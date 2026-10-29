@@ -781,8 +781,8 @@ fn kernel_process_start_refusals() -> (usize, usize, usize, usize, usize) {
             atomic_word_load(&kernel_process_stable_retry_busy),
             atomic_word_load(&kernel_process_stable_retry_partial));
 }
-private let mut scheduled_process_stale_first_slot: usize = 0;
-private let mut scheduled_process_stale_first_generation: usize = 0;
+private let mut scheduled_process_stale_first_slot: AtomicWord;
+private let mut scheduled_process_stale_first_generation: AtomicWord;
 
 // The kernel stack run of a reaped process, held until something can
 // safely take it.
@@ -1020,9 +1020,8 @@ fn scheduled_process_record_locked(guard: borrow ProcessRunGuard[lock],
         !{unsafe} {
     if (scheduled_process_pool_ready == false) {
         atomic_word_fetch_add(&scheduled_process_record_missing_count, 1);
-        if (scheduled_process_missing_first_slot == 0) {
-            scheduled_process_missing_first_slot = slot.word;
-            scheduled_process_missing_reason = 1;
+        if (atomic_word_compare_exchange(&scheduled_process_missing_first_slot, 0, slot.word)) {
+            atomic_word_store(&scheduled_process_missing_reason, 1);
         }
         return &scheduled_process_record_absent;
     }
@@ -1056,29 +1055,25 @@ fn scheduled_process_record_locked(guard: borrow ProcessRunGuard[lock],
             // generation check catches it, on `process invariant: STALE
             // HANDLE READS` and `RECYCLED HANDLE READS`.
             if (process_pool_holds_slot(slot.word)) {
-                scheduled_process_freed_slot_count =
-                    scheduled_process_freed_slot_count + 1;
-                if (scheduled_process_freed_first_slot == 0) {
-                    scheduled_process_freed_first_slot = slot.word;
-                    scheduled_process_freed_cpu = cpu_id();
+                atomic_word_fetch_add(&scheduled_process_freed_slot_count, 1);
+                if (atomic_word_compare_exchange(&scheduled_process_freed_first_slot, 0, slot.word)) {
+                    atomic_word_store(&scheduled_process_freed_cpu, cpu_id());
                     scheduled_process_freed_site =
                         kernel_activity[execution_cpu_index()];
                 }
                 return &scheduled_process_record_absent;
             }
             atomic_word_fetch_add(&scheduled_process_record_missing_count, 1);
-            if (scheduled_process_missing_first_slot == 0) {
-                scheduled_process_missing_first_slot = slot.word;
-                scheduled_process_missing_reason = 2;
-                scheduled_process_missing_cpu = cpu_id();
+            if (atomic_word_compare_exchange(&scheduled_process_missing_first_slot, 0, slot.word)) {
+                atomic_word_store(&scheduled_process_missing_reason, 2);
+                atomic_word_store(&scheduled_process_missing_cpu, cpu_id());
                 scheduled_process_missing_site =
                     kernel_activity[execution_cpu_index()];
                 // +1, so 0 means "no current process here" rather than
                 // "current is slot 0". The first version could not tell
                 // those apart and the difference is the idle path.
                 if (execution_state[execution_cpu_index()].current_live) {
-                    scheduled_process_missing_current =
-                        region_held_address(execution_state[execution_cpu_index()].current_handle.pool_index) + 1;
+                    atomic_word_store(&scheduled_process_missing_current, region_held_address(execution_state[execution_cpu_index()].current_handle.pool_index) + 1);
                 }
             }
             return &scheduled_process_record_absent;
@@ -1130,9 +1125,8 @@ fn scheduled_process_record_of_locked(
         handle: ProcessHandle) -> &mut ProcessRecord @ lock !{unsafe} {
     if (scheduled_process_handle_matches(handle) == false) {
         atomic_word_fetch_add(&scheduled_process_stale_handle_reads, 1);
-        if (scheduled_process_stale_first_slot == 0) {
-            scheduled_process_stale_first_slot = region_held_address(handle.pool_index);
-            scheduled_process_stale_first_generation = handle.generation;
+        if (atomic_word_compare_exchange(&scheduled_process_stale_first_slot, 0, region_held_address(handle.pool_index))) {
+            atomic_word_store(&scheduled_process_stale_first_generation, handle.generation);
         }
     }
     return scheduled_process_record_locked(guard, process_slot_of(handle.pool_index));
@@ -1230,9 +1224,8 @@ fn scheduled_process_record_current(running: borrow ProcessCurrent[process, phas
         RegionHeldProbe(ProcessRecord)::Stale => {
             process_pool_unlock(pool_guard);
             atomic_word_fetch_add(&scheduled_process_record_missing_count, 1);
-            if (scheduled_process_missing_first_slot == 0) {
-                scheduled_process_missing_first_slot = region_held_address(handle.pool_index);
-                scheduled_process_missing_reason = 2;
+            if (atomic_word_compare_exchange(&scheduled_process_missing_first_slot, 0, region_held_address(handle.pool_index))) {
+                atomic_word_store(&scheduled_process_missing_reason, 2);
             }
             return &scheduled_process_record_absent;
         }
@@ -1251,11 +1244,11 @@ fn scheduled_process_stale_handle_reads_value() -> usize {
 }
 
 fn scheduled_process_stale_first_slot_value() -> usize {
-    return scheduled_process_stale_first_slot;
+    return atomic_word_load(&scheduled_process_stale_first_slot);
 }
 
 fn scheduled_process_stale_first_generation_value() -> usize {
-    return scheduled_process_stale_first_generation;
+    return atomic_word_load(&scheduled_process_stale_first_generation);
 }
 
 fn scheduled_process_reaped_current_count_value() -> usize {
@@ -1291,8 +1284,13 @@ fn scheduled_process_recycled_handle_count() -> usize !{unsafe} {
 //
 // Both stores sit INSIDE the miss branches, so the path that finds a record
 // pays nothing for them.
-private let mut scheduled_process_missing_first_slot: usize = 0;
-private let mut scheduled_process_missing_reason: usize = 0;
+//
+// GitHub issue #1012: each first-occurrence record (missing, freed, stale)
+// is claimed by a compare-and-swap of its slot word from 0, so exactly one
+// core writes the companion words. A reader may see the slot before the
+// companions land; these are diagnostics read at a report.
+private let mut scheduled_process_missing_first_slot: AtomicWord;
+private let mut scheduled_process_missing_reason: AtomicWord;
 // GitHub issue #514: reason 2 was one word for two different failures, and
 // the difference is the whole fork in the road. `intrusive_pool_probe_slot`
 // answers NoPayload either because the pool does not own the address at all
@@ -1304,8 +1302,8 @@ private let mut scheduled_process_missing_reason: usize = 0;
 // that misses says nothing about WHO asked, and 102 call sites in this file
 // reach here. Stored, not printed: the miss path can run in interrupt
 // context.
-private let mut scheduled_process_missing_cpu: usize = 0;
-private let mut scheduled_process_missing_current: usize = 0;
+private let mut scheduled_process_missing_cpu: AtomicWord;
+private let mut scheduled_process_missing_current: AtomicWord;
 // GitHub issue #573: what this CPU is doing, one word per CPU, readable by a
 // capture after the fact. #569 and #571 each stalled on "what was this CPU
 // doing when the miss happened", and each time the answer was an ad-hoc
@@ -1435,21 +1433,21 @@ fn scheduled_process_missing_site_value() -> KernelActivity {
 // A slot a walk named and found free by the time it looked. Reported, not
 // asserted at zero: it is a race the walk handles, and its rate is a fact
 // about how often a reap lands inside a walk rather than a defect.
-private let mut scheduled_process_freed_slot_count: usize = 0;
-private let mut scheduled_process_freed_first_slot: usize = 0;
-private let mut scheduled_process_freed_cpu: usize = 0;
+private let mut scheduled_process_freed_slot_count: AtomicWord;
+private let mut scheduled_process_freed_first_slot: AtomicWord;
+private let mut scheduled_process_freed_cpu: AtomicWord;
 private let mut scheduled_process_freed_site: KernelActivity;
 
 fn scheduled_process_freed_slot_count_value() -> usize {
-    return scheduled_process_freed_slot_count;
+    return atomic_word_load(&scheduled_process_freed_slot_count);
 }
 
 fn scheduled_process_freed_first_slot_value() -> usize {
-    return scheduled_process_freed_first_slot;
+    return atomic_word_load(&scheduled_process_freed_first_slot);
 }
 
 fn scheduled_process_freed_cpu_value() -> usize {
-    return scheduled_process_freed_cpu;
+    return atomic_word_load(&scheduled_process_freed_cpu);
 }
 
 fn scheduled_process_freed_site_value() -> KernelActivity {
@@ -1457,19 +1455,19 @@ fn scheduled_process_freed_site_value() -> KernelActivity {
 }
 
 fn scheduled_process_missing_first_slot_value() -> usize {
-    return scheduled_process_missing_first_slot;
+    return atomic_word_load(&scheduled_process_missing_first_slot);
 }
 
 fn scheduled_process_missing_reason_value() -> usize {
-    return scheduled_process_missing_reason;
+    return atomic_word_load(&scheduled_process_missing_reason);
 }
 
 fn scheduled_process_missing_cpu_value() -> usize {
-    return scheduled_process_missing_cpu;
+    return atomic_word_load(&scheduled_process_missing_cpu);
 }
 
 fn scheduled_process_missing_current_value() -> usize {
-    return scheduled_process_missing_current;
+    return atomic_word_load(&scheduled_process_missing_current);
 }
 
 
@@ -3087,9 +3085,8 @@ fn scheduled_process_record_owned(owner: borrow ScheduledProcessOwner[process])
         RegionHeldProbe(ProcessRecord)::Stale => {
             process_pool_unlock(pool_guard);
             atomic_word_fetch_add(&scheduled_process_record_missing_count, 1);
-            if (scheduled_process_missing_first_slot == 0) {
-                scheduled_process_missing_first_slot = region_held_address(owner.pool_index);
-                scheduled_process_missing_reason = 2;
+            if (atomic_word_compare_exchange(&scheduled_process_missing_first_slot, 0, region_held_address(owner.pool_index))) {
+                atomic_word_store(&scheduled_process_missing_reason, 2);
             }
             return &scheduled_process_record_absent;
         }

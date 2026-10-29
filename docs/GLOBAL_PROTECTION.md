@@ -90,3 +90,9 @@ by a source scan with different edges).
   and stable-root retries, reap-unlinked) become `AtomicWord` with
   `fetch_add`, so increments from different cores are no longer lost.
   462 -> 452 unprotected.
+- 2026-10-29: compare-and-swap with existing operations. virtio_blk's
+  four statistics (the maximum raised by `atomic_word_compare_swap`) and
+  process.tkb's nine first-occurrence words (missing, freed, stale: each
+  record claimed by a compare-and-swap of its slot word from 0). 452 -> 439
+  unprotected. The `_site` and timeout-snapshot structs beside them stay
+  listed.

@@ -59,16 +59,12 @@ kernel/drivers/block/memory.tkb	block_run_reads	unreviewed; 2026-10-06 candidate
 kernel/drivers/block/memory.tkb	block_single_reads	unreviewed
 kernel/drivers/block/memory.tkb	block_write_calls	unreviewed; 2026-10-06 candidate-context: block I/O service and per-CPU read-ahead / TaskMutex for device commands; local read-ahead before device lock; epoch invalidation
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_base	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
-kernel/drivers/block/virtio_blk.tkb	virtio_blk_completion_max_ticks	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
-kernel/drivers/block/virtio_blk.tkb	virtio_blk_completion_total_ticks	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
-kernel/drivers/block/virtio_blk.tkb	virtio_blk_completions	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_disabled	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_queue	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_ready	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_regs	unreviewed
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_timeout_first	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_timeout_last	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
-kernel/drivers/block/virtio_blk.tkb	virtio_blk_timeouts	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_used_seen	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
 kernel/drivers/block/virtio_blk_dma.tkb	virtio_blk_used_claimed	unreviewed
 kernel/drivers/net/rp1_gem.tkb	gem	unreviewed
@@ -211,21 +207,12 @@ kernel/kernel/process.tkb	kernel_process_trace_omit_pid_set	unreviewed
 kernel/kernel/process.tkb	kernel_process_trace_probe_child_frame	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	kernel_process_trace_probe_parent_frame	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	scheduled_process_boot_handed_off	unreviewed
-kernel/kernel/process.tkb	scheduled_process_freed_cpu	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	scheduled_process_freed_first_slot	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	scheduled_process_freed_site	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	scheduled_process_freed_slot_count	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	scheduled_process_missing_cpu	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	scheduled_process_missing_current	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	scheduled_process_missing_first_slot	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	scheduled_process_missing_reason	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	scheduled_process_missing_site	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	scheduled_process_peer_dispatch_enabled	unreviewed; 2026-10-06 retain-authority: machine process namespace and scheduler / run guard; typed record makers; pooled records; bootstrap and assembly continuations
 kernel/kernel/process.tkb	scheduled_process_pool_ready	unreviewed; 2026-10-06 retain-authority: machine process namespace and scheduler / run guard; typed record makers; pooled records; bootstrap and assembly continuations
 kernel/kernel/process.tkb	scheduled_process_record_absent	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	scheduled_process_stack_deepest_reaped	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	scheduled_process_stale_first_generation	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	scheduled_process_stale_first_slot	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	spread_timer_child	unreviewed; 2026-10-06 retain-fixture: EL0 spread timer fixture / timer enter/left publication and fixture progress hooks
 kernel/kernel/process.tkb	spread_timer_parent	unreviewed; 2026-10-06 retain-fixture: EL0 spread timer fixture / timer enter/left publication and fixture progress hooks
 kernel/kernel/process.tkb	spread_timer_phase	unreviewed; 2026-10-06 retain-fixture: EL0 spread timer fixture / timer enter/left publication and fixture progress hooks

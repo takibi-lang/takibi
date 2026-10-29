@@ -7,6 +7,7 @@
 use "kernel/drivers/virtio_ring.tkb";
 use "kernel/drivers/dma_address.tkb";
 use "kernel/lib/mutex.tkb";
+use "kernel/lib/atomic_word.tkb";
 use "kernel/drivers/block/virtio_blk_dma.tkb";
 
 const VIRTIO_QNUM: isize = 8;
@@ -80,20 +81,21 @@ struct VirtioBlkTimeoutSnapshot {
     interrupt: usize;
     used_at_reset: usize;
 }
-let mut virtio_blk_timeouts: usize = 0;
+let mut virtio_blk_timeouts: AtomicWord;
 // The slowest completion that did arrive, in counter ticks, and how many
 // arrived; a wait that never times out can still be slow enough, per
-// request, to silence an ext2 write for a minute.
-let mut virtio_blk_completion_max_ticks: usize = 0;
-let mut virtio_blk_completions: usize = 0;
-let mut virtio_blk_completion_total_ticks: usize = 0;
-fn virtio_blk_completion_total() -> usize { return virtio_blk_completion_total_ticks; }
-fn virtio_blk_completion_max() -> usize { return virtio_blk_completion_max_ticks; }
-fn virtio_blk_completion_count() -> usize { return virtio_blk_completions; }
+// request, to silence an ext2 write for a minute. AtomicWords (GitHub
+// issue #1012), so DDB and the test driver read whole words from any core.
+let mut virtio_blk_completion_max_ticks: AtomicWord;
+let mut virtio_blk_completions: AtomicWord;
+let mut virtio_blk_completion_total_ticks: AtomicWord;
+fn virtio_blk_completion_total() -> usize { return atomic_word_load(&virtio_blk_completion_total_ticks); }
+fn virtio_blk_completion_max() -> usize { return atomic_word_load(&virtio_blk_completion_max_ticks); }
+fn virtio_blk_completion_count() -> usize { return atomic_word_load(&virtio_blk_completions); }
 let mut virtio_blk_timeout_first: VirtioBlkTimeoutSnapshot;
 let mut virtio_blk_timeout_last: VirtioBlkTimeoutSnapshot;
 
-fn virtio_blk_timeout_count() -> usize { return virtio_blk_timeouts; }
+fn virtio_blk_timeout_count() -> usize { return atomic_word_load(&virtio_blk_timeouts); }
 fn virtio_blk_timeout_first_snapshot() -> VirtioBlkTimeoutSnapshot {
     return virtio_blk_timeout_first;
 }
@@ -285,20 +287,27 @@ private fn virtio_blk_submit_owned(request_type: u32, sector: u32,
                 virtio_blk_regs.interrupt_status as usize,
                 0 };
             snapshot.used_at_reset = virtio_blk_used_index();
-            if (virtio_blk_timeouts == 0) { virtio_blk_timeout_first = snapshot; }
+            if (atomic_word_load(&virtio_blk_timeouts) == 0) { virtio_blk_timeout_first = snapshot; }
             virtio_blk_timeout_last = snapshot;
-            virtio_blk_timeouts = virtio_blk_timeouts + 1;
+            atomic_word_fetch_add(&virtio_blk_timeouts, 1);
             let reset_confirmed: bool =
                 virtio_blk_receive_settle_reset(pending_device);
             return false;
         }
     }
     let waited: usize = (read_cntpct() - completion_start) as usize;
-    if (waited > virtio_blk_completion_max_ticks) {
-        virtio_blk_completion_max_ticks = waited;
+    // Raise the maximum by compare-and-swap: a failed swap means another
+    // writer stored a newer value, observed by the failed swap; try again
+    // while ours is still larger.
+    let mut seen_max: usize = atomic_word_load(&virtio_blk_completion_max_ticks);
+    while (waited > seen_max) {
+        match atomic_word_compare_swap(&virtio_blk_completion_max_ticks, seen_max, waited) {
+            CasResult::Swapped => { seen_max = waited; }
+            CasResult::Observed(current) => { seen_max = current; }
+        }
     }
-    virtio_blk_completions = virtio_blk_completions + 1;
-    virtio_blk_completion_total_ticks = virtio_blk_completion_total_ticks + waited;
+    atomic_word_fetch_add(&virtio_blk_completions, 1);
+    atomic_word_fetch_add(&virtio_blk_completion_total_ticks, waited);
     match virtio_blk_receive_take() {
         VirtioBlkReceiveAuthority::Cpu(restored_cpu) => {
             let restored_view = dma_cpu_slice(restored_cpu, VirtioBlkReceive);
