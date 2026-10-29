@@ -14,7 +14,7 @@ import sys
 import buildcheck_global_protection as g
 from pass_line import report_pass
 
-HEAD = "# takibi globals, format 1; see docs/GLOBAL_PROTECTION.md\n" + "\t".join(g.COLUMNS) + "\n"
+HEAD = "# takibi globals, format 2; see docs/GLOBAL_PROTECTION.md\n" + "\t".join(g.COLUMNS) + "\n"
 
 
 def table(*rows):
@@ -40,8 +40,10 @@ def refused(fn):
 
 def main():
     failures = []
+    checked = []
 
     def expect(what, ok):
+        checked.append(what)
         if not ok:
             failures.append(what)
 
@@ -68,7 +70,12 @@ def main():
     expect("no production rows is refused",
            refused(lambda: g.globals_of([("t", table(row("kernel/tests/t.tkb", "x")))])))
     expect("other format is refused",
-           refused(lambda: g.parse_table(HEAD.replace("format 1", "format 2"), "t")))
+           refused(lambda: g.parse_table(HEAD.replace("format 2", "format 1"), "t")))
+    # GitHub issue #769: format 2's uses table follows the rows.
+    expect("the uses table after the rows is not read as globals",
+           len(g.parse_table(table(row("kernel/a.tkb", "x", "atomic"))
+                             + "# uses\nfile\tline\tname\tkind\tfunction\n"
+                             + "kernel/a.tkb\t3\tx\tread\tf\n", "t")) == 1)
     expect("unknown class is refused",
            refused(lambda: g.parse_table(table(row("kernel/a.tkb", "x", "locked")), "t")))
 
@@ -79,7 +86,7 @@ def main():
             print(f"FAIL global-protection-controls: {f}", file=sys.stderr)
         return 1
     report_pass("global-protection-controls",
-                f"13 controls refused or passed as specified; allow-list {len(tracked)} rows",
+                f"{len(checked)} controls refused or passed as specified; allow-list {len(tracked)} rows",
                 rows=len(tracked))
     return 0
 

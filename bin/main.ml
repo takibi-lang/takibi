@@ -421,6 +421,7 @@ let () =
     if !emit_globals <> "" then begin
       let out = open_out !emit_globals in
       Global_protection.write_table out source_prog;
+      Global_protection.write_uses out source_prog;
       close_out out
     end;
 

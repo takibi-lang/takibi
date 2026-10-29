@@ -3222,7 +3222,7 @@ let infer_tests = [
       let rows = String.split_on_char '\n' (Buffer.contents buf)
                  |> List.filter (( <> ) "") in
       Alcotest.(check bool) "format line" true
-        (String.starts_with ~prefix:"# takibi globals, format 1" (List.hd rows));
+        (String.starts_with ~prefix:"# takibi globals, format 2" (List.hd rows));
       let protection name =
         match List.find_opt (fun r ->
           List.nth (String.split_on_char '\t' r) 2 = name) (List.tl (List.tl rows)) with
@@ -23946,6 +23946,50 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
          Alcotest.(check bool) "the root" true (strict "i762_root");
          Alcotest.(check bool) "its callee" true (strict "i762_helper");
          Alcotest.(check bool) "an unrelated function" false (strict "i762_other")));
+
+  (* GitHub issue #769: every use of a global, the second table of
+     --emit-globals: the kind of each use, a local that shadows a global,
+     and a use in another file. *)
+  Alcotest.test_case "issue #769: the uses table names each use of a global, its kind and function, after name binding" `Quick
+    (fun () ->
+       let parse_as file src =
+         Compilation_state.reset ();
+         let lexbuf = Lexing.from_string src in
+         Lexing.set_filename lexbuf file;
+         Parser.program Lexer.read lexbuf in
+       let defs = parse_as "defs.tkb"
+         "let mut g: [usize; 4];
+          let mut h: usize;
+          fn writer(i: usize) { g[i] = h; h = 1; }
+          fn shadow() { let h: usize = 2; let k: usize = h; }
+          fn addr() -> *usize { return &g[0] as *usize; }" in
+       let user = parse_as "user.tkb"
+         "fn reader() -> usize { return g[1] + (h as usize); }" in
+       let path = Filename.temp_file "takibi-uses-" ".tsv" in
+       let out = open_out path in
+       Global_protection.write_uses out (defs @ user);
+       close_out out;
+       let ic = open_in path in
+       let rows = ref [] in
+       (try while true do rows := input_line ic :: !rows done with End_of_file -> ());
+       close_in ic;
+       let rows = List.rev !rows in
+       let has name kind fn file =
+         List.exists (fun r ->
+           match String.split_on_char '\t' r with
+           | [f; _; n; k; func] -> f = file && n = name && k = kind && func = fn
+           | _ -> false) rows in
+       Alcotest.(check string) "header" "# uses" (List.hd rows);
+       Alcotest.(check bool) "g[i] = .. writes g" true (has "g" "write" "writer" "defs.tkb");
+       Alcotest.(check bool) ".. = h reads h" true (has "h" "read" "writer" "defs.tkb");
+       Alcotest.(check bool) "h = 1 writes h" true (has "h" "write" "writer" "defs.tkb");
+       Alcotest.(check bool) "a shadowing local is not the global" false
+         (List.exists (fun r ->
+            match String.split_on_char '\t' r with
+            | [_; _; "h"; _; "shadow"] -> true | _ -> false) rows);
+       Alcotest.(check bool) "&g[0] takes g's address" true (has "g" "address" "addr" "defs.tkb");
+       Alcotest.(check bool) "g[1] in another file indexes g" true (has "g" "index" "reader" "user.tkb");
+       Alcotest.(check bool) "h as usize casts h" true (has "h" "cast" "reader" "user.tkb"));
 
   Alcotest.test_case "opaque handle pointers codegen without a concrete layout" `Quick
     (expect_codegen_ok

@@ -9,11 +9,11 @@ classification is the compiler's (`lib/global_protection.ml`): it reads the
 `per_cpu`, `dma_fixed`, `guarded_by` and region registries and the
 generated protocol and region-pool names, not `.tkb` text.
 
-## Format, version 1
+## Format, version 2
 
 The first line is
 
-    # takibi globals, format 1; see docs/GLOBAL_PROTECTION.md
+    # takibi globals, format 2; see docs/GLOBAL_PROTECTION.md
 
 and the second names the columns:
 
@@ -26,6 +26,26 @@ and the second names the columns:
 | `qualifier` | `region` (a `region let mut` backing), `scratch`, or `-` |
 | `type` | the declared type, spelled compactly (`[AtomicWord;4]`, `LockedCell(usize)`) |
 | `protection` | one class below |
+
+## The uses table (format 2, GitHub issue #769)
+
+After the globals' rows, a line `# uses` and a column header start a
+second table: one row per use of a global anywhere in the program,
+resolved after name binding (a parameter or local of the same name
+shadows the global for the rest of its scope).
+
+| column | content |
+| --- | --- |
+| `file`, `line` | where the use is |
+| `name` | the global |
+| `kind` | `write` (root of an assignment target), `address` (`&g`, `&g.f`, `&g[i]`), `region` (`region_of(g)`), `index` (`g[i]`, `g[a..<b]`), `cast` (`g as T`), or `read` |
+| `function` | the function containing the use; `-` for another global's initializer |
+
+It is the inventory a migration of a global needs (#637's region seal,
+per-CPU or owned state replacing shared globals) and the evidence behind a
+TRUSTED_BASE.md row that names a global. It is a table rather than a
+`--uses-of NAME` flag because the compiler's facts are files a script
+reads, not flags (#1027, #987); `grep` the name column.
 
 ## Classes
 

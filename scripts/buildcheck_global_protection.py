@@ -29,7 +29,8 @@ from pass_line import report_pass
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ALLOWLIST = ROOT / "scripts" / "global_protection_allowlist.tsv"
-FORMAT = 1
+FORMAT = 2
+USES_MARK = "# uses"
 HEADER = "# takibi globals, format "
 COLUMNS = ("file", "line", "name", "visibility", "qualifier", "type", "protection")
 PROTECTED = {"atomic", "lock", "per_cpu", "region", "place", "dma_fixed",
@@ -52,6 +53,10 @@ def parse_table(text, origin):
         raise TableError(f"{origin}: column header is not {COLUMNS}")
     rows = []
     for number, line in enumerate(lines[2:], start=3):
+        # Format 2 (GitHub issue #769): the uses table follows; this reader
+        # needs only the globals.
+        if line == USES_MARK:
+            break
         cells = line.split("\t")
         if len(cells) != len(COLUMNS):
             raise TableError(f"{origin}:{number}: {len(cells)} cells, not {len(COLUMNS)}")

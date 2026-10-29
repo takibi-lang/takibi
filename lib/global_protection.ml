@@ -25,7 +25,7 @@
 
 open Ast
 
-let format_version = 1
+let format_version = 2
 
 let columns = [ "file"; "line"; "name"; "visibility"; "qualifier"; "type"; "protection" ]
 
@@ -100,4 +100,108 @@ let write_table (out : out_channel) (prog : toplevel list) =
         Printf.fprintf out "%s\t%d\t%s\t%s\t%s\t%s\t%s\n"
           (Call_graph.relative (source_file_of_loc loc)) loc.Lexing.pos_lnum name
           (if priv then "private" else "public") qualifier (spell ty) prot
+    | _ -> ()) prog
+
+(* GitHub issue #769: every use of a global, as a second table of the same
+   file (no new flag: facts, not flags, #1027/#987). One row per use, after
+   name binding: a function's parameters and locals (let, let-match, for,
+   for-each, tuple and match bindings) shadow a global of the same name for
+   the rest of their scope, so a row is a use of the global itself. The
+   kind is the innermost one that applies:
+
+   - `write`   the root of an assignment's target (`g = ..`, `g.f = ..`,
+               `g[i] = ..`);
+   - `address` the root of `&g`, `&g.f`, `&g[i]`;
+   - `region`  the operand of a region claim (`region_of(g)`);
+   - `index`   the base of an index or slice (`g[i]`, `g[a..<b]`);
+   - `cast`    the operand of a cast (`g as T`);
+   - `read`    any other use.
+
+   A global's initializer that names another global is a use in function
+   `-`. Uses inside a generic template are reported at the template. *)
+
+let uses_columns = [ "file"; "line"; "name"; "kind"; "function" ]
+
+module S = Set.Make (String)
+
+let write_uses (out : out_channel) (prog : toplevel list) =
+  let globals = List.fold_left (fun acc -> function
+    | LetDef (name, _, _, _, _, _, _) -> S.add name acc
+    | _ -> acc) S.empty prog in
+  let row fn (e : expr) name kind =
+    Printf.fprintf out "%s\t%d\t%s\t%s\t%s\n"
+      (Call_graph.relative (source_file_of_loc e.loc)) e.loc.Lexing.pos_lnum
+      name kind fn in
+  let rec root (e : expr) = match e.desc with
+    | Var n -> Some (n, e)
+    | FieldGet (b, _) | Index (b, _) | SliceOf (b, _, _) -> root b
+    | _ -> None in
+  let rec expr fn locals kind (e : expr) =
+    let sub = expr fn locals "read" in
+    match e.desc with
+    | Var n ->
+        if S.mem n globals && not (S.mem n locals) then row fn e n kind
+    | Assign (lhs, rhs) ->
+        (match root lhs with
+         | Some (n, v) when S.mem n globals && not (S.mem n locals) ->
+             row fn v n "write"; lvalue_parts fn locals lhs
+         | _ -> sub lhs);
+        sub rhs
+    | AddrOf inner ->
+        (match root inner with
+         | Some (n, v) when S.mem n globals && not (S.mem n locals) ->
+             row fn v n "address"; lvalue_parts fn locals inner
+         | _ -> sub inner)
+    | Call ("region_of", [ ({ desc = Var _; _ } as a) ]) ->
+        expr fn locals "region" a
+    | Call (_, args) -> List.iter sub args
+    | Index (b, i) -> expr fn locals (base_kind b) b; sub i
+    | SliceOf (b, lo, hi) -> expr fn locals (base_kind b) b; sub lo; sub hi
+    | Cast (_, inner) ->
+        (match inner.desc with Var _ -> expr fn locals "cast" inner | _ -> sub inner)
+    | FieldGet (b, _) -> expr fn locals kind b
+    | VariantCtor (_, _, a) | Bnot a | Deref a | Unsafe a -> sub a
+    | BinOp (_, a, b) -> sub a; sub b
+    | StructLit es | TupleLit es -> List.iter sub es
+    | _ -> ()
+  and base_kind (b : expr) = match b.desc with Var _ -> "index" | _ -> "read"
+  (* The index and slice operands inside an assigned or addressed place
+     are ordinary reads. *)
+  and lvalue_parts fn locals (e : expr) =
+    let sub = expr fn locals "read" in
+    match e.desc with
+    | FieldGet (b, _) -> lvalue_parts fn locals b
+    | Index (b, i) -> lvalue_parts fn locals b; sub i
+    | SliceOf (b, lo, hi) -> lvalue_parts fn locals b; sub lo; sub hi
+    | _ -> ()
+  and stmts fn locals (ss : stmt list) =
+    ignore (List.fold_left (fun locals s -> stmt fn locals s) locals ss)
+  and arms fn locals = List.iter (function
+    | ArmVariant (_, _, Some (PayloadBind (x, _)), body) ->
+        stmts fn (S.add x locals) body
+    | ArmVariant (_, _, _, body) | ArmWild body | ArmMiss body
+    | ArmIntLit (_, body) | ArmByteSliceLit (_, body) -> stmts fn locals body)
+  and stmt fn locals (s : stmt) =
+    let e = expr fn locals "read" in
+    match s.desc with
+    | Return (Some x) | Expr x | Yield x | StaticAssert (x, _) -> e x; locals
+    | Return None | Break | Continue -> locals
+    | Block b | UnsafeBlock b -> stmts fn locals b; locals
+    | Let (_, name, _, init, _) -> Option.iter e init; S.add name locals
+    | LetTuple (names, init) -> e init; List.fold_left (fun l n -> S.add n l) locals names
+    | If (c, a, b) -> e c; stmts fn locals a; stmts fn locals b; locals
+    | While (c, b) -> e c; stmts fn locals b; locals
+    | For (x, _, lo, hi, b) -> e lo; e hi; stmts fn (S.add x locals) b; locals
+    | ForEach (x, it, b) -> e it; stmts fn (S.add x locals) b; locals
+    | Match (subject, ms) -> e subject; arms fn locals ms; locals
+    | LetMatch (_, name, _, subject, ms) ->
+        e subject; arms fn locals ms; S.add name locals
+  in
+  output_string out "# uses\n";
+  output_string out (String.concat "\t" uses_columns ^ "\n");
+  List.iter (function
+    | FuncDef f ->
+        let params = List.fold_left (fun l (p, _) -> S.add p l) S.empty f.params in
+        stmts f.name params f.body
+    | LetDef (_, _, Some init, _, _, _, _) -> expr "-" S.empty "read" init
     | _ -> ()) prog
