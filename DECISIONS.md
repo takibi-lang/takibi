@@ -511,3 +511,15 @@ condition below applies, and reports the land afterwards.
 ## 2026-10-29 #1193 the lane budget is re-derived from the (a) measurement (option 1, provisional)
 - Under the new measurement a quiet allcheck spends about 4570 busy lane-seconds with no product cause; busy time follows host contention. The limit becomes the measured total plus the documented 30 % host-load headroom (about 5900), with the derivation in check_lane_budget.py. Provisional: re-measure after the cortex-a76 switch (#1032) lands. A contention-insensitive metric (CPU time per lane) is a separate issue.
 - The stale kept green copy (4412) is deleted with the maintainer's approval so a green allcheck can be taken.
+
+## 2026-10-29 maintainer decisions on the away list (coordinator file 2026-10-29_away2.md)
+- #638 stage 4: D1 (a) an `!{interrupt}` function may be called only from `!{interrupt}`/`exception` functions or inside a masked region, and mints CPU authority there; D2 (i) a fallible `preempt_off (cpu) { ... } else { ... }` block, the else arm running without authority instead of stopping.
+- #954 stage 3 scope: (C) contracts beyond init and index bounds first, starting with #986 slice 2 (region arithmetic and overlay length as z3-checked obligations, now authorized). Sparse-init lemmas (#109) and loop-invariant inference are taken when needed.
+- #1089: (A) torn writes stay outside the ext2 recovery model, as on Linux ext2 (fsck after power loss); document the boundary and close.
+- #1013: (A) one phase-wide linear BootPhase token minted by main, borrowed for set/read during boot, consumed by `boot_phase_end` immediately before secondaries start (CPU_ON); plain loads after.
+- #1032 IOMMU: (B) the RPi5 BCM2712 IOMMU first, then (A) QEMU virtio-pci behind smmuv3, so neither platform is left without IOMMU enforcement. Stack guard pages: D3 (i) the entry switches to the overflow stack and reports; D1/D2 pending a Linux/BSD comparison.
+- #1027 steps 2-3: start now. Q1 (b) `--regions` stays explicit (`--internal-regions`) until #750; Q2 (a) `--emit-tla`/`--emit-protocol-source` become `--generate tla|protocol-source <dir>`; D2 (a) struct-layout and exception-frame-offsets become facts files, effect-matrix and doc move to `--generate`; D3 the depfile becomes `facts/deps.d`.
+- #779: (b) the region type carries line alignment and the split rules preserve it.
+- #774: (A) a linear `IrqClaim[id]` from the IAR read, source clears return `IrqAcked[id]`, EOI takes only `IrqAcked`, the default arm proves `id` is no handled source; (a) the handled set is a const array per platform.
+- #926: (c) deferred and removed from ROADMAP.md (a 24-hour GICv3 build host is no longer a priority).
+- #901: (b) implement the ppoll sigmask as the first consumer of #1000's delivery chokepoint; (c) now: nfds > 0 with a non-NULL sigmask returns EINVAL (Partial in SYSCALLS.md) instead of spinning.
