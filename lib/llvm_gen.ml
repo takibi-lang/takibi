@@ -4745,106 +4745,34 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       emit_interrupt_event true;
       (TypeVoid, const_null (i1_type context))
 
-  | Call (("mrs_cntfrq_el0" | "mrs_cntpct_el0" | "mrs_sctlr_el1"
-          | "mrs_esr_el1" | "mrs_far_el1" | "mrs_elr_el1" | "mrs_spsr_el1"
-          | "mrs_id_aa64mmfr0_el1" | "mrs_mpidr_el1"
-          | "mrs_daif") as name, []) ->
-      (* GitHub issue #226/#227: one `mrs` each, register chosen by LLVM's
-         own allocator via the "=r" output constraint -- never named by the
-         .tkb caller. *)
+  | Call (name, args) when Instr_spec.is_instruction name ->
+      (* GitHub issue #1005: one emitter for every instruction builtin. The
+         row gives the asm and its constraints: "=r" for a result LLVM's
+         allocator places (#226/#227), "r" for the one value an Xt operand
+         carries, and named physical registers where the instruction's ABI
+         fixes them (smc4/hvc4's SMCCC x0-x3, svc5's x8 and x0-x4, #228).
+         Arguments are evaluated left to right, as the type rule took them. *)
+      let spec = Option.get (Instr_spec.find name) in
+      let asm = match Instr_spec.asm_for_triple spec
+                        (target_triple !the_module) with
+        | Ok asm -> asm
+        | Error message -> raise (Error message)
+      in
       let ity = usize_lltype () in
-      let fty = function_type ity [||] in
-      let reg = match name with
-        | "mrs_cntfrq_el0" -> "cntfrq_el0"
-        | "mrs_cntpct_el0" -> "cntpct_el0"
-        | "mrs_sctlr_el1"  -> "sctlr_el1"
-        | "mrs_esr_el1"    -> "esr_el1"
-        | "mrs_far_el1"    -> "far_el1"
-        | "mrs_elr_el1"    -> "elr_el1"
-        | "mrs_spsr_el1"   -> "spsr_el1"
-        (* GitHub issue #402: ID_AA64MMFR0_EL1.ASIDBits -- the ASID width
-           this implementation has, rather than the 8-bit floor every
-           AArch64 part is guaranteed to have. *)
-        | "mrs_id_aa64mmfr0_el1" -> "id_aa64mmfr0_el1"
-        (* GitHub issue #445: which core is asking. Both boot paths already
-           compute this in assembly and throw it away -- entry_qemu.S reads
-           Aff0 and entry.S reads Aff1, because QEMU `virt` and BCM2712
-           number their cores in different affinity fields. WHICH field is
-           per-platform and belongs in kernel/platform/*/init.tkb's
-           cpu_id(); this intrinsic is only the register read. *)
-        | "mrs_mpidr_el1"  -> "mpidr_el1"
-        (* GitHub issue #351: reading the interrupt mask is what lets a
-           lock RESTORE it rather than unconditionally enabling -- the
-           local_irq_save half that msr_daifset_irq alone cannot express. *)
-        | "mrs_daif"       -> "daif"
-        | _ -> assert false
-      in
-      let inline = const_inline_asm fty
-        (Printf.sprintf "mrs $0, %s" reg) "=r,~{memory}" true false in
-      let v = build_call fty inline [||] (name ^ ".result") builder in
-      (TypeUsize, v)
-
-  | Call (("msr_daifclr_irq" | "msr_daifset_irq" | "tlbi_vmalle1"
-          | "tlbi_vmalle1is"
-          | "dsb_ish" | "dsb_ishst" | "isb" | "wfi") as name, []) ->
-      (* GitHub issue #226: zero-argument barrier/TLBI/DAIF-immediate
-         instructions, same shape as signal_fence above. *)
-      let fty = function_type (void_type context) [||] in
-      (* GitHub issue #1035: the two data barriers also lower on x86-64,
-         for the same reason the atomics do (see the atomic case below):
-         kernel/fs/ext2/mutation_lock.tkb runs host-natively under
-         linux_user/ext2_host. `mfence` is x86-64's full barrier, the
-         store-load ordering the lock's Dekker half needs. The other
-         instructions here have no host meaning and stay AArch64's. *)
-      let triple = target_triple !the_module in
-      let host_x86_64 = starts_with triple "x86_64" in
-      let asm = match name with
-        | ("dsb_ish" | "dsb_ishst") when host_x86_64 -> "mfence"
-        | "msr_daifclr_irq" -> "msr DAIFClr, #0x2"
-        | "msr_daifset_irq" -> "msr DAIFSet, #0x2"
-        | "tlbi_vmalle1"    -> "tlbi vmalle1"
-        (* GitHub issue #446: the Inner Shareable sibling. Same operand
-           shape, different reach -- every core in the shareability
-           domain rather than this one. *)
-        | "tlbi_vmalle1is"  -> "tlbi vmalle1is"
-        | "dsb_ish"         -> "dsb ish"
-        | "dsb_ishst"       -> "dsb ishst"
-        | "isb"             -> "isb"
-        (* GitHub issue #447: NOT interrupt_wait()'s `wfe`. An idle core
-           waiting on wfe is woken by any core's SEV, and this kernel
-           executes one on every timer tick (interrupt_notify), so a core
-           that only wants its own interrupt has to say so. *)
-        | "wfi"             -> "wfi"
-        | _ -> assert false
-      in
-      let inline = const_inline_asm fty asm "~{memory}" true false in
-      ignore (build_call fty inline [||] "" builder);
-      (TypeVoid, const_null (i1_type context))
-
-  | Call (("msr_cntp_tval_el0" | "msr_cntp_ctl_el0" | "msr_sctlr_el1"
-          | "msr_mair_el1" | "msr_tcr_el1" | "msr_ttbr0_el1"
-          | "tlbi_vae1is" | "tlbi_aside1is") as name,
-          [arg_e]) ->
-      (* GitHub issue #226: one instruction each, taking the caller's value
-         through an ordinary "r" input constraint -- LLVM picks which GPR,
-         same as every other call in this codebase. *)
-      let ity = usize_lltype () in
-      let (_, v) = gen_expr ~expected_ty:TypeUsize locals arg_e in
-      let fty = function_type (void_type context) [| ity |] in
-      let asm = match name with
-        | "msr_cntp_tval_el0" -> "msr cntp_tval_el0, $0"
-        | "msr_cntp_ctl_el0"  -> "msr cntp_ctl_el0, $0"
-        | "msr_sctlr_el1"     -> "msr sctlr_el1, $0"
-        | "msr_mair_el1"      -> "msr mair_el1, $0"
-        | "msr_tcr_el1"       -> "msr tcr_el1, $0"
-        | "msr_ttbr0_el1"     -> "msr ttbr0_el1, $0"
-        | "tlbi_vae1is"       -> "tlbi vae1is, $0"
-        | "tlbi_aside1is"     -> "tlbi aside1is, $0"
-        | _ -> assert false
-      in
-      let inline = const_inline_asm fty asm "r,~{memory}" true false in
-      ignore (build_call fty inline [| v |] "" builder);
-      (TypeVoid, const_null (i1_type context))
+      let values = Array.of_list (List.map (fun arg_e ->
+        snd (gen_expr ~expected_ty:TypeUsize locals arg_e)) args) in
+      let result_ty =
+        if Instr_spec.returns_value spec.shape then ity
+        else void_type context in
+      let fty = function_type result_ty (Array.map (fun _ -> ity) values) in
+      let inline = const_inline_asm fty asm spec.constraints true false in
+      if Instr_spec.returns_value spec.shape then
+        (TypeUsize,
+         build_call fty inline values (name ^ ".result") builder)
+      else begin
+        ignore (build_call fty inline values "" builder);
+        (TypeVoid, const_null (i1_type context))
+      end
 
   | Call (name, cell :: rest) when Atomic_spec.is_cell_op name ->
       (* The cell's address is the intrinsic's: AtomicWord is one usize. *)
@@ -5360,70 +5288,6 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | _, _ ->
            (* type_inf.ml has already rejected every other arity. *)
            assert false)
-
-  | Call ("smc4", [a0_e; a1_e; a2_e; a3_e]) ->
-      (* GitHub issue #226: the real SMCCC ABI (x0-x3 in, x0 out) is fixed
-         hardware/firmware convention, not something a .tkb caller chooses
-         -- expressed here as named physical-register constraints so the
-         asm body is just the bare instruction, with no internal mov
-         shuffle the way emit_aarch64_cache_range's dc-loop needs (that one
-         uses scratch registers the caller's own operands must not
-         collide with; here every operand already lives in the exact
-         register the instruction needs, in and out, so there is nothing
-         to shuffle). *)
-      let ity = usize_lltype () in
-      let (_, v0) = gen_expr ~expected_ty:TypeUsize locals a0_e in
-      let (_, v1) = gen_expr ~expected_ty:TypeUsize locals a1_e in
-      let (_, v2) = gen_expr ~expected_ty:TypeUsize locals a2_e in
-      let (_, v3) = gen_expr ~expected_ty:TypeUsize locals a3_e in
-      let fty = function_type ity [| ity; ity; ity; ity |] in
-      let constraints = "={x0},{x0},{x1},{x2},{x3},~{memory}" in
-      let inline = const_inline_asm fty "smc #0" constraints true false in
-      let result = build_call fty inline [| v0; v1; v2; v3 |]
-        "smc4.result" builder in
-      (TypeUsize, result)
-
-  | Call ("hvc4", [a0_e; a1_e; a2_e; a3_e]) ->
-      (* GitHub issue #237 (QEMU port): identical to smc4 just above, one
-         instruction different (`hvc #0` instead of `smc #0`) -- see that
-         case's comment and hvc4's own type_inf.ml registration for why
-         QEMU `virt` needs this conduit instead of RPi5's real-firmware
-         SMC. *)
-      let ity = usize_lltype () in
-      let (_, v0) = gen_expr ~expected_ty:TypeUsize locals a0_e in
-      let (_, v1) = gen_expr ~expected_ty:TypeUsize locals a1_e in
-      let (_, v2) = gen_expr ~expected_ty:TypeUsize locals a2_e in
-      let (_, v3) = gen_expr ~expected_ty:TypeUsize locals a3_e in
-      let fty = function_type ity [| ity; ity; ity; ity |] in
-      let constraints = "={x0},{x0},{x1},{x2},{x3},~{memory}" in
-      let inline = const_inline_asm fty "hvc #0" constraints true false in
-      let result = build_call fty inline [| v0; v1; v2; v3 |]
-        "hvc4.result" builder in
-      (TypeUsize, result)
-
-  | Call ("svc5", [nr_e; a0_e; a1_e; a2_e; a3_e; a4_e]) ->
-      (* GitHub issue #228: the real Linux/AArch64 syscall ABI (x8 = syscall
-         number in, x0-x4 = up to five arguments in, x0 = result out) is a
-         fixed OS convention, not something a .tkb caller chooses -- same
-         named-physical-register-constraint technique as smc4 just above.
-         x0 is deliberately named twice in the constraint string (once as
-         the plain output, once as a0's own input): the real ABI reuses
-         that one register for both the first argument going in and the
-         return value coming out, exactly like smc4's own x0 already does
-         for SMCCC. *)
-      let ity = usize_lltype () in
-      let (_, vnr) = gen_expr ~expected_ty:TypeUsize locals nr_e in
-      let (_, v0) = gen_expr ~expected_ty:TypeUsize locals a0_e in
-      let (_, v1) = gen_expr ~expected_ty:TypeUsize locals a1_e in
-      let (_, v2) = gen_expr ~expected_ty:TypeUsize locals a2_e in
-      let (_, v3) = gen_expr ~expected_ty:TypeUsize locals a3_e in
-      let (_, v4) = gen_expr ~expected_ty:TypeUsize locals a4_e in
-      let fty = function_type ity [| ity; ity; ity; ity; ity; ity |] in
-      let constraints = "={x0},{x8},{x0},{x1},{x2},{x3},{x4},~{memory}" in
-      let inline = const_inline_asm fty "svc #0" constraints true false in
-      let result = build_call fty inline [| vnr; v0; v1; v2; v3; v4 |]
-        "svc5.result" builder in
-      (TypeUsize, result)
 
   | Call (("place_take" | "place_put"), _)
     when Generic_variant.place_exchange e <> None ->

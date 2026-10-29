@@ -125,9 +125,7 @@ let cache_maintenance_sites program =
    makes about memory, and the compiler does not check the operand. Each
    direct call is a counted site. Zero-argument TLBI, barriers and the
    timer writes msr_cntp_tval_el0 and msr_cntp_ctl_el0 cannot select an address and are not counted. *)
-let translation_builtins =
-  [ "tlbi_vae1is"; "tlbi_aside1is";
-    "msr_ttbr0_el1"; "msr_tcr_el1"; "msr_mair_el1"; "msr_sctlr_el1" ]
+let translation_builtins = Instr_spec.raw_site_names
 
 let translation_sites program =
   named_call_sites (fun callee -> List.mem callee translation_builtins) program

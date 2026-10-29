@@ -23880,6 +23880,46 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
        Alcotest.(check int) "two mfence calls" 2
          (count_substring (Llvm.string_of_llvalue fn) "llvm.x86.sse2.mfence"));
 
+  (* GitHub issue #1005: the instruction table. Every instruction builtin
+     comes from one Instr_spec row: its arity from the row's shape, its
+     name only while the row exists, its asm only for the targets the row
+     names. *)
+  Alcotest.test_case "issue #1005: every instruction row is a reserved builtin with one shape" `Quick
+    (fun () ->
+       List.iter (fun (spec : Takibi.Instr_spec.t) ->
+         Alcotest.(check bool) (spec.name ^ " reserved") true
+           (List.mem spec.name Takibi.Language_words.compiler_builtins);
+         Alcotest.(check bool) (spec.name ^ " listed in WORDS.md") true
+           (List.mem spec.name Takibi.Language_words.instruction_builtins))
+         Takibi.Instr_spec.all;
+       Alcotest.(check int) "one row per name"
+         (List.length Takibi.Instr_spec.all)
+         (List.length (List.sort_uniq compare Takibi.Instr_spec.names)));
+
+  Alcotest.test_case "issue #1005: a call with the wrong operand count is rejected from the row" `Quick
+    (fun () ->
+       expect_type_error "expects one argument: msr_tcr_el1(v)"
+         "fn bad_write() { msr_tcr_el1(); }" ();
+       expect_type_error "expects four arguments"
+         "fn bad_trap() -> usize { return hvc4(1, 2, 3); }" ();
+       expect_type_error "expects six arguments"
+         "fn bad_svc() -> usize { return svc5(1); }" ());
+
+  Alcotest.test_case "issue #1005: a name with no row is an unresolved identifier" `Quick
+    (fun () ->
+       Alcotest.(check bool) "mrs_vbar_el1 has no row" false
+         (Takibi.Instr_spec.is_instruction "mrs_vbar_el1");
+       expect_type_error "mrs_vbar_el1"
+         "fn no_row() -> usize { return mrs_vbar_el1(); }" ());
+
+  Alcotest.test_case "issue #1005: AMD64 rejects an AArch64-only row with the table's text" `Quick
+    (fun () ->
+       with_codegen_target "x86_64-pc-linux-gnu" (fun () ->
+         expect_codegen_error
+           "mrs_cntpct_el0 is an AArch64 instruction (mrs $0, cntpct_el0) with no lowering for target"
+           "fn x86_counter() -> usize { return mrs_cntpct_el0(); }" ();
+         expect_codegen_ok "fn x86_barrier() { dsb_ish(); dsb_ishst(); }" ()));
+
   Alcotest.test_case "opaque handle pointers codegen without a concrete layout" `Quick
     (expect_codegen_ok
        "opaque struct DmaOwned;

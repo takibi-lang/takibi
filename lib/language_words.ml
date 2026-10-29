@@ -120,21 +120,13 @@ let compiler_builtins = [
   "dma_begin_tx"; "dma_finish_owned_tx";
   "dma_device_span"; "dma_span_address"; "dma_span_length";
   "checked_add_usize"; "checked_mul_usize";
-  "mrs_cntfrq_el0"; "mrs_cntpct_el0"; "mrs_sctlr_el1";
-  "mrs_esr_el1"; "mrs_far_el1"; "mrs_elr_el1"; "mrs_spsr_el1";
-  "mrs_id_aa64mmfr0_el1"; "mrs_mpidr_el1";
-  "msr_cntp_tval_el0"; "msr_cntp_ctl_el0"; "msr_sctlr_el1";
-  "msr_mair_el1"; "msr_tcr_el1"; "msr_ttbr0_el1";
-  "msr_daifclr_irq"; "msr_daifset_irq"; "mrs_daif";
-  "tlbi_vmalle1"; "tlbi_vmalle1is";
-  "tlbi_vae1is"; "tlbi_aside1is";
-  "dsb_ish"; "dsb_ishst"; "isb"; "wfi"; "smc4"; "hvc4"; "svc5";
   (* GitHub issue #17/#467: the closed atomic set comes from Atomic_spec,
      the same source used by typing, effect inference, and code generation.
      It is reserved for the same reason as every builtin above -- infer_expr
      dispatches on the name before it consults fenv, so a user function of
      the same name would be silently unreachable. *)
-] @ Atomic_spec.names @ List.map fst Atomic_spec.cell_ops @ [
+] @ Instr_spec.names (* GitHub issue #1005: the instruction table *)
+  @ Atomic_spec.names @ List.map fst Atomic_spec.cell_ops @ [
   (* GitHub issue #299: the publication record's four operations. Reserved
      for the same reason -- and additionally because a user function named
      publish_commit that did NOT commit would be the most misleading name
@@ -144,14 +136,9 @@ let compiler_builtins = [
   "field_take"; "field_put";
 ]
 
-(* GitHub issue #1003: the builtins that each lower to one named machine
-   instruction (or a fixed short sequence), marked in WORDS.md until #1005's
-   instruction table owns them. *)
-let instruction_builtins = List.filter (fun name ->
-    List.exists (fun prefix -> String.starts_with ~prefix name)
-      ["mrs_"; "msr_"; "tlbi_"; "dsb_"]
-    || List.mem name ["isb"; "wfi"; "smc4"; "hvc4"; "svc5"])
-  compiler_builtins
+(* GitHub issue #1003/#1005: the builtins that each lower to one named
+   machine instruction, marked in WORDS.md; Instr_spec owns them. *)
+let instruction_builtins = Instr_spec.names
 
 (* GitHub issue #1004: words removed from the language. A use gets a
    targeted diagnostic (type_inf.ml) and the name stays reserved, but it is

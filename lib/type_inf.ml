@@ -5188,40 +5188,18 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | _ -> raise (TypeError (e.loc,
            Printf.sprintf "%s expects no arguments: %s()" fname fname)))
 
-  | Call (("mrs_cntfrq_el0" | "mrs_cntpct_el0" | "mrs_sctlr_el1"
-          | "mrs_esr_el1" | "mrs_far_el1" | "mrs_elr_el1" | "mrs_spsr_el1"
-          | "mrs_id_aa64mmfr0_el1" | "mrs_mpidr_el1"
-          | "mrs_daif") as fname, args) ->
-      (* GitHub issue #226/#227: closed system-register read intrinsics. Zero
-         arguments, like dma_publish/etc. above -- a runtime value must not
-         be able to select which register gets read. *)
-      (match args with
-       | [] -> TUsize
-       | _ -> raise (TypeError (e.loc,
-           Printf.sprintf "%s expects no arguments: %s()" fname fname)))
-
-  | Call (("msr_daifclr_irq" | "msr_daifset_irq" | "tlbi_vmalle1"
-          | "tlbi_vmalle1is"
-          | "dsb_ish" | "dsb_ishst" | "isb" | "wfi") as fname, args) ->
-      (* GitHub issue #226: closed zero-argument barrier/TLBI/DAIF-immediate
-         intrinsics. *)
-      (match args with
-       | [] -> TVoid
-       | _ -> raise (TypeError (e.loc,
-           Printf.sprintf "%s expects no arguments: %s()" fname fname)))
-
-  | Call (("msr_cntp_tval_el0" | "msr_cntp_ctl_el0" | "msr_sctlr_el1"
-          | "msr_mair_el1" | "msr_tcr_el1" | "msr_ttbr0_el1"
-          | "tlbi_vae1is" | "tlbi_aside1is") as fname, args) ->
-      (* GitHub issue #226: closed system-register write / TLBI intrinsics
-         taking the one usize value the instruction's Xt operand carries. *)
-      (match args with
-       | [v] ->
-           let vt = infer_expr senv eenv tyenv fenv v in
-           unify_at v.loc vt TUsize;
-           TVoid
-       | _ -> raise (TypeError (e.loc,
-           Printf.sprintf "%s expects one argument: %s(v)" fname fname)))
+  | Call (fname, args) when Instr_spec.is_instruction fname ->
+      (* GitHub issue #1005: every instruction builtin, from its row. Each
+         operand is one usize and the count is fixed by the row's shape:
+         a runtime value must not be able to select which register or
+         instruction gets used (#226). *)
+      let spec = Option.get (Instr_spec.find fname) in
+      if List.length args <> Instr_spec.arity spec.shape then
+        raise (TypeError (e.loc, Instr_spec.arity_message spec));
+      List.iter (fun arg ->
+        let t = infer_expr senv eenv tyenv fenv arg in
+        unify_at arg.loc t TUsize) args;
+      if Instr_spec.returns_value spec.shape then TUsize else TVoid
 
   | Call (fname, cell :: rest) when Atomic_spec.is_cell_op fname ->
       let ct = infer_expr senv eenv tyenv fenv cell in
@@ -5456,54 +5434,6 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
              "publish_copy expects two arguments: \
               publish_copy(&source, &destination)"))
        | _, _ -> assert false)
-
-  | Call (("smc4" | "hvc4") as fname, args) ->
-      (* GitHub issue #226: the raw `smc #0` trap, exposed as a plain
-         4-in/1-out hardware primitive (the real SMCCC x0-x3 in / x0 out
-         convention lives in lib/llvm_gen.ml's fixed register constraints,
-         not in any PSCI-specific semantics here -- this intrinsic knows
-         nothing about PSCI, matching "closed set of instructions", not
-         "closed set of hypervisor calls").
-         GitHub issue #237 (QEMU port): hvc4 is the same 4-in/1-out shape
-         over `hvc #0` instead of `smc #0` -- QEMU `virt`'s own guest DTB
-         reports its PSCI conduit as "hvc", not "smc" (confirmed by
-         dumping it: SMC trapped as an Undefined Instruction at EL1, since
-         this boot configuration has no EL3 to trap to at all, only EL2).
-         RPi5's real TF-A firmware uses SMC; identical SMCCC argument
-         convention either way, so this is the same type rule with one
-         more name, not a new rule. *)
-      (match args with
-       | [a; b; c; d] ->
-           List.iter (fun arg ->
-             let t = infer_expr senv eenv tyenv fenv arg in
-             unify_at arg.loc t TUsize) [a; b; c; d];
-           TUsize
-       | _ -> raise (TypeError (e.loc,
-           Printf.sprintf "%s expects four arguments: %s(x0, x1, x2, x3)" fname fname)))
-
-  | Call ("svc5" as fname, args) ->
-      (* GitHub issue #228 (dependency named by that issue: #226's own
-         raw-instruction-primitive precedent, extended to `svc`): the raw
-         Linux/AArch64 `svc #0` syscall trap, exposed as a plain 6-in/1-out
-         hardware primitive -- syscall number in x8, up to five argument
-         registers x0-x4, result in x0 (the real Linux AArch64 syscall ABI
-         convention lives in lib/llvm_gen.ml's fixed register constraints,
-         same shape as smc4's own SMCCC constraints just above). "5" names
-         the five DATA argument registers this intrinsic exposes (x0-x4),
-         matching every real Linux syscall the initial EL0 test payload
-         issues today (issue #228) -- clone(2) is the widest at five
-         (flags, stack, ptid, tls, ctid). Unused trailing arguments are
-         simply passed as 0, the same convention a real `mov x4, #0`
-         would already need in hand-written assembly for a narrower
-         syscall. *)
-      (match args with
-       | [nr; a0; a1; a2; a3; a4] ->
-           List.iter (fun arg ->
-             let t = infer_expr senv eenv tyenv fenv arg in
-             unify_at arg.loc t TUsize) [nr; a0; a1; a2; a3; a4];
-           TUsize
-       | _ -> raise (TypeError (e.loc,
-           Printf.sprintf "%s expects six arguments: %s(nr, x0, x1, x2, x3, x4)" fname fname)))
 
   | Call ("dma_cpu_slice" as operation,
           [({ desc = (Ast.Var _ | Ast.FieldGet ({ desc = Ast.Var _; _ }, _)); _ } as owner);
@@ -11756,7 +11686,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let irq_guard_types = inherit_stored_guard_types irq_guard_types in
   let irq_restorers =
     let restores = ref (StringMap.fold (fun caller callees acc ->
-        if StringSet.mem "msr_daifclr_irq" callees
+        if StringSet.mem Instr_spec.irq_unmask callees
            && not (StringSet.mem caller irq_restore_discharged)
         then StringSet.add caller acc else acc) lock_callees StringSet.empty) in
     let changed = ref true in
@@ -13137,7 +13067,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           (* GitHub issue #528; see irq_restorers. A guard passed to this
              call is being handed over -- released, usually -- rather than
              held across it. *)
-          if target = "msr_daifclr_irq" || StringSet.mem target irq_restorers
+          if target = Instr_spec.irq_unmask || StringSet.mem target irq_restorers
              || (StringSet.mem target may_call_indirect
                  && not (StringSet.mem target irq_restore_discharged))
              || StringMap.mem (loc_key e.loc) !resolved_indirect_call_effects
@@ -13164,7 +13094,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                     then " may reach an unknown indirect call"
                     else " reaches msr_daifclr_irq" ^
                       chain_text (call_chain target
-                        (fun callee -> callee = "msr_daifclr_irq")
+                        (fun callee -> callee = Instr_spec.irq_unmask)
                         (fun callee ->
                            StringSet.mem callee irq_restore_discharged)) in
                   raise (TypeError (e.loc, Printf.sprintf
@@ -14637,10 +14567,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let mask_transfer target ((current, depth, saved) as state) =
     if current = 0 then state
     else if StringSet.mem target mask_noreturn then mask_dead
-    else if target = "mrs_daif" then mask_save state
-    else if target = "msr_daifset_irq"
+    else if target = Instr_spec.irq_save then mask_save state
+    else if target = Instr_spec.irq_mask
             || StringSet.mem target mask_primitives then (2, depth, saved)
-    else if target = "msr_daifclr_irq" then (1, depth, saved)
+    else if target = Instr_spec.irq_unmask then (1, depth, saved)
     else if StringSet.mem target mask_restorers then mask_restore state
     else if StringSet.mem target mask_guards then state
     else match StringMap.find_opt target !mask_summaries with
@@ -14679,7 +14609,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         (target, indirect_requires) in
   let mask_walk body entry on_masked_call =
     let returned = ref mask_dead in
-    let masker = ref "msr_daifset_irq" in
+    let masker = ref Instr_spec.irq_mask in
     let rec expr state (e : Ast.expr) = match e.desc with
       | Ast.Call (name, args) ->
           let state = List.fold_left expr state args in
