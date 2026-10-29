@@ -567,6 +567,32 @@
         "frame_lines": "#992 FrameRef level index: SPSR-reading leveled mints, El0 entry and fresh mints, LeveledFrame matches at the entries",
         "invariant_stop_sites": "#992 scheduled_process_parked_frame stops on a delivery aimed at an El1 frame"
       }
+    },
+    {
+      "date": "2026-10-29",
+      "head": "9271ff95",
+      "counts": {
+        "raw_mint_files": 14,
+        "frame_lines": 12174,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 214,
+        "raw_deref_io": 7,
+        "raw_deref_builtin_region": 113,
+        "unsafe_blocks": 150,
+        "extern_fns": 61,
+        "invariant_stop_sites": 118,
+        "assembly_lines": 2473,
+        "per_cpu_ordinary_arrays": 73,
+        "per_cpu_stores": 6,
+        "raw_cpu_id_calls": 157,
+        "unprotected_globals": 475,
+        "frame_api_ratchet": 7
+      },
+      "changes": {
+        "assembly_lines": "#1032 user-access PAN leaves (open, close, per-core enable) in user_entry.S",
+        "extern_fns": "#1032 user_access_open, user_access_close, user_access_pan_enable",
+        "frame_lines": "#1032 user_entry.S PAN leaves"
+      }
     }
   ]
 }
