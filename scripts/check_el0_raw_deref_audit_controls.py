@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Controls for the standalone EL0 audit recipe's coverage and dependencies."""
+import re
 from pathlib import Path
 
 from check_el0_raw_deref_audit import audit_recipe_problems
@@ -8,6 +9,9 @@ from pass_line import CaseCount, report_pass
 ROOT = Path(__file__).resolve().parent.parent
 CASES = CaseCount()
 text = (ROOT / "Makefile").read_text()
+# The payload's compile call, read from the Makefile so a new probe entry
+# point does not need this file edited (#1172 and #1176 each had to).
+EL0_CALL = re.search(r"\$\(call KERNEL_EL0_COMPILE,initial_user_payload[^)]*\)", text).group(0)
 
 
 def check(source, needle=None):
@@ -21,7 +25,7 @@ def check(source, needle=None):
 
 
 check(text)
-check(text.replace("$(call KERNEL_EL0_COMPILE,initial_user_payload sigaltstack_probe_alone shared_mapping_probe_alone mmap_region_probe_alone realtime_clock_probe_alone itimer_probe_alone)",
+check(text.replace(EL0_CALL,
                    "$(TAKIBI) $< -o $@"), "KERNEL_RPI5_USER_PAYLOAD_TKB_O must use")
 check(text.replace("--emit-raw-deref-audit $@.rawderef.tsv", ""), "must contain --emit-raw-deref-audit")
 check(text.replace("--check-raw-deref el0 $@.rawderef.tsv $@.d", "--verbose"), "must contain python3")
