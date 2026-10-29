@@ -247,7 +247,7 @@ next one taken. The done record of the previous queue is in HISTORY.md
    acknowledges its source), #752 (typestate in more of the kernel), #755
    (an immutable integer binding keeps one static), #751 (per-element
    witnesses, deferred until a consumer needs them), #926 (GICv3 for QEMU
-   virt), #769 (`--uses-of NAME`; shares #987's module), #747 (host GDB
+   virt), #769 (every use of a global, done 2026-10-30 as --emit-globals' uses table), #747 (host GDB
    test). Audit follow-ups filed 2026-10-23 to 2026-10-25: #901, #902,
    #898, #899, #904, #905, #903, #1024, #1025, #1029, #1030.
 7. **Time measurement, then the optimizations waiting on it** (maintainer,
