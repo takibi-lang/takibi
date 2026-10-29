@@ -8,3 +8,4 @@ userspace shared mmap: fork shares MAP_SHARED and copies MAP_PRIVATE, munmap ok;
 userspace statfs and umask: ext2 0xEF53 and procfs 0x9FA0, umask 077 gives 0600 and 0700 ok
 userspace mmap region: 2 MiB MAP_SHARED shared across fork, 8 MiB MAP_PRIVATE zero on first touch and by syscall, madvise EINVAL, hints, DONTNEED zeroes private and keeps shared, munmap reuse ok
 userspace mmap region limits: madvise unknown and MADV_REMOVE EINVAL, unmapped ENOMEM, over 16 MiB ENOMEM ok
+userspace clocks: CLOCK_REALTIME and CLOCK_MONOTONIC advance across a 20 ms nanosleep, unknown clock EINVAL ok

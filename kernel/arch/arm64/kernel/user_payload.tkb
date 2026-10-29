@@ -1000,6 +1000,7 @@ fn initial_user_payload() !{unsafe} {
         statfs_umask_kernel_probe();
         mmap_region_probe();
         mmap_region_kernel_probe();
+        realtime_clock_probe();
         svc5(93, 0, 0, 0, 0, 0);
     }
 }
@@ -1546,6 +1547,51 @@ fn mmap_region_kernel_probe() !{unsafe} {
             != ENOMEM_RC);
     let message: []const u8 =
         bs"userspace mmap region limits: madvise unknown and MADV_REMOVE EINVAL, unmapped ENOMEM, over 16 MiB ENOMEM ok\n";
+/* GitHub issue #1166: CLOCK_REALTIME advances. It was a fixed timestamp,
+ * and stress-ng's stress_yield_sleep_ms -- usleep(1000) until the realtime
+ * clock has moved 1 ms -- never returned. Both clocks are read around a
+ * 20 ms nanosleep and must have moved at least 10 ms; realtime must also be
+ * past 2001 (10^9 s). `realtime_clock_probe_alone` runs under qemu-aarch64
+ * in `make linuxcheck` against this line of the linux_file view. */
+const CLOCK_GETTIME_SYSCALL: usize = 113;
+const NANOSLEEP_SYSCALL: usize = 101;
+const REALTIME_PROBE_SLEEP_NS: usize = 20000000;
+const REALTIME_PROBE_MIN_NS: usize = 10000000;
+
+fn realtime_clock_probe_alone() !{unsafe} {
+    realtime_clock_probe();
+    svc5(93, 0, 0, 0, 0, 0);
+}
+
+// One clock as nanoseconds; fails the probe on an error or a bad timespec.
+fn realtime_probe_read_ns(clock: usize) -> usize !{unsafe} {
+    let mut ts: [u8; 16];
+    let ts_base: *u8 = ts as *u8;
+    fail_if(svc5(CLOCK_GETTIME_SYSCALL, clock, ptr_of(ts_base, 0), 0, 0, 0) != 0);
+    let seconds: usize = payload_read_u64(ts_base, 0);
+    let nanos: usize = payload_read_u64(ts_base, 8);
+    fail_if(nanos >= 1000000000 || seconds >= 10000000000);
+    return seconds * 1000000000 + nanos;
+}
+
+fn realtime_clock_probe() !{unsafe} {
+    let real_before: usize = realtime_probe_read_ns(0);
+    let mono_before: usize = realtime_probe_read_ns(1);
+    fail_if(real_before < 1000000000 * 1000000000);
+    let mut request: [u8; 16];
+    let request_base: *u8 = request as *u8;
+    payload_write_u64(request_base, 0, 0);
+    payload_write_u64(request_base, 8, REALTIME_PROBE_SLEEP_NS);
+    fail_if(svc5(NANOSLEEP_SYSCALL, ptr_of(request_base, 0), 0, 0, 0, 0) != 0);
+    let real_after: usize = realtime_probe_read_ns(0);
+    let mono_after: usize = realtime_probe_read_ns(1);
+    fail_if(real_after < real_before + REALTIME_PROBE_MIN_NS);
+    fail_if(mono_after < mono_before + REALTIME_PROBE_MIN_NS);
+    // An unknown clock is EINVAL.
+    let mut ts: [u8; 16];
+    fail_if(svc5(CLOCK_GETTIME_SYSCALL, 0x7FFF, ptr_of(ts as *u8, 0), 0, 0, 0) != EINVAL_RC);
+    let message: []const u8 =
+        bs"userspace clocks: CLOCK_REALTIME and CLOCK_MONOTONIC advance across a 20 ms nanosleep, unknown clock EINVAL ok\n";
     fail_if(svc5(64, 1, (unsafe { message as *u8 }) as usize,
                  message.len, 0, 0) != message.len);
 }

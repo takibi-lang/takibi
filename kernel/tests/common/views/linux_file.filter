@@ -8,3 +8,4 @@
 ^userspace statfs and umask:
 ^userspace mmap region: 
 ^userspace mmap region limits: 
+^userspace clocks:

@@ -8245,20 +8245,32 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         match user_range_check_write(current_authority, x1, 16) {
             UserWriteRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
             UserWriteRangeResult::Ok(range) => {
-                let mut seconds: u64 = 1700000000;
-                let mut nanos: u64 = 0;
-                if (x0 == 1) {
-                    let frequency: usize = read_cntfrq() as usize;
-                    if (frequency == 0) {
-                        return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
-                    }
-                    let ticks: usize = read_cntpct() as usize;
-                    seconds = (ticks / frequency) as u64;
-                    let remainder: usize = ticks % frequency;
-                    nanos = ((remainder * 1000000000) / frequency) as u64;
-                } else if (x0 != 0) {
+                // GitHub issue #1166: CLOCK_REALTIME is the fixed epoch
+                // plus CLOCK_MONOTONIC, so it advances as Linux's does. It
+                // used to be the epoch alone, and stress-ng's
+                // stress_yield_sleep_ms -- sleep 1 ms until the realtime
+                // clock has moved 1 ms -- slept forever. There is no RTC,
+                // so the epoch is still the fixed 1700000000 (2023-11-14).
+                if (x0 != 0 && x0 != 1) {
                     return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
                 }
+                let frequency: usize = read_cntfrq() as usize;
+                if (frequency == 0) {
+                    return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
+                }
+                let ticks: usize = read_cntpct() as usize;
+                let mut whole: usize = ticks / frequency;
+                let remainder: usize = ticks % frequency;
+                let nanos: u64 = ((remainder * 1000000000) / frequency) as u64;
+                if (x0 == 0) {
+                    match checked_add_usize(whole, 1700000000) {
+                        CheckedUsize::Overflow => {
+                            return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
+                        }
+                        CheckedUsize::Value(value) => { whole = value; }
+                    }
+                }
+                let seconds: u64 = whole as u64;
                 match user_write_join(user_write_u64(range, 0, seconds),
                                       user_write_u64(range, 8, nanos)) {
                     UserWriteResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
