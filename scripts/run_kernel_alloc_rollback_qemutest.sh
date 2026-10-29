@@ -163,7 +163,7 @@ echo "[kernel/qemu alloc-rollback] booting kernel-debug.elf under QEMU+GDB"
 . "$REPO_ROOT/scripts/vcpu_lease.sh"
 resource_lease_vcpu_acquire "$TAKIBI_QEMU_SMP"
 "$REPO_ROOT/scripts/qemu.sh" \
-    -machine virt -cpu cortex-a53 -smp "$TAKIBI_QEMU_SMP" -m 1024 -display none -monitor none \
+    -machine virt -cpu cortex-a76 -smp "$TAKIBI_QEMU_SMP" -m 1024 -display none -monitor none \
     -qmp "tcp:127.0.0.1:$QMP_PORT,server=on,wait=off" \
     -chardev "socket,id=debug_uart,host=127.0.0.1,port=$SERIAL_PORT,server=on,wait=on" \
     -serial chardev:debug_uart \

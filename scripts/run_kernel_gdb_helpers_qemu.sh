@@ -15,7 +15,7 @@ mkdir -p "$ARTIFACT_DIR"
 . "$REPO_ROOT/scripts/vcpu_lease.sh"
 resource_lease_vcpu_acquire "$TAKIBI_QEMU_SMP"
 "$REPO_ROOT/scripts/qemu.sh" \
-    -machine virt -cpu cortex-a53 -smp "$TAKIBI_QEMU_SMP" -m 1024 -display none -monitor none \
+    -machine virt -cpu cortex-a76 -smp "$TAKIBI_QEMU_SMP" -m 1024 -display none -monitor none \
     -serial "file:$ARTIFACT_DIR/serial.log" \
     -gdb "tcp:127.0.0.1:$GDB_PORT" -S \
     -kernel "$ELF" >"$ARTIFACT_DIR/qemu.log" 2>&1 &

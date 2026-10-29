@@ -54,7 +54,7 @@ shutil.copyfile(root / 'kernel/build/user/ext2.img', disk)
 uart = artifacts / 'uart.log'
 uart.write_bytes(b'')
 marker = 'probe-ticks: missing-peer controls complete'
-command = [str(root / 'scripts/qemu.sh'), '-machine', 'virt', '-cpu', 'cortex-a53',
+command = [str(root / 'scripts/qemu.sh'), '-machine', 'virt', '-cpu', 'cortex-a76',
            '-smp', os.environ['TAKIBI_QEMU_SMP'], '-m', '1024', '-display', 'none', '-monitor', 'none',
            '-serial', 'file:' + str(uart),
            '-drive', f'file={disk},if=none,format=raw,id=vd0',

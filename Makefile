@@ -1827,8 +1827,10 @@ $(KERNEL_RPI5_DEBUG_METADATA): $(KERNEL_RPI5_MAIN_O) $(TAKIBI)
 # -- QEMU/AArch64 (GitHub issue #237) -----------------------------------------
 # Reuses the same aarch64-none-elf triple as RPi5 (no --cpu passed to
 # LLVM_MC for either target's assembly -- see KERNEL_RPI5_ENTRY_O's own
-# rule above), but a lower --cpu for the .tkb compile, matching QEMU
-# `virt`'s own -cpu cortex-a53.
+# rule above), but a lower --cpu for the .tkb compile: the QEMU kernel keeps
+# ARMv8.0 code generation (ldaxr/stxr, no LSE) so that path stays exercised,
+# while every QEMU lane emulates -cpu cortex-a76 (ARMv8.2, the RPi5 core) so
+# FEAT_PAN and the other v8.1/v8.2 features exist under test (#1032).
 QEMU_TARGET := aarch64-none-elf
 QEMU_CPU    := cortex-a53
 

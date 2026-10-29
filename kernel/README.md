@@ -1692,7 +1692,7 @@ are deliberate, not gaps to silently close:
   real hardware. A change to `kernel/arch/arm64/mm/mmu.tkb` or any DMA path
   passing under QEMU is not evidence it is cache-safe.
 - **Boot model differs from RPi5's TF-A hand-off.** QEMU `virt` (with a
-  plain `-cpu cortex-a53`, no firmware) starts the guest directly at EL1,
+  plain `-cpu cortex-a76`, no firmware) starts the guest directly at EL1,
   not EL2, so `kernel/arch/arm64/boot/entry_qemu.S` skips the EL2-drop
   sequence `entry.S` needs for RPi5's real TF-A hand-off. Its PSCI conduit
   is HVC, not RPi5's real-firmware SMC, and its per-core MPIDR numbering

@@ -3,7 +3,7 @@
  * kernel/arch/arm64/boot/entry.S with the serial numbers filed off --
  * that file's el2_drop_to_el1 exists because RPi5's TF-A hands off control
  * at EL2, and this kernel needs to drop to EL1 itself. QEMU `virt` with a
- * plain `-cpu cortex-a53` (no explicit EL2/EL3 firmware options) starts a
+ * plain `-cpu cortex-a76` (no explicit EL2/EL3 firmware options) starts a
  * `-kernel`-loaded guest directly at EL1 -- confirmed empirically: the
  * first real boot attempt under this port hit a repeating "Undefined
  * Instruction" trap at absolute PC 0x200 (VBAR_EL1's architectural RESET

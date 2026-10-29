@@ -125,13 +125,13 @@ must have the maintained loader's ET_DYN shape; ordinary ET_EXEC is not the
 input format this experiment uses. The ash launcher preserves an absolute
 argv[0] for the static-image resolver.
 
-Launch QEMU with `-machine virt -cpu cortex-a53 -smp 2 -m 1024 -display none
+Launch QEMU with `-machine virt -cpu cortex-a76 -smp 2 -m 1024 -display none
 -monitor none -global virtio-mmio.force-legacy=false`, the matching kernel-debug
 ELF, the copy as a virtio-blk disk, a socket UART, and a loopback GDB listener.
 No network device or HTTP service is needed. For the recorded host ports:
 
 ```sh
-qemu-system-aarch64 -machine virt -cpu cortex-a53 -smp 2 -m 1024 \
+qemu-system-aarch64 -machine virt -cpu cortex-a76 -smp 2 -m 1024 \
   -display none -monitor none -global virtio-mmio.force-legacy=false \
   -chardev socket,id=uart,host=127.0.0.1,port=22981,server=on,wait=on \
   -serial chardev:uart -gdb tcp:127.0.0.1:22982 \

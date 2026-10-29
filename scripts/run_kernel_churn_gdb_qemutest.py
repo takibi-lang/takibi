@@ -29,7 +29,7 @@ def main():
         helper.qmp_socket = directory / "qmp"
         with (artifact / "qemu.log").open("w") as output:
             guest = subprocess.Popen([
-                QEMU, "-machine", "virt", "-cpu", "cortex-a53",
+                QEMU, "-machine", "virt", "-cpu", "cortex-a76",
                 "-smp", str(smp), "-m", "1024", "-display", "none", "-monitor", "none",
                 "-serial", "none", "-S", "-qmp",
                 f"unix:{helper.qmp_socket},server=on,wait=off", "-kernel", str(ELF)],

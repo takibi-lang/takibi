@@ -76,7 +76,7 @@ python3 "$REPO_ROOT/scripts/qemu_port_guard.py" "$LABEL" "tcp:$GDB_PORT" || exit
 . "$REPO_ROOT/scripts/vcpu_lease.sh"
 resource_lease_vcpu_acquire 1
 timeout "$TIMEOUT_SECS" "$REPO_ROOT/scripts/qemu.sh" \
-    -machine virt -cpu cortex-a53 -m 128 -display none -monitor none \
+    -machine virt -cpu cortex-a76 -m 128 -display none -monitor none \
     -serial "file:$RUN_DIR/uart.log" \
     -semihosting-config enable=on,target=native \
     -S -gdb "tcp:127.0.0.1:$GDB_PORT" \

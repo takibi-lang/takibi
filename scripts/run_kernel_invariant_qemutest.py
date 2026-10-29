@@ -22,7 +22,7 @@ def main():
     elf = (out / "kernel.elf").resolve()
     elf.write_bytes(loaded)
     data = bytearray()
-    command = [QEMU, "-machine", "virt", "-cpu", "cortex-a53",
+    command = [QEMU, "-machine", "virt", "-cpu", "cortex-a76",
                "-smp", str(smp), "-m", "128", "-display", "none", "-monitor", "none",
                "-serial", "stdio", "-kernel", str(elf)]
     with (out / "qemu.log").open("wb") as errors:

@@ -60,7 +60,7 @@ def main():
         endpoint = directory / "qmp"
         with (artifacts / "qemu.log").open("w") as output:
             guest = subprocess.Popen([
-                QEMU, "-machine", "virt", "-cpu", "cortex-a53",
+                QEMU, "-machine", "virt", "-cpu", "cortex-a76",
                 "-smp", str(smp), "-m", "1024", "-display", "none", "-monitor", "none",
                 "-serial", "none", "-S", "-qmp",
                 f"unix:{endpoint},server=on,wait=off", "-kernel", str(ELF)],

@@ -31,7 +31,7 @@ def main():
     artifacts = Path(os.environ.get("TAKIBI_LANE_ARTIFACT_ROOT", "_build")) / "dma-qemu"
     artifacts.mkdir(parents=True, exist_ok=True)
     process = subprocess.Popen([
-        QEMU, "-machine", "virt", "-cpu", "cortex-a53",
+        QEMU, "-machine", "virt", "-cpu", "cortex-a76",
         "-smp", str(smp), "-m", "128M", "-display", "none", "-monitor", "none",
         "-serial", "stdio", "-nic", "none", "-kernel", sys.argv[1],
     ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

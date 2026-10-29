@@ -205,7 +205,7 @@ def main() -> int:
     command = [
         QEMU,
         "-machine", "virt",
-        "-cpu", "cortex-a53",
+        "-cpu", "cortex-a76",
         "-smp", str(smp),
         "-m", "1G",
         "-object", "memory-backend-ram,id=ram0,size=512M",
@@ -231,7 +231,7 @@ def main() -> int:
         generated = subprocess.run([
             QEMU,
             "-machine", f"virt,dumpdtb={dtb}",
-            "-cpu", "cortex-a53",
+            "-cpu", "cortex-a76",
             "-smp", str(smp),
             "-m", "1G",
             "-object", "memory-backend-ram,id=ram0,size=512M",
@@ -256,7 +256,7 @@ def main() -> int:
         discontiguous_command = [
             QEMU,
             "-machine", "virt",
-            "-cpu", "cortex-a53",
+            "-cpu", "cortex-a76",
             "-smp", str(smp),
             "-m", "1G",
             "-object", "memory-backend-ram,id=ram0,size=512M",
@@ -281,7 +281,7 @@ def main() -> int:
     low_memory_command = [
         QEMU,
         "-machine", "virt",
-        "-cpu", "cortex-a53",
+        "-cpu", "cortex-a76",
         "-smp", str(smp),
         "-m", "128M",
         "-display", "none",
@@ -303,7 +303,7 @@ def main() -> int:
         generated = subprocess.run([
             QEMU,
             "-machine", f"virt,dumpdtb={dtb}",
-            "-cpu", "cortex-a53",
+            "-cpu", "cortex-a76",
             "-smp", str(smp),
             "-m", "1G",
             "-display", "none",
@@ -325,7 +325,7 @@ def main() -> int:
         invalid_command = [
             QEMU,
             "-machine", "virt",
-            "-cpu", "cortex-a53",
+            "-cpu", "cortex-a76",
             "-smp", str(smp),
             "-m", "1G",
             "-display", "none",
