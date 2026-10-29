@@ -97,8 +97,10 @@ private fn ext2_exhaustion_mode(mount: Ext2Mount) -> Ext2ExhaustionMode {
     return Ext2ExhaustionMode::Interactive;
 }
 
-// Fillers are ordinary linked files. A one-byte range write fills the gap
-// through the production allocator without a volume-sized source buffer.
+// Fillers are ordinary linked files. One one-byte range write per block
+// claims it through the production allocator without a volume-sized
+// source buffer; a single write at the end would leave the blocks before
+// it as holes (#1087).
 // EL0 shrinks and removes both after observing ENOSPC; no test syscall or
 // unowned bitmap reservation is carried across userspace execution.
 private fn ext2_exhaustion_filler(mount: Ext2Mount, name: []const u8,
@@ -113,13 +115,19 @@ private fn ext2_exhaustion_filler(mount: Ext2Mount, name: []const u8,
         Ext2LookupResult::Invalid => { return false; }
         Ext2LookupResult::NotFound => { return false; }
         Ext2LookupResult::Found(inode) => {
-            match ext2_write_regular_file_range(
-                    mount, inode, (blocks * KERNEL_BLOCK_SIZE - 1) as usize, bs"x") {
-                Ext2ResizeResult::Resized => { return true; }
-                Ext2ResizeResult::Invalid => { return false; }
-                Ext2ResizeResult::NoSpace => { return false; }
-                Ext2ResizeResult::Fenced => { return false; }
+            for block: usize in 0..<EXT2_MAX_SINGLE_FILE_BLOCKS {
+                if (block < blocks) {
+                    match ext2_write_regular_file_range(mount, inode,
+                            block * KERNEL_BLOCK_SIZE + KERNEL_BLOCK_SIZE - 1,
+                            bs"x") {
+                        Ext2ResizeResult::Resized => { }
+                        Ext2ResizeResult::Invalid => { return false; }
+                        Ext2ResizeResult::NoSpace => { return false; }
+                        Ext2ResizeResult::Fenced => { return false; }
+                    }
+                }
             }
+            return true;
         }
     }
 }
