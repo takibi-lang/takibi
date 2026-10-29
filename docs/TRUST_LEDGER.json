@@ -713,6 +713,30 @@
       "changes": {
         "frame_lines": "#1211 the non-interrupt TX drain marks the writer wake owed and keeps TXIM enabled until the service runs; the room predicate is shared under the console lock"
       }
+    },
+    {
+      "date": "2026-10-29",
+      "head": "149561da",
+      "counts": {
+        "raw_mint_files": 14,
+        "frame_lines": 12230,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 214,
+        "raw_deref_io": 7,
+        "raw_deref_builtin_region": 113,
+        "unsafe_blocks": 151,
+        "extern_fns": 61,
+        "invariant_stop_sites": 118,
+        "assembly_lines": 2503,
+        "per_cpu_ordinary_arrays": 73,
+        "per_cpu_stores": 6,
+        "raw_cpu_id_calls": 157,
+        "unprotected_globals": 428,
+        "frame_api_ratchet": 7
+      },
+      "changes": {
+        "frame_lines": "#1217 DDB snapshot field and uart-tx wait detail for echo pending, TXIM and the owed writer wake"
+      }
     }
   ]
 }
