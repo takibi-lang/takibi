@@ -32,8 +32,22 @@ Two bounds:
                    allcheck on a quiet host, 2026-10-24, rebased on b10ee276,
                    measured 3301 busy lane-seconds over 34 receipts (summed
                    elapsed 9119 s, lease wait 6546 s, span 610 s). The limit
-                   is 4300 s: that plus about 30 % for host load, the same
+                   was 4300 s: that plus about 30 % for host load, the same
                    headroom the earlier 9000 s elapsed limit had (#908).
+                   Re-derived (maintainer decision 2026-10-29, #1193;
+                   PROVISIONAL until re-measured after the #1032 cortex-a76
+                   switch lands): green allchecks grew to 4412 and 4498 with
+                   no lane doing more work -- single-lane A/B on a quiet host,
+                   8d7901bc against 5f79f0c0, kernelcheck-qemu-main 269.6 s
+                   and 269.5 s, race-window-609 262.3 s and 262.2 s -- since a
+                   busy second is wall time and stretches with host
+                   contention (qemu-main: 269 s alone, 340 s in allcheck).
+                   With the kernel images built before the first receipt
+                   (allcheck-prebuild), a quiet clean allcheck on 5f79f0c0
+                   measured about 4570 (4368 over 33 receipts, plus langcheck
+                   about 84 s and the RPi5 lane about 126 s, which failed in
+                   that run). The limit is 5900 s: that plus about 30 %,
+                   the same headroom as before (margin 1330 s).
                    Only a GREEN allcheck's receipts are read (#1123): land.sh
                    copies _build/lane-timing, after allcheck passed, to
                    <git common dir>/takibi-land/lane-timing-green
@@ -107,7 +121,7 @@ def keep_green(source: pathlib.Path, dest: pathlib.Path) -> None:
     staging.rename(dest)
     shutil.rmtree(old, ignore_errors=True)
 QEMU_LANE_LIMIT = 25
-LANE_SECONDS_LIMIT = 4300.0
+LANE_SECONDS_LIMIT = 5900.0
 
 
 def rules(text: str) -> dict[str, list[str]]:

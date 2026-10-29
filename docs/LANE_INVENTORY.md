@@ -4,7 +4,7 @@ GitHub issue #908. Each QEMU lane costs a guest boot (often several) and adds
 roughly its own time to every land, because allcheck is throughput bound
 (#886: 34 lanes on 24 host threads, about 9000 lane-seconds).
 `scripts/check_lane_budget.py` holds the number of leaf QEMU lanes at 25 and
-the last allcheck's busy lane-seconds (elapsed less vCPU lease wait, #927) at 4300; AGENTS.md says a new error-case
+the last allcheck's busy lane-seconds (elapsed less vCPU lease wait, #927) at 5900 (#1193, provisional); AGENTS.md says a new error-case
 test joins an existing lane and a new lane needs the maintainer.
 
 This page classifies every leaf lane so that a new case knows where to go and
