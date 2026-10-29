@@ -79,6 +79,55 @@ def main():
         print("FAIL kernel-asm-wxn control: missing function passed")
         return 1
 
+    # GitHub issue #1032: SPAN (bit 23) and A (bit 1) cleared through an AND
+    # with a mov/movk-built register, since no logical immediate encodes both.
+    def span_body(movk):
+        return [
+            (0x6000, "mrs x8, SCTLR_EL1", "kernel_mmu_activate"),
+            (0x6004, "mov x9, #-0x3               // =-3", "kernel_mmu_activate"),
+            (0x6008, movk, "kernel_mmu_activate"),
+            (0x600C, "and x8, x8, x9", "kernel_mmu_activate"),
+            (0x6010, "msr SCTLR_EL1, x8", "kernel_mmu_activate"),
+        ]
+    CASES.note()
+    good = span_body("movk x9, #0xff7f, lsl #16")
+    if (checker.check_sctlr_clears_span(good) or
+            checker.check_sctlr_allows_normal_memory_unaligned_access(good)):
+        print("FAIL kernel-asm-span control: a SPAN- and A-clearing write was refused")
+        return 1
+    CASES.note()
+    failures = checker.check_sctlr_clears_span(span_body("movk x9, #0xffff, lsl #16"))
+    if len(failures) != 1 or "SPAN" not in failures[0]:
+        print("FAIL kernel-asm-span control: a write leaving SPAN set passed")
+        return 1
+    CASES.note()
+    failures = checker.check_sctlr_clears_span([])
+    if len(failures) != 1 or "unverified" not in failures[0]:
+        print("FAIL kernel-asm-span control: missing function passed")
+        return 1
+
+    # GitHub issue #1032: PSTATE.PAN written only by the user-access leaves.
+    leaves = [
+        (0x7000, "msr PAN, #0x1", "user_access_pan_enable"),
+        (0x7004, "msr PAN, #0x0", "user_access_open"),
+        (0x7008, "msr PAN, #0x1", "user_access_close"),
+    ]
+    CASES.note()
+    if checker.check_pan_writes(leaves):
+        print("FAIL kernel-asm-pan control: the three leaves were refused")
+        return 1
+    CASES.note()
+    failures = checker.check_pan_writes(
+        leaves + [(0x700C, "msr PAN, #0x0", "copy_from_user")])
+    if len(failures) != 1 or "outside the user-access leaves" not in failures[0]:
+        print("FAIL kernel-asm-pan control: a PAN clear outside the window passed")
+        return 1
+    CASES.note()
+    failures = checker.check_pan_writes(leaves[:1] + leaves[2:])
+    if len(failures) != 1 or "user_access_open" not in failures[0]:
+        print("FAIL kernel-asm-pan control: a missing window opener passed")
+        return 1
+
     # GitHub issue #920: every EL0 eret resets the GIC priority mask.
     pmr_ok = [
         (0x3000, "bl 0x4000 <irq_mask_reset_el0>", "kernel_process_stack_switch_complete"),

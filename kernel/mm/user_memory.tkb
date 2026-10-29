@@ -6,6 +6,13 @@ use "kernel/mm/user_access.tkb";
 // each populated L2 branch. The literal stays here because top-level const
 // initializers cannot multiply another file's identifier.
 const USER_RANGE_WINDOW: usize = 0x40000000;
+// GitHub issue #1032: the user window as one interval. A range's base
+// address has the refined type below, so the compiler refuses a range --
+// and so a user-access window's dereference -- whose base it cannot prove
+// lies in [USER_TEXT_VA, USER_RANGE_END): a kernel address cannot be handed
+// to the window as if it were a user one. PAN stops the opposite direction
+// (an EL1 access to user memory outside a window) in hardware.
+const USER_RANGE_END: usize = USER_TEXT_VA + USER_RANGE_WINDOW;
 
 // Isolates AP/UXN/PXN/AF/nG attribute bits from the physical address in a
 // live PTE.
@@ -84,13 +91,13 @@ enum UserAccessMode: u8 { Read; Write; }
 // checks again.
 affine struct UserReadRange[process: usize] {
     private root: AddressSpaceRoot;
-    private address: usize;
+    private address: {USER_TEXT_VA..<USER_RANGE_END as usize};
     private length: usize;
 }
 
 affine struct UserWriteRange[process: usize] {
     private root: AddressSpaceRoot;
-    private address: usize;
+    private address: {USER_TEXT_VA..<USER_RANGE_END as usize};
     private length: usize;
 }
 
@@ -167,6 +174,34 @@ fn user_range_l3_span(address: usize, length: usize) -> (bool, usize, usize) {
     return (true, first, last);
 }
 
+// The refined base of a range that user_range_span_ok admitted. A
+// nonzero span was already checked to lie in the window; an empty span
+// names no byte, so any address is admitted and the base becomes the
+// window start, which is never dereferenced for it. Refused only for a
+// nonempty span outside the window, which span_ok has already refused.
+//
+// The window start is narrowed through a local rather than assigned
+// directly: a named constant is not accepted as a proven value at a
+// refined target today (unfiled: named const as a refined value).
+must_use variant UserRangeBase {
+    Refused;
+    Base({USER_TEXT_VA..<USER_RANGE_END as usize});
+}
+
+fn user_range_base(address: usize, length: usize) -> UserRangeBase {
+    if (address >= USER_TEXT_VA && address < USER_RANGE_END) {
+        let base: {USER_TEXT_VA..<USER_RANGE_END as usize} = address;
+        return UserRangeBase::Base(base);
+    }
+    if (length != 0) { return UserRangeBase::Refused; }
+    let start: usize = USER_TEXT_VA;
+    if (start >= USER_TEXT_VA && start < USER_RANGE_END) {
+        let base: {USER_TEXT_VA..<USER_RANGE_END as usize} = start;
+        return UserRangeBase::Base(base);
+    }
+    return UserRangeBase::Refused;
+}
+
 // GitHub issue #199: shared span-validation logic, factored out of the
 // old single user_range_check so user_range_check_read/_write below stay
 // thin type-specific wrappers rather than duplicating this walk. Not
@@ -208,8 +243,13 @@ fn user_range_check_read(
     if (user_range_span_ok(root, address, length, UserAccessMode::Read) == false) {
         return UserReadRangeResult::Fault;
     }
-    let mut range: UserReadRange[process] = { root, address, length };
-    return UserReadRangeResult::Ok(range);
+    match user_range_base(address, length) {
+        UserRangeBase::Refused => { return UserReadRangeResult::Fault; }
+        UserRangeBase::Base(base) => {
+            let mut range: UserReadRange[process] = { root, base, length };
+            return UserReadRangeResult::Ok(range);
+        }
+    }
 }
 
 fn user_range_check_write(
@@ -221,8 +261,13 @@ fn user_range_check_write(
     if (user_range_span_ok(root, address, length, UserAccessMode::Write) == false) {
         return UserWriteRangeResult::Fault;
     }
-    let mut range: UserWriteRange[process] = { root, address, length };
-    return UserWriteRangeResult::Ok(range);
+    match user_range_base(address, length) {
+        UserRangeBase::Refused => { return UserWriteRangeResult::Fault; }
+        UserRangeBase::Base(base) => {
+            let mut range: UserWriteRange[process] = { root, base, length };
+            return UserWriteRangeResult::Ok(range);
+        }
+    }
 }
 
 // Boot probes only: whether `root` would admit the range, without making
@@ -247,11 +292,16 @@ fn user_probe_boot_read_matches(address: usize, expected: borrow [const u8; 8..]
     if (user_range_span_ok(root, address, 8, UserAccessMode::Read) == false) {
         return false;
     }
-    let mut range: UserReadRange[0] = { root, address, 8 };
-    for index: usize in 0..<8 {
-        if (user_read_byte(range, index) != expected[index]) { return false; }
+    match user_range_base(address, 8) {
+        UserRangeBase::Refused => { return false; }
+        UserRangeBase::Base(base) => {
+            let mut range: UserReadRange[0] = { root, base, 8 };
+            for index: usize in 0..<8 {
+                if (user_read_byte(range, index) != expected[index]) { return false; }
+            }
+            return true;
+        }
     }
-    return true;
 }
 
 // Boot probes only: put `root` on this CPU and store or load one byte at
@@ -268,8 +318,13 @@ fn user_probe_root_write_byte(root: AddressSpaceRoot, address: usize, value: u8)
         return UserWriteResult::Fault;
     }
     address_space_activate_root(root);
-    let mut range: UserWriteRange[0] = { root, address, 1 };
-    return user_write_byte(range, 0, value);
+    match user_range_base(address, 1) {
+        UserRangeBase::Refused => { return UserWriteResult::Fault; }
+        UserRangeBase::Base(base) => {
+            let mut range: UserWriteRange[0] = { root, base, 1 };
+            return user_write_byte(range, 0, value);
+        }
+    }
 }
 
 fn user_probe_root_read_byte(root: AddressSpaceRoot, address: usize)
@@ -278,8 +333,13 @@ fn user_probe_root_read_byte(root: AddressSpaceRoot, address: usize)
         return (false, 0);
     }
     address_space_activate_root(root);
-    let mut range: UserReadRange[0] = { root, address, 1 };
-    return (true, user_read_byte(range, 0));
+    match user_range_base(address, 1) {
+        UserRangeBase::Refused => { return (false, 0); }
+        UserRangeBase::Base(base) => {
+            let mut range: UserReadRange[0] = { root, base, 1 };
+            return (true, user_read_byte(range, 0));
+        }
+    }
 }
 
 // GitHub issue #199 follow-up: a write-validated range's underlying page
