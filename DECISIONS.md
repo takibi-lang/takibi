@@ -498,3 +498,7 @@ condition below applies, and reports the land afterwards.
 - Compiling for cortex-a53 (ARMv8.0) keeps the compiler from emitting ARMv8.1+ instructions such as the LSE atomics, and running that kernel on cortex-a76 lanes checks it.
 - PAN (ARMv8.1) is required at boot: a core without FEAT_PAN halts, so the kernel no longer boots on a real A53. The maintainer accepted this rather than pay for a no-PAN fallback: "no newer instructions" now means the code the compiler emits, not boot on ARMv8.0 hardware.
 - No active reason to change the compile target, so it stays cortex-a53. Revisit only if a v8.0 board must boot or the A53 target starts costing work.
+
+## 2026-10-29 #1193 lane receipts measure check and guest time only (option a)
+- A/B runs showed no lane slowed by #1172 or #1032; the growth was build work and host noise counted as busy lane time.
+- Build everything (dune, race-window kernels, buildcheck objects) before the first lane receipt starts, so receipts hold only check and guest time, and re-derive the budget from quiet runs of that measurement. Rejected: subtracting build time inside each lane (b), and re-deriving the number without changing the measurement (c, which #1123 discourages).
