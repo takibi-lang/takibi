@@ -9,6 +9,9 @@ kernel/arch/arm64/kernel/frame_ref.tkb
 kernel/arch/arm64/mm/mmu.tkb
 kernel/boot/fdt.tkb
 kernel/drivers/block/virtio_blk.tkb
+# virtio_blk: 1 site left, the shared DMA span address export
+# virtio_span_address, which #1162 moves (its queue is a typed global
+# written through checked indexes since 2026-10-29, #1161).
 kernel/drivers/net/rp1_gem.tkb
 kernel/drivers/net/virtio_net.tkb
 # virtio_net: 1 site left, DDB used-index read, #1164 (its queues are a

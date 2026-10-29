@@ -364,6 +364,10 @@ rules globally.
   checked indexes, and its span export is virtio_blk.tkb's
   `virtio_span_address`; what stays is DDB's lock-free acquire load of the
   RX used index, which #1164 (a stopped device observation) retires.
+  `kernel/drivers/block/virtio_blk.tkb` keeps one raw site (2026-10-29,
+  #1161): its descriptor table and avail ring are a typed global written
+  through checked indexes; what stays is `virtio_span_address`, the DMA
+  span export virtio_net and virtio_used share, which #1162 moves.
   A snapshot observation (decision E1) trusts its lowering's validity test:
   that an element whose ownership marker says "written" (for an xHCI event
   ring, a Cycle bit equal to the consumer cycle state) was completely
