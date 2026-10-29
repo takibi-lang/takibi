@@ -124,7 +124,7 @@ REQUIREMENTS = (
     ('synthetic deadline wait', '^ddb: wait pid=11 state=blocked waits-for event=deadline$', 1, None, 'both'),
     ('synthetic signal wait', '^ddb: wait pid=12 state=blocked waits-for event=signal$', 1, None, 'both'),
     ('synthetic unknown wait', '^ddb: wait pid=13 state=blocked waits-for unknown$', 1, None, 'both'),
-    ('synthetic UART TX wait', '^ddb: wait pid=14 state=blocked waits-for event=uart-tx queued=320 low-water=256$', 1, None, 'both'),
+    ('synthetic UART TX wait', '^ddb: wait pid=14 state=blocked waits-for event=uart-tx queued=320 low-water=256 echo-pending=yes txim=off wake-owed=yes$', 1, None, 'both'),
     ('synthetic network wait', '^ddb: wait pid=15 state=blocked waits-for event=net-rx frame-pending=no connection-pending=unknown tick-wake=core1 due=1 rx-cap=no$', 1, None, 'both'),
     ('synthetic graph summary', '^ddb: wait edges=8 blocked=9 unknown=2 truncated=1$', 1, None, 'both'),
     ('synthetic process wait rendering', '^ddb: waittest ps pid=10 ppid=0 state=3 wait=1 waker=uart-rx queued=1 root=0 sp=0x0000000000000000 pending=none masked=none owner=none mask=0x0000000000000000 core0=0 cmd="/bin/peer-read a\\?b -x mo"\\+$', 1, None, 'both'),

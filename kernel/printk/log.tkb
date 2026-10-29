@@ -1138,6 +1138,25 @@ fn kernel_log_tx_queue_count() -> usize {
     return kernel_log_tx_count;
 }
 
+// GitHub issue #1217: the three facts #1211's diagnosis had to piece
+// together from the console snapshot and PL011 IMSC, for DDB's uart-tx wait
+// line. Bit 0: terminal echo pending; bit 1: TXIM enabled; bit 2: a writer
+// wake owed (kernel_log_tx_writer_wake_owed). Read without the console lock:
+// DDB has stopped the world and takes no lock (#920).
+const KERNEL_LOG_TX_DDB_ECHO_PENDING: usize = 1;
+const KERNEL_LOG_TX_DDB_TXIM: usize = 2;
+const KERNEL_LOG_TX_DDB_WAKE_OWED: usize = 4;
+
+fn kernel_log_tx_ddb_state() -> usize !{unsafe} {
+    let mut state: usize = 0;
+    if (terminal_echo_pending()) { state = state | KERNEL_LOG_TX_DDB_ECHO_PENDING; }
+    if (uart_tx_irq_enabled()) { state = state | KERNEL_LOG_TX_DDB_TXIM; }
+    if (atomic_word_load(&kernel_log_tx_writer_wake_owed) != 0) {
+        state = state | KERNEL_LOG_TX_DDB_WAKE_OWED;
+    }
+    return state;
+}
+
 fn kernel_log_tx_writer_low_water() -> usize {
     return KERNEL_LOG_TX_WRITER_LOW_WATER;
 }

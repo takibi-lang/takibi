@@ -47,7 +47,7 @@ ddb: wait pid=10 state=blocked waits-for event=uart-rx queued=1
 ddb: wait pid=11 state=blocked waits-for event=deadline
 ddb: wait pid=12 state=blocked waits-for event=signal
 ddb: wait pid=13 state=blocked waits-for unknown
-ddb: wait pid=14 state=blocked waits-for event=uart-tx queued=320 low-water=256
+ddb: wait pid=14 state=blocked waits-for event=uart-tx queued=320 low-water=256 echo-pending=yes txim=off wake-owed=yes
 ddb: wait pid=15 state=blocked waits-for event=net-rx frame-pending=no connection-pending=unknown tick-wake=core1 due=1 rx-cap=no
 ddb: wait edges=8 blocked=9 unknown=2 truncated=1
 ddb: waittest ps pid=10 ppid=0 state=3 wait=1 waker=uart-rx queued=1 root=0 sp=0x0000000000000000 pending=none masked=none owner=none mask=0x0000000000000000 core0=0 cmd="/bin/peer-read a?b -x mo"+

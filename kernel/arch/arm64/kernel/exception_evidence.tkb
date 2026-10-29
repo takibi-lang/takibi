@@ -275,6 +275,8 @@ struct DdbSnapshot {
     uart_rx_queued: usize;
     uart_tx_queued: usize;
     uart_tx_low_water: usize;
+    // GitHub issue #1217: kernel_log_tx_ddb_state's bits.
+    uart_tx_state: usize;
     // Encoded by net_pending_state_code: 0=no, 1=yes, 2=unknown.
     net_rx_frame: usize;
     net_rx_connection: usize;
@@ -2145,13 +2147,19 @@ private fn ddb_put_pending_state(state: usize) !{unsafe} {
 
 private fn ddb_render_waker_detail(
         reason: usize, uart_rx_queued: usize, uart_tx_queued: usize,
-        uart_tx_low_water: usize, net_rx_frame: usize,
+        uart_tx_low_water: usize, uart_tx_state: usize, net_rx_frame: usize,
         net_rx_connection: usize) !{unsafe} {
     if (reason == 1) {
         ddb_puts(" queued="); ddb_put_udec(uart_rx_queued);
     } else if (reason == 6) {
         ddb_puts(" queued="); ddb_put_udec(uart_tx_queued);
         ddb_puts(" low-water="); ddb_put_udec(uart_tx_low_water);
+        ddb_puts(" echo-pending=");
+        if ((uart_tx_state & 1) != 0) { ddb_puts("yes"); } else { ddb_puts("no"); }
+        ddb_puts(" txim=");
+        if ((uart_tx_state & 2) != 0) { ddb_puts("on"); } else { ddb_puts("off"); }
+        ddb_puts(" wake-owed=");
+        if ((uart_tx_state & 4) != 0) { ddb_puts("yes"); } else { ddb_puts("no"); }
     } else if (reason == 3) {
         ddb_puts(" frame-pending="); ddb_put_pending_state(net_rx_frame);
         ddb_puts(" connection-pending=");
@@ -2184,7 +2192,7 @@ private fn ddb_render_command(record: ProcessDdbRecord) !{unsafe} {
 
 private fn ddb_render_process(
         record: ProcessDdbRecord, uart_rx_queued: usize,
-        uart_tx_queued: usize, uart_tx_low_water: usize,
+        uart_tx_queued: usize, uart_tx_low_water: usize, uart_tx_state: usize,
         net_rx_frame: usize, net_rx_connection: usize) !{unsafe} {
     ddb_puts(" pid="); ddb_put_udec(record.pid);
     ddb_puts(" ppid="); ddb_put_udec(record.ppid);
@@ -2193,7 +2201,7 @@ private fn ddb_render_process(
     if (record.wait_reason != 0) {
         ddb_puts(" waker="); ddb_puts(ddb_wait_reason_name(record.wait_reason));
         ddb_render_waker_detail(record.wait_reason, uart_rx_queued,
-            uart_tx_queued, uart_tx_low_water, net_rx_frame,
+            uart_tx_queued, uart_tx_low_water, uart_tx_state, net_rx_frame,
             net_rx_connection);
     }
     ddb_puts(" root="); ddb_put_udec(record.root_slot);
@@ -2224,8 +2232,8 @@ private fn ddb_render_ps() !{unsafe} {
             ddb_puts("ddb: ps");
             ddb_render_process(ddb_snapshot.processes[index],
                 ddb_snapshot.uart_rx_queued, ddb_snapshot.uart_tx_queued,
-                ddb_snapshot.uart_tx_low_water, ddb_snapshot.net_rx_frame,
-                ddb_snapshot.net_rx_connection);
+                ddb_snapshot.uart_tx_low_water, ddb_snapshot.uart_tx_state,
+                ddb_snapshot.net_rx_frame, ddb_snapshot.net_rx_connection);
         }
     }
 }
@@ -2525,7 +2533,7 @@ private fn ddb_render_wait_from(
         count: usize, truncated: usize, current_pid: usize,
         current_state: usize, current_reason: usize,
         uart_rx_queued: usize, uart_tx_queued: usize,
-        uart_tx_low_water: usize, net_rx_frame: usize,
+        uart_tx_low_water: usize, uart_tx_state: usize, net_rx_frame: usize,
         net_rx_connection: usize, net_rx_capability: usize) !{unsafe} {
     let mut awaited: usize = 0;
     for index: usize in 0..<DDB_PROCESS_RECORDS {
@@ -2544,7 +2552,7 @@ private fn ddb_render_wait_from(
     ddb_puts(" reason="); ddb_puts(ddb_wait_reason_name(current_reason));
     if (current_reason != 0) {
         ddb_render_waker_detail(current_reason, uart_rx_queued,
-            uart_tx_queued, uart_tx_low_water, net_rx_frame,
+            uart_tx_queued, uart_tx_low_water, uart_tx_state, net_rx_frame,
             net_rx_connection);
     }
     ddb_puts(" awaited="); ddb_put_udec(awaited);
@@ -2597,8 +2605,8 @@ private fn ddb_render_wait_from(
                     ddb_puts(" waits-for event=");
                     ddb_puts(ddb_wait_reason_name(reason));
                     ddb_render_waker_detail(reason, uart_rx_queued,
-                        uart_tx_queued, uart_tx_low_water, net_rx_frame,
-                        net_rx_connection);
+                        uart_tx_queued, uart_tx_low_water, uart_tx_state,
+                        net_rx_frame, net_rx_connection);
                     if (reason == 3) {
                         ddb_render_net_rx_retry(records[index],
                                                 net_rx_capability);
@@ -2626,6 +2634,7 @@ private fn ddb_render_wait() !{unsafe} {
                          ddb_snapshot.uart_rx_queued,
                          ddb_snapshot.uart_tx_queued,
                          ddb_snapshot.uart_tx_low_water,
+                         ddb_snapshot.uart_tx_state,
                          ddb_snapshot.net_rx_frame,
                          ddb_snapshot.net_rx_connection,
                          ddb_snapshot.net_rx_capability);
@@ -2692,7 +2701,7 @@ private fn ddb_render_wait_test() !{unsafe} {
     ddb_wait_test_records[9].tick_wake_core = 2;
     ddb_wait_test_records[9].tick_wake_due = 1;
     ddb_render_wait_from(ddb_wait_test_records as []ProcessDdbRecord,
-                         10, 1, 3, 2, 3, 1, 320, 256, 0, 2, 0);
+                         10, 1, 3, 2, 3, 1, 320, 256, 5, 0, 2, 0);
     // #887: a command line longer than the copied prefix, holding an
     // argument separator and a byte the quoting must not pass through.
     let command: [const u8; DDB_COMMAND_BYTES..] =
@@ -2702,7 +2711,7 @@ private fn ddb_render_wait_test() !{unsafe} {
     }
     ddb_wait_test_records[4].command_length = 40;
     ddb_puts("ddb: waittest ps");
-    ddb_render_process(ddb_wait_test_records[4], 1, 320, 256, 0, 2);
+    ddb_render_process(ddb_wait_test_records[4], 1, 320, 256, 5, 0, 2);
 }
 
 private fn ddb_render_proc(pid: usize) !{unsafe} {
@@ -2712,8 +2721,8 @@ private fn ddb_render_proc(pid: usize) !{unsafe} {
             ddb_puts("ddb: proc");
             ddb_render_process(ddb_snapshot.processes[index],
                 ddb_snapshot.uart_rx_queued, ddb_snapshot.uart_tx_queued,
-                ddb_snapshot.uart_tx_low_water, ddb_snapshot.net_rx_frame,
-                ddb_snapshot.net_rx_connection);
+                ddb_snapshot.uart_tx_low_water, ddb_snapshot.uart_tx_state,
+                ddb_snapshot.net_rx_frame, ddb_snapshot.net_rx_connection);
             return;
         }
     }
@@ -2837,6 +2846,7 @@ private fn kernel_ddb_enter_stopped(
     ddb_snapshot.uart_rx_queued = kernel_uart_rx_queued();
     ddb_snapshot.uart_tx_queued = kernel_log_tx_queue_count();
     ddb_snapshot.uart_tx_low_water = kernel_log_tx_writer_low_water();
+    ddb_snapshot.uart_tx_state = kernel_log_tx_ddb_state();
     // GitHub issue #959: the driver's lock-free reading; DDB takes no lock
     // and no ring owner (#920).
     let frame_pending: NetPendingState = kernel_net_rx_frame_pending();

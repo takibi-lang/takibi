@@ -55,6 +55,11 @@ fn uart_tx_irq_enable() {
     uart.imsc = uart.imsc | (1 << 5); // TXIM
 }
 
+// GitHub issue #1217: DDB's uart-tx wait line shows whether TXIM is on.
+fn uart_tx_irq_enabled() -> bool {
+    return (uart.imsc & (1 << 5)) != 0;
+}
+
 fn uart_tx_irq_disable() {
     uart.imsc = uart.imsc & ~(1 << 5);
 }

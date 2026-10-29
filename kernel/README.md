@@ -454,7 +454,11 @@ wait is shown as an event node rather than as a guessed producer. A network
 wait carries `frame-pending=yes|no`, read lock-free from the NIC's RX ring:
 virtio-net compares the used index with the driver's shadow, and GEM cleans
 and invalidates the descriptor line (`dc civac`) before reading its
-ownership bit, so neither answers `unknown` once a buffer is posted. Use
+ownership bit, so neither answers `unknown` once a buffer is posted. A
+UART transmit wait carries `queued=` and `low-water=`, and also
+`echo-pending=yes|no`, `txim=on|off` and `wake-owed=yes|no` (#1217): a writer
+still asleep with an empty queue, no pending echo and the TX interrupt off
+is #1211's lost wake. Use
 `continue` to return through the saved exception frame. The debugger writes
 every byte by spinning on the UART FIFO -- it is entered with interrupts
 masked, so it has nothing to drain a transmit queue with -- and `continue`
