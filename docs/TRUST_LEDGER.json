@@ -542,6 +542,31 @@
       "changes": {
         "unsafe_blocks": "#1176 credentials_probe's write of its view line, the same message-pointer cast every EL0 probe uses"
       }
+    },
+    {
+      "date": "2026-10-29",
+      "head": "4e87752b",
+      "counts": {
+        "raw_mint_files": 14,
+        "frame_lines": 12088,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 214,
+        "raw_deref_io": 7,
+        "raw_deref_builtin_region": 113,
+        "unsafe_blocks": 150,
+        "extern_fns": 58,
+        "invariant_stop_sites": 118,
+        "assembly_lines": 2434,
+        "per_cpu_ordinary_arrays": 73,
+        "per_cpu_stores": 6,
+        "raw_cpu_id_calls": 157,
+        "unprotected_globals": 475,
+        "frame_api_ratchet": 7
+      },
+      "changes": {
+        "frame_lines": "#992 FrameRef level index: SPSR-reading leveled mints, El0 entry and fresh mints, LeveledFrame matches at the entries",
+        "invariant_stop_sites": "#992 scheduled_process_parked_frame stops on a delivery aimed at an El1 frame"
+      }
     }
   ]
 }
