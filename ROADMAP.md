@@ -115,10 +115,12 @@ owners are TaskMutex, the spare stack stays masked). #980
    2026-10-09 through 2026-10-25 (HISTORY.md): places, per-CPU storage,
    RegionPool records, header overlays, the process-stack run owner, the
    per-CPU scratch migration (#981, #982). What remains: the K category of
-   `kernel/RAW_MINT_FILES` -- `rp1_gem`, `virtio_net`, `virtio_blk`
-   (`drivers/block/memory` left 2026-10-26: a checked slice; `virtio_net`
-   is down to its DDB used-index read, #1164; `virtio_blk` to its span
-   export, #1162; next #1162, #1163, #1032) -- leaves through device protocols and
+   `kernel/RAW_MINT_FILES` -- `rp1_gem`, `virtio_net`
+   (`drivers/block/memory` left 2026-10-26: a checked slice, `virtio_blk`
+   2026-10-29 (#1161, #1162); `virtio_net`
+   is down to its DDB used-index read, #1164; device-visible addresses have
+   one mint, `drivers/dma_address.tkb`, since 2026-10-29, #1162; next #1163,
+   #1032) -- leaves through device protocols and
    `IoHandle` as `usb_xhci` did (#720), which is also "drivers out of the
    frame" in #1017; then section regions (#777, awaiting its decision) take
    `stack_poison.tkb`'s last integer ranges and the DTB blob. The frame API

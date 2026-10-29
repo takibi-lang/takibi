@@ -307,7 +307,7 @@ rules globally.
   a publishing lowering, after the generated clean; the `observe` lowerings of the files in
   `kernel/DEVICE_SEMANTICS_FILES`, which assert completion and quiescence
   like a dma_fixed mint file; `unsafe dma_span_address` and the bus
-  translation applied at that site; and the line ownership of a region of the
+  translation applied at its one site, `kernel/drivers/dma_address.tkb`; and the line ownership of a region of the
   right type and count made by `region_split*` or `region_bytes_typed`
   rather than claimed from a backing global. Also trusted: that a stored
   owner is the one the device was programmed with. An owner kept in a
@@ -355,19 +355,28 @@ rules globally.
   entry is written while the controller holds the table, which needs
   sub-region authority); it is an ordinary checked array whose bus address
   is taken by a pointer cast. With that, `usb_xhci.tkb` holds no raw site
-  and is off `kernel/RAW_MINT_FILES`; the one raw step left, the bus-address
-  export of a device span, is `kernel/platform/rpi5/usb_xhci_bus.tkb`.
+  and is off `kernel/RAW_MINT_FILES`; its one raw step left is
+  `kernel/platform/rpi5/usb_xhci_bus.tkb`'s DCBAA clean.
+  Every device-visible address of a span is minted in one file,
+  `kernel/drivers/dma_address.tkb` (2026-10-29, #1162), under one rule: a
+  span's CPU physical address is `dma_span_address`, and a device sees it
+  plus the inbound offset of its bus -- 0 for QEMU virt's virtio-mmio
+  (`virtio_span_address`), the boot-DTB-validated `rp1_dma_pci_offset` for
+  RP1's GEM and xHCI (`rp1_span_bus_address`); the CPU-side DDB look takes
+  the physical address (`dma_span_cpu_address`). Each function's callers
+  are fixed in `scripts/allowed_callers.tsv`. Trusted: that a driver names
+  its own bus's function, and that a device touches only the span's bytes;
+  the IOMMU (#1032) is to enforce the second in hardware.
   `kernel/drivers/block/memory.tkb` left the list too (2026-10-26, #637):
   its USB run read slices `block_run_data` with a compiler-proved bound.
   `kernel/drivers/net/virtio_net.tkb` keeps one raw site (2026-10-28, #637):
   its descriptor tables and avail rings are a typed global written through
-  checked indexes, and its span export is virtio_blk.tkb's
+  checked indexes, and its span export is the mint's
   `virtio_span_address`; what stays is DDB's lock-free acquire load of the
   RX used index, which #1164 (a stopped device observation) retires.
-  `kernel/drivers/block/virtio_blk.tkb` keeps one raw site (2026-10-29,
-  #1161): its descriptor table and avail ring are a typed global written
-  through checked indexes; what stays is `virtio_span_address`, the DMA
-  span export virtio_net and virtio_used share, which #1162 moves.
+  `kernel/drivers/block/virtio_blk.tkb` left the list (2026-10-29): its
+  descriptor table and avail ring are a typed global written through
+  checked indexes (#1161), and its span export moved to the mint (#1162).
   A snapshot observation (decision E1) trusts its lowering's validity test:
   that an element whose ownership marker says "written" (for an xHCI event
   ring, a Cycle bit equal to the consumer cycle state) was completely
