@@ -16,7 +16,7 @@ closed.
 
 The rule: every function that calls a mutator, outside the files that
 define the mutators and the lock, calls ext2_mutation_take itself, or is
-handed the guard as a `borrow Ext2MutationGuard[ext2_mutation_lock]`
+handed the guard as a `borrow Ext2MutationGuard[ext2_mutation]`
 parameter -- or its file is named below with a reason. The parameter form
 counts because the compiler checks it: the guard is linear and minted only
 by the take, so a caller cannot produce one it does not hold (GitHub issue
@@ -71,7 +71,7 @@ BLOCK_WRITE = "ext2_block_write"
 MUTATOR_FILE = "kernel/fs/ext2/ext2.tkb"
 TAKE = "ext2_mutation_take"
 LOCK_FILE = "kernel/fs/ext2/mutation_lock.tkb"
-HELD = "guard: borrow Ext2MutationGuard[ext2_mutation_lock]"
+HELD = "guard: borrow Ext2MutationGuard[ext2_mutation]"
 
 # The files that define the mutators and the lock: they call each other
 # without the guard by design.

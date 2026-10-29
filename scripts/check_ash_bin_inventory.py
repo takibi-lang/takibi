@@ -29,7 +29,7 @@ def peer_affinity_gate_is_guarded(syscall: str, process: str) -> bool:
     return (
         re.search(
             r"fn kernel_process_current_cpu_allows\(\s*"
-            r"guard: borrow ProcessRunGuard\[scheduled_process_run_lock\]\)"
+            r"guard: borrow ProcessRunGuard\[process_run\]\)"
             r" -> bool", process) is not None
         and "let guard = process_run_lock();" in gate
         and "kernel_process_current_cpu_allows(guard)" in gate
@@ -95,12 +95,12 @@ def busybox_sleep_probe_is_real(makefile: str, stdin: str,
         and "number != AARCH64_NR_CLOCK_NANOSLEEP" in workload
         and re.search(
             r"fn kernel_process_current_parent_pid\(\s*"
-            r"guard: borrow ProcessRunGuard\[scheduled_process_run_lock\]\)"
+            r"guard: borrow ProcessRunGuard\[process_run\]\)"
             r" -> usize", process)
             is not None
         and re.search(
             r"fn kernel_process_current_affinity_mask\(\s*"
-            r"guard: borrow ProcessRunGuard\[scheduled_process_run_lock\]\)"
+            r"guard: borrow ProcessRunGuard\[process_run\]\)"
             r" -> usize", process)
             is not None
         and peer_affinity_gate_is_guarded(syscall, process)

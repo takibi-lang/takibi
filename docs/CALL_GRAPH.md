@@ -35,7 +35,7 @@ empty cell or empty list is `-`.
 | `qualifiers` | the subset of `private`, `inline`, `noinline` |
 | `declared` | the declared effect contract: `-` when there is none, `{}` for an explicit empty one, else its effects as written |
 | `effects` | the effects the checker inferred, with declared roles, sorted (the effect names of `EFFECTS.md`); the union over a generic function's instances |
-| `params` | `name: type` per parameter, separated by `, `. The type is spelled from the compiler's tokens with a blank only between two word-like tokens (`borrow Ext2MutationGuard[ext2_mutation_lock]`, `&mut T`, `[u8;4]`), so `, ` never occurs inside one |
+| `params` | `name: type` per parameter, separated by `, `. The type is spelled from the compiler's tokens with a blank only between two word-like tokens (`borrow Ext2MutationGuard[ext2_mutation]`, `&mut T`, `[u8;4]`), so `, ` never occurs inside one |
 | `callees` | the resolved direct callees, deduplicated and sorted, each `name@file:line` naming the callee's own row, or `name@-` for a callee with no definition here (an `extern`); `*` when the function also calls through a function value, whose target is not known |
 | `callers` | the rows whose `callees` name this one, spelled the same way |
 | `values` | the functions this one names as a value (passes, stores or returns a function pointer to), spelled the same way |

@@ -119,10 +119,10 @@ def main() -> int:
     failures += case(
         "a new restore written the sanctioned way is not reported",
         planted("kernel/printk/log.tkb",
-                "private fn kernel_log_tx_pending(guard: borrow ConsoleGuard[console_tx_lock]) -> bool {",
+                "private fn kernel_log_tx_pending(guard: borrow ConsoleGuard[console_tx]) -> bool {",
                 "fn planted_restore_probe(saved_flags: usize) {\n"
                 "    mutex_irq_restore(saved_flags);\n}\n\n"
-                "private fn kernel_log_tx_pending(guard: borrow ConsoleGuard[console_tx_lock]) -> bool {"),
+                "private fn kernel_log_tx_pending(guard: borrow ConsoleGuard[console_tx]) -> bool {"),
         "", should_fail=False)
 
     for failure in failures:

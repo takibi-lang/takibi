@@ -89,7 +89,7 @@ def main() -> int:
         workload[:sample_start] + fabricated_refined_cpu +
         workload[sample_end:], syscall, process)
     no_run_guard = replace_once(process, "fn kernel_process_current_parent_pid(\n"
-        "        guard: borrow ProcessRunGuard[scheduled_process_run_lock]) "
+        "        guard: borrow ProcessRunGuard[process_run]) "
         "-> usize {", "fn kernel_process_current_parent_pid() -> usize {")
     assert not check.busybox_sleep_probe_is_real(
         makefile, stdin, workload, syscall, no_run_guard)
