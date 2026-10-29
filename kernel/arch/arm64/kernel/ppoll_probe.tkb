@@ -30,6 +30,8 @@
 const READ_SYSCALL: usize = 63;
 const WRITE_SYSCALL: usize = 64;
 const PPOLL_SYSCALL: usize = 73;
+const DUP3_SYSCALL: usize = 24;
+const PPOLL_PROBE_DUP_FD: usize = 9;
 const EXIT_SYSCALL: usize = 93;
 const CLONE_SYSCALL: usize = 220;
 const CLOSE_SYSCALL: usize = 57;
@@ -50,16 +52,25 @@ private fn ppoll_probe_say(line: borrow []const u8) !{unsafe} {
     svc5(WRITE_SYSCALL, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0);
 }
 
+// GitHub issue #902: the child waits on a dup of fd 0, not on fd 0 itself,
+// and reads through it: readiness and reads follow the descriptor's object,
+// the terminal, whatever its number. A kernel that looked at fd 0 only
+// answered this ppoll 0 at once, and the child exited 1.
 private fn ppoll_probe_child() {
+    let terminal: usize = svc5(DUP3_SYSCALL, 0, PPOLL_PROBE_DUP_FD, 0, 0, 0);
+    if (terminal != PPOLL_PROBE_DUP_FD) {
+        svc5(EXIT_SYSCALL, 4, 0, 0, 0, 0);
+    }
     let mut pollfd: [u8; 8];
     for index: usize in 0..<8 { pollfd[index] = 0; }
+    pollfd[0] = terminal as u8;
     pollfd[4] = POLLIN;
     let mut byte: [u8; 1];
     let ready: usize = svc5(PPOLL_SYSCALL, pollfd as *u8 as usize, 1, 0, 0, 0);
     if (ready != 1 || (pollfd[6] & POLLIN) == 0) {
         svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
     }
-    if (svc5(READ_SYSCALL, 0, byte as *u8 as usize, 1, 0, 0) != 1) {
+    if (svc5(READ_SYSCALL, terminal, byte as *u8 as usize, 1, 0, 0) != 1) {
         svc5(EXIT_SYSCALL, 2, 0, 0, 0, 0);
     }
     svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
@@ -179,7 +190,7 @@ fn ppoll_probe() {
     if (spin == 0) { ppoll_probe_say(bs"ppoll-probe: the pause collapsed\n"); }
     if (reaped == child && status[0] == 0 && status[1] == 0) {
         ppoll_probe_say(
-            bs"ppoll-probe: fd 0 became readable and the child read its byte\n");
+            bs"ppoll-probe: a dup of fd 0 became readable and the child read its byte\n");
         ppoll_probe_timed();
         ppoll_probe_pause();
     }

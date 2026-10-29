@@ -216,7 +216,7 @@ mva
 cloexec: execve closed fds 20 and 22, kept fd 21
 shell ppoll: uart blocked
 ppoll: stdin wait blocked beside a runnable process
-ppoll-probe: fd 0 became readable and the child read its byte
+ppoll-probe: a dup of fd 0 became readable and the child read its byte
 ppoll-probe: a byte written during a timed ppoll was reported
 ppoll: pause blocked until a signal
 ppoll-probe: pause() blocked until SIGTERM ended it

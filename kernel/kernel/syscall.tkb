@@ -3561,7 +3561,9 @@ fn syscall_read_segment_with(slot: borrow SyscallSlot[0],
                 return SyscallIoResult::Errno(LINUX_ENOTCONN);
             }
         }
-        if (fd == 0 && kernel_syscall_terminal_is_open(fd)) {
+        // GitHub issue #902: a read of any terminal descriptor reads the
+        // terminal, as Linux's does.
+        if (kernel_syscall_terminal_is_open(fd)) {
             return syscall_read_uart(current_authority, address, requested);
         }
         match unified_pipe_lookup(kernel_syscall_process_key(), fd) {
@@ -3699,13 +3701,15 @@ fn syscall_read_segment_with(slot: borrow SyscallSlot[0],
 // Connected TCP fds
 // check already-buffered data read-only (no mutation, so no risk to the
 // proven TCP send/receive paths). Regular files and directories are always
-// ready (#768); other terminal fds report nothing; the rest is POLLNVAL.
+// ready (#768); every terminal fd reports as fd 0 does (#902); the rest is
+// POLLNVAL.
 // The UART RX ring lives in kernel/drivers/serial/uart_rx_ring.tkb (GitHub
 // issue #543); this file reads it through kernel_uart_rx_pending and
 // kernel_uart_rx_getc.
 
 fn syscall_poll_fd_ready(fd: usize) -> (bool, usize) {
-    if (fd == 0 && kernel_syscall_terminal_is_open(fd)) {
+    // GitHub issue #902: any descriptor of the terminal, not fd 0 alone.
+    if (kernel_syscall_terminal_is_open(fd)) {
         if (kernel_uart_rx_pending()) { return (true, POLLIN); }
         return (true, 0);
     }
@@ -3984,7 +3988,7 @@ fn syscall_ppoll_dispatch(current_authority: borrow ProcessCurrent[current_proce
                     UserWriteResult::Written => {}
                 }
                 if (final_revents != 0) { ready_count = ready_count + 1; }
-                if (nfds == 1 && fd == 0 &&
+                if (nfds == 1 &&
                     kernel_syscall_terminal_is_open(fd) &&
                     (events_raw as usize & POLLIN) != 0) {
                     uart_wait = true;
@@ -5863,7 +5867,7 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
         return true;
     }
     if (number == 63 || number == AARCH64_NR_READV) {
-        if (fd == 0 && kernel_syscall_terminal_is_open(fd)) { return true; }
+        if (kernel_syscall_terminal_is_open(fd)) { return true; }
         if (kernel_syscall_pipe_is_open(fd)) { return true; }
         return kernel_syscall_file_readable(fd);
     }
