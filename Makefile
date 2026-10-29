@@ -2524,8 +2524,8 @@ kernelcheck-race-window-635-qemu: kernelbuild-check
 _kernelcheck-race-window-635-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_RACE_WINDOW=635 KERNEL_QEMU_RACE_WINDOW_ARMED=skip KERNEL_QEMU_RACE_WINDOW_SIGNATURE='^workload: settings wake FAILED: the reader is still asleep' KERNEL_QEMU_SERIAL_PORT=18730 KERNEL_QEMU_QMP_PORT=18731 KERNEL_QEMU_NETDEV_LOCAL_PORT=18732 KERNEL_QEMU_NETDEV_REMOTE_PORT=18733 bash scripts/run_kernel_race_window_qemutest.sh
 	@# GitHub issue #1216: #1211's RX-resume drain lost wake, in this lane
-	@# rather than one of its own (docs/LANE_INVENTORY.md), on the same ports.
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_RACE_WINDOW=1211 KERNEL_QEMU_RACE_WINDOW_REQUIRE_FAILURE=1 KERNEL_QEMU_RACE_WINDOW_SIGNATURE='^ddb: wait pid=[0-9]+ state=blocked waits-for event=uart-tx' KERNEL_QEMU_SERIAL_PORT=18730 KERNEL_QEMU_QMP_PORT=18731 KERNEL_QEMU_NETDEV_LOCAL_PORT=18732 KERNEL_QEMU_NETDEV_REMOTE_PORT=18733 bash scripts/run_kernel_race_window_qemutest.sh
+	@# rather than one of its own (docs/LANE_INVENTORY.md).
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_RACE_WINDOW=1211 KERNEL_QEMU_RACE_WINDOW_REQUIRE_FAILURE=1 KERNEL_QEMU_RACE_WINDOW_SIGNATURE='^ddb: wait pid=[0-9]+ state=blocked waits-for event=uart-tx' KERNEL_QEMU_SERIAL_PORT=18517 KERNEL_QEMU_QMP_PORT=18518 KERNEL_QEMU_NETDEV_LOCAL_PORT=18519 KERNEL_QEMU_NETDEV_REMOTE_PORT=18520 bash scripts/run_kernel_race_window_qemutest.sh
 
 .PHONY: kernelcheck-race-window-678-qemu _kernelcheck-race-window-678-qemu
 kernelcheck-race-window-678-qemu: kernelbuild-check
