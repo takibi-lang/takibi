@@ -38,7 +38,9 @@ PART_DEF = re.compile(r"^CICHECK_PART_([A-Z]+) := ", re.M)
 LANES_DEF = re.compile(r"^CICHECK_LANES := (.*)$", re.M)
 TARGETS = re.compile(r"^(cicheck(?: cicheck-[a-z]+)*):\n", re.M)
 MATRIX = re.compile(r"^\s+part: \[([^\]]*)\]\s*$", re.M)
-ALLCHECK = re.compile(r"resource_lease_run_suite allcheck \\\n\t+\$\(MAKE\) ([a-z ]+?) \|\|")
+# #1193: allcheck builds first (allcheck-prebuild), then runs its lanes.
+ALLCHECK = re.compile(r"resource_lease_run_suite allcheck bash -c \\\n\t+"
+                      r"'\$\(MAKE\) allcheck-prebuild && \$\(MAKE\) ([a-z ]+?)' \\\n\t+\|\|")
 RUN = "make cicheck-${{ matrix.part }}"
 BUDGET = 'python3 scripts/ci_time_budget.py "$CI_JOB_START"'
 UPLOAD = "      - name: Preserve failure evidence\n        if: failure() || cancelled()\n"
