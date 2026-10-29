@@ -135,6 +135,18 @@ case "$MODE" in
         expected_ec=21
         expected_detail='^oops: access=instruction-fetch$'
         ;;
+    el1_read_user)
+        # GitHub issue #1032: EL1 reads a user page outside a user-access
+        # window. GDB replaces the instruction at PID 1's first
+        # el0_context_resume with ldrb w10, [x9] and points x9 at the user
+        # entry (an EL0-readable text page of the active root). With
+        # PSTATE.PAN set the load takes a permission data abort at the
+        # current EL (ec 0x25) with FAR at the user address; without PAN
+        # it succeeds and no such report appears.
+        fault_instruction=0x3940012a
+        expected_ec=25
+        expected_detail='^oops: data-abort dfsc=0x000000000000000[c-f] access=read$'
+        ;;
     *)
         echo "error: unknown KERNEL_QEMU_OOPS_MODE: $MODE" >&2
         exit 1
@@ -349,6 +361,24 @@ PYLINE
             -ex "set \$pc = \$takibi_target"
             -ex "detach"
         )
+    elif [ "$MODE" = el1_read_user ]; then
+        # The frame's ELR word is PID 1's user entry, mapped EL0-readable in
+        # the root that is active here. The PC is el0_context_resume's
+        # first instruction; GDB's write goes through the debug path, which
+        # ignores the text page's read-only permission.
+        gdb_commands=(
+            -ex "target remote :$GDB_PORT"
+            -ex "break kernel_process_boot_handoff"
+            -ex "continue"
+            -ex "disable 1"
+            -ex "break *el0_context_resume thread 1"
+            -ex "continue"
+            -ex "disable 2"
+            -ex "set \$x9 = (*(long *)(\$x0 + 0x100))"
+            -ex "set {int}\$pc = $fault_instruction"
+            -ex "printf \"takibi-read-target=0x%016lx\\n\", \$x9"
+            -ex "detach"
+        )
     elif [ "$MODE" = concurrent_fault ]; then
         # QEMU's gdbstub numbers vCPUs from 1: thread 1 is core 0, thread 2
         # is core 1. With scheduler-locking on, `continue` resumes only the
@@ -519,6 +549,25 @@ if [ "$MODE" = peer_fault ] || [ "$MODE" = peer_fault_start_window ] || [ "$MODE
     fi
     ext2_postcheck_after_stop
     echo "PASS kernel/qemu oops: the peer's fail-stop stopped core 0 and reported alone"
+    exit 0
+fi
+
+# GitHub issue #1032: the EL1 load from a user page outside a window is
+# the verdict: an EL1 data abort whose DFSC is a permission fault and whose
+# FAR is the user address.
+if [ "$MODE" = el1_read_user ]; then
+    target="$(sed -n 's/^takibi-read-target=0x\([0-9a-f]*\)$/\1/p' "$ARTIFACT_DIR/arm-gdb.log" | head -1)"
+    line="$(grep -aE "^oops: fail-stop seq=1 cpu=0 slot=[0-9]+ ec=0x0*$expected_ec " "$UART_LOG" | head -1 || true)"
+    if [ -z "$target" ] || [ -z "$line" ] ||
+            ! printf '%s\n' "$line" | grep -q " far=0x$target " ||
+            ! grep -Eq "$expected_detail" "$UART_LOG"; then
+        echo "FAIL kernel/qemu oops: EL1 read the user page 0x${target:-unknown} outside a user-access window, or did not report a permission data abort there" >&2
+        sed 's/^/  /' "$UART_LOG" >&2 || true
+        sed 's/^/  /' "$ARTIFACT_DIR/arm-gdb.log" >&2 || true
+        exit 1
+    fi
+    ext2_postcheck_after_stop
+    echo "PASS kernel/qemu oops: $MODE (EL1 load from user page 0x$target outside a window took a permission data abort)"
     exit 0
 fi
 
