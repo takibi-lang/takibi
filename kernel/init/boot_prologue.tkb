@@ -15,6 +15,7 @@
 use "kernel/printk/log.tkb";
 use "kernel/arch/arm64/kernel/cache_geometry.tkb";
 use "kernel/arch/arm64/kernel/cache_geometry_extern.tkb";
+use "kernel/arch/arm64/kernel/user_access_extern.tkb";
 
 fn kernel_boot_prologue() !{logs, unsafe} {
     // First, before anything has had a chance to go deep: fill the unused
@@ -36,6 +37,22 @@ fn kernel_boot_prologue() !{logs, unsafe} {
     }
     // Before any DMA: no driver has been probed yet.
     kernel_cache_geometry_require(0);
+    kernel_pan_require(0);
+}
+
+// GitHub issue #1032: set PSTATE.PAN on this core, or halt. PAN keeps EL1
+// out of user pages except inside a kernel/mm/user_access.tkb window, and
+// SCTLR_EL1.SPAN clear (kernel_mmu_activate) sets it again on every
+// exception entry. Every core calls it for itself, like the cache check: a
+// core without FEAT_PAN (an ARMv8.0 part such as Cortex-A53) would run
+// with user memory open to every EL1 access, so it is refused rather than
+// run unprotected. Silent on success.
+fn kernel_pan_require(core: usize) !{logs, unsafe} {
+    if (user_access_pan_enable() != 0) { return; }
+    kernel_boot_log("pan: FEAT_PAN absent (ID_AA64MMFR1_EL1.PAN == 0) core=");
+    uart_put_udec(core);
+    kernel_boot_log("; halting\n");
+    while (true) { }
 }
 
 // GitHub issue #759: halt this core unless its CTR_EL0 fits DMA_CACHE_LINE

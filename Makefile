@@ -492,6 +492,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/mm/address_space.tkb \
 	kernel/mm/process_image.tkb \
 	kernel/mm/memory_map.tkb \
+	kernel/mm/user_access.tkb \
 	kernel/mm/user_memory.tkb \
 	kernel/net/arp.tkb \
 	kernel/net/checksum.tkb \
@@ -1047,7 +1048,7 @@ KERNEL_SLOTMAP_TKB      := $(KERNEL_DIR)/lib/slotmap.tkb
 KERNEL_REFCOUNT_SLOTMAP_TKB := $(KERNEL_DIR)/lib/refcount_slotmap.tkb
 KERNEL_PAGE_TKB         := $(KERNEL_DIR)/mm/page.tkb
 KERNEL_ADDRESS_SPACE_TKB := $(KERNEL_DIR)/mm/address_space.tkb
-KERNEL_USER_MEMORY_TKB  := $(KERNEL_DIR)/mm/user_memory.tkb
+KERNEL_USER_MEMORY_TKB  := $(KERNEL_DIR)/mm/user_memory.tkb $(KERNEL_DIR)/mm/user_access.tkb $(KERNEL_DIR)/arch/arm64/kernel/user_access_extern.tkb
 KERNEL_PROCESS_IMAGE_TKB := $(KERNEL_DIR)/mm/process_image.tkb
 KERNEL_PROCESS_TKB      := $(KERNEL_DIR)/kernel/process.tkb
 KERNEL_FD_TABLE_TKB     := $(KERNEL_DIR)/kernel/fd_table.tkb

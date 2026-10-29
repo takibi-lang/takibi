@@ -166,6 +166,7 @@ fn kernel_secondary_main(context: usize) !{unsafe} {
         // GitHub issue #759: before this core says it started, so a core
         // whose cache lines do not fit DMA_CACHE_LINE is never counted.
         kernel_cache_geometry_require(core_id);
+        kernel_pan_require(core_id);
         if (context == 0x190 + core_id) {
             atomic_word_store(&kernel_secondary_boot_state[core],
                               0x100 + core_id);

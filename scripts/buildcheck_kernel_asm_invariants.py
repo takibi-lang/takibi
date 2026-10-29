@@ -316,6 +316,51 @@ NO_GPR_DEST_RE = re.compile(
 )
 
 
+AND_REG_RE = re.compile(r"^and\s+[wx](\d+),\s*[wx]\d+,\s*[wx](\d+)$")
+
+
+def register_constants(texts):
+    """Each register's constant as mov/movk build it, in program order."""
+    consts = {}
+    for text in texts:
+        text = text.split("//")[0].strip()
+        m = CONST_MOV_RE.match(text)
+        if m:
+            consts[m.group(1)] = (int(m.group(2), 0)
+                                  << int(m.group(3) or 0)) & (2**64 - 1)
+            continue
+        m = CONST_MOVK_RE.match(text)
+        if m:
+            shift = int(m.group(3) or 0)
+            old = consts.get(m.group(1), 0) & ~(0xFFFF << shift)
+            consts[m.group(1)] = old | (int(m.group(2), 0) << shift)
+    return consts
+
+
+def sctlr_and_mask(body, write_index, target_reg, producer):
+    """The AND mask the SCTLR_EL1 write's value last went through, or None.
+
+    An AND immediate, a BIC immediate (as its complement), or, since
+    #1032 clears two non-adjacent bits that no logical immediate encodes,
+    an AND with a register whose constant mov/movk built earlier.
+    """
+    if producer is None:
+        return None
+    producer = producer.split("//")[0].strip()
+    match_and = AND_IMM_RE.match(producer)
+    if match_and and match_and.group(1) == target_reg:
+        return int(match_and.group(2), 0)
+    match_bic = BIC_IMM_RE.match(producer)
+    if match_bic and match_bic.group(1) == target_reg:
+        return ~int(match_bic.group(2), 0) & (2**64 - 1)
+    match_reg = AND_REG_RE.match(producer)
+    if match_reg and match_reg.group(1) == target_reg:
+        consts = register_constants(text for _, text in body[:write_index])
+        if match_reg.group(2) in consts:
+            return consts[match_reg.group(2)]
+    return None
+
+
 def check_sctlr_allows_normal_memory_unaligned_access(insns):
     failures = []
     body = [(addr, text) for addr, text, fn in insns
@@ -350,13 +395,9 @@ def check_sctlr_allows_normal_memory_unaligned_access(insns):
             break
 
     clears_a = False
-    if producer is not None:
-        match_and = AND_IMM_RE.match(producer)
-        match_bic = BIC_IMM_RE.match(producer)
-        if match_and and match_and.group(1) == target_reg:
-            clears_a = int(match_and.group(2), 0) & (1 << 1) == 0
-        elif match_bic and match_bic.group(1) == target_reg:
-            clears_a = int(match_bic.group(2), 0) & (1 << 1) != 0
+    mask = sctlr_and_mask(body, write_index, target_reg, producer)
+    if mask is not None:
+        clears_a = mask & (1 << 1) == 0
 
     if not clears_a:
         failures.append(
@@ -423,6 +464,78 @@ def check_sctlr_sets_wxn(insns):
             "writable kernel or user page could be executed"
         ]
     return []
+
+
+# GitHub issue #1032: SCTLR_EL1.SPAN (bit 23) must be clear so every
+# exception taken to EL1 sets PSTATE.PAN; with it set (its reset value) a
+# syscall from EL0 would enter with PAN as EL0 left it, clear, and every
+# EL1 access to user memory would succeed outside a user_access window.
+SCTLR_SPAN = 1 << 23
+
+
+def check_sctlr_clears_span(insns):
+    body = [(addr, text.split("//")[0].strip()) for addr, text, fn in insns
+            if fn == "kernel_mmu_activate"]
+    writes = [(i, SCTLR_WRITE_RE.match(text)) for i, (_, text)
+              in enumerate(body) if SCTLR_WRITE_RE.match(text)]
+    if len(writes) != 1:
+        return [
+            "issue #1032 regression: expected exactly one SCTLR_EL1 write in "
+            "kernel_mmu_activate, found %d, so SCTLR_EL1.SPAN is unverified"
+            % len(writes)
+        ]
+    write_index, match = writes[0]
+    target_reg = match.group(1)
+    producer = None
+    for _, text in reversed(body[:write_index]):
+        if NO_GPR_DEST_RE.match(text):
+            continue
+        dest = DEST_REG_RE.match(text)
+        if dest and dest.group(1) == target_reg:
+            producer = text
+            break
+    mask = sctlr_and_mask(body, write_index, target_reg, producer)
+    if mask is None or mask & SCTLR_SPAN:
+        return [
+            "issue #1032 regression: the SCTLR_EL1 write in "
+            "kernel_mmu_activate is not fed by an AND that clears "
+            "SCTLR_EL1.SPAN (bit 23); an exception from EL0 would enter EL1 "
+            "with PAN clear"
+        ]
+    return []
+
+
+# GitHub issue #1032: PSTATE.PAN is written only by the three
+# user-access leaves in user_entry.S: cleared (MSR PAN, #0) only in
+# user_access_open, set (MSR PAN, #1) only in user_access_close and
+# user_access_pan_enable. Their Takibi callers are fixed by
+# scripts/allowed_callers.tsv; this pins the instructions themselves, so a
+# PAN write cannot appear anywhere else in the linked kernel.
+PAN_WRITE_RE = re.compile(r"^msr\s+PAN,\s*#(0x[0-9a-f]+|\d+)$", re.IGNORECASE)
+PAN_WRITERS = {"0": {"user_access_open"},
+               "1": {"user_access_close", "user_access_pan_enable"}}
+
+
+def check_pan_writes(insns):
+    failures = []
+    seen = {"user_access_open": 0, "user_access_close": 0,
+            "user_access_pan_enable": 0}
+    for addr, text, fn in insns:
+        m = PAN_WRITE_RE.match(text.split("//")[0].strip())
+        if not m:
+            continue
+        if fn not in PAN_WRITERS.get(str(int(m.group(1), 0)), set()):
+            failures.append(
+                "issue #1032 regression: PSTATE.PAN write `%s` at 0x%x in %s, "
+                "outside the user-access leaves" % (text.strip(), addr, fn))
+        else:
+            seen[fn] += 1
+    for fn, count in seen.items():
+        if count != 1:
+            failures.append(
+                "issue #1032 regression: expected one PSTATE.PAN write in %s, "
+                "found %d" % (fn, count))
+    return failures
 
 
 # GitHub issue #451/#449: mutex_acquire must MASK BEFORE IT TAKES.
@@ -1039,6 +1152,8 @@ def main():
         + check_spinlock_is_atomic(insns, elf_path)
         + check_sctlr_allows_normal_memory_unaligned_access(insns)
         + check_sctlr_sets_wxn(insns)
+        + check_sctlr_clears_span(insns)
+        + check_pan_writes(insns)
         + check_mutex_masks_before_taking(insns)
         + check_tlb_invalidate_all_is_broadcast(insns)
         + check_exception_stacks_are_per_core(insns)
@@ -1051,7 +1166,7 @@ def main():
             print("FAIL kernel/asm-invariants: %s" % f, file=sys.stderr)
         return 1
     report_pass("kernel/asm-invariants", "UXN identity-block bits, eret DAIF.I "
-          "masking, SCTLR_EL1.A clear and WXN set, the spinlock's "
+          "masking, SCTLR_EL1.A clear, WXN set and SPAN clear, PSTATE.PAN written only by the user-access leaves, the spinlock's "
           "target-selected compare-exchange, mutex_acquire masking "
           "before it takes, the whole-TLB invalidate broadcasting "
           "while MMU activation stays local, and every exception entry "

@@ -1,5 +1,6 @@
 use "kernel/mm/page.tkb";
 use "kernel/mm/address_space.tkb";
+use "kernel/mm/user_access.tkb";
 
 // One L1 slot of user VA: address_space.tkb lazily allocates an L3 table for
 // each populated L2 branch. The literal stays here because top-level const
@@ -331,7 +332,9 @@ fn copy_from_user(range: borrow UserReadRange[process], destination: borrow unin
     if (destination.len > range.length) { return false; }
     let source_base: *u8 = unsafe { range.address as *u8 };
     let source_view = unsafe { source_base[0..<range.length as isize] };
+    let window: UserAccessWindow[0] = user_access_window_open();
     let copied: usize = slice_copy(destination, source_view);
+    user_access_window_close(window);
     return copied == destination.len;
 }
 
@@ -341,7 +344,9 @@ fn copy_to_user(range: borrow UserWriteRange[process], source: borrow init []con
     let destination_base: *u8 = unsafe { range.address as *u8 };
     let destination_view =
         unsafe { destination_base[0..<range.length as isize] };
+    let window: UserAccessWindow[0] = user_access_window_open();
     let copied: usize = slice_copy(destination_view, source);
+    user_access_window_close(window);
     if (copied != source.len) { return UserWriteResult::Fault; }
     return UserWriteResult::Written;
 }
@@ -374,14 +379,19 @@ fn copy_to_user_span(range: borrow UserWriteRange[process], source: borrow unini
 
 fn user_read_byte(range: borrow UserReadRange[process], offset: usize) -> u8 !{unsafe} {
     let source_byte: *u8 = unsafe { (range.address + offset) as *u8 };
-    return *source_byte;
+    let window: UserAccessWindow[0] = user_access_window_open();
+    let value: u8 = *source_byte;
+    user_access_window_close(window);
+    return value;
 }
 
 fn user_write_byte(range: borrow UserWriteRange[process], offset: usize, value: u8) -> UserWriteResult !{unsafe} {
     if (offset >= range.length) { return UserWriteResult::Fault; }
     if (user_range_resolve_cow(range) == false) { return UserWriteResult::Fault; }
     let field: *u8 = unsafe { (range.address + offset) as *u8 };
+    let window: UserAccessWindow[0] = user_access_window_open();
     *field = value;
+    user_access_window_close(window);
     return UserWriteResult::Written;
 }
 
@@ -390,7 +400,9 @@ fn user_write_u32(range: borrow UserWriteRange[process], offset: usize, value: u
     if (offset + 4 > range.length || offset + 4 < offset) { return UserWriteResult::Fault; }
     if (user_range_resolve_cow(range) == false) { return UserWriteResult::Fault; }
     let field: *u32 = unsafe { (range.address + offset) as *u32 };
+    let window: UserAccessWindow[0] = user_access_window_open();
     *field = value;
+    user_access_window_close(window);
     return UserWriteResult::Written;
 }
 
@@ -399,7 +411,9 @@ fn user_write_u64(range: borrow UserWriteRange[process], offset: usize, value: u
     if (offset + 8 > range.length || offset + 8 < offset) { return UserWriteResult::Fault; }
     if (user_range_resolve_cow(range) == false) { return UserWriteResult::Fault; }
     let field: *u64 = unsafe { (range.address + offset) as *u64 };
+    let window: UserAccessWindow[0] = user_access_window_open();
     *field = value;
+    user_access_window_close(window);
     return UserWriteResult::Written;
 }
 
@@ -411,13 +425,19 @@ fn user_write_u64(range: borrow UserWriteRange[process], offset: usize, value: u
 fn user_read_u32(range: borrow UserReadRange[process], offset: usize) -> (bool, u32) !{unsafe} {
     if (offset + 4 > range.length || offset + 4 < offset) { return (false, 0); }
     let field: *u32 = unsafe { (range.address + offset) as *u32 };
-    return (true, *field);
+    let window: UserAccessWindow[0] = user_access_window_open();
+    let value: u32 = *field;
+    user_access_window_close(window);
+    return (true, value);
 }
 
 fn user_read_u64(range: borrow UserReadRange[process], offset: usize) -> (bool, u64) !{unsafe} {
     if (offset + 8 > range.length || offset + 8 < offset) { return (false, 0); }
     let field: *u64 = unsafe { (range.address + offset) as *u64 };
-    return (true, *field);
+    let window: UserAccessWindow[0] = user_access_window_open();
+    let value: u64 = *field;
+    user_access_window_close(window);
+    return (true, value);
 }
 
 // A 2-byte write, little-endian, via two already-proven-safe byte writes
@@ -438,11 +458,13 @@ fn user_zero_fill(range: borrow UserWriteRange[process]) -> UserWriteResult !{un
     if (user_range_resolve_cow(range) == false) { return UserWriteResult::Fault; }
     let base: *u8 = unsafe { range.address as *u8 };
     let mut index: usize = 0;
+    let window: UserAccessWindow[0] = user_access_window_open();
     while (index < range.length) {
         let byte: *u8 = base + (index as isize);
         *byte = 0;
         index = index + 1;
     }
+    user_access_window_close(window);
     return UserWriteResult::Written;
 }
 

@@ -1,0 +1,35 @@
+// GitHub issue #1032: the typed user-access window.
+//
+// Every EL1 data access to user memory happens inside a window. On AArch64
+// PSTATE.PAN is set on every core from boot (kernel_pan_require) and again
+// on every exception entry (SCTLR_EL1.SPAN clear), so an EL1 load or store
+// to an EL0-accessible page faults unless a window has cleared PAN. A
+// window is linear: opening one is the only way to clear PAN, and every
+// path out of the function that opened it must close it, so PAN cannot be
+// left clear by an early return. The window holds no lock and must not
+// span a block; kernel/mm/user_memory.tkb opens one around each single
+// copy or field access, after the range has been validated and any COW
+// page resolved, so nothing inside it can sleep.
+//
+// The type is portable; the two leaves it calls are per architecture
+// (AArch64: MSR PAN in kernel/arch/arm64/kernel/user_entry.S; x86-64 would
+// be STAC/CLAC and RISC-V sstatus.SUM under the same names). An interrupt
+// taken inside a window enters with PAN set again and returns, through the
+// saved SPSR, to the window with PAN still clear.
+use "kernel/arch/arm64/kernel/user_access_extern.tkb";
+
+// The static index carries no meaning yet (the language requires one on a
+// linear owner); every window is UserAccessWindow[0].
+linear struct UserAccessWindow[window: usize] {
+    private open: usize;
+}
+
+fn user_access_window_open() -> UserAccessWindow[0] !{unsafe} {
+    user_access_open();
+    let mut window: UserAccessWindow[0] = { 1 };
+    return window;
+}
+
+fn user_access_window_close(window: sink UserAccessWindow[0]) !{unsafe} {
+    user_access_close();
+}

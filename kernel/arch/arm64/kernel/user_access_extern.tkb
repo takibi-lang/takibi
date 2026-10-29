@@ -1,0 +1,9 @@
+// extern fn declarations for the user-access window's AArch64 leaves in
+// kernel/arch/arm64/kernel/user_entry.S (GitHub issue #1032). A file of
+// its own so kernel/mm/user_access.tkb, the portable window, and
+// kernel/init/boot_prologue.tkb can both use it without a second extern
+// declaration. user_access_open/close are called only from
+// kernel/mm/user_access.tkb (scripts/allowed_callers.tsv).
+extern fn user_access_pan_enable() -> usize;
+extern fn user_access_open();
+extern fn user_access_close();

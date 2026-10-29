@@ -450,3 +450,42 @@ kernel_idle_exit_enter:
     mov     sp, x1
     mov     x29, xzr
     br      x5
+
+/* GitHub issue #1032: the user-access window's per-architecture leaves.
+ * PSTATE.PAN=1 makes every EL1 data access to an EL0-accessible page
+ * fault; kernel/mm/user_access.tkb's linear UserAccessWindow is the only
+ * caller of user_access_open/close, so a user dereference outside a window
+ * faults instead of succeeding. No logic beyond one PSTATE write each.
+ * MSR PAN, #imm is spelled as .inst because the assembler runs without a
+ * --cpu that names FEAT_PAN (ARMv8.1); the encodings are
+ * MSR PAN,#0 = 0xd500409f and MSR PAN,#1 = 0xd500419f. The x86-64
+ * (STAC/CLAC) and RISC-V (sstatus.SUM) leaves would take the same names.
+ *
+ * user_access_pan_enable() -> usize: 1 and PAN set when
+ * ID_AA64MMFR1_EL1.PAN (bits 23:20) is nonzero, else 0 with nothing
+ * written. Each core calls it for itself (PSTATE is per core). */
+    .global user_access_pan_enable
+    .type user_access_pan_enable, %function
+user_access_pan_enable:
+    mrs     x0, id_aa64mmfr1_el1
+    ubfx    x0, x0, #20, #4
+    cbz     x0, 1f
+    .inst   0xd500419f
+    mov     x0, #1
+1:
+    ret
+    .size user_access_pan_enable, . - user_access_pan_enable
+
+    .global user_access_open
+    .type user_access_open, %function
+user_access_open:
+    .inst   0xd500409f
+    ret
+    .size user_access_open, . - user_access_open
+
+    .global user_access_close
+    .type user_access_close, %function
+user_access_close:
+    .inst   0xd500419f
+    ret
+    .size user_access_close, . - user_access_close

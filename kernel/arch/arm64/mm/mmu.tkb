@@ -273,9 +273,13 @@ fn kernel_mmu_activate(l1_physical: usize, asid: usize) {
     // The A mask is spelled with a usize operand: `~(1 << 1)` alone was
     // lowered as a 32-bit complement and zero-extended, which cleared
     // SCTLR_EL1[63:32] on every boot (found with #1032).
+    // GitHub issue #1032: SPAN (bit 23) clear makes every exception taken
+    // to EL1 set PSTATE.PAN, so a syscall or interrupt starts with user
+    // memory closed whatever the interrupted context had; the reset value
+    // has it set. PAN itself is set per core by kernel_pan_require.
     let sctlr_enabled: usize =
         (sctlr | 1 | (1 << 2) | (1 << 12) | (1 << 19))
-        & ~((1 as usize) << 1);
+        & ~(((1 as usize) << 1) | ((1 as usize) << 23));
     msr_sctlr_el1(sctlr_enabled);
     isb();
 }
