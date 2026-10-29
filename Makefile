@@ -2746,6 +2746,24 @@ kernelcheck: $(KERNELCHECK_LANES)
 LANE_TIMING_DIR := $(CURDIR)/_build/lane-timing
 AWAIT_TIMING_DIR := $(CURDIR)/_build/await-timing
 
+# GitHub issue #1193: build what the lanes read before the first lane
+# starts. After land.sh's `make clean`, the kernel images (the race-window
+# kernels among them) and linux_user were compiled on every core while the
+# host lanes' receipts were already open, so those lanes measured the
+# contention: the test lane took 79.5 s in one green run and 13.7 s in
+# another, the buildcheck lanes doubled, and the busy lane-seconds the budget
+# reads moved by hundreds of seconds with no lane doing more work (#1193 A/B
+# on a quiet host: kernelcheck-qemu-main 269.6 s before #1172 and 269.5 s
+# after, race-window-609 262.3 s and 262.2 s). Built first, a receipt holds
+# check and guest time, and the build shows as the summary's pre-lane time.
+# `build` also builds the test executable (dune's default alias), so the
+# test lane only runs it. The lanes keep their prerequisites, so a lane run
+# alone still builds what it needs.
+.PHONY: allcheck-prebuild
+allcheck-prebuild: build
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-images
+	@$(LINUX_BUILD_LOCK_RUN) $(MAKE) _linuxbuild
+
 .PHONY: allcheck
 allcheck:
 	@status=0; . scripts/resource_lease.sh; \
@@ -2753,8 +2771,9 @@ allcheck:
 	export TAKIBI_LANE_TIMING_DIR="$(LANE_TIMING_DIR)"; bash scripts/lane_timing.sh origin; \
 	rm -rf "$(AWAIT_TIMING_DIR)"; mkdir -p "$(AWAIT_TIMING_DIR)"; \
 	export TAKIBI_AWAIT_TIMING_DIR="$(AWAIT_TIMING_DIR)"; \
-	resource_lease_run_suite allcheck \
-		$(MAKE) langcheck slowcheck test linuxcheck modelcheck kernelcheck || status=$$?; \
+	resource_lease_run_suite allcheck bash -c \
+		'$(MAKE) allcheck-prebuild && $(MAKE) langcheck slowcheck test linuxcheck modelcheck kernelcheck' \
+		|| status=$$?; \
 	echo; \
 	python3 scripts/summarize_lane_timing.py "$(LANE_TIMING_DIR)" || true; \
 	python3 scripts/summarize_await_timing.py "$(AWAIT_TIMING_DIR)" || true; \

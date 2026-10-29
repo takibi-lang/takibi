@@ -78,11 +78,24 @@ def green_dir() -> pathlib.Path | None:
     return pathlib.Path(common).resolve() / "takibi-land" / GREEN_NAME
 
 
+def unfinished(directory: pathlib.Path) -> list[str]:
+    """Lanes whose begin stamp has no receipt (GitHub issue #1193). A lane
+    that began and never wrote its receipt is missing from the sum, so the
+    sum reads low: the quiet 5f79f0c0 run left langcheck.start and summed
+    4498 where its lanes cost about 4580."""
+    return sorted(path.name[:-len(".start")] for path in directory.glob("*.start"))
+
+
 def keep_green(source: pathlib.Path, dest: pathlib.Path) -> None:
     """Replace dest with a copy of a green run's receipts, so a reader sees
     the old copy or the new one, never half of each."""
     if not source.is_dir():
         raise ValueError(f"{source} is not a lane timing artifact")
+    missing = unfinished(source)
+    if missing:
+        raise ValueError(
+            f"{source} has no receipt for {', '.join(missing)}: a lane began "
+            "and wrote none, so the run cannot be measured")
     dest.parent.mkdir(parents=True, exist_ok=True)
     staging = dest.with_name(dest.name + ".new")
     old = dest.with_name(dest.name + ".old")
@@ -176,6 +189,11 @@ def lane_seconds(directory: pathlib.Path,
     files = sorted(directory.glob("*.jsonl")) if directory.is_dir() else []
     if not files:
         return None
+    missing = unfinished(directory)
+    if missing:
+        raise ValueError(
+            f"{directory} has no receipt for {', '.join(missing)}: a lane began "
+            "and wrote none, and its seconds would be left out of the sum")
     records = []
     for path in files:
         for line in path.read_text().splitlines():

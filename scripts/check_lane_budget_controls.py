@@ -95,6 +95,16 @@ def main() -> int:
         cases.note()
         assert budget_main(["--keep-green", str(red), str(kept)]) == 0 \
             and budget_main([str(kept)]) == 1, "a green run over the budget still fails"
+        # #1193: a lane that began and wrote no receipt (the quiet 5f79f0c0
+        # run's langcheck.start) is refused, both when measured and when
+        # kept, since the sum would leave its seconds out.
+        (green_run / "langcheck.start").write_text("1.0\n")
+        cases.note()
+        assert budget_main([str(green_run)]) == 1, "an unfinished lane is refused"
+        cases.note()
+        assert budget_main(["--keep-green", str(green_run), str(kept)]) == 1 \
+            and budget_main([str(kept)]) == 1, "an unfinished run is not kept"
+        (green_run / "langcheck.start").unlink()
         cases.note()
         assert not (root / "git" / "kept.new").exists() \
             and not (root / "git" / "kept.old").exists(), "no staging copy is left"
