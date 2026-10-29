@@ -1000,26 +1000,54 @@ private fn uart_tx_drain_into_fifo(
 fn uart_tx_service() !{unsafe} {
     let guard = console_lock();
     uart_tx_drain_into_fifo(guard);
+    // This service's caller runs the writer wake, so a wake another drain
+    // owed (see uart_tx_drain_into_fifo_force) is paid here.
+    atomic_word_store(&kernel_log_tx_writer_wake_owed, 0);
     if (terminal_output_paused() || uart_terminal_output_pending_locked(guard) == false) {
         uart_tx_irq_disable();
     }
     console_unlock(guard);
 }
 
+// GitHub issue #1211: a drain that gives sleeping writers their room, and is
+// not the transmit interrupt's own, owes them the wake. Only the interrupt
+// path (uart_irq_service) wakes UartTx sleepers, and the drain cannot take the
+// run lock to wake them itself (run -> console is the lock order,
+// kernel/models/ConsoleTx.tla NESTED). The RX handler's resume drain sent the
+// ^C echo straight into an empty FIFO after its own wake had run: the writer
+// that reran the write and found the echo still pending had published Blocked
+// in between, the queue was then empty, and with nothing left to send nobody
+// enabled the TX interrupt again. So the drain that made the room keeps the
+// interrupt enabled until the service has run, and the service's caller wakes.
+// kernel/models/ConsoleTx.tla checks this (POLLWAKE).
+private let mut kernel_log_tx_writer_wake_owed: AtomicWord;
+
+private fn kernel_log_tx_writer_room_locked(
+        guard: borrow ConsoleGuard[console_tx_lock]) -> bool {
+    return terminal_output_paused() == false && terminal_echo_pending() == false &&
+           kernel_log_tx_count <= KERNEL_LOG_TX_WRITER_LOW_WATER;
+}
+
 // Fatal/DDB flushes must remain available even after a user sent XOFF.
 private fn uart_tx_drain_into_fifo_force(
         guard: borrow ConsoleGuard[console_tx_lock]) !{unsafe} {
-    while (uart_terminal_output_pending_locked(guard) && uart_tx_fifo_full() == false) {
+    let room_before: bool = kernel_log_tx_writer_room_locked(guard);
+    let mut draining: bool = true;
+    while (draining && uart_terminal_output_pending_locked(guard) && uart_tx_fifo_full() == false) {
         match kernel_log_tx_pop(guard) {
             KernelLogTxByte::Empty => {
                 match terminal_echo_read() {
-                    TerminalEchoReadResult::Empty => { return; }
+                    TerminalEchoReadResult::Empty => { draining = false; }
                     TerminalEchoReadResult::Byte(value) => { uart_tx_store(value); }
                 }
             }
             KernelLogTxByte::Byte(value) => { uart_tx_store(value); }
         }
     }
+    if (room_before == false && kernel_log_tx_writer_room_locked(guard)) {
+        atomic_word_store(&kernel_log_tx_writer_wake_owed, 1);
+    }
+    if (atomic_word_load(&kernel_log_tx_writer_wake_owed) != 0) { uart_tx_irq_enable(); }
 }
 
 fn uart_putc(c: u8) !{logs, unsafe} {
@@ -1147,8 +1175,7 @@ fn uart_user_write_room() -> usize {
 // Whether the TX interrupt should wake sleeping writers.
 fn kernel_log_tx_writer_room() -> bool {
     let guard = console_lock();
-    let room: bool = terminal_output_paused() == false && terminal_echo_pending() == false &&
-           kernel_log_tx_count <= KERNEL_LOG_TX_WRITER_LOW_WATER;
+    let room: bool = kernel_log_tx_writer_room_locked(guard);
     console_unlock(guard);
     return room;
 }

@@ -150,7 +150,8 @@ check_model ConsoleTx Safety 10 \
     fixed:CInitFixed:pass:ok \
     ring:CInitRing:ProgramOrder:violated \
     norecheck:CInitNoRecheck:NoLostWakeup:violated \
-    nested:CInitNested:deadlock:ok
+    nested:CInitNested:deadlock:ok \
+    nopollwake:CInitNoPollWake:NoLostWakeup:violated
 
 check_model ConsoleOwner Safety 8 \
     fixed:CInitFixed:pass:ok \

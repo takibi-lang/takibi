@@ -34,6 +34,15 @@ EXTENDS Integers, Sequences
 (* TLC must find the deadlock. The fixed order is run -> console, and the   *)
 (* interrupt lets go of the console lock before it takes the run lock.      *)
 (*                                                                         *)
+(* POLLWAKE is GitHub issue #1211: a drain that is not the transmit       *)
+(* interrupt's own (the RX handler's resume drain, a kernel log line's      *)
+(* drain) can also make the room a sleeping writer waits for, and only the  *)
+(* interrupt path wakes writers. With POLLWAKE = TRUE such a drain keeps the*)
+(* interrupt enabled, so its service runs the wake; with POLLWAKE = FALSE a *)
+(* drain that empties the queue leaves nothing to send, the interrupt stays *)
+(* off, and the writer sleeps beside an empty queue. TLC must find          *)
+(* NoLostWakeup violated.                                                   *)
+(*                                                                         *)
 (* The transmit queue holds QCAP chunks and a peer ring RCAP. Bytes within a*)
 (* chunk are not modelled: a chunk is one indivisible append, as a whole    *)
 (* user-output chunk is admitted under the run guard.                       *)
@@ -47,7 +56,9 @@ CONSTANTS
     \* @type: Bool;
     RECHECK,
     \* @type: Bool;
-    NESTED
+    NESTED,
+    \* @type: Bool;
+    POLLWAKE
 
 CHUNKS == 3
 QCAP == 1
@@ -159,6 +170,19 @@ TxWake ==
     /\ pc' = IF pc = "asleep" THEN "idle" ELSE pc
     /\ UNCHANGED <<nextChunk, loc, runLock, queue, ring, wire>>
 
+\* uart_terminal_resume_output, uart_wire_byte, kernel_log_emit_line: a drain
+\* outside the transmit interrupt takes the oldest chunk onto the wire under
+\* the console lock. It cannot take the run lock (run -> console), so it does
+\* not wake; with POLLWAKE it owes the wake and keeps the interrupt enabled,
+\* whose service then runs TxWake.
+PollDrain ==
+    /\ queue # <<>>
+    /\ conLock = "free"
+    /\ wire' = Append(wire, Head(queue))
+    /\ queue' = Tail(queue)
+    /\ wakePending' = (wakePending \/ POLLWAKE)
+    /\ UNCHANGED <<nextChunk, loc, pc, runLock, conLock, ring>>
+
 \* kernel_log_peer_console_drain: core 0 moves the oldest ring chunk into
 \* the queue. Only the ring design has a ring. Core 0 does this at moments of
 \* its own, so it is an action that may happen or not between any two others.
@@ -192,6 +216,7 @@ Next ==
     \/ BlockWriter
     \/ TxTake
     \/ TxWake
+    \/ PollDrain
     \/ Drain
     \/ Migrate
     \/ Finished
@@ -239,9 +264,10 @@ AllSent == <>(nextChunk = CHUNKS + 1 /\ queue = <<>> /\ ring = <<>>)
 ----------------------------------------------------------------------------
 (* Constant initializers for Apalache (TLC reads the .cfg files instead). *)
 
-CInitFixed == LOCKED = TRUE /\ RECHECK = TRUE /\ NESTED = FALSE
-CInitRing == LOCKED = FALSE /\ RECHECK = TRUE /\ NESTED = FALSE
-CInitNoRecheck == LOCKED = TRUE /\ RECHECK = FALSE /\ NESTED = FALSE
-CInitNested == LOCKED = TRUE /\ RECHECK = TRUE /\ NESTED = TRUE
+CInitFixed == LOCKED = TRUE /\ RECHECK = TRUE /\ NESTED = FALSE /\ POLLWAKE = TRUE
+CInitRing == LOCKED = FALSE /\ RECHECK = TRUE /\ NESTED = FALSE /\ POLLWAKE = TRUE
+CInitNoRecheck == LOCKED = TRUE /\ RECHECK = FALSE /\ NESTED = FALSE /\ POLLWAKE = TRUE
+CInitNested == LOCKED = TRUE /\ RECHECK = TRUE /\ NESTED = TRUE /\ POLLWAKE = TRUE
+CInitNoPollWake == LOCKED = TRUE /\ RECHECK = TRUE /\ NESTED = FALSE /\ POLLWAKE = FALSE
 
 =============================================================================

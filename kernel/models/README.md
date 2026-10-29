@@ -600,13 +600,21 @@ modelcheck` requires each to fail:
   console lock while it takes the run lock for the wake. A writer that got
   the run lock first wants the console lock, so each waits for the other. TLC
   reports `Deadlock reached`; Apalache only shows that the variant runs.
+- `POLLWAKE = FALSE` is GitHub issue #1211: a drain outside the transmit
+  interrupt (`PollDrain`: the RX handler's resume drain, a kernel log line's
+  drain) makes the room a sleeping writer waits for, but only the interrupt
+  path wakes writers, and with the queue empty nothing enables the interrupt
+  again. The writer sleeps beside an empty queue. TLC and Apalache both report
+  `NoLostWakeup`. The kernel's drain marks the wake owed and keeps the
+  interrupt enabled until its service has run (`POLLWAKE = TRUE`).
 
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |
 | `WriterEnter` | `syscall_write_segment_with` | a terminal write is admitted whole under the run lock | fd lookup and the user-memory copy -- irrelevant to `ProgramOrder`: they run before the chunk is admitted and change no queue or lock | `4fd1259b7c7b` |
 | `WriterAppend` | `uart_user_write`, `uart_terminal_write_chunk`, `uart_user_write_locked`, `uart_user_write_room_locked`, `syscall_write_segment_with`, `kernel_log_emit_line`, `kernel_log_emit_byte_locked`, `console_lock`, `console_unlock`, `mutex_acquire_measured` | the append to the queue under the console lock, or the decision that there is no room; on every CPU the same queue, and the run lock let go | short counts and partial chunks -- irrelevant to `ProgramOrder`: a partial chunk is a shorter chunk, and the model already appends each whole; nonterminal fd paths -- irrelevant to `ProgramOrder`: they do not append terminal bytes; kernel log lines -- irrelevant to `ProgramOrder`: they share the FIFO order without changing a terminal writer's chunk order; measurement counters -- irrelevant to `ProgramOrder`: they are updated under the same lock and never select queue contents, admission or ownership | `2ccef83d5068` |
 | `BlockWriter` | `kernel_process_block_uart_tx` | the writer publishes itself asleep under the run lock; `RECHECK` is the room re-check there | successor choice and the switch -- modelled elsewhere: `Wait4Block.Wait4Block` | `d28cda46e101` |
-| `TxTake` | `uart_tx_service`, `uart_tx_drain_into_fifo` | one chunk leaves the queue onto the wire under the console lock and makes room; `NESTED` keeps the lock | the FIFO's capacity and the byte-by-byte drain -- irrelevant to `ProgramOrder`: bytes leave the queue in order, so a chunk taken whole is the same order | `64b204f40433` |
+| `TxTake` | `uart_tx_service`, `uart_tx_drain_into_fifo` | one chunk leaves the queue onto the wire under the console lock and makes room; `NESTED` keeps the lock | the FIFO's capacity and the byte-by-byte drain -- irrelevant to `ProgramOrder`: bytes leave the queue in order, so a chunk taken whole is the same order | `f3fc6626aa6d` |
+| `PollDrain` | `uart_tx_drain_into_fifo_force`, `uart_terminal_resume_output`, `uart_wire_byte`, `kernel_log_tx_writer_room_locked` | a drain outside the transmit interrupt takes a chunk onto the wire under the console lock and, when it gives writers their room, keeps the interrupt enabled so the service runs the wake | the FIFO and the interrupt's own timing -- irrelevant to `NoLostWakeup`: an enabled TX interrupt is taken once the FIFO falls to its level, which the drained bytes guarantee; the echo queue -- irrelevant to `NoLostWakeup`: echo pending is one more reason the room predicate is false, and the drain that empties it is this action | `807217b776c5` |
 | `TxWake` | `kernel_process_uart_tx_wake_all` | under the run lock, a writer asleep on room becomes runnable | which other processes wait on UartTx -- irrelevant to `NoLostWakeup`: the model has one writer, and each waiter is woken by the same scan | `f0e8320644be` |
 | `Drain` | Retired terminal ring; negative variant only | the former route delays peer chunks independently of the shared queue | the retired implementation -- irrelevant to `ProgramOrder`: this action is reachable only in the unfixed variant and remains its negative control | `e3b0c44298fc` |
 | `Migrate` | `kernel_process_timer_schedule` | the process changes CPU between writes, never inside one (`KERNEL_PREEMPTIBLE` is 0) | affinity -- irrelevant to `ProgramOrder`: it only forbids some moves, and the model already allows each one it forbids | `5ca8ea2be2e4` |
@@ -615,7 +623,7 @@ Where the kernel stands against the model: terminal writers on every CPU,
 the shared queue and FIFO drain use the console lock, with order run -> console.
 The TX interrupt (`uart_tx_service`) releases it before the wake. Writer-room
 rechecks also take the console lock. The maintained terminal follows
-`LOCKED = TRUE`, `RECHECK = TRUE`, `NESTED = FALSE`. The terminal ring and
+`LOCKED = TRUE`, `RECHECK = TRUE`, `NESTED = FALSE`, `POLLWAKE = TRUE`. The terminal ring and
 its DDB rendezvous are retired; `Drain` remains only in the unfixed model
 variant to demonstrate the old reordering.
 The retained kernel-log publication stream is separate from terminal ordering.
@@ -685,7 +693,7 @@ the sources stop, everything is served.
 | `Deliver` | `uart_irq_route` | the GIC hands the pending SPI to any idle core of the route, which acknowledges it; `GATE` forbids it while the SPI is active | which cores are online and the route rewrite after each EOI -- irrelevant to `NoStranded`: a narrower route only forbids some deliveries, and pending stays a property of the source | `22d1bdc9ec08` |
 | `TryLockWin` | `uart_irq_serve` | the compare-swap of the busy word from 0 to 1 wins | the per-core taken counter -- irrelevant to `NoStranded`: it is only read by the boot report | `d6de02e82b9d` |
 | `TryLockBusy` | `uart_irq_serve` | the compare-swap finds the word taken; the core goes to its EOI | nothing | `d6de02e82b9d` |
-| `ServeTx` | `uart_irq_service`, `uart_tx_service` | the TX FIFO is refilled above its level | the writer wake under the run lock -- modelled elsewhere: `ConsoleTx.TxWake` | `eca0b9cdcba8` |
+| `ServeTx` | `uart_irq_service`, `uart_tx_service` | the TX FIFO is refilled above its level | the writer wake under the run lock -- modelled elsewhere: `ConsoleTx.TxWake` | `18e019c77743` |
 | `DrainRx` | `uart_irq_service`, `uart_rx_drain` | the RX FIFO is drained to RXFE | a BREAK that ends the drain early -- irrelevant to `NoStranded`: the bytes it leaves keep the line asserted, the same as bytes that arrive after the drain | `0e2700a3ec92` |
 | `Release` | `uart_irq_serve` | the busy word is stored back to 0 | nothing | `d6de02e82b9d` |
 | `Eoi` | `rp1_vector_iack`, `uart_irq_after_eoi` | the SPI stops being active on this core | DDB entry after the EOI -- irrelevant to `NoStranded`: the core takes no further UART step, which the model already allows by never delivering to it | `1d97797d26f8` |
