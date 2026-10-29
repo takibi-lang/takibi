@@ -273,19 +273,6 @@ kernel/kernel/schedule_contention_evidence.tkb	schedule_probe_attempts	unreviewe
 kernel/kernel/schedule_contention_evidence.tkb	schedule_probe_handle	unreviewed; 2026-10-06 retain-fixture: named schedule_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
 kernel/kernel/schedule_contention_evidence.tkb	schedule_probe_ready	unreviewed; 2026-10-06 retain-fixture: named schedule_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
 kernel/kernel/signal_contention_evidence.tkb	signal_probe_record	unreviewed; 2026-10-06 retain-fixture: named signal_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
-kernel/kernel/stall_probe.tkb	stall_probe_event_cpu	unreviewed
-kernel/kernel/stall_probe.tkb	stall_probe_event_kind	unreviewed
-kernel/kernel/stall_probe.tkb	stall_probe_event_pid	unreviewed
-kernel/kernel/stall_probe.tkb	stall_probe_event_time	unreviewed
-kernel/kernel/stall_probe.tkb	stall_probe_idle_passes	unreviewed
-kernel/kernel/stall_probe.tkb	stall_probe_last_idle_pass	unreviewed
-kernel/kernel/stall_probe.tkb	stall_probe_last_refused_pid	unreviewed
-kernel/kernel/stall_probe.tkb	stall_probe_last_resume	unreviewed
-kernel/kernel/stall_probe.tkb	stall_probe_last_tick	unreviewed
-kernel/kernel/stall_probe.tkb	stall_probe_last_wfi	unreviewed
-kernel/kernel/stall_probe.tkb	stall_probe_next	unreviewed
-kernel/kernel/stall_probe.tkb	stall_probe_refusals	unreviewed
-kernel/kernel/stall_probe.tkb	stall_probe_watch	unreviewed
 kernel/kernel/syscall.tkb	kernel_syscall_exec_lost_count	unreviewed
 kernel/kernel/syscall.tkb	kernel_syscall_exec_refused_count	unreviewed
 kernel/kernel/syscall.tkb	syscall_filesystem	unreviewed; 2026-10-06 retain-context: filesystem service and CPU-local action scratch / boot-published filesystem; non-preemptible local scratch; stable argv owner exchange

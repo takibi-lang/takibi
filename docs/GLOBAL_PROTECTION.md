@@ -78,3 +78,10 @@ lock 18, region 20, dma_fixed 8, per_cpu 6, scratch 1, none 474, so 475
 unprotected. Outside files whose name contains `evidence` or `probe`: 519
 globals, 391 unprotected (the issue's 2026-10-25 hand count was 406 of 500,
 by a source scan with different edges).
+
+## Migration log (slice 3)
+
+- 2026-10-29: `kernel/kernel/stall_probe.tkb`'s 13 words (per-CPU notes,
+  watched pids, the event ring and its cursor) become `AtomicWord`; the
+  ring cursor is one `fetch_add`, so two cores no longer take one slot.
+  475 -> 462 unprotected.
