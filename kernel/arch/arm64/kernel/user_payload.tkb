@@ -1547,6 +1547,10 @@ fn mmap_region_kernel_probe() !{unsafe} {
             != ENOMEM_RC);
     let message: []const u8 =
         bs"userspace mmap region limits: madvise unknown and MADV_REMOVE EINVAL, unmapped ENOMEM, over 16 MiB ENOMEM ok\n";
+    fail_if(svc5(64, 1, (unsafe { message as *u8 }) as usize,
+                 message.len, 0, 0) != message.len);
+}
+
 /* GitHub issue #1166: CLOCK_REALTIME advances. It was a fixed timestamp,
  * and stress-ng's stress_yield_sleep_ms -- usleep(1000) until the realtime
  * clock has moved 1 ms -- never returned. Both clocks are read around a
