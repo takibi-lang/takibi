@@ -86,8 +86,8 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
   2026-10-26) took every stressor past its setup, and #1147 (shared anonymous mmap, statfs,
   getrusage, umask; done 2026-10-26) past its shared region, and #1151 (a 16 MiB mmap region
   apart from brk, madvise; done 2026-10-29) past its 2 MiB shared cache buffer; the fork phase
-  now hangs with its four stressor children blocked in a deadline wait (next blocker, to be
-  filed), so exec and pipe are not reached. The fixture
+  now hangs with its four stressor children blocked in a deadline wait (#1166),
+  so exec and pipe are not reached. The fixture
   rootfs grew from 2816 to 6144 blocks to hold both programs, so QEMU and
   the board boot the same image (maintainer, option b: one board build,
   sized from content; about 18 s more SWD per RPi5 lane run). Each program is recorded beside the same program under Linux
