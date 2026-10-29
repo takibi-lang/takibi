@@ -45,6 +45,7 @@ Modes:
                     fail the campaign or, failing that, the fault run
   nearfull          a small write into a large file on a nearly full disk
                     succeeds (#1086)
+  holes             writes past end of file leave holes, as on Linux (#1087)
   self-test         the parsers and the oracle, without the program
 
 The default sizes are the linuxcheck member's; the long campaign is
@@ -52,9 +53,7 @@ The default sizes are the linuxcheck member's; the long campaign is
 
 Divergences the generator does not produce, each an open issue with its
 tier-B row or a note there: #1021 (doubly indirect files; files stay
-within 268 KiB), #1087 (a write past end of file
-allocates the skipped blocks, where Linux leaves a hole: same bytes, more
-i_blocks; the campaign writes with seekwrite, which never does), #1089 (a
+within 268 KiB), #1089 (a
 torn write is outside the recovery model; `faults --torn` shows it), and
 link(2), which the kernel does not implement. A rejected write may fence
 the mount; the fault run then recovers it (ext2_recover, as the boot
@@ -183,8 +182,8 @@ def size_of(path):
 def write_need(path, offset, length, written):
     """The blocks the kernel claims for the failing write(2) of a pwrite:
     since #1086 only the blocks that write changes (ext2_block_replaced:
-    the blocks it covers, the blocks past the old end, the old partial
-    last block when the file grows), plus a new indirect block when the
+    the blocks it covers and the old partial last block when the file
+    grows; a skipped block stays a hole, #1087), plus a new indirect block when the
     file needs one. Linux needs the new blocks only, so the difference is
     at most the copied blocks of one 1 KiB write(2) and the indirect."""
     size = os.path.getsize(path) if os.path.exists(path) else 0
@@ -197,7 +196,7 @@ def write_need(path, offset, length, written):
     new_count = (new_size + 1023) // 1024
     need = 0
     for index in range(new_count):
-        if index >= old_count or (index * 1024 < end and start < index * 1024 + 1024) or \
+        if (index * 1024 < end and start < index * 1024 + 1024) or \
                 (index + 1 == old_count and new_size > size and size % 1024):
             need += 1
     return need + (1 if new_count > 12 else 0)
@@ -548,8 +547,16 @@ def generate(seed, count, largest=80000):
             length = rng.choice([rng.randrange(1, 64), rng.randrange(1, 3000),
                                  rng.randrange(1, 20000), rng.randrange(20000, 80000)])
             length = min(length, largest)
-            # seekwrite never writes past EOF, whatever the file's real size:
-            # the kernel allocates a hole's blocks (#1087)
+            # one write in five lands past EOF and leaves a hole (#1087);
+            # the others are seekwrites, which never pass EOF
+            if rng.random() < 0.2:
+                offset = size + rng.choice([rng.randrange(1, 1024),
+                                            rng.randrange(1024, 40000)])
+                if offset + length > MAX_FILE:
+                    continue
+                lines.append(f"pwrite {target} {offset} {length} {rng.randrange(256)}")
+                model.files[target] = max(size, offset + length)
+                continue
             offset = rng.choice([0, size, rng.randrange(0, size + 1)])
             if offset + length > MAX_FILE:
                 continue
@@ -843,6 +850,30 @@ def run_nearfull():
                 "an overwrite, a straddling write and an append (#1086)", cases=len(lines) - fillers)
 
 
+def run_holes():
+    """GitHub issue #1087: a write past end of file leaves the skipped
+    blocks as holes, as on Linux -- same bytes and the same i_blocks --
+    in the direct blocks and under the indirect block, and a later write
+    into a hole fills just that block."""
+    lines = [f"pwrite {ROOT}/s 5000 10 1",
+             f"pwrite {ROOT}/s 40000 100 2",
+             f"pwrite {ROOT}/s 1 3 3",
+             f"pwrite {ROOT}/s 20000 1500 4",
+             f"pwrite {ROOT}/t 200000 10 5",
+             f"seekwrite {ROOT}/t 0 10 6"]
+    with tempfile.TemporaryDirectory(prefix="ext2_host_holes.") as work:
+        pristine = os.path.join(work, "pristine.img")
+        make_image(pristine)
+        problems, results = compare_run(pristine, lines, work)
+        for line, result in zip(lines, results):
+            if result["errno"] != "0":
+                problems.append(f"`{line}` answered {result['errno']}")
+        if problems:
+            raise HostError("holes (#1087): " + "; ".join(problems))
+    report_pass("ext2-host holes", "writes past end of file leave holes with "
+                "Linux's bytes and i_blocks (#1087)", cases=len(lines))
+
+
 def self_test():
     match = RESULT_RE.match("3 pwrite eq/a 0 10 1 -> ENOSPC written=4 free=2/9")
     assert match and match.group(3) == "ENOSPC" and match.group(4) == "4", match
@@ -902,12 +933,15 @@ def main(argv):
     p.add_argument("--first", type=int, default=0)
     sub.add_parser("self-test")
     sub.add_parser("nearfull")
+    sub.add_parser("holes")
     args = parser.parse_args(argv[1:])
     try:
         if args.mode == "self-test":
             self_test()
         elif args.mode == "nearfull":
             run_nearfull()
+        elif args.mode == "holes":
+            run_holes()
         elif args.mode == "eq":
             run_eq(args.ops)
         elif args.mode == "campaign":

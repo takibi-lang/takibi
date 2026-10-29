@@ -516,15 +516,15 @@ fn ext2_read_inode(slot: borrow Ext2Slot[0], mount: Ext2Mount,
     if (file_type == 0x4000) { max_size = ext2_max_directory_size(); }
     if (mode == 0 || size > max_size ||
         (file_type != 0x8000 && file_type != 0x4000 && file_type != 0xA000) ||
-        ((file_type == 0x4000 || (file_type == 0x8000 && size > 0)) &&
+        (file_type == 0x4000 &&
          (direct_block0 == 0 || direct_block0 >= mount.filesystem_blocks)) ||
-        ((file_type == 0x8000 || file_type == 0x4000) &&
-         size > ext2_direct_file_size() &&
+        (file_type == 0x4000 && size > ext2_direct_file_size() &&
          (indirect_block == 0 || indirect_block >= mount.filesystem_blocks)) ||
+        // A regular file may be sparse (#1087): any pointer may be a hole,
+        // and a pointer that is not one must name a block.
         (file_type == 0x8000 &&
-         size > ext2_direct_file_size() +
-               ext2_pointer_count() * KERNEL_BLOCK_SIZE &&
-         (double_indirect_block == 0 ||
+         (direct_block0 >= mount.filesystem_blocks ||
+          indirect_block >= mount.filesystem_blocks ||
           double_indirect_block >= mount.filesystem_blocks)) ||
         (file_type == 0xA000 && size > 60)) {
         return Ext2InodeResult::Invalid;
@@ -715,68 +715,117 @@ private inline fn ext2_lookup_path_with(slot: borrow Ext2Slot[0], mount: Ext2Mou
     return ext2_lookup_path_from_with(slot, mount, 2, name);
 }
 
+// GitHub issue #1087: a pointer of 0 is a hole, which reads as zeros, and
+// is told apart from a failed read or an out-of-range pointer.
+must_use variant Ext2PointerResult { Invalid; Hole; Block(usize); }
+
+private fn ext2_pointer_entry(mount: Ext2Mount, block: usize)
+        -> Ext2PointerResult {
+    if (block == 0) { return Ext2PointerResult::Hole; }
+    if (block < 2 || block >= mount.filesystem_blocks) {
+        return Ext2PointerResult::Invalid;
+    }
+    return Ext2PointerResult::Block(block);
+}
+
 // Resolve a regular file's i_block[index]. The inode table is re-read on
 // every call rather than trusting a copy held here; since GitHub issue #208
 // the block layer's cache answers those re-reads, so they cost a copy rather
 // than a device round trip. Direct entries
 // reside at byte 40; i_block[12] at byte 88 names a singly-indirect block
-// of 256 little-endian u32 entries. Returns 0 (never a valid data block)
-// for an out-of-range index or any failed metadata read.
-fn ext2_inode_block_pointer(slot: borrow Ext2Slot[0], mount: Ext2Mount,
-        inode: Ext2Inode,
-                            index: usize) -> usize {
+// of 256 little-endian u32 entries. Invalid for an out-of-range index or
+// pointer, or any failed metadata read; Hole for a pointer of 0 at any
+// level.
+fn ext2_file_block_lookup(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+        inode: Ext2Inode, index: usize) -> Ext2PointerResult {
     let pointers: usize = ext2_pointer_count();
-    if (pointers == 0) { return 0; }
+    if (pointers == 0) { return Ext2PointerResult::Invalid; }
     if (index >= EXT2_MAX_DIRECT_BLOCKS + pointers + pointers * pointers) {
-        return 0;
+        return Ext2PointerResult::Invalid;
     }
     match block_read(mount.device, inode.table_block,
                      ext2_scratch[slot.index].metadata as []u8) {
-        BlockIoResult::Invalid => { return 0; }
+        BlockIoResult::Invalid => { return Ext2PointerResult::Invalid; }
         BlockIoResult::Ok => { }
     }
     let mut inode_pointer: Ext2Bytes =
         ext2_at(ext2_metadata(), inode.table_offset);
     if (index < EXT2_MAX_DIRECT_BLOCKS) {
-        return ext2_u32(slot, inode_pointer, 40 + index * 4) as usize;
+        return ext2_pointer_entry(mount,
+                ext2_u32(slot, inode_pointer, 40 + index * 4) as usize);
     }
     let single_index: usize = index - EXT2_MAX_DIRECT_BLOCKS;
     let indirect_block: usize = ext2_u32(slot, inode_pointer, 88) as usize;
     if (single_index < pointers) {
-        if (indirect_block == 0 || indirect_block >= mount.filesystem_blocks) {
-            return 0;
+        if (indirect_block == 0) { return Ext2PointerResult::Hole; }
+        if (indirect_block < 2 || indirect_block >= mount.filesystem_blocks) {
+            return Ext2PointerResult::Invalid;
         }
         match block_read(mount.device, indirect_block,
                          ext2_scratch[slot.index].file as []u8) {
-            BlockIoResult::Invalid => { return 0; }
+            BlockIoResult::Invalid => { return Ext2PointerResult::Invalid; }
             BlockIoResult::Ok => { }
         }
-        return ext2_u32(slot, ext2_file(),
-                        single_index * 4) as usize;
+        return ext2_pointer_entry(mount, ext2_u32(slot, ext2_file(),
+                        single_index * 4) as usize);
     }
     let double_block: usize = ext2_u32(slot, inode_pointer, 92) as usize;
-    if (double_block == 0 || double_block >= mount.filesystem_blocks) {
-        return 0;
+    if (double_block == 0) { return Ext2PointerResult::Hole; }
+    if (double_block < 2 || double_block >= mount.filesystem_blocks) {
+        return Ext2PointerResult::Invalid;
     }
     let double_index: usize = single_index - pointers;
     match block_read(mount.device, double_block,
                      ext2_scratch[slot.index].metadata as []u8) {
-        BlockIoResult::Invalid => { return 0; }
+        BlockIoResult::Invalid => { return Ext2PointerResult::Invalid; }
         BlockIoResult::Ok => { }
     }
     let second_level: usize = ext2_u32(slot, 
         ext2_metadata(), (double_index / pointers) * 4) as usize;
-    if (second_level == 0 || second_level >= mount.filesystem_blocks) {
-        return 0;
+    if (second_level == 0) { return Ext2PointerResult::Hole; }
+    if (second_level < 2 || second_level >= mount.filesystem_blocks) {
+        return Ext2PointerResult::Invalid;
     }
     match block_read(mount.device, second_level,
                      ext2_scratch[slot.index].file as []u8) {
-        BlockIoResult::Invalid => { return 0; }
+        BlockIoResult::Invalid => { return Ext2PointerResult::Invalid; }
         BlockIoResult::Ok => { }
     }
-    let resolved: usize = ext2_u32(slot, ext2_file(),
-                    (double_index % pointers) * 4) as usize;
-    return resolved;
+    return ext2_pointer_entry(mount, ext2_u32(slot, ext2_file(),
+                    (double_index % pointers) * 4) as usize);
+}
+
+// The block i_block[index] names, 0 for a hole or a failed read: the
+// directory walks, which have no holes, treat both as a bad directory.
+fn ext2_inode_block_pointer(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+        inode: Ext2Inode, index: usize) -> usize {
+    match ext2_file_block_lookup(slot, mount, inode, index) {
+        Ext2PointerResult::Invalid => { return 0; }
+        Ext2PointerResult::Hole => { return 0; }
+        Ext2PointerResult::Block(block) => { return block; }
+    }
+}
+
+// Regular file block BLOCK_INDEX into the file buffer: its bytes, or
+// zeros for a hole (#1087). False on a bad pointer or a failed read.
+private fn ext2_file_block_fill(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+        inode: Ext2Inode, block_index: usize) -> bool !{unsafe} {
+    match ext2_file_block_lookup(slot, mount, inode, block_index) {
+        Ext2PointerResult::Invalid => { return false; }
+        Ext2PointerResult::Hole => {
+            for byte: usize in 0..<KERNEL_BLOCK_SIZE {
+                ext2_scratch[slot.index].file[byte] = 0;
+            }
+            return true;
+        }
+        Ext2PointerResult::Block(block) => {
+            match block_read(mount.device, block,
+                             ext2_scratch[slot.index].file as []u8) {
+                BlockIoResult::Invalid => { return false; }
+                BlockIoResult::Ok => { return true; }
+            }
+        }
+    }
 }
 
 fn ext2_read_small_file(mount: Ext2Mount, inode_number: usize,
@@ -804,16 +853,9 @@ private inline fn ext2_read_small_file_with(slot: borrow Ext2Slot[0],
                 (inode.size + KERNEL_BLOCK_SIZE - 1) / KERNEL_BLOCK_SIZE;
             let mut copied: usize = 0;
             for block_index: usize in 0..<block_count {
-                let block_number: usize =
-                    ext2_inode_block_pointer(slot, mount, inode, block_index);
-                if (block_number == 0 ||
-                    block_number >= mount.filesystem_blocks) {
+                if (ext2_file_block_fill(slot, mount, inode, block_index) ==
+                        false) {
                     return Ext2ReadResult::Invalid;
-                }
-                match block_read(mount.device, block_number,
-                                 ext2_scratch[slot.index].file as []u8) {
-                    BlockIoResult::Invalid => { return Ext2ReadResult::Invalid; }
-                    BlockIoResult::Ok => { }
                 }
                 let mut chunk: usize = KERNEL_BLOCK_SIZE;
                 if (inode.size - copied < chunk) { chunk = inode.size - copied; }
@@ -884,15 +926,9 @@ private inline fn ext2_read_file_chunk_with(slot: borrow Ext2Slot[0],
             }
             let block_index: usize = offset / KERNEL_BLOCK_SIZE;
             let block_offset: usize = offset % KERNEL_BLOCK_SIZE;
-            let block_number: usize =
-                ext2_inode_block_pointer(slot, mount, inode, block_index);
-            if (block_number == 0 || block_number >= mount.filesystem_blocks) {
+            if (ext2_file_block_fill(slot, mount, inode, block_index) ==
+                    false) {
                 return Ext2ReadResult::Invalid;
-            }
-            match block_read(mount.device, block_number,
-                             ext2_scratch[slot.index].file as []u8) {
-                BlockIoResult::Invalid => { return Ext2ReadResult::Invalid; }
-                BlockIoResult::Ok => { }
             }
             let mut chunk: usize = destination.len;
             if (chunk > KERNEL_BLOCK_SIZE - block_offset) {
@@ -2618,21 +2654,23 @@ private fn ext2_zero_past_size(slot: borrow Ext2Slot[0], start: usize,
 
 // GitHub issue #1086: whether file block INDEX gets a new block in this
 // update. A replace (preserve_existing false) rewrites every block; a
-// write(2) copies only the blocks it changes -- the blocks it covers, the
-// blocks past the old end, and the old last block when its tail past the
-// old size must become zeros -- and keeps every other block where it is.
-// The inode write stays the one commit point, so a failed update still
-// leaves the old file exactly as it was.
+// write(2) copies only the blocks it changes -- the blocks it covers, and
+// the old last block when its tail past the old size must become zeros --
+// and keeps every other block where it is. A block it neither covers nor
+// had stays a hole (pointer 0), as on Linux (#1087). The inode write stays
+// the one commit point, so a failed update still leaves the old file
+// exactly as it was. OLD_BLOCK is the block the file named there, 0 for a
+// hole or past the old end.
 private fn ext2_block_replaced(index: usize, offset: usize, length: usize,
                                old_size: usize, old_count: usize,
-                               new_size: usize,
+                               new_size: usize, old_block: usize,
                                preserve_existing: bool) -> bool {
-    if (preserve_existing == false || index >= old_count) { return true; }
+    if (preserve_existing == false) { return true; }
     let start: usize = index * KERNEL_BLOCK_SIZE;
     if (start < offset + length && offset < start + KERNEL_BLOCK_SIZE) {
         return true;
     }
-    return index + 1 == old_count && new_size > old_size &&
+    return old_block != 0 && index + 1 == old_count && new_size > old_size &&
         old_size % KERNEL_BLOCK_SIZE != 0;
 }
 
@@ -2670,17 +2708,38 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
             for index: usize in 0..<EXT2_MAX_SINGLE_FILE_BLOCKS {
                 old_blocks[index] = 0;
                 if (index < old_count) {
-                    let block: usize =
-                        ext2_inode_block_pointer(slot, mount, inode, index);
-                    if (block < 2 || block >= mount.filesystem_blocks) {
-                        return Ext2ResizeResult::Invalid;
+                    // A hole stays 0 (#1087).
+                    let mut block: usize = 0;
+                    match ext2_file_block_lookup(slot, mount, inode, index) {
+                        Ext2PointerResult::Invalid => {
+                            return Ext2ResizeResult::Invalid;
+                        }
+                        Ext2PointerResult::Hole => { }
+                        Ext2PointerResult::Block(named) => { block = named; }
                     }
                     for earlier: usize in 0..<EXT2_MAX_SINGLE_FILE_BLOCKS {
-                        if (earlier < index && old_blocks[earlier] == block) {
+                        if (block != 0 && earlier < index &&
+                            old_blocks[earlier] == block) {
                             return Ext2ResizeResult::Invalid;
                         }
                     }
                     old_blocks[index] = block;
+                }
+            }
+            let mut old_named: usize = 0;
+            let mut new_named: usize = 0;
+            let mut new_named_single: usize = 0;
+            for index: usize in 0..<EXT2_MAX_SINGLE_FILE_BLOCKS {
+                if (old_blocks[index] != 0) { old_named = old_named + 1; }
+                if (index < new_count &&
+                    (old_blocks[index] != 0 ||
+                     ext2_block_replaced(index, offset, source.len, inode.size,
+                            old_count, new_size, old_blocks[index],
+                            preserve_existing))) {
+                    new_named = new_named + 1;
+                    if (index >= EXT2_MAX_DIRECT_BLOCKS) {
+                        new_named_single = new_named_single + 1;
+                    }
                 }
             }
             match block_read(mount.device, inode.table_block,
@@ -2695,19 +2754,17 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
             let old_double: usize = ext2_u32(slot, inode_pointer, 92) as usize;
             let old_sectors: usize = ext2_u32(slot, inode_pointer, 28) as usize;
             let mut old_pointer_blocks: usize = 0;
-            if (old_count > EXT2_MAX_DIRECT_BLOCKS) {
-                old_pointer_blocks = 1;
-            }
+            if (old_indirect != 0) { old_pointer_blocks = 1; }
             if (old_double != 0 ||
-                (old_pointer_blocks == 0 && old_indirect != 0) ||
+                (old_count <= EXT2_MAX_DIRECT_BLOCKS && old_indirect != 0) ||
                 (old_pointer_blocks == 1 &&
                  (old_indirect < 2 ||
                   old_indirect >= mount.filesystem_blocks)) ||
-                old_sectors != (old_count + old_pointer_blocks) * 2) {
+                old_sectors != (old_named + old_pointer_blocks) * 2) {
                 return Ext2ResizeResult::Invalid;
             }
             for index: usize in 0..<EXT2_MAX_SINGLE_FILE_BLOCKS {
-                if (index < old_count && old_blocks[index] == old_indirect) {
+                if (old_blocks[index] != 0 && old_blocks[index] == old_indirect) {
                     return Ext2ResizeResult::Invalid;
                 }
             }
@@ -2717,7 +2774,7 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
             for index: usize in 0..<EXT2_MAX_SINGLE_FILE_BLOCKS {
                 if (index < new_count &&
                     ext2_block_replaced(index, offset, source.len, inode.size,
-                            old_count, new_size, preserve_existing)) {
+                            old_count, new_size, old_blocks[index], preserve_existing)) {
                     if (allocations.count >= allocation_budget) {
                         return ext2_write_abort(slot, mount, allocations);
                     }
@@ -2751,7 +2808,7 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                                     allocations = updated;
                                 }
                             }
-                            if (preserve_existing && index < old_count) {
+                            if (preserve_existing && old_blocks[index] != 0) {
                                 match block_read(
                                         mount.device, old_blocks[index],
                                         ext2_scratch[slot.index].file as []u8) {
@@ -2794,7 +2851,7 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                 }
             }
             let mut new_indirect: usize = 0;
-            if (new_count > EXT2_MAX_DIRECT_BLOCKS) {
+            if (new_named_single != 0) {
                 if (allocations.count >= allocation_budget) {
                     return ext2_write_abort(slot, mount, allocations);
                 }
@@ -2835,7 +2892,7 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                     if (direct < new_count &&
                         ext2_block_replaced(direct, offset, source.len,
                                 inode.size, old_count, new_size,
-                                preserve_existing)) {
+                                old_blocks[direct], preserve_existing)) {
                         next = next + 1;
                     }
                 }
@@ -2845,12 +2902,13 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                         let mut block: usize = old_blocks[index];
                         if (ext2_block_replaced(index, offset, source.len,
                                 inode.size, old_count, new_size,
-                                preserve_existing)) {
+                                old_blocks[index], preserve_existing)) {
                             block = ext2_write_allocations_block(slot,
                                     allocations, next);
                             next = next + 1;
                         }
-                        if (block < 2 || block >= mount.filesystem_blocks ||
+                        if ((block != 0 && block < 2) ||
+                            block >= mount.filesystem_blocks ||
                             ext2_put_u32(slot, ext2_file(),
                                 single_index * 4,
                                 block as u32) == false) {
@@ -2887,12 +2945,13 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                     block = old_blocks[index];
                     if (ext2_block_replaced(index, offset, source.len,
                             inode.size, old_count, new_size,
-                            preserve_existing)) {
+                            old_blocks[index], preserve_existing)) {
                         block = ext2_write_allocations_block(slot,
                                 allocations, next_direct);
                         next_direct = next_direct + 1;
                     }
-                    if (block < 2 || block >= mount.filesystem_blocks) {
+                    if ((block != 0 && block < 2) ||
+                        block >= mount.filesystem_blocks) {
                         return ext2_write_abort(slot, mount, allocations);
                     }
                 }
@@ -2905,7 +2964,7 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
             if (new_indirect != 0) { new_pointer_blocks = 1; }
             if (ext2_put_u32(slot, inode_bytes, 4, new_size as u32) == false ||
                 ext2_put_u32(slot, inode_bytes, 28,
-                             ((new_count + new_pointer_blocks) * 2) as u32) == false ||
+                             ((new_named + new_pointer_blocks) * 2) as u32) == false ||
                 ext2_put_u32(slot, inode_bytes, 88,
                         new_indirect as u32) == false) {
                 return ext2_write_abort(slot, mount, allocations);
@@ -2920,9 +2979,9 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
             ext2_write_allocations_published(allocations);
             let mut released: bool = true;
             for index: usize in 0..<EXT2_MAX_SINGLE_FILE_BLOCKS {
-                if (index < old_count &&
+                if (old_blocks[index] != 0 &&
                     ext2_block_replaced(index, offset, source.len, inode.size,
-                            old_count, new_size, preserve_existing)) {
+                            old_count, new_size, old_blocks[index], preserve_existing)) {
                     let block: usize = old_blocks[index];
                     match ext2_release_block(slot, 
                             mount, ext2_block_owner_new(block - 1, block, block)) {
@@ -2947,10 +3006,10 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                 // leaves the mount inconsistent.
                 let mut settled: bool = true;
                 for index: usize in 0..<EXT2_MAX_SINGLE_FILE_BLOCKS {
-                    if (index < old_count &&
+                    if (old_blocks[index] != 0 &&
                         ext2_block_replaced(index, offset, source.len,
                                 inode.size, old_count, new_size,
-                                preserve_existing)) {
+                                old_blocks[index], preserve_existing)) {
                         if (ext2_bitmap_force_clear(slot, 
                                 mount, false, old_blocks[index] - 1) == false) {
                             settled = false;
@@ -2967,10 +3026,10 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                 if (settled == false) {
                     ext2_fenced = true;
                     for index: usize in 0..<EXT2_MAX_SINGLE_FILE_BLOCKS {
-                        if (index < old_count &&
+                        if (old_blocks[index] != 0 &&
                             ext2_block_replaced(index, offset, source.len,
                                     inode.size, old_count, new_size,
-                                    preserve_existing)) {
+                                    old_blocks[index], preserve_existing)) {
                             ext2_fence_pending_add(old_blocks[index]);
                         }
                     }

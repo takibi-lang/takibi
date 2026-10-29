@@ -924,6 +924,7 @@ linuxcheck: linuxbuild compiler-fuzz
 	@python3 scripts/ext2_host.py campaign
 	@python3 scripts/ext2_host.py faults
 	@python3 scripts/ext2_host.py nearfull
+	@python3 scripts/ext2_host.py holes
 	@python3 scripts/ext2_host.py hostile
 	@python3 scripts/ext2_host.py control
 	@# GitHub issue #1138: user_payload's sigaltstack probe under host Linux
