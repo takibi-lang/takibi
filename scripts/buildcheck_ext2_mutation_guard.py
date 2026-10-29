@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Every ext2 mutation runs under kernel/fs/ext2/mutation_lock.tkb's guard.
 
-Usage: buildcheck_ext2_mutation_guard.py <kernel>.callgraph.tsv
+Usage: buildcheck_ext2_mutation_guard.py <kernel>.facts/callgraph.tsv
 
 GitHub issue #533. ext2_claim_directory mints a directory owner from the
 directory tree, which is sound only while one core at a time mutates. That
@@ -22,7 +22,7 @@ counts because the compiler checks it: the guard is linear and minted only
 by the take, so a caller cannot produce one it does not hold (GitHub issue
 #597).
 
-GitHub issue #987: the facts come from the compiler's --emit-call-graph
+GitHub issue #987: the facts come from the compiler's --facts callgraph.tsv
 table of the kernel just compiled (scripts/call_graph_table.py), not from
 regular expressions over the source. A call is a resolved call, so a
 mutator named in a comment or a string is not one, and a guard taken only

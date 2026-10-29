@@ -3,7 +3,7 @@
    Two consumers share one traversal here:
 
    - lib/unused_functions.ml closes reachability over [iter_references];
-   - --emit-call-graph writes [write_table], one TSV row per function
+   - --facts callgraph.tsv writes [write_table], one TSV row per function
      definition, so the build checks under scripts/ read the compiler's own
      resolution instead of re-deriving a call graph from source text with
      regular expressions. docs/CALL_GRAPH.md is the format's contract.
@@ -20,7 +20,7 @@ open Types
 module StringSet = Set.Make (String)
 
 (* What one expression site refers to. The target is passed beside it, not
-   inside it, so a compile without --emit-call-graph allocates nothing more
+   inside it, so a compile without --facts callgraph.tsv allocates nothing more
    for --reject-unused-functions than it did before the traversal was
    shared (#923's budget measures words). *)
 type reference =

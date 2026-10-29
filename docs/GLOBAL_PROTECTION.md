@@ -1,6 +1,6 @@
 # The global protection table and its ratchet
 
-`takibi ... --emit-globals PATH` writes one row per `let mut` global of the
+`takibi ... --facts DIR` writes `DIR/globals.tsv`, one row per `let mut` global of the
 program with the protection its declared type shows (GitHub issue #1012
 slice 1). The kernel recipes write it beside each `main.o` as
 `<object>.globals.tsv`, and `scripts/buildcheck_global_protection.py` runs

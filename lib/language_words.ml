@@ -5,7 +5,7 @@ module StringSet = Set.Make (String)
    builtins look like calls but have compiler-defined typing/lowering, and
    predeclared names enter an otherwise ordinary identifier namespace. *)
 (* GitHub issue #1003: each hard keyword carries its class as data, so
-   WORDS.md (takibi --emit-doc words) states it without a hand-kept comment.
+   WORDS.md (takibi --generate words) states it without a hand-kept comment.
    Kernel_qualifier marks the words the maintained kernel's needs brought in. *)
 type keyword_class =
   | Core

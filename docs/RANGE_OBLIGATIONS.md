@@ -5,8 +5,8 @@ of `+`, `-`, `* k`, a constant `/`, `% m`, `& k`, the builtin `min`/`max`
 (#984) and a widening cast. Each
 derived range is built through `refined_or_base` (lib/type_inf.ml, mirrored in
 lib/llvm_gen.ml), and each call names the operation and the operand ranges it
-reasoned from. `takibi --emit-range-obligations DIR` turns every such
-conclusion into one SMT-LIB file, and `scripts/buildcheck_range_obligations.py`
+reasoned from. `takibi --facts DIR` turns every such
+conclusion into one SMT-LIB file under `DIR/rangeobl/`, and `scripts/buildcheck_range_obligations.py`
 asks z3 to refute it. The checker keeps deciding; z3 is a second, simpler judge
 of its interval arithmetic, at the machine's own bit width.
 

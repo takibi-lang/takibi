@@ -37,7 +37,7 @@ def _takibi_at_function_entry(frame):
 
 
 class TakibiDebugMetadata(gdb.Command):
-    """Load a JSON sidecar emitted by --emit-debug-metadata."""
+    """Load a JSON sidecar emitted by --facts debug-metadata.json."""
 
     def __init__(self):
         super().__init__("takibi-debug-metadata", gdb.COMMAND_DATA)

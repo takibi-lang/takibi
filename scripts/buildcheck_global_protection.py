@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The global protection ratchet (GitHub issue #1012 slice 1).
 
-Reads the compiler's `--emit-globals` tables of both kernels
+Reads the compiler's `--facts globals.tsv` tables of both kernels
 (docs/GLOBAL_PROTECTION.md) and refuses:
 
 - a production `let mut` global whose type shows no protection (protection
@@ -17,7 +17,7 @@ kernel/tests and kernel/models. The row count of the allow-list is the
 ledger category `unprotected_globals` (scripts/check_trust_ledger.py), so a
 rise needs an issue there and a fall names its rule.
 
-  buildcheck_global_protection.py QEMU.globals.tsv RPI5.globals.tsv
+  buildcheck_global_protection.py QEMU.facts/globals.tsv RPI5.facts/globals.tsv
   buildcheck_global_protection.py --summary TABLE...   counts per class
 
 GitHub issue #1201: a migration deletes its rows with the script rather than
@@ -32,7 +32,7 @@ still names an unprotected global. --prune removes every stale row. Either
 writes the list only if every still-unprotected global keeps its row and
 nothing but the removed rows changed; comments and order are kept. The
 tables are the kernelbuild's, GLOBAL_PROTECTION_TABLES in the Makefile:
-kernel/build/{qemu,rpi5}/main.o.globals.tsv.
+kernel/build/{qemu,rpi5}/main.o.facts/globals.tsv.
 """
 
 import collections

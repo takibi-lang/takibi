@@ -197,7 +197,7 @@ fn page_ddb_physical_address_readable(
 //
 // A `u8`, not a `usize`, and it costs nothing: PageMeta's `usize` field
 // forces 8-byte alignment, so bytes 2..7 were padding already
-// (`--emit-struct-layout PageMeta`), so it adds zero bytes per page.
+// (`--facts structs.tsv PageMeta`), so it adds zero bytes per page.
 enum PageOwnerTag: u8 {
     // A free page, or one never handed out. Never passed to page_alloc:
     // every allocation names a real owner, which is what makes a page

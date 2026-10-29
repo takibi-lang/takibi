@@ -17,7 +17,7 @@ match arm), never as a constructed value.
 
 GitHub issue #952: each refined_or_base call there also passes `~ob` (or
 `?ob`), the operation and operands its range was derived from, so z3
-re-checks it under --emit-range-obligations
+re-checks it under --facts rangeobl
 (scripts/buildcheck_range_obligations.py). A call that cannot describe its
 operation says why in a `no-range-obligation:` comment just above it.
 

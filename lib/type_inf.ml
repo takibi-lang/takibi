@@ -91,7 +91,7 @@ let active_overflow_audit_sites : overflow_audit_site list ref = ref []
 (* GitHub issue #639 (#637 stage 0): every place a raw pointer is
    dereferenced. `unsafe` gates only the moment a pointer is minted, so once
    a `*T` exists `p.field`, `*p` and `p[i]` compile anywhere and nothing
-   counted them. This table is what `--emit-raw-deref-audit` writes and
+   counted them. This table is what `--facts rawderef.tsv` writes and
    scripts/buildcheck_raw_deref_ratchet.py reads. A text scan cannot tell a
    raw pointer from a slice, an array or a `&T` reference, and the type
    checker can, which is why the record is made here.
@@ -367,7 +367,7 @@ let obligation_operand t = match repr t with
 (* ~ob names the source site, the rule, and the operands the range was
    derived from; every call in the refined-range rules passes it
    (scripts/check_refined_range_constructor.py), so each derived range is
-   re-checked by z3 under --emit-range-obligations (#952). *)
+   re-checked by z3 under --facts rangeobl (#952). *)
 (* GitHub issue #952: Const_env folds on the checker's native ints; a fold
    is the machine's value only when nothing wraps at the base's width
    (Const_env.folded_value_within). None for a base without one. *)

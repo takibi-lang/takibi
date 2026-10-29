@@ -88,7 +88,7 @@ raw-field reference mints, local unsafe assertions and calls of
 Both maintained kernels build with it; their list is `kernel/RAW_MINT_FILES`.
 The list is a ratchet the compiler enforces: an entry that does not exist, or
 that this compilation reads and that holds no counted site, is rejected (a
-file only the other target compiles is skipped). `--emit-raw-site-counts`
+file only the other target compiles is skipped). `--facts rawsites.tsv`
 writes per-file site counts, and `make raw-site-counts` prints both kernels'.
 The mint files' public API carries no raw pointer: no non-private function
 of a listed file returns a `*T`, and none returns a `usize` its name calls an
@@ -653,7 +653,7 @@ HEAD it measured and one count per category -- the frame (`RAW_MINT_FILES`
 files and lines, `DEVICE_SEMANTICS_FILES`), the raw dereference budget,
 production `unsafe` blocks, assembly lines, `extern fn`, ordinary per-CPU
 arrays and per_cpu stores, raw `cpu_id()` calls, `kernel_invariant_stop`
-sites, the frame API ratchet, and, with a build, `--emit-raw-site-counts`
+sites, the frame API ratchet, and, with a build, `--facts rawsites.tsv`
 per target and the z3 range obligations -- and, for every count that moved,
 why: a fallen trust count names the rule that retired it (a name from
 `RULES` in `scripts/check_trust_ledger.py`), a risen one the issue that
@@ -677,7 +677,7 @@ lines; wrapping a longer body in one block does the reverse. Read the pair.
 Raw-pointer dereferences are counted apart from `unsafe` blocks, because
 `unsafe` gates only the moment a pointer is minted and a `*T` that exists can
 be dereferenced anywhere. The compiler lists every such site with
-`--emit-raw-deref-audit <path>` (`p.field`, `*p`, `p[i]`, and a store through
+`--facts DIR`, in `DIR/rawderef.tsv` (`p.field`, `*p`, `p[i]`, and a store through
 each; `*io T` and `*align(N) T` are marked; references, slices and arrays are
 not raw pointers and are not listed). Each kernel object and standalone
 EL0 Takibi payload object's build holds the list to the per-file budget in

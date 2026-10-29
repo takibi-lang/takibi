@@ -1,6 +1,6 @@
 # Allowed callers of guarded kernel functions: GitHub issue #1107 (folds
 # #638 stage 2 cpu-offset-callers and #1106 exec-inode-writer).
-# scripts/buildcheck_allowed_callers.py reads the --emit-call-graph table of
+# scripts/buildcheck_allowed_callers.py reads the --facts callgraph.tsv table of
 # each kernel object and, for every row, refuses a function outside the
 # allowed set that calls the guarded function or takes it as a value, and
 # refuses a table in which an allowed caller no longer calls it.

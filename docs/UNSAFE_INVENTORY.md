@@ -113,7 +113,7 @@ Notes on individual groups:
 
 ## Raw dereference sites (measured 2026-09-30, #639)
 
-`--emit-raw-deref-audit` lists every place the type checker sees a raw
+`--facts rawderef.tsv` lists every place the type checker sees a raw
 pointer dereferenced, in six forms: `*p`, `p.field`, `p[i]` and a store
 through each. Both kernel objects, deduplicated by source position so a
 generic function counts once:

@@ -1,7 +1,7 @@
 """Brace-matching function extraction from .tkb text, for the checks that
 still read source (GitHub issue #987 moved it here from
 check_model_function_map.py, whose review stamps now come from the
-compiler's --emit-call-graph table).
+compiler's --facts callgraph.tsv table).
 
 This is a shadow front end: it approximates what the compiler's parser
 knows. A check that needs a function's extent, callees or a stable hash of

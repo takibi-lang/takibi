@@ -21,7 +21,7 @@ review-stamp-only (GitHub issue #833): the three stages, with every row's
 Reviewed cell blanked, merge cleanly. Merged rows keep upstream's stamp
 (else the branch's); after the rebase finishes,
 `make model-map-restamp` runs on the rebased tree and its result is
-committed: it compiles both kernels' main.o for their --emit-call-graph
+committed: it compiles both kernels' main.o for their --facts callgraph.tsv
 tables (GitHub issue #987; the stamps are the compiler's body hashes) and
 runs scripts/buildcheck_model_function_map.py --restamp over them. That
 happens before the checkpoint re-record, so the re-recorded review covers

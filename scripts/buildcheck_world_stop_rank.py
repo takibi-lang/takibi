@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The world stop holds the lowest lock rank; its unranked body is probe-only.
 
-Usage: buildcheck_world_stop_rank.py <kernel>.callgraph.tsv
+Usage: buildcheck_world_stop_rank.py <kernel>.facts/callgraph.tsv
 
 GitHub issue #641 keeps the compiler's lock-order check covering the world
 stop's retry liveness (kernel/models/WorldStopRetry.tla, variant holdlock):
@@ -15,7 +15,7 @@ stop's retry liveness (kernel/models/WorldStopRetry.tla, variant holdlock):
 
 GitHub issue #567: these two rules used to be regular expressions over the
 kernel's .tkb text inside check_world_stop_refusals.py. They now read the
-compiler's --emit-call-graph table of the kernel just compiled
+compiler's --facts callgraph.tsv table of the kernel just compiled
 (scripts/call_graph_table.py): the ranks from the `declared` column, the
 callers from the `callers` column. A rank or a call kept only in a comment
 is not in the table, by construction. The kernel recipes run this on each

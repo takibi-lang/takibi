@@ -1,6 +1,6 @@
 # Raw-pointer dereference sites per kernel file: GitHub issue #639 (#637 stage 0).
 # `plain` counts *T and *align(N) T; `io` counts *io T. The compiler's
-# --emit-raw-deref-audit is what these numbers are measured from, and
+# --facts rawderef.tsv is what these numbers are measured from, and
 # `scripts/measure_trusted_base.py --check-raw-deref` holds a build to
 # them: a file with no row, over its row, or UNDER its row fails. Lowering
 # a row is a deliberate edit (`--lower` does it for the files a build

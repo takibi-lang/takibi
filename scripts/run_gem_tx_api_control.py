@@ -27,7 +27,7 @@ def main():
     for control, expected in controls:
         subprocess.run([sys.executable, str(root / 'scripts/build_rpi5_gem_tx_fixture.py'),
                         str(root), str(overlay), 'unconfirmed-ready', '--control', control], check=True)
-        result = subprocess.run(command + ['--emit-struct-layout', 'GemPacket'], cwd=overlay,
+        result = subprocess.run(command + ['-o', str(overlay / (control + '.o'))], cwd=overlay,
                                 capture_output=True, text=True)
         output = result.stdout + result.stderr
         (overlay / (control + '.log')).write_text(output)

@@ -78,10 +78,11 @@ def main():
         "TAKIBI_LANE_ARTIFACT_ROOT", ROOT / "_build")) / \
         "kernel-debug-return-abi-qemu" / f"counterfactual-{mode}"
     artifacts.mkdir(parents=True, exist_ok=True)
-    real = artifacts / "real-metadata.json"
+    real = artifacts / "facts" / "debug-metadata.json"
     subprocess.run([str(TAKIBI), str(FIXTURE), "--target", "aarch64-none-elf",
                     "--cpu", "cortex-a53", "--frame-pointers", "--forbid-trap",
-                    "--emit-debug-metadata", str(real)], check=True, timeout=60)
+                    "--facts", str(artifacts / "facts"),
+                    "-o", str(artifacts / "fixture.o")], check=True, timeout=60)
     wrong = artifacts / "regressed-metadata.json"
     wrong.write_text(json.dumps(regress(json.loads(real.read_text()), mode)),
                      encoding="ascii")

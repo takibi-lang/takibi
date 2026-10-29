@@ -1,5 +1,5 @@
 # Read-only maintained-kernel state inspection over compiler-owned DWARF and
-# --emit-debug-metadata output.
+# --facts debug-metadata.json output.
 #
 # Usage:
 #   source scripts/kernel_debug_metadata.gdb

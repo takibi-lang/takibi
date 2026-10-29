@@ -7,7 +7,7 @@ cannot be counted.
 
 `--check-raw-deref TARGET AUDIT DEPFILE [--lower]` is the one gate in here
 (GitHub issue #639, #637 stage 0). It holds a kernel build's raw-pointer
-dereference sites, which the compiler lists with --emit-raw-deref-audit, to
+dereference sites, which the compiler lists with --facts rawderef.tsv, to
 the per-file budget in scripts/raw_deref_budget.tsv, and is run by the rules
 that compile each kernel or standalone EL0 object. A ratchet: a file with no row, over its row or
 UNDER its row fails, so the number only moves down by an edit made on purpose.
@@ -74,7 +74,7 @@ def read_raw_deref_budget(path: Path) -> dict[str, tuple[int, int, str]]:
 
 
 def read_raw_deref_audit(path: Path) -> dict[str, list[int]]:
-    """file -> [plain, io] counts, from --emit-raw-deref-audit's output."""
+    """file -> [plain, io] counts, from --facts rawderef.tsv's output."""
     lines = path.read_text().splitlines()
     if not lines or lines[0].split("\t")[:6] != [
             "file", "line", "column", "function", "form", "pointer"]:
@@ -313,10 +313,10 @@ def main() -> None:
     args = parser.parse_args()
 
     targets = {
-        "RPi5 kernel": read_depfile_sources(KERNEL_DIR / "build/rpi5/main.o.d"),
-        "QEMU kernel": read_depfile_sources(KERNEL_DIR / "build/qemu/main.o.d"),
+        "RPi5 kernel": read_depfile_sources(KERNEL_DIR / "build/rpi5/main.o.facts/deps.d"),
+        "QEMU kernel": read_depfile_sources(KERNEL_DIR / "build/qemu/main.o.facts/deps.d"),
         "EL0 test payload": read_depfile_sources(
-            KERNEL_DIR / "build/rpi5/user_payload_tkb.o.d"
+            KERNEL_DIR / "build/rpi5/user_payload_tkb.o.facts/deps.d"
         ),
     }
     source_names = sorted(set().union(*map(set, targets.values())))

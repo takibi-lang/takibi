@@ -48,7 +48,7 @@
 // T's own alignment and T's interior is laid out exactly as it would be
 // standalone, so wrapping an aligned aggregate is safe and that
 // convention does not have to be re-litigated per call site.
-// `--emit-struct-layout` is how to check it for a given T.
+// `--facts structs.tsv` is how to check it for a given T.
 //
 // WHY NOT pool_lock_acquire
 //

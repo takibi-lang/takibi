@@ -28,9 +28,8 @@ def audit_recipe_problems(text):
         problems.append("no standalone EL0 Takibi object rules found")
     macro = re.search(r"^define KERNEL_EL0_COMPILE\n(.*?)^endef$", text, re.M | re.S)
     body = macro[1] if macro else ""
-    for required in ["--emit-raw-deref-audit $@.rawderef.tsv",
-                     "--emit-depfile $@.d",
-                     "python3 scripts/measure_trusted_base.py --check-raw-deref el0 $@.rawderef.tsv $@.d"]:
+    for required in ["--facts $@.facts",
+                     "python3 scripts/measure_trusted_base.py --check-raw-deref el0 $@.facts/rawderef.tsv $@.facts/deps.d"]:
         if required not in body:
             problems.append(f"KERNEL_EL0_COMPILE must contain {required}")
     for name in sorted(objects):

@@ -1,9 +1,9 @@
 // GitHub issue #778: an `rx` device protocol. Its generated model carries the
 // cache: `make modelcheck` checks that it passes, and that the model with the
-// publishing clean-and-invalidate left out (--emit-tla-omit-cache publish),
-// the finishing invalidate (--emit-tla-omit-cache finish), or (GitHub issue
+// publishing clean-and-invalidate left out (--internal-tla-omit-cache publish),
+// the finishing invalidate (--internal-tla-omit-cache finish), or (GitHub issue
 // #801) the snapshot observation peek's per-element invalidate
-// (--emit-tla-omit-cache refresh), violates Safety.
+// (--internal-tla-omit-cache refresh), violates Safety.
 protocol RxTransfer[inst: usize] retains region(u8)[b, n] rx {
     state Ready access write;
     state InFlight[req] device;

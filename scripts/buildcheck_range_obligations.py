@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Re-check every refinement range the compiler derived, with z3.
 
-GitHub issue #952. `takibi --emit-range-obligations DIR` writes one SMT-LIB
+GitHub issue #952. `takibi --facts DIR` writes one SMT-LIB
 file per distinct derived range (lib/range_obligation.ml; the format is in
 docs/RANGE_OBLIGATIONS.md). Each file asserts that some input inside its
 known range makes the machine operation, at its own bit width, land outside
@@ -385,11 +385,11 @@ def control(takibi: str) -> int:
         tmp_path = pathlib.Path(tmp)
         src = tmp_path / "control.tkb"
         src.write_text(CONTROL_SOURCE)
-        out_dir = tmp_path / "obligations"
+        out_dir = tmp_path / "facts" / "rangeobl"
         run = subprocess.run(
             [takibi, str(src), "-o", str(tmp_path / "control.o"),
              "--internal-range-obligation-fault-control", "--regions",
-             "--emit-range-obligations", str(out_dir)],
+             "--facts", str(tmp_path / "facts")],
             text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if run.returncode != 0:
             print(run.stdout)

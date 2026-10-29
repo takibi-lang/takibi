@@ -24,7 +24,7 @@ let check ~external_entries ~check_files (prog : toplevel list) (types : program
         let old = Option.value (StringMap.find_opt caller !edges) ~default:StringSet.empty in
         edges := StringMap.add caller (StringSet.add target old) !edges
   in
-  (* GitHub issue #987: the edges come from the traversal --emit-call-graph
+  (* GitHub issue #987: the edges come from the traversal --facts callgraph.tsv
      writes, so the two cannot disagree about what calls what. *)
   Call_graph.iter_references (fun from reference target ->
     match reference with

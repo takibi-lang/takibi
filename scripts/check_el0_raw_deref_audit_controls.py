@@ -27,9 +27,8 @@ def check(source, needle=None):
 check(text)
 check(text.replace(EL0_CALL,
                    "$(TAKIBI) $< -o $@"), "KERNEL_RPI5_USER_PAYLOAD_TKB_O must use")
-check(text.replace("--emit-raw-deref-audit $@.rawderef.tsv", ""), "must contain --emit-raw-deref-audit")
-check(text.replace("--check-raw-deref el0 $@.rawderef.tsv $@.d", "--verbose"), "must contain python3")
-check(text.replace("--emit-depfile $@.d", ""), "must contain --emit-depfile")
+check(text.replace("--facts $@.facts -o", "-o"), "must contain --facts")
+check(text.replace("--check-raw-deref el0 $@.facts/rawderef.tsv $@.facts/deps.d", "--verbose"), "must contain python3")
 check(text.replace("$(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) |", "$(TAKIBI) |"), "must depend")
 check(text.replace("Makefile scripts/measure_trusted_base.py scripts/raw_deref_budget.tsv",
                    "Makefile scripts/measure_trusted_base.py"), "must contain scripts/raw_deref_budget.tsv")

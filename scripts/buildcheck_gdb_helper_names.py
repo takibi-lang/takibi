@@ -55,12 +55,12 @@ heredoc that holds a python block is read as .gdb text; and a
 Takibi enum, variant, case and constant names (takibi-enum,
 takibi-force-variant-return, takibi-variant-layout, takibi-constant, and
 kernel_state.gdb's _tk_enum, _tk_constant, _tk_named_constant) are looked
-up in the --emit-debug-metadata JSON. RPi5 runners (those naming the RPi5
+up in the --facts debug-metadata.json JSON. RPi5 runners (those naming the RPi5
 debug ELF) are checked with --rpi5 against that ELF, together with the
 helpers they source, by the rule that links it; the QEMU run skips them.
 
 Not every subscript reads a kernel value. A key the compiler's
---emit-debug-metadata JSON uses (read from the metadata file handed in, so
+--facts debug-metadata.json JSON uses (read from the metadata file handed in, so
 the set follows the compiler) indexes that JSON; an ALL_CAPS key is an
 environment variable or a metadata constant; HELPER_KEYS lists, per file,
 the keys of a helper's own dicts, so that waiver cannot grow silently.
@@ -381,7 +381,7 @@ class Checker:
     def takibi_command(self, where, command, rest):
         """kernel_debug_metadata.gdb's commands name Takibi enums,
         variants, cases and constants, which live in the compiler's
-        --emit-debug-metadata JSON rather than in DWARF."""
+        --facts debug-metadata.json JSON rather than in DWARF."""
         words = rest.split(None, 1)
         if not words or words[0] == "0":
             # An f-string placeholder: resolved, if it can be, by the
@@ -1253,7 +1253,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("elf")
     parser.add_argument("--metadata",
-                        help="the compiler's --emit-debug-metadata JSON")
+                        help="the compiler's --facts debug-metadata.json JSON")
     parser.add_argument("--scripts",
                         default=str(Path(__file__).resolve().parent))
     parser.add_argument("--only", help="check this one helper file")

@@ -39,7 +39,7 @@ const DiagnosticEventProcessUartWake: usize = 0x0201;
 
 // The published record. `seq` is the publication field -- first, `usize`,
 // and written only by publish_begin and publish_commit. A decoder outside
-// this program gets the offsets from `--emit-struct-layout DiagnosticEvent`
+// this program gets the offsets from `--facts structs.tsv DiagnosticEvent`
 // rather than from a constant here agreeing with the field order by hand,
 // which is what DIAGNOSTIC_TRACE_WORDS_PER_EVENT used to be.
 struct publish DiagnosticEvent {

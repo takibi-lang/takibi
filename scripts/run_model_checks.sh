@@ -29,7 +29,7 @@ OUT="$REPO_ROOT/_build/models"
 MODELS="$REPO_ROOT/kernel/models"
 mkdir -p "$OUT"
 # Models generated from Takibi protocol declarations (GitHub issue #720):
-# `takibi --emit-tla` writes them here, never into the source tree.
+# `takibi --generate tla` writes them here, never into the source tree.
 GEN="$OUT/generated"
 mkdir -p "$GEN"
 # A declaration removed from the tree must not leave its old model behind.
@@ -231,8 +231,8 @@ check_model WorldStopRetry Safety 4 \
 # timeout and failed-reset faults no longer compile (Protocol_decl's static
 # rules; test/test_takibi.ml, "protocol-declarations").
 for decl in "$MODELS"/protocols/*.tkb; do
-    "$TAKIBI" "$decl" --emit-tla "$GEN" || {
-        echo "FAIL modelcheck: takibi --emit-tla rejected $decl"
+    "$TAKIBI" "$decl" --generate tla "$GEN" || {
+        echo "FAIL modelcheck: takibi --generate tla rejected $decl"
         exit 1
     }
 done
@@ -243,9 +243,9 @@ done
 # per-element invalidate.
 for control in TxTransfer:publish RxTransfer:publish RxTransfer:finish \
         RxTransfer:refresh; do
-    "$TAKIBI" "$MODELS/protocols/${control%%:*}.tkb" --emit-tla "$GEN" \
-        --emit-tla-omit-cache "${control##*:}" || {
-        echo "FAIL modelcheck: takibi --emit-tla-omit-cache rejected $control"
+    "$TAKIBI" "$MODELS/protocols/${control%%:*}.tkb" --generate tla "$GEN" \
+        --internal-tla-omit-cache "${control##*:}" || {
+        echo "FAIL modelcheck: takibi --internal-tla-omit-cache rejected $control"
         exit 1
     }
 done

@@ -17,7 +17,7 @@
    symbolic terms it is a sound, incomplete decision in quantifier-free
    linear integer arithmetic. Every positive conclusion is written as an
    SMT-LIB obligation (QF_LIA, one existential point k) that z3 re-checks
-   under --emit-range-obligations, the channel of #952. *)
+   under --facts rangeobl, the channel of #952. *)
 
 module SMap = Map.Make (String)
 

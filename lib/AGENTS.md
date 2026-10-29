@@ -18,7 +18,7 @@ declared field position is not an LLVM member position. Every path from a
 field name to a member index must go through `struct_llvm_field_index`:
 `field_info` and its callers, the runtime struct-literal initializer, the
 constant struct-literal evaluator, the struct-layout reporter behind
-`--emit-struct-layout`, and the DWARF member-offset loop. A new path that
+`--facts structs.tsv`, and the DWARF member-offset loop. A new path that
 skips the mapping breaks struct literals long before anyone notices an
 offset. `alignof` reports the effective alignment rather than the ABI
 alignment, because LLVM has nowhere to record a declared `align(N)`, and

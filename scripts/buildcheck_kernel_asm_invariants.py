@@ -984,7 +984,7 @@ MMU_OFF_ALLOCATOR_FUNCTIONS = (
 
 
 # GitHub issue #762: every function an `!{mmu_off}` root reaches, read from
-# the compiler's call graph (main.o.callgraph.tsv, docs/CALL_GRAPH.md):
+# the compiler's call graph (main.o.facts/callgraph.tsv, docs/CALL_GRAPH.md):
 # the compiler compiles these +strict-align, and this check is the
 # backstop over the same set rather than over a hand list.
 def mmu_off_reachable(callgraph_path):
@@ -1150,7 +1150,7 @@ def asm_takibi_entry_controls():
 def check_mmu_off_from_graph(insns, takibi_object):
     """The #762 set: every MMU-off-reachable function in the Takibi
     object's call graph, which must include the #746 list."""
-    graph = takibi_object + ".callgraph.tsv"
+    graph = takibi_object + ".facts/callgraph.tsv"
     if not os.path.exists(graph):
         return [f"issue #762: {graph} is missing; the MMU-off set comes from it"]
     roots, reachable = mmu_off_reachable(graph)

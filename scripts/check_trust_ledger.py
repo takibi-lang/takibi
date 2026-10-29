@@ -25,9 +25,9 @@ the check needs no kernel build:
 - the frame API ratchet (check_frame_api.py RATCHET, #1018), when present;
 - the unprotected globals (scripts/global_protection_allowlist.tsv rows,
   which buildcheck_global_protection.py holds to the compiler's
-  --emit-globals tables, #1012).
+  --facts globals.tsv tables, #1012).
 
-Build-measured categories (`--emit-raw-site-counts` per target, z3 range
+Build-measured categories (`--facts rawsites.tsv` per target, z3 range
 obligations) are recorded only by `--append --build-dir kernel/build` and are
 not re-measured by the fast check.
 
@@ -80,8 +80,8 @@ CATEGORIES = {
     "unprotected_globals": (TRUST, "production let mut globals whose type shows no protection (scripts/global_protection_allowlist.tsv rows, #1012)"),
     "per_cpu_stores": (JUDGE, "per_cpu store globals (#704, #638)"),
     # Build-measured: recorded by --append --build-dir only.
-    "raw_sites_qemu": (TRUST, "--emit-raw-site-counts total, QEMU main.o"),
-    "raw_sites_rpi5": (TRUST, "--emit-raw-site-counts total, RPi5 main.o"),
+    "raw_sites_qemu": (TRUST, "--facts rawsites.tsv total, QEMU main.o"),
+    "raw_sites_rpi5": (TRUST, "--facts rawsites.tsv total, RPi5 main.o"),
     "range_obligations_qemu": (JUDGE, "z3 range obligations emitted, QEMU main.o (#952)"),
 }
 BUILD_ONLY = {"raw_sites_qemu", "raw_sites_rpi5", "range_obligations_qemu"}
@@ -209,12 +209,12 @@ def measure_tree():
 def measure_build(build_dir):
     counts = {}
     for target in ("qemu", "rpi5"):
-        tsv = build_dir / target / "main.o.rawsites.tsv"
+        tsv = build_dir / target / "main.o.facts" / "rawsites.tsv"
         if tsv.exists():
             counts[f"raw_sites_{target}"] = sum(
                 int(line.split("\t")[0])
                 for line in tsv.read_text().splitlines() if line.strip())
-    obligations = build_dir / "qemu" / "main.o.rangeobl"
+    obligations = build_dir / "qemu" / "main.o.facts" / "rangeobl"
     if obligations.is_dir():
         counts["range_obligations_qemu"] = len(list(obligations.glob("*.smt2")))
     return counts

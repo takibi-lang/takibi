@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Every ext2 release and create writes through the undo log.
 
-Usage: buildcheck_ext2_release_log.py <kernel>.callgraph.tsv
+Usage: buildcheck_ext2_release_log.py <kernel>.facts/callgraph.tsv
 
 GitHub issue #1088. O_TRUNC, the last unlink of a file, rename over a file
 and rmdir used to write their blocks one after another with no way back: a
@@ -18,7 +18,7 @@ makes every path end in a commit or an abort; what the compiler does NOT
 check is that a release writes only through the log. A helper added later
 that calls ext2_block_write itself would compile and silently reopen #1088.
 
-So this reads the compiler's --emit-call-graph table (GitHub issue #987,
+So this reads the compiler's --facts callgraph.tsv table (GitHub issue #987,
 scripts/call_graph_table.py) and refuses any function reachable from a
 release root, inside kernel/fs/ext2/ext2.tkb, that calls ext2_block_write
 or the raw block_write, other than the writers named below with the reason

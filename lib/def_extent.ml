@@ -1,6 +1,6 @@
 (* Where each function definition ends in its source file (GitHub issue
    #987). Ast.func carries only the definition's start (def_loc); the
-   call-graph table behind --emit-call-graph also needs the end, to hash the
+   call-graph table behind --facts callgraph.tsv also needs the end, to hash the
    definition's tokens and report its last line. The parser records the end
    here, keyed by the start, and only while [enabled] is set -- so a compile
    without the flag allocates nothing for it.

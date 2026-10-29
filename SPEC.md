@@ -17,7 +17,7 @@ describes behavior in prose instead.
 
 File extension: `.tkb`. Compiler invocation: `takibi <file1.tkb>
 [file2.tkb ...] [flags]`; [`CLI.md`](CLI.md) is the generated list of every flag
-(`takibi --emit-doc cli`). Multiple `.tkb` files are
+(`takibi --generate cli`). Multiple `.tkb` files are
 concatenated (flat global namespace) before compilation -- there is no
 module/import system beyond `use` (see "Known Limitations" below).
 
@@ -90,7 +90,7 @@ function colliding with a non-function kind, is rejected.
 
 Source words have four distinct classifications. The complete inventory is
 [`WORDS.md`](WORDS.md), generated from `lib/language_words.ml` by `takibi
---emit-doc words` and kept fresh by `language-words-control` in `make
+--generate words` and kept fresh by `language-words-control` in `make
 langcheck`; lexer and name-resolution tests fail if its categories overlap or
 a hard keyword is tokenized as an ordinary identifier.
 
@@ -960,7 +960,7 @@ with `m` mutable) is an alias whose length is its own `.len`. When a read
 is rejected, the message lists the path facts the checker had.
 
 Every covering conclusion becomes a `; takibi-init-obligation v1` file under
-`--emit-range-obligations` (docs/RANGE_OBLIGATIONS.md), with the path facts
+`--facts rangeobl` (docs/RANGE_OBLIGATIONS.md), with the path facts
 it used as assertions (a `min` as an `ite`): z3 re-checks the checker's
 interval reasoning in QF_LIA, outside the trusted base, and a failed one
 reports the uncovered element `k`. docs/VERIFICATION_DESIGN.md
@@ -2407,7 +2407,7 @@ error, and so is a call to a function from which such an indirect call is
 reachable through resolved direct calls. Release the guard first, or call
 the target directly.
 
-`--emit-held-guards <path>` writes an optional TSV report after type checking,
+`--facts DIR` writes `DIR/heldguards.tsv`, a TSV report, after type checking,
 without changing program acceptance. The columns are `file`, `line`, `column`,
 `caller`, `callee`, `guard`, `binding_id`, `guard_type`, `rank`, `lock`, and
 `state`. Locations are one-based; caller and callee use the checked function
@@ -2996,7 +2996,7 @@ satisfies `lo >= 0 && hi <= minimum`, or when one of two checkers proves
   #798). After `if (off >= s.len || s.len - off < 4) { return; }` the reads
   `s[off]` through `s[off + 3]` need no check; so does `s[i]` under
   `if (i < s.len)`, or in `let n = s.len; for i in 0..<n`. z3 re-checks each
-  such proof as an index obligation under `--emit-range-obligations`.
+  such proof as an index obligation under `--facts rangeobl`.
 - Any other index (a mutable slice binding, a region count) is decided by
   the bounded order-contract checker, which proves `i < s.len` for the
   current bindings, including `prefix.len <= s.len && i < prefix.len`, an
@@ -4430,7 +4430,7 @@ record readable; per-CPU rings stay independently written.
 ## Protocol Declarations (GitHub issue #720, first slice)
 
 A `protocol` item declares a resource-transfer protocol once. The compiler
-validates it into one representation and, with `--emit-tla <dir>`, writes
+validates it into one representation and, with `--generate tla <dir>`, writes
 `<dir>/<Name>.tla` and `<Name>.cfg` from it and exits. Otherwise the same
 representation generates sealed permission types (below) in place of the
 item; they use the built-in region, so a program with a protocol compiles
@@ -4546,7 +4546,7 @@ Generated code rule (GitHub issue #786). Every function the compiler derives
 A generator that cannot meet all three is not accepted. Protocol code is
 internal; its element accessors (`_read`, `_write`), device spans (`_span`,
 `_span_at`), `_release`, witness `_spend` and snapshot `_value` are `inline`.
-`--emit-protocol-source <dir>` writes each protocol's generated source as
+`--generate protocol-source <dir>` writes each protocol's generated source as
 `<dir>/<Name>.tkb` and exits, so a diagnostic that points into `<protocol
 Name>` can be read against it; only the declaration is validated.
 
@@ -4594,7 +4594,7 @@ that no other code can split:
   holds every cell from its initial state on. `make modelcheck` checks
   `TxTransfer`, `RxTransfer` and `PacketBuffer` under
   `kernel/models/protocols/`, and as fault controls their models emitted
-  with `--emit-tla-omit-cache publish` or `finish`, which leave that step
+  with `--internal-tla-omit-cache publish` or `finish`, which leave that step
   out of the model only (the generator always emits it); a control that
   would leave nothing out is an error. A `snapshot` observation (GitHub
   issue #801) is one model step per held cell: the generated per-element

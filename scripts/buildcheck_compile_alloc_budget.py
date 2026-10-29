@@ -6,7 +6,7 @@ the QEMU main.o compile went from 53 GB allocated (about 6.6e9 words) to
 7.2 GB. Quadratic list scans have no lintable shape (check_text_search.py
 catches only the substring-search one), so this holds the result instead.
 The compiler writes the words it allocated on the OCaml heap
-(`--emit-alloc-words`, Gc.allocated_bytes at exit). Unlike wall or CPU time
+(`--facts allocwords`, Gc.allocated_bytes at exit). Unlike wall or CPU time
 that number does not depend on host load: the same sources and compiler give
 the same count, so the check needs no reference run and costs nothing beyond
 the compile the build already does.

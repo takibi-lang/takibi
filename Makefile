@@ -239,9 +239,9 @@ regions-flag-control: build
 .PHONY: effect-matrix-control
 effect-matrix-control: build
 	@tmp=`mktemp`; trap 'rm -f "$$tmp"' EXIT; \
-	$(NICE_HEAVY) $(TAKIBI) --emit-effect-matrix > "$$tmp"; \
+	$(NICE_HEAVY) $(TAKIBI) --generate effects > "$$tmp"; \
 	if ! cmp -s EFFECTS.md "$$tmp"; then \
-		echo "FAIL effect-matrix-control: EFFECTS.md is stale; regenerate with $(TAKIBI) --emit-effect-matrix" >&2; \
+		echo "FAIL effect-matrix-control: EFFECTS.md is stale; regenerate with $(TAKIBI) --generate effects" >&2; \
 		diff -u EFFECTS.md "$$tmp" >&2 || true; exit 1; \
 	fi; \
 	echo "PASS effect-matrix-control: EFFECTS.md matches compiler effect rules"
@@ -253,9 +253,9 @@ effect-matrix-control: build
 .PHONY: language-words-control
 language-words-control: build
 	@tmp=`mktemp`; trap 'rm -f "$$tmp"' EXIT; \
-	$(NICE_HEAVY) $(TAKIBI) --emit-doc words > "$$tmp"; \
+	$(NICE_HEAVY) $(TAKIBI) --generate words > "$$tmp"; \
 	if ! cmp -s WORDS.md "$$tmp"; then \
-		echo "FAIL language-words-control: WORDS.md is stale; regenerate with $(TAKIBI) --emit-doc words > WORDS.md" >&2; \
+		echo "FAIL language-words-control: WORDS.md is stale; regenerate with $(TAKIBI) --generate words > WORDS.md" >&2; \
 		diff -u WORDS.md "$$tmp" >&2 || true; exit 1; \
 	fi; \
 	echo "PASS language-words-control: WORDS.md matches lib/language_words.ml"
@@ -263,9 +263,9 @@ language-words-control: build
 .PHONY: cli-flags-control
 cli-flags-control: build
 	@tmp=`mktemp`; trap 'rm -f "$$tmp"' EXIT; \
-	$(NICE_HEAVY) $(TAKIBI) --emit-doc cli > "$$tmp"; \
+	$(NICE_HEAVY) $(TAKIBI) --generate cli > "$$tmp"; \
 	if ! cmp -s CLI.md "$$tmp"; then \
-		echo "FAIL cli-flags-control: CLI.md is stale; regenerate with $(TAKIBI) --emit-doc cli > CLI.md" >&2; \
+		echo "FAIL cli-flags-control: CLI.md is stale; regenerate with $(TAKIBI) --generate cli > CLI.md" >&2; \
 		diff -u CLI.md "$$tmp" >&2 || true; exit 1; \
 	fi; \
 	echo "PASS cli-flags-control: CLI.md matches the flag table in bin/main.ml"
@@ -1012,7 +1012,7 @@ KERNEL_RPI5_USER_EXTERN  := $(KERNEL_DIR)/arch/arm64/kernel/user_entry_extern.tk
 KERNEL_RPI5_EXC_CONTEXT := $(KERNEL_DIR)/arch/arm64/kernel/exception_context.inc
 # Generated (GitHub issue #286, gitignored) -- offset constants only,
 # `.include`d by the hand-written file above. Emitted by $(TAKIBI)'s own
-# --emit-exception-frame-offsets flag (see the file rule below), not a
+# frame-offsets.inc fact (takibi --facts; see the file rule below), not a
 # separate script.
 KERNEL_EXC_CONTEXT_OFFSETS := $(KERNEL_DIR)/arch/arm64/kernel/exception_context_offsets.inc
 KERNEL_CRASH_SNAPSHOT_LAYOUT := _build/kernel-crash-snapshot-layout.gdb
@@ -1517,8 +1517,8 @@ $(KERNEL_RPI5_CACHE_GEOMETRY_O): $(KERNEL_CACHE_GEOMETRY_S) | $(KERNEL_BUILD_DIR
 KERNEL_RAW_DEREF_DEPS := Makefile scripts/measure_trusted_base.py scripts/raw_deref_budget.tsv
 
 define KERNEL_EL0_COMPILE
-	$(NICE_HEAVY) $(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions $(foreach entry,$(1),--external-entry $(entry)) --emit-depfile $@.d --emit-raw-deref-audit $@.rawderef.tsv --emit-call-graph $@.callgraph.tsv -o $@
-	python3 scripts/measure_trusted_base.py --check-raw-deref el0 $@.rawderef.tsv $@.d
+	$(NICE_HEAVY) $(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions $(foreach entry,$(1),--external-entry $(entry)) --facts $@.facts -o $@
+	python3 scripts/measure_trusted_base.py --check-raw-deref el0 $@.facts/rawderef.tsv $@.facts/deps.d
 endef
 
 # GitHub issue #241: the EL0 syscall-ABI test payload, compiled/linked
@@ -1573,7 +1573,7 @@ $(KERNEL_SIGNAL_CONFORMANCE_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERN
 $(KERNEL_BUSY_LOOP_O): $(KERNEL_BUSY_LOOP_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
 	$(call KERNEL_EL0_COMPILE,busy_loop_a busy_loop_b busy_loop_placement_report busy_loop_placement_guard busy_loop_peer_spin busy_loop_peer_net_wake)
 
--include $(KERNEL_BUSY_LOOP_O).d
+-include $(KERNEL_BUSY_LOOP_O).facts/deps.d
 
 $(KERNEL_BUSY_LOOP_A_ELF): $(KERNEL_BUSY_LOOP_O)
 	$(LLD) -pie --no-dynamic-linker -e busy_loop_a $< -o $@
@@ -1602,7 +1602,7 @@ $(KERNEL_BUSY_LOOP_PEER_NET_WAKE_ELF): $(KERNEL_BUSY_LOOP_O)
 $(KERNEL_PEER_READ_O): $(KERNEL_PEER_READ_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
 	$(call KERNEL_EL0_COMPILE,peer_read core_read peer_console peer_tty)
 
--include $(KERNEL_PEER_READ_O).d
+-include $(KERNEL_PEER_READ_O).facts/deps.d
 
 $(KERNEL_PEER_READ_ELF): $(KERNEL_PEER_READ_O)
 	$(LLD) -pie --no-dynamic-linker -e peer_read $< -o $@
@@ -1623,7 +1623,7 @@ $(KERNEL_PEER_TTY_ELF): $(KERNEL_PEER_READ_O)
 $(KERNEL_PEER_SETTINGS_O): $(KERNEL_PEER_SETTINGS_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
 	$(call KERNEL_EL0_COMPILE,peer_settings)
 
--include $(KERNEL_PEER_SETTINGS_O).d
+-include $(KERNEL_PEER_SETTINGS_O).facts/deps.d
 
 $(KERNEL_PEER_SETTINGS_ELF): $(KERNEL_PEER_SETTINGS_O)
 	$(LLD) -pie --no-dynamic-linker -e peer_settings $< -o $@
@@ -1632,7 +1632,7 @@ $(KERNEL_PEER_SETTINGS_ELF): $(KERNEL_PEER_SETTINGS_O)
 $(KERNEL_CLOEXEC_O): $(KERNEL_CLOEXEC_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
 	$(call KERNEL_EL0_COMPILE,cloexec_probe cloexec_check)
 
--include $(KERNEL_CLOEXEC_O).d
+-include $(KERNEL_CLOEXEC_O).facts/deps.d
 
 $(KERNEL_CLOEXEC_ELF): $(KERNEL_CLOEXEC_O)
 	$(LLD) -pie --no-dynamic-linker -e cloexec_probe $< -o $@
@@ -1645,7 +1645,7 @@ $(KERNEL_CLOEXEC_CHECK_ELF): $(KERNEL_CLOEXEC_O)
 $(KERNEL_PPOLL_PROBE_O): $(KERNEL_PPOLL_PROBE_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
 	$(call KERNEL_EL0_COMPILE,ppoll_probe)
 
--include $(KERNEL_PPOLL_PROBE_O).d
+-include $(KERNEL_PPOLL_PROBE_O).facts/deps.d
 
 $(KERNEL_PPOLL_PROBE_ELF): $(KERNEL_PPOLL_PROBE_O)
 	$(LLD) -pie --no-dynamic-linker -e ppoll_probe $< -o $@
@@ -1654,7 +1654,7 @@ $(KERNEL_PPOLL_PROBE_ELF): $(KERNEL_PPOLL_PROBE_O)
 $(KERNEL_PIPE_PROBE_O): $(KERNEL_PIPE_PROBE_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
 	$(call KERNEL_EL0_COMPILE,pipe_probe pipe_cloexec_check)
 
--include $(KERNEL_PIPE_PROBE_O).d
+-include $(KERNEL_PIPE_PROBE_O).facts/deps.d
 
 $(KERNEL_PIPE_PROBE_ELF): $(KERNEL_PIPE_PROBE_O)
 	$(LLD) -pie --no-dynamic-linker -e pipe_probe $< -o $@
@@ -1667,7 +1667,7 @@ $(KERNEL_PIPE_CLOEXEC_CHECK_ELF): $(KERNEL_PIPE_PROBE_O)
 $(KERNEL_AFFINITY_O): $(KERNEL_AFFINITY_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
 	$(call KERNEL_EL0_COMPILE,affinity_probe)
 
--include $(KERNEL_AFFINITY_O).d
+-include $(KERNEL_AFFINITY_O).facts/deps.d
 
 $(KERNEL_AFFINITY_ELF): $(KERNEL_AFFINITY_O)
 	$(LLD) -pie --no-dynamic-linker -e affinity_probe $< -o $@
@@ -1676,7 +1676,7 @@ $(KERNEL_AFFINITY_ELF): $(KERNEL_AFFINITY_O)
 $(KERNEL_SPREAD_O): $(KERNEL_SPREAD_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
 	$(call KERNEL_EL0_COMPILE,spread_probe)
 
--include $(KERNEL_SPREAD_O).d
+-include $(KERNEL_SPREAD_O).facts/deps.d
 
 $(KERNEL_SPREAD_ELF): $(KERNEL_SPREAD_O)
 	$(LLD) -pie --no-dynamic-linker -e spread_probe $< -o $@
@@ -1685,7 +1685,7 @@ $(KERNEL_SPREAD_ELF): $(KERNEL_SPREAD_O)
 $(KERNEL_MOVECOST_O): $(KERNEL_MOVECOST_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
 	$(call KERNEL_EL0_COMPILE,movecost_probe)
 
--include $(KERNEL_MOVECOST_O).d
+-include $(KERNEL_MOVECOST_O).facts/deps.d
 
 $(KERNEL_MOVECOST_ELF): $(KERNEL_MOVECOST_O)
 	$(LLD) -pie --no-dynamic-linker -e movecost_probe $< -o $@
@@ -1694,7 +1694,7 @@ $(KERNEL_MOVECOST_ELF): $(KERNEL_MOVECOST_O)
 $(KERNEL_PEER_MUTATE_O): $(KERNEL_PEER_MUTATE_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
 	$(call KERNEL_EL0_COMPILE,peer_mutate)
 
--include $(KERNEL_PEER_MUTATE_O).d
+-include $(KERNEL_PEER_MUTATE_O).facts/deps.d
 
 $(KERNEL_PEER_MUTATE_ELF): $(KERNEL_PEER_MUTATE_O)
 	$(LLD) -pie --no-dynamic-linker -e peer_mutate $< -o $@
@@ -1703,7 +1703,7 @@ $(KERNEL_PEER_MUTATE_ELF): $(KERNEL_PEER_MUTATE_O)
 $(KERNEL_PROTOCOL_TRACE_O): $(KERNEL_PROTOCOL_TRACE_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
 	$(call KERNEL_EL0_COMPILE,protocol_trace_probe)
 
--include $(KERNEL_PROTOCOL_TRACE_O).d
+-include $(KERNEL_PROTOCOL_TRACE_O).facts/deps.d
 
 $(KERNEL_PROTOCOL_TRACE_ELF): $(KERNEL_PROTOCOL_TRACE_O)
 	$(LLD) -pie --no-dynamic-linker -e protocol_trace_probe $< -o $@
@@ -1712,7 +1712,7 @@ $(KERNEL_PROTOCOL_TRACE_ELF): $(KERNEL_PROTOCOL_TRACE_O)
 $(KERNEL_PEER_EXEC_O): $(KERNEL_PEER_EXEC_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
 	$(call KERNEL_EL0_COMPILE,peer_exec peer_exec_image)
 
--include $(KERNEL_PEER_EXEC_O).d
+-include $(KERNEL_PEER_EXEC_O).facts/deps.d
 
 $(KERNEL_PEER_EXEC_ELF): $(KERNEL_PEER_EXEC_O)
 	$(LLD) -pie --no-dynamic-linker -e peer_exec $< -o $@
@@ -1725,7 +1725,7 @@ $(KERNEL_PEER_EXEC_IMAGE_ELF): $(KERNEL_PEER_EXEC_O)
 $(KERNEL_TERMINAL_O): $(KERNEL_TERMINAL_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
 	$(call KERNEL_EL0_COMPILE,terminal_probe)
 
--include $(KERNEL_TERMINAL_O).d
+-include $(KERNEL_TERMINAL_O).facts/deps.d
 
 $(KERNEL_TERMINAL_ELF): $(KERNEL_TERMINAL_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O)
 	$(LLD) -pie --no-dynamic-linker -e terminal_probe $^ -o $@
@@ -1734,7 +1734,7 @@ $(KERNEL_TERMINAL_ELF): $(KERNEL_TERMINAL_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O)
 $(KERNEL_SESSION_O): $(KERNEL_SESSION_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
 	$(call KERNEL_EL0_COMPILE,session_probe session_check)
 
--include $(KERNEL_SESSION_O).d
+-include $(KERNEL_SESSION_O).facts/deps.d
 
 $(KERNEL_SESSION_ELF): $(KERNEL_SESSION_O)
 	$(LLD) -pie --no-dynamic-linker -e session_probe $< -o $@
@@ -1747,7 +1747,7 @@ $(KERNEL_SESSION_CHECK_ELF): $(KERNEL_SESSION_O)
 $(KERNEL_NESTED_EXEC_O): $(KERNEL_NESTED_EXEC_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
 	$(call KERNEL_EL0_COMPILE,nested_exec_probe nested_exec_wrong_image)
 
--include $(KERNEL_NESTED_EXEC_O).d
+-include $(KERNEL_NESTED_EXEC_O).facts/deps.d
 
 $(KERNEL_NESTED_EXEC_ELF): $(KERNEL_NESTED_EXEC_O)
 	$(LLD) -pie --no-dynamic-linker -e nested_exec_probe $< -o $@
@@ -1760,7 +1760,7 @@ $(KERNEL_NESTED_WRONG_IMAGE_ELF): $(KERNEL_NESTED_EXEC_O)
 $(KERNEL_EXEC_ENOMEM_O): $(KERNEL_EXEC_ENOMEM_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
 	$(call KERNEL_EL0_COMPILE,exec_enomem_cpu0 exec_enomem_cpu1)
 
--include $(KERNEL_EXEC_ENOMEM_O).d
+-include $(KERNEL_EXEC_ENOMEM_O).facts/deps.d
 
 $(KERNEL_BUILD_DIR)/exec_enomem_cpu%.elf: $(KERNEL_EXEC_ENOMEM_O)
 	$(LLD) -pie --no-dynamic-linker -e exec_enomem_cpu$* $< -o $@
@@ -1769,7 +1769,7 @@ $(KERNEL_BUILD_DIR)/exec_enomem_cpu%.elf: $(KERNEL_EXEC_ENOMEM_O)
 $(KERNEL_SIGNAL_BOUNDARY_O): $(KERNEL_SIGNAL_BOUNDARY_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
 	$(call KERNEL_EL0_COMPILE,signal_boundary_probe signal_terminal_probe signal_terminal_skip)
 
--include $(KERNEL_SIGNAL_BOUNDARY_O).d
+-include $(KERNEL_SIGNAL_BOUNDARY_O).facts/deps.d
 
 $(KERNEL_SIGNAL_BOUNDARY_ASM_O): $(KERNEL_DIR)/arch/arm64/kernel/signal_boundary_asm.S | $(KERNEL_BUILD_DIR)
 	$(LLVM_MC) -triple=$(RPI5_TARGET) -filetype=obj $< -o $@
@@ -1789,12 +1789,12 @@ $(KERNEL_SIGNAL_TERMINAL_SKIP_ELF): $(KERNEL_SIGNAL_BOUNDARY_O) $(KERNEL_SIGNAL_
 $(KERNEL_PEER_FORK_O): $(KERNEL_PEER_FORK_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
 	$(call KERNEL_EL0_COMPILE,peer_fork)
 
--include $(KERNEL_PEER_FORK_O).d
+-include $(KERNEL_PEER_FORK_O).facts/deps.d
 
 $(KERNEL_PEER_SLEEP_O): $(KERNEL_PEER_SLEEP_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
 	$(call KERNEL_EL0_COMPILE,peer_sleep)
 
--include $(KERNEL_PEER_SLEEP_O).d
+-include $(KERNEL_PEER_SLEEP_O).facts/deps.d
 
 $(KERNEL_PEER_FORK_ELF): $(KERNEL_PEER_FORK_O)
 	$(LLD) -pie --no-dynamic-linker -e peer_fork $< -o $@
@@ -1808,7 +1808,7 @@ $(KERNEL_PEER_SLEEP_ELF): $(KERNEL_PEER_SLEEP_O)
 $(KERNEL_HANG_CORE_O): $(KERNEL_HANG_CORE_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
 	$(call KERNEL_EL0_COMPILE,hang_core)
 
--include $(KERNEL_HANG_CORE_O).d
+-include $(KERNEL_HANG_CORE_O).facts/deps.d
 
 $(KERNEL_HANG_CORE_ELF): $(KERNEL_HANG_CORE_O)
 	$(LLD) -pie --no-dynamic-linker -e hang_core $< -o $@
@@ -1816,20 +1816,20 @@ $(KERNEL_HANG_CORE_ELF): $(KERNEL_HANG_CORE_O)
 
 $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_EXT2_MUTATION_LOCK_TKB) $(KERNEL_EXT2_MUTATION_PROBE_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_PMU_EXTERN) $(KERNEL_CACHE_GEOMETRY_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_RPI5_MEMORY_TKB) $(KERNEL_FDT_TKB) \
     $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_INTC_TKB) $(KERNEL_RPI5_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile | $(KERNEL_BUILD_DIR)
-	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $< $(KERNEL_RPI5_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_EXECUTION_MODEL) $(KERNEL_UNUSED_CHECK_RPI5) --emit-depfile $@.d --emit-raw-deref-audit $@.rawderef.tsv --emit-raw-site-counts $@.rawsites.tsv --emit-call-graph $@.callgraph.tsv --emit-globals $@.globals.tsv --emit-range-obligations $@.rangeobl -o $@
-	python3 scripts/buildcheck_kernel_unused_coverage.py rpi5 $@.d
-	python3 scripts/buildcheck_ext2_mutation_guard.py $@.callgraph.tsv
-	python3 scripts/buildcheck_ext2_reader_self_wait.py $@.callgraph.tsv
-	python3 scripts/buildcheck_ext2_release_log.py $@.callgraph.tsv
-	python3 scripts/buildcheck_allowed_callers.py $@.callgraph.tsv
-	python3 scripts/buildcheck_world_stop_rank.py $@.callgraph.tsv
+	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $< $(KERNEL_RPI5_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_EXECUTION_MODEL) $(KERNEL_UNUSED_CHECK_RPI5) --facts $@.facts -o $@
+	python3 scripts/buildcheck_kernel_unused_coverage.py rpi5 $@.facts/deps.d
+	python3 scripts/buildcheck_ext2_mutation_guard.py $@.facts/callgraph.tsv
+	python3 scripts/buildcheck_ext2_reader_self_wait.py $@.facts/callgraph.tsv
+	python3 scripts/buildcheck_ext2_release_log.py $@.facts/callgraph.tsv
+	python3 scripts/buildcheck_allowed_callers.py $@.facts/callgraph.tsv
+	python3 scripts/buildcheck_world_stop_rank.py $@.facts/callgraph.tsv
 	python3 scripts/buildcheck_frame_size.py $@
-	$(NICE_HEAVY) python3 scripts/buildcheck_range_obligations.py $@.rangeobl
-	python3 scripts/measure_trusted_base.py --check-raw-deref rpi5 $@.rawderef.tsv $@.d
+	$(NICE_HEAVY) python3 scripts/buildcheck_range_obligations.py $@.facts/rangeobl
+	python3 scripts/measure_trusted_base.py --check-raw-deref rpi5 $@.facts/rawderef.tsv $@.facts/deps.d
 
 # GitHub issue #306: same depfile fix as $(KERNEL_QEMU_MAIN_O)'s own, for
 # this target's own hand-written prerequisite list above.
--include $(KERNEL_RPI5_MAIN_O).d
+-include $(KERNEL_RPI5_MAIN_O).facts/deps.d
 
 $(KERNEL_RPI5_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_RPI5_LINK_LD) $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $(KERNEL_RPI5_MAIN_O) -o $@ $(KERNEL_GC_LIST)
@@ -1849,20 +1849,20 @@ $(KERNEL_RPI5_SHELL_ELF): $(KERNEL_RPI5_ELF) $(KERNEL_EXT2_IMAGE) \
 # ordinary image, with DWARF added only to the host ELF. Depending on main.o
 # gives this second compile its complete depfile-backed source boundary.
 $(KERNEL_RPI5_MAIN_DEBUG_O): $(KERNEL_RPI5_MAIN_O)
-	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_RPI5_COMPILE_FLAGS) $(KERNEL_UNUSED_CHECK_RPI5) -g --emit-depfile $@.d -o $@
-	python3 scripts/buildcheck_kernel_unused_coverage.py rpi5 $@.d
+	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_RPI5_COMPILE_FLAGS) $(KERNEL_UNUSED_CHECK_RPI5) -g --facts $@.facts -o $@
+	python3 scripts/buildcheck_kernel_unused_coverage.py rpi5 $@.facts/deps.d
 	python3 scripts/buildcheck_frame_size.py $@
 
--include $(KERNEL_RPI5_MAIN_DEBUG_O).d
+-include $(KERNEL_RPI5_MAIN_DEBUG_O).facts/deps.d
 
 $(KERNEL_RPI5_DEBUG_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $(KERNEL_RPI5_MAIN_DEBUG_O) $(KERNEL_RPI5_LINK_LD) $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $(KERNEL_RPI5_MAIN_DEBUG_O) -o $@
 	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 2
 	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool_cell 16
 
-$(KERNEL_RPI5_DEBUG_METADATA): $(KERNEL_RPI5_MAIN_O) $(TAKIBI)
+$(KERNEL_RPI5_DEBUG_METADATA): $(KERNEL_RPI5_MAIN_O)
 	@mkdir -p $(dir $@)
-	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_RPI5_COMPILE_FLAGS) --emit-debug-metadata $@
+	cp $(KERNEL_RPI5_MAIN_O).facts/debug-metadata.json $@
 
 # -- QEMU/AArch64 (GitHub issue #237) -----------------------------------------
 # Reuses the same aarch64-none-elf triple as RPi5 (no --cpu passed to
@@ -1958,23 +1958,23 @@ $(KERNEL_QEMU_CACHE_GEOMETRY_O): $(KERNEL_CACHE_GEOMETRY_S) | $(KERNEL_QEMU_BUIL
 # duplicate top-level definition is a compile error by design.
 $(KERNEL_QEMU_MAIN_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_EXT2_MUTATION_LOCK_TKB) $(KERNEL_EXT2_MUTATION_PROBE_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_PMU_EXTERN) $(KERNEL_CACHE_GEOMETRY_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_FDT_TKB) \
     $(KERNEL_QEMU_UART_TKB) $(KERNEL_QEMU_INTC_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile | $(KERNEL_QEMU_BUILD_DIR)
-	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< $(KERNEL_QEMU_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_EXECUTION_MODEL) $(KERNEL_UNUSED_CHECK_QEMU) --emit-depfile $@.d --emit-raw-deref-audit $@.rawderef.tsv --emit-raw-site-counts $@.rawsites.tsv --emit-call-graph $@.callgraph.tsv --emit-globals $@.globals.tsv --emit-alloc-words $@.allocwords --emit-range-obligations $@.rangeobl -o $@
-	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.d
-	python3 scripts/buildcheck_ext2_mutation_guard.py $@.callgraph.tsv
-	python3 scripts/buildcheck_ext2_reader_self_wait.py $@.callgraph.tsv
-	python3 scripts/buildcheck_ext2_release_log.py $@.callgraph.tsv
-	python3 scripts/buildcheck_allowed_callers.py $@.callgraph.tsv
-	python3 scripts/buildcheck_world_stop_rank.py $@.callgraph.tsv
+	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< $(KERNEL_QEMU_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_EXECUTION_MODEL) $(KERNEL_UNUSED_CHECK_QEMU) --facts $@.facts -o $@
+	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.facts/deps.d
+	python3 scripts/buildcheck_ext2_mutation_guard.py $@.facts/callgraph.tsv
+	python3 scripts/buildcheck_ext2_reader_self_wait.py $@.facts/callgraph.tsv
+	python3 scripts/buildcheck_ext2_release_log.py $@.facts/callgraph.tsv
+	python3 scripts/buildcheck_allowed_callers.py $@.facts/callgraph.tsv
+	python3 scripts/buildcheck_world_stop_rank.py $@.facts/callgraph.tsv
 	python3 scripts/buildcheck_frame_size.py $@
-	$(NICE_HEAVY) python3 scripts/buildcheck_range_obligations.py $@.rangeobl
-	python3 scripts/buildcheck_compile_alloc_budget.py qemu $@.allocwords
-	python3 scripts/measure_trusted_base.py --check-raw-deref qemu $@.rawderef.tsv $@.d
+	$(NICE_HEAVY) python3 scripts/buildcheck_range_obligations.py $@.facts/rangeobl
+	python3 scripts/buildcheck_compile_alloc_budget.py qemu $@.facts/allocwords
+	python3 scripts/measure_trusted_base.py --check-raw-deref qemu $@.facts/rawderef.tsv $@.facts/deps.d
 
 # Issue #587 negative control: the same QEMU source closure, with only the
 # NetRx scan moved before its process-run lock in the generated overlay.
 $(KERNEL_QEMU_NET_WAKE_CONTROL_O): $(KERNEL_QEMU_MAIN_O) $(KERNEL_PROCESS_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) $(KERNEL_DIR)/arch/arm64/kernel/secondary.tkb scripts/build_qemu_net_wake_control.py | $(KERNEL_QEMU_BUILD_DIR)
 	python3 scripts/build_qemu_net_wake_control.py . $(KERNEL_QEMU_NET_WAKE_CONTROL_DIR)
-	cd $(KERNEL_QEMU_NET_WAKE_CONTROL_DIR) && $(NICE_HEAVY) $(abspath $(TAKIBI)) kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb kernel/platform/qemu/usb_disk_absent.tkb kernel/platform/qemu/mmu_layout.tkb kernel/boot/fdt.tkb kernel/platform/qemu/memory.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/block/virtio_blk.tkb kernel/platform/qemu/init.tkb $(KERNEL_QEMU_COMPILE_FLAGS) $(KERNEL_UNUSED_CHECK_QEMU) --emit-depfile $(abspath $@).d -o $(abspath $@)
+	cd $(KERNEL_QEMU_NET_WAKE_CONTROL_DIR) && $(NICE_HEAVY) $(abspath $(TAKIBI)) kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb kernel/platform/qemu/usb_disk_absent.tkb kernel/platform/qemu/mmu_layout.tkb kernel/boot/fdt.tkb kernel/platform/qemu/memory.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/block/virtio_blk.tkb kernel/platform/qemu/init.tkb $(KERNEL_QEMU_COMPILE_FLAGS) $(KERNEL_UNUSED_CHECK_QEMU) --facts $(abspath $@).facts -o $(abspath $@)
 
 $(KERNEL_QEMU_BUILD_DIR)/race-%-armed-main.o: $(KERNEL_QEMU_MAIN_O) scripts/build_qemu_race_window.py | $(KERNEL_QEMU_BUILD_DIR)
 	python3 scripts/build_qemu_race_window.py . _build/qemu-race-window-$*-armed $*
@@ -1996,14 +1996,14 @@ $(KERNEL_QEMU_NET_WAKE_CONTROL_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_E
 # compiler's own `use` resolution (issue #55/#95 Part A) already computes
 # correctly on every invocation -- it drifted once already (issue #305's
 # kernel/kernel/fd_table.tkb was reachable only transitively and missing
-# from that list, so Make silently kept a stale kernel.elf). --emit-depfile
-# above writes the real, complete closure to $(KERNEL_QEMU_MAIN_O).d in
+# from that list, so Make silently kept a stale kernel.elf). --facts
+# above writes the real, complete closure to $(KERNEL_QEMU_MAIN_O).facts/deps.d in
 # gcc -MMD/-MF's Makefile-fragment format; -include-ing it here makes
 # Make's own staleness check as accurate as the compiler's. `-include`
 # (not `include`) so a missing .d file on a clean checkout is silently
 # skipped rather than a hard error, matching this convention's standard
 # clean-build bootstrap behavior.
--include $(KERNEL_QEMU_MAIN_O).d
+-include $(KERNEL_QEMU_MAIN_O).facts/deps.d
 
 $(KERNEL_QEMU_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_MAIN_O) $(KERNEL_QEMU_LINK_LD) $(KERNEL_RPI5_LINK_LD)
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_MAIN_O) -o $@ $(KERNEL_GC_LIST)
@@ -2024,32 +2024,24 @@ kernelbuild-qemu: build
 # Compiler-owned names for integer diagnostic ABI fields plus target-aware
 # closed-variant layout and return ABI. This is a host sidecar only: it is not
 # linked into the kernel and therefore adds no production runtime data or
-# instructions. The main object dependency gives this second compiler
-# invocation the same source staleness boundary without adding another
-# hand-maintained prerequisite list.
+# instructions. These and the debugger layouts below are copies of main.o's
+# own fact files (takibi --facts, GitHub issue #1027 step 2), so they have
+# exactly main.o's source staleness boundary and cost no second compile.
 # Console offsets come from LLVM, including the wrapper around atomic words.
-$(KERNEL_CONSOLE_LAYOUT): $(KERNEL_QEMU_MAIN_O) $(TAKIBI)
+$(KERNEL_CONSOLE_LAYOUT): $(KERNEL_QEMU_MAIN_O) scripts/struct_layout_gdb.py
 	@mkdir -p $(dir $@)
-	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_QEMU_COMPILE_FLAGS) --emit-struct-layout KernelLogCoreState -o $@.core
-	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_QEMU_COMPILE_FLAGS) --emit-struct-layout AtomicWord -o $@.atomic
-	cat $@.core $@.atomic > $@.tmp
+	python3 scripts/struct_layout_gdb.py $(KERNEL_QEMU_MAIN_O).facts/structs.tsv KernelLogCoreState AtomicWord > $@.tmp
 	mv $@.tmp $@
-	rm $@.core $@.atomic
 
 # Churn debugger layouts are host-only and track the compiled source.
-_build/kernel-churn-layout.gdb: $(KERNEL_QEMU_MAIN_O) $(TAKIBI)
+_build/kernel-churn-layout.gdb: $(KERNEL_QEMU_MAIN_O) scripts/struct_layout_gdb.py
 	@mkdir -p $(dir $@)
-	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_QEMU_COMPILE_FLAGS) --emit-struct-layout AsidState -o $@.0
-	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_QEMU_COMPILE_FLAGS) --emit-struct-layout 'LockedCell$$AsidState' -o $@.1
-	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_QEMU_COMPILE_FLAGS) --emit-struct-layout Mutex -o $@.2
-	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_QEMU_COMPILE_FLAGS) --emit-struct-layout WorldStop -o $@.3
-	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_QEMU_COMPILE_FLAGS) --emit-struct-layout AtomicWord -o $@.4
-	cat $@.0 $@.1 $@.2 $@.3 $@.4 > $@.tmp
+	python3 scripts/struct_layout_gdb.py $(KERNEL_QEMU_MAIN_O).facts/structs.tsv AsidState 'LockedCell$$AsidState' Mutex WorldStop AtomicWord > $@.tmp
 	mv $@.tmp $@
-	rm $@.0 $@.1 $@.2 $@.3 $@.4
 
-$(KERNEL_DEBUG_METADATA): $(KERNEL_QEMU_MAIN_O) $(TAKIBI)
-	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_QEMU_COMPILE_FLAGS) --emit-debug-metadata $@
+$(KERNEL_DEBUG_METADATA): $(KERNEL_QEMU_MAIN_O)
+	@mkdir -p $(dir $@)
+	cp $(KERNEL_QEMU_MAIN_O).facts/debug-metadata.json $@
 
 # Debug variant: identical inputs to $(KERNEL_QEMU_MAIN_O)/$(KERNEL_QEMU_ELF)
 # above, just with -g added, so GDB would get real DWARF type info --
@@ -2064,13 +2056,13 @@ KERNEL_QEMU_DEBUG_ELF    := $(KERNEL_QEMU_BUILD_DIR)/kernel-debug.elf
 
 $(KERNEL_QEMU_MAIN_DEBUG_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_EXT2_MUTATION_LOCK_TKB) $(KERNEL_EXT2_MUTATION_PROBE_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_PMU_EXTERN) $(KERNEL_CACHE_GEOMETRY_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_FDT_TKB) \
     $(KERNEL_QEMU_UART_TKB) $(KERNEL_QEMU_INTC_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile | $(KERNEL_QEMU_BUILD_DIR)
-	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< $(KERNEL_QEMU_COMPILE_FLAGS) $(KERNEL_UNUSED_CHECK_QEMU) -g --emit-depfile $@.d -o $@
-	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.d
+	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< $(KERNEL_QEMU_COMPILE_FLAGS) $(KERNEL_UNUSED_CHECK_QEMU) -g --facts $@.facts -o $@
+	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.facts/deps.d
 	python3 scripts/buildcheck_frame_size.py $@
 
 # GitHub issue #306: same depfile fix as $(KERNEL_QEMU_MAIN_O)'s own, for
 # this target's own hand-written prerequisite list above.
--include $(KERNEL_QEMU_MAIN_DEBUG_O).d
+-include $(KERNEL_QEMU_MAIN_DEBUG_O).facts/deps.d
 
 $(KERNEL_QEMU_DEBUG_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_MAIN_DEBUG_O) $(KERNEL_QEMU_LINK_LD) $(KERNEL_RPI5_LINK_LD)
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_MAIN_DEBUG_O) -o $@
@@ -2127,33 +2119,30 @@ kernel-lib-check:
 # entry/exception_restore codegen. That duplication caused a real bug (a
 # q0-specific alignment step this Python reimplementation added but the
 # compiler's own algorithm never had -- see HISTORY.md's 2026-08-13 entry).
-# The compiler's `--emit-exception-frame-offsets <StructName>` flag now
+# The compiler's frame-offsets.inc fact (takibi --facts; it was the
+# --facts frame-offsets.inc flag until GitHub issue #1027 step 2)
 # dumps the SAME computation exception_entry/exception_restore already use
 # internally, as GAS `.equ` constants, so there is exactly one
 # implementation of "how to lay out this struct" left, not two kept in
 # sync by hand. This still only ever writes offset constants, never
 # hand-written assembly macro bodies (those remain the ordinary,
 # git-tracked exception_context.inc) -- so there is still no placeholder/
-# fallback path that could silently emit broken assembly.
-$(KERNEL_EXC_CONTEXT_OFFSETS): $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(KERNEL_EXT2_IMAGE) $(TAKIBI)
-	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_QEMU_COMPILE_FLAGS) --emit-exception-frame-offsets ExceptionFrame --emit-depfile $@.d -o $@
-
-# GitHub issue #306: same depfile fix as $(KERNEL_QEMU_MAIN_O)'s own, for
-# this target's own hand-written prerequisite list above.
--include $(KERNEL_EXC_CONTEXT_OFFSETS).d
-
-$(KERNEL_CRASH_SNAPSHOT_LAYOUT): $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_EXT2_IMAGE) $(TAKIBI)
-	@mkdir -p $(dir $@)
-	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_QEMU_COMPILE_FLAGS) --emit-struct-layout CrashSnapshot --emit-depfile $@.d -o $@
+# fallback path that could silently emit broken assembly. It is a copy of
+# QEMU main.o's fact, so main.o's depfile is its staleness boundary.
+$(KERNEL_EXC_CONTEXT_OFFSETS): $(KERNEL_QEMU_MAIN_O)
+	cp $(KERNEL_QEMU_MAIN_O).facts/frame-offsets.inc $@
 
 # GitHub issue #306, hit again live while adding CrashSnapshot fields
-# (issue #294): this target's own hand-written prerequisite list above
-# does not include kernel/arch/arm64/kernel/exception_evidence.tkb --
-# the file CrashSnapshot is actually DEFINED in -- so a struct-only
-# change there left a stale layout .gdb file in place, and
+# (issue #294): a hand-written prerequisite list that missed
+# kernel/arch/arm64/kernel/exception_evidence.tkb -- the file CrashSnapshot
+# is actually DEFINED in -- left a stale layout .gdb file in place, and
 # kernelcheck-oops-qemu's GDB readback failed against the new binary's
-# real (shifted) field offsets. Same fix as #306's KERNEL_QEMU_MAIN_O.
--include $(KERNEL_CRASH_SNAPSHOT_LAYOUT).d
+# real (shifted) field offsets. Deriving it from main.o's own facts keeps
+# main.o's depfile as the one boundary.
+$(KERNEL_CRASH_SNAPSHOT_LAYOUT): $(KERNEL_QEMU_MAIN_O) scripts/struct_layout_gdb.py
+	@mkdir -p $(dir $@)
+	python3 scripts/struct_layout_gdb.py $(KERNEL_QEMU_MAIN_O).facts/structs.tsv CrashSnapshot > $@.tmp
+	mv $@.tmp $@
 
 ## Verify that exception-frame offsets are consistent and the hand-written
 ## SAVE/RESTORE macros contain real assembly, not placeholder/empty bodies.
@@ -2200,17 +2189,17 @@ kernel-memory-map-check: _kernelbuild-rpi5 _kernelbuild-qemu
 ## either kernel, so the check needs both main.o tables and runs once here.
 ## `make model-map-restamp` rewrites the Reviewed stamps from the same
 ## tables (scripts/checkpoint_rebase.py runs it after a stamp-only conflict).
-MODEL_MAP_TABLES = $(KERNEL_QEMU_MAIN_O).callgraph.tsv $(KERNEL_RPI5_MAIN_O).callgraph.tsv
+MODEL_MAP_TABLES = $(KERNEL_QEMU_MAIN_O).facts/callgraph.tsv $(KERNEL_RPI5_MAIN_O).facts/callgraph.tsv
 MODEL_MAP_STAMP  = $(KERNEL_DIR)/build/model_function_map.ok
 $(MODEL_MAP_STAMP): $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_DIR)/models/README.md $(wildcard $(KERNEL_DIR)/models/*.tla) scripts/buildcheck_model_function_map.py scripts/call_graph_table.py
 	python3 scripts/buildcheck_model_function_map.py $(MODEL_MAP_TABLES)
 	@touch $@
 
 ## Every production `let mut` global's protection, from both kernels'
-## --emit-globals tables (GitHub issue #1012 slice 1, docs/GLOBAL_PROTECTION.md):
+## globals.tsv facts (GitHub issue #1012 slice 1, docs/GLOBAL_PROTECTION.md):
 ## an unprotected global outside scripts/global_protection_allowlist.tsv, or
 ## a stale row there, fails the build.
-GLOBAL_PROTECTION_TABLES = $(KERNEL_QEMU_MAIN_O).globals.tsv $(KERNEL_RPI5_MAIN_O).globals.tsv
+GLOBAL_PROTECTION_TABLES = $(KERNEL_QEMU_MAIN_O).facts/globals.tsv $(KERNEL_RPI5_MAIN_O).facts/globals.tsv
 GLOBAL_PROTECTION_STAMP  = $(KERNEL_DIR)/build/global_protection.ok
 $(GLOBAL_PROTECTION_STAMP): $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O) scripts/buildcheck_global_protection.py scripts/global_protection_allowlist.tsv
 	python3 scripts/buildcheck_global_protection.py $(GLOBAL_PROTECTION_TABLES)
@@ -3039,7 +3028,8 @@ litmuscheck: build
 clean:
 	$(NICE_HEAVY) dune clean
 	find kernel/build -type f \( -name '*.o' -o -name '*.elf' -o -name '*.bin' -o -name '*.img' -o -name '*.d' \) -delete 2>/dev/null || true
-	rm -f kernel/arch/arm64/kernel/exception_context_offsets.inc kernel/arch/arm64/kernel/exception_context_offsets.inc.d
+	find kernel/build -type d -name '*.facts' -prune -exec rm -rf {} + 2>/dev/null || true
+	rm -f kernel/arch/arm64/kernel/exception_context_offsets.inc
 	rm -rf $(LINUX_USER_BUILD_DIR)
 	find $(LINUX_USER_DIR) -type f \( -name '*.o' -o -name '*.exe' \) -delete 2>/dev/null || true
 
@@ -3061,7 +3051,7 @@ KERNEL_EXECUTION_MODEL := --require-execution-model $(abspath kernel/EXECUTION_M
 .PHONY: raw-site-counts
 raw-site-counts: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O)
-	@for o in $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O); do echo "== $$o"; sed 's|$(CURDIR)/||' $$o.rawsites.tsv; done
+	@for o in $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O); do echo "== $$o"; sed 's|$(CURDIR)/||' $$o.facts/rawsites.tsv; done
 # GitHub issue #720 option a: only the files in kernel/DEVICE_SEMANTICS_FILES
 # may declare a device protocol (a region with a tx/rx direction). GitHub
 # issue #796: the compiler rejects a stale entry (a missing file, or a
@@ -3102,9 +3092,9 @@ KERNEL_DMA_ELF := $(KERNEL_QEMU_BUILD_DIR)/kernel-dma-fixture-positive.elf
 # ownership/state branch each. They are available on demand, outside allbuild.
 $(KERNEL_QEMU_BUILD_DIR)/dma-fixture-%.o: $(KERNEL_QEMU_MAIN_O) scripts/build_qemu_dma_fixture.py kernel/tests/qemu/dma/virtio_blk_fixture.tkb Makefile
 	python3 scripts/build_qemu_dma_fixture.py . _build/qemu-dma-fixture-$* $(if $(filter positive,$*),,$*)
-	cd _build/qemu-dma-fixture-$* && $(NICE_HEAVY) $(abspath $(TAKIBI)) $(KERNEL_DMA_SRCS) $(KERNEL_DMA_FLAGS) --emit-depfile $(abspath $@).d --emit-raw-deref-audit $(abspath $@).rawderef.tsv -o $(abspath $@)
-	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.d
-	python3 scripts/measure_trusted_base.py --check-raw-deref qemu $@.rawderef.tsv $@.d
+	cd _build/qemu-dma-fixture-$* && $(NICE_HEAVY) $(abspath $(TAKIBI)) $(KERNEL_DMA_SRCS) $(KERNEL_DMA_FLAGS) --facts $(abspath $@).facts -o $(abspath $@)
+	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.facts/deps.d
+	python3 scripts/measure_trusted_base.py --check-raw-deref qemu $@.facts/rawderef.tsv $@.facts/deps.d
 $(KERNEL_QEMU_BUILD_DIR)/kernel-dma-fixture-%.elf: $(KERNEL_QEMU_BUILD_DIR)/dma-fixture-%.o $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_LINK_LD)
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $< -o $@
 _kernelbuild-dma-qemu: $(KERNEL_DMA_ELF)
@@ -3118,9 +3108,9 @@ KERNEL_INVARIANT_ELF := $(KERNEL_QEMU_BUILD_DIR)/kernel-invariant-fixture.elf
 .PHONY: kernelbuild-invariant-qemu _kernelbuild-invariant-qemu kernelcheck-invariant-qemu
 $(KERNEL_QEMU_BUILD_DIR)/invariant-fixture.o: $(KERNEL_QEMU_MAIN_O) scripts/build_qemu_invariant_fixture.py scripts/build_qemu_dma_fixture.py kernel/tests/qemu/invariant_stop/fixture.tkb Makefile
 	python3 scripts/build_qemu_invariant_fixture.py . _build/qemu-invariant-fixture
-	cd _build/qemu-invariant-fixture && $(NICE_HEAVY) $(abspath $(TAKIBI)) $(KERNEL_DMA_SRCS) $(KERNEL_QEMU_COMPILE_FLAGS) --reject-unused-functions --external-entry main --check-unused-file kernel/tests/qemu/invariant_stop/fixture.tkb --emit-depfile $(abspath $@).d --emit-raw-deref-audit $(abspath $@).rawderef.tsv -o $(abspath $@)
-	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.d
-	python3 scripts/measure_trusted_base.py --check-raw-deref qemu $@.rawderef.tsv $@.d
+	cd _build/qemu-invariant-fixture && $(NICE_HEAVY) $(abspath $(TAKIBI)) $(KERNEL_DMA_SRCS) $(KERNEL_QEMU_COMPILE_FLAGS) --reject-unused-functions --external-entry main --check-unused-file kernel/tests/qemu/invariant_stop/fixture.tkb --facts $(abspath $@).facts -o $(abspath $@)
+	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.facts/deps.d
+	python3 scripts/measure_trusted_base.py --check-raw-deref qemu $@.facts/rawderef.tsv $@.facts/deps.d
 $(KERNEL_INVARIANT_ELF): $(KERNEL_QEMU_BUILD_DIR)/invariant-fixture.o $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_LINK_LD)
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $< -o $@
 	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 1
@@ -3140,9 +3130,9 @@ KERNEL_GEM_TX_ELFS := $(foreach mode,$(KERNEL_GEM_TX_MODES),$(KERNEL_BUILD_DIR)/
 .PHONY: _kernelbuild-gem-tx-rpi5 kernelbuild-gem-tx-rpi5
 $(KERNEL_BUILD_DIR)/gem-tx-fixture-%.o: $(KERNEL_RPI5_MAIN_O) scripts/build_rpi5_gem_tx_fixture.py kernel/tests/rpi5/gem_tx/fixture.tkb kernel/tests/rpi5/gem_tx/irq_fixture.tkb Makefile
 	python3 scripts/build_rpi5_gem_tx_fixture.py . _build/rpi5-gem-tx-$* $*
-	cd _build/rpi5-gem-tx-$* && $(NICE_HEAVY) $(abspath $(TAKIBI)) $(KERNEL_GEM_TX_SRCS) $(KERNEL_GEM_TX_FLAGS) --check-unused-file $(if $(filter irq-%,$*),kernel/tests/rpi5/gem_tx/irq_fixture.tkb,kernel/tests/rpi5/gem_tx/fixture.tkb) --emit-depfile $(abspath $@).d --emit-raw-deref-audit $(abspath $@).rawderef.tsv -o $(abspath $@)
-	python3 scripts/buildcheck_kernel_unused_coverage.py rpi5 $@.d
-	python3 scripts/measure_trusted_base.py --check-raw-deref rpi5 $@.rawderef.tsv $@.d
+	cd _build/rpi5-gem-tx-$* && $(NICE_HEAVY) $(abspath $(TAKIBI)) $(KERNEL_GEM_TX_SRCS) $(KERNEL_GEM_TX_FLAGS) --check-unused-file $(if $(filter irq-%,$*),kernel/tests/rpi5/gem_tx/irq_fixture.tkb,kernel/tests/rpi5/gem_tx/fixture.tkb) --facts $(abspath $@).facts -o $(abspath $@)
+	python3 scripts/buildcheck_kernel_unused_coverage.py rpi5 $@.facts/deps.d
+	python3 scripts/measure_trusted_base.py --check-raw-deref rpi5 $@.facts/rawderef.tsv $@.facts/deps.d
 $(KERNEL_BUILD_DIR)/kernel-gem-tx-fixture-%.elf: $(KERNEL_BUILD_DIR)/gem-tx-fixture-%.o $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $(KERNEL_RPI5_LINK_LD)
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $< -o $@
 _kernelbuild-gem-tx-rpi5: $(KERNEL_GEM_TX_ELFS)

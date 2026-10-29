@@ -5006,7 +5006,7 @@ private fn kernel_process_scheduler_probe_frame_b() -> usize {
 const KERNEL_CRASH_TRACE_EVENTS: usize = 16;
 const KERNEL_PROCESS_TRACE_WORDS_PER_EVENT: usize = 12;
 // Compiler-owned field positions for the flat snapshot ABI. External readers
-// consume these through --emit-debug-metadata rather than repeating the
+// consume these through --facts debug-metadata.json rather than repeating the
 // numeric layout. Keep the kernel's writer and renderers on the same names.
 const KERNEL_PROCESS_TRACE_SEQUENCE_WORD: usize = 0;
 const KERNEL_PROCESS_TRACE_CPU_WORD: usize = 1;

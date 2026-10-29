@@ -150,7 +150,7 @@ private fn fd_exists_control() -> ProcessFdContextExists[0] {
     failures = run_overlay_cases(
         repo, "takibi-backing-exists-", cases, edit,
         lambda overlay: [str(compiler), *args.sources, *kernel_compile_flags(),
-                         "--emit-struct-layout", "AddressSpaceBacking", "-o", str(overlay / "layout")],
+                         "-o", str(overlay / "check.o")],
         judge)
     ran = CaseCount()
     for failure in failures:

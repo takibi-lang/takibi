@@ -82,7 +82,7 @@ let unused_errors ?(external_entries = ["main"]) src =
   let types = Type_inf.infer_program prog in
   Unused_functions.check ~external_entries ~check_files:[] prog types
 
-(* GitHub issue #987: the --emit-call-graph table for one source, written
+(* GitHub issue #987: the --facts callgraph.tsv table for one source, written
    to a real file because the body hash re-lexes the definition from disk.
    Rows are (name, [(column, cell)]). *)
 let call_graph_rows src =
@@ -3195,7 +3195,7 @@ let infer_tests = [
       Alcotest.(check bool) "function value" true
         (String.starts_with ~prefix:"callback@" (field "main" "values")));
 
-  (* GitHub issue #1012: --emit-globals classifies each `let mut` global by
+  (* GitHub issue #1012: --facts globals.tsv classifies each `let mut` global by
      the protection its type shows; the ratchet reads this column. *)
   Alcotest.test_case "global protection table classes" `Quick
     (fun () ->
@@ -19503,10 +19503,10 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
           let out = read_all stdout and err = read_all stderr in
           Unix.close_process_full (stdout, stdin, stderr), out ^ err in
         let emit () =
-          let status, output = run [source; "--emit-held-guards"; report;
+          let status, output = run [source; "--facts"; report ^ ".facts";
             "-o"; object_file] in
           if status <> Unix.WEXITED 0 then Alcotest.failf "report CLI failed: %s" output;
-          let ic = open_in report in
+          let ic = open_in (Filename.concat (report ^ ".facts") "heldguards.tsv") in
           Fun.protect ~finally:(fun () -> close_in ic) (fun () -> read_all ic) in
         let first = emit () in
         Alcotest.(check string) "repeat compilation has identical TSV" first (emit ());
@@ -19540,10 +19540,10 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
           |> List.map (fun row -> List.nth row 3) |> List.sort_uniq compare in
         Alcotest.(check int) "both generic instantiations retain separate sites" 2
           (List.length generic_callers);
-        let status, output = run ["--emit-held-guards"] in
+        let status, output = run ["--facts"] in
         Alcotest.(check bool) "missing path exits nonzero" true (status <> Unix.WEXITED 0);
         Alcotest.(check bool) "missing path names the expected diagnostic" true
-          (contains_substring output "--emit-held-guards requires a path")));
+          (contains_substring output "--facts requires a directory")));
 
   Alcotest.test_case "held guard report is opt-in" `Quick
     (fun () ->
@@ -23956,7 +23956,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
          Alcotest.(check bool) "an unrelated function" false (strict "i762_other")));
 
   (* GitHub issue #769: every use of a global, the second table of
-     --emit-globals: the kind of each use, a local that shadows a global,
+     --facts globals.tsv: the kind of each use, a local that shadows a global,
      and a use in another file. *)
   Alcotest.test_case "issue #769: the uses table names each use of a global, its kind and function, after name binding" `Quick
     (fun () ->
@@ -25122,13 +25122,13 @@ let depfile_tests =
       let main = write "main.tkb" "fn main() {}" in
       let device = write "device.tkb" "fn device_only() {}" in
       let mint = write "mint.tkb" "fn mint_only() {}" in
-      let depfile = Filename.concat dir "main.o.d" in
+      let depfile = Filename.concat dir "main.o.facts/deps.d" in
       let obj = Filename.concat dir "main.o" in
       let compiler = takibi_cli_path () in
       let args = [| compiler; main; "--target"; "aarch64-none-elf";
                     "--device-semantics-file"; device;
                     "--raw-mint-file"; mint;
-                    "--emit-depfile"; depfile; "-o"; obj |] in
+                    "--facts"; Filename.concat dir "main.o.facts"; "-o"; obj |] in
       let (o, i, e) = Unix.open_process_args_full compiler args
                         (Unix.environment ()) in
       close_out_noerr i;
@@ -29564,7 +29564,7 @@ let device_protocol_tests = [
       (* A control with nothing to leave out is refused, not vacuous. *)
       let _, plain = Protocol_decl.extract (parse (protocol_src protocol_ok_body)) in
       Alcotest.check_raises "vacuous control"
-        (Failure "--emit-tla-omit-cache: protocol P has no such cache step, \
+        (Failure "--internal-tla-omit-cache: protocol P has no such cache step, \
                   so the control would be vacuous")
         (fun () -> ignore (Protocol_decl.to_tla ~omit:Protocol_decl.Omit_publish
                              (List.hd plain)));
@@ -29572,7 +29572,7 @@ let device_protocol_tests = [
          cell after its generated invalidate; the refresh control drops the
          invalidate and is refused on a protocol with no snapshot. *)
       Alcotest.check_raises "vacuous refresh control"
-        (Failure "--emit-tla-omit-cache: protocol Rx has no such cache step, \
+        (Failure "--internal-tla-omit-cache: protocol Rx has no such cache step, \
                   so the control would be vacuous")
         (fun () -> ignore (Protocol_decl.to_tla ~omit:Protocol_decl.Omit_refresh p)));
 
@@ -29613,7 +29613,7 @@ let device_protocol_tests = [
        | _ -> Alcotest.failf "Rx_post must clean before its doorbell:\n%s" post);
       Alcotest.(check bool) "tx finish has no cache work" false
         (contains_substring (function_ir ir "Rx_take") "dc "));
-  (* GitHub issue #758: --emit-protocol-source shows the generated file. *)
+  (* GitHub issue #758: --generate protocol-source shows the generated file. *)
   Alcotest.test_case "generated source: one file per protocol, publication in order" `Quick
     (fun () ->
       match Protocol_decl.generated_sources (parse device_protocol) with

@@ -1,7 +1,7 @@
 # The call-graph table
 
-`takibi ... --emit-call-graph PATH` writes the program's resolved call graph
-as a tab-separated table, after type checking. It exists so a build check
+`takibi ... --facts DIR` writes the program's resolved call graph to
+`DIR/callgraph.tsv` as a tab-separated table, after type checking. It exists so a build check
 that asks "which function calls which" reads the compiler's own answer
 instead of re-deriving it from `.tkb` text with regular expressions. A
 regex over source stops matching without failing; this table cannot drift

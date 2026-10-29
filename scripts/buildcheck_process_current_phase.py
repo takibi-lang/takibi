@@ -73,7 +73,7 @@ private fn current_phase_control(
         repo, 'takibi-current-phase-', cases,
         lambda case: (process, source + case[1]),
         lambda overlay: [str(compiler), *args.sources, *kernel_compile_flags(),
-                         '--emit-struct-layout', 'ProcessRecord', '-o', str(overlay / 'layout')],
+                         '-o', str(overlay / 'check.o')],
         judge)
     ran = CaseCount()
     for failure in failures:

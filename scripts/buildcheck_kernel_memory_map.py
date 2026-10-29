@@ -546,7 +546,7 @@ def main():
         for problem in problems:
             print(f"  {problem}", file=sys.stderr)
         # Name the maintenance action in the failure, the way
-        # effect-matrix-control names --emit-effect-matrix and
+        # effect-matrix-control names --generate effects and
         # check_agents_paths.py names the table to edit. This script had the
         # --update flag documented only in its own docstring, which is the
         # one place nobody reads while a build is red: four separate

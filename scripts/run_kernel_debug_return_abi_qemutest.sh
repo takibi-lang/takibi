@@ -2,7 +2,7 @@
 # GitHub issue #713: execute the compiler's AArch64 variant-return
 # description against the backend's real machine convention.
 #
-# The debug sidecar (--emit-debug-metadata) says where a variant result
+# The debug sidecar (the debug-metadata.json fact) says where a variant result
 # lives on return: registers x0..x7, one per scalar leaf, or the buffer the
 # caller passed in x8. During #693 it said "registers" for a ten-leaf result
 # LLVM returned through x8, and the injected failure never arrived. The unit
@@ -52,11 +52,10 @@ rm -f "$RUN_DIR"/uart.log "$RUN_DIR"/gdb.log "$RUN_DIR"/qemu.log
 
 # Build from source every run: the fixture is a few hundred bytes, and a
 # stale ELF here would test a compiler nobody asked about. The sidecar is
-# its own compiler mode, run with the same flags as the object.
+# a fact of the same compile (takibi --facts).
 "$TAKIBI" "$FIXTURE/fixture.tkb" --target aarch64-none-elf --cpu cortex-a53 \
-    "${FLAGS[@]}" -o "$RUN_DIR/fixture.o"
-"$TAKIBI" "$FIXTURE/fixture.tkb" --target aarch64-none-elf --cpu cortex-a53 \
-    "${FLAGS[@]}" --emit-debug-metadata "$RUN_DIR/metadata.json"
+    "${FLAGS[@]}" --facts "$RUN_DIR/facts" -o "$RUN_DIR/fixture.o"
+cp "$RUN_DIR/facts/debug-metadata.json" "$RUN_DIR/metadata.json"
 llvm-mc-19 --triple=aarch64-none-elf --filetype=obj "$FIXTURE/entry.S" \
     -o "$RUN_DIR/entry.o"
 ld.lld-19 -T "$FIXTURE/link.ld" "$RUN_DIR/entry.o" \

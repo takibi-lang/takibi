@@ -1,6 +1,6 @@
 (* The global protection table (GitHub issue #1012 slice 1).
 
-   `--emit-globals PATH` writes one TSV row per `let mut` global of the
+   `--facts DIR` writes one TSV row per `let mut` global of the
    program, with the protection its declared type shows. The ratchet
    scripts/buildcheck_global_protection.py reads it, so the classification
    is the compiler's view of the type (registries, generic templates,

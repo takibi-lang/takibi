@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The TLA+ action tables still point at real code and justify every drop.
 
-Usage: buildcheck_model_function_map.py [--restamp] <qemu main.o>.callgraph.tsv
-                                                    <rpi5 main.o>.callgraph.tsv
+Usage: buildcheck_model_function_map.py [--restamp] <qemu main.o>.facts/callgraph.tsv
+                                                    <rpi5 main.o>.facts/callgraph.tsv
 
 GitHub issues #601, #616 and #617. kernel/models/README.md maps each model action
 to the Takibi functions it abstracts, and says what the action keeps and
@@ -38,7 +38,7 @@ reason, which is why a bare "X is dropped" is refused.
 
 GitHub issue #987 (maintainer's option A, 2026-10-25): the definitions,
 their extents and their body hashes come from the compiler's
---emit-call-graph tables of the QEMU and RPi5 kernels (docs/CALL_GRAPH.md),
+--facts callgraph.tsv tables of the QEMU and RPi5 kernels (docs/CALL_GRAPH.md),
 not from a brace-matching extractor over the source. body_hash is a digest
 of the compiler's own tokens, so a comment or layout edit keeps a stamp and
 any token change -- inside a string literal too -- moves it. A function

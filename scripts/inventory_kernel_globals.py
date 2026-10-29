@@ -125,7 +125,7 @@ def render():
         raise ValueError('no explicit kernel global declarations found')
     main = {}
     for target in ('qemu', 'rpi5'):
-        depfile = ROOT / f'kernel/build/{target}/main.o.d'
+        depfile = ROOT / f'kernel/build/{target}/main.o.facts/deps.d'
         if not depfile.exists():
             raise ValueError(f'missing {depfile}; run make kernelbuild first')
         # The first line only: the compiled closure, not the policy inputs

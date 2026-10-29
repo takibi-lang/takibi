@@ -1,4 +1,4 @@
-"""Reader for the compiler's --emit-call-graph table (GitHub issue #987).
+"""Reader for the compiler's --facts callgraph.tsv table (GitHub issue #987).
 
 docs/CALL_GRAPH.md is the format. A check that needs to know which function
 calls which reads this table, written by the compiler from its own name

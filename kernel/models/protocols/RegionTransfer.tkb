@@ -1,5 +1,5 @@
 // GitHub issue #720: the shared region-transfer protocol as one Takibi
-// declaration. `takibi --emit-tla` generates its TLA+ model; `make
+// declaration. `takibi --generate tla` generates its TLA+ model; `make
 // modelcheck` checks it beside the handwritten SharedRegionTransfer.tla
 // whose fixed verdict it must reproduce. RegionTransferEarly_faulty.tkb
 // changes one line and must violate Safety; the other handwritten faults are

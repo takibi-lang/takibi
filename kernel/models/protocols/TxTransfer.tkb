@@ -1,6 +1,6 @@
 // GitHub issue #778: a `tx` device protocol. Its generated model carries the
 // cache: `make modelcheck` checks that it passes, and that the model with the
-// generated clean left out (--emit-tla-omit-cache publish) violates Safety.
+// generated clean left out (--internal-tla-omit-cache publish) violates Safety.
 protocol TxTransfer[inst: usize] retains region(u8)[b, n] tx {
     state Ready access write;
     state InFlight[req] device;

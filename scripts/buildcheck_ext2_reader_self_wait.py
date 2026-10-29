@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """No syscall registered as an ext2 reader waits for the ext2 mutation guard.
 
-Usage: buildcheck_ext2_reader_self_wait.py <kernel>.callgraph.tsv
+Usage: buildcheck_ext2_reader_self_wait.py <kernel>.facts/callgraph.tsv
 
 GitHub issue #1015. A syscall that reaches ext2 is counted as a reader at
 entry (syscall_ext2_reader_mark, GitHub issue #559) until
@@ -9,7 +9,7 @@ syscall_ext2_reader_take releases it. ext2_mutation_take waits until no
 reader is counted. A registered syscall that then takes the guard waits for
 itself, forever: #967 met this with openat O_CREAT and avoided it by not
 registering that path. Nothing in the compiler stops the next mutating
-syscall from repeating it, so this check reads the --emit-call-graph table
+syscall from repeating it, so this check reads the --facts callgraph.tsv table
 (GitHub issue #987, scripts/call_graph_table.py) and refuses:
 
 1. a caller of syscall_ext2_reader_mark other than REGISTRAR, or a caller

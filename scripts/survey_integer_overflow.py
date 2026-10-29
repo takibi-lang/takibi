@@ -279,9 +279,11 @@ def main() -> int:
             seconds, peak_kib = run_measured(command)
             baseline_seconds += seconds
             baseline_peak_kib = max(baseline_peak_kib, peak_kib)
-            report = temp_path / f"{index}.tsv"
+            # The overflow audit is one of the --facts files; the
+            # measured cost is now that of every fact, an upper bound.
+            report = temp_path / f"{index}" / "overflow.tsv"
             seconds, peak_kib = run_measured(
-                command + ["--emit-overflow-audit", str(report)]
+                command + ["--facts", str(temp_path / f"{index}")]
             )
             audit_seconds += seconds
             audit_peak_kib = max(audit_peak_kib, peak_kib)

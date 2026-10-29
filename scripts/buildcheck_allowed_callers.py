@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Guarded kernel functions are called only by their reviewed callers.
 
-Usage: buildcheck_allowed_callers.py <kernel>.callgraph.tsv
+Usage: buildcheck_allowed_callers.py <kernel>.facts/callgraph.tsv
 
 GitHub issue #1107. Each row of scripts/allowed_callers.tsv names a guarded
 function, the (file, function) pairs allowed to call it, and the reason. This
-check reads the --emit-call-graph table (scripts/call_graph_table.py), after
+check reads the --facts callgraph.tsv table (scripts/call_graph_table.py), after
 name resolution, and for every row refuses:
 
 1. a function outside the allowed set that calls the guarded function or

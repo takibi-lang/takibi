@@ -3,7 +3,7 @@
    Every range the checker derives for an arithmetic or cast result is built
    through refined_or_base (lib/type_inf.ml, lib/llvm_gen.ml). Each such site
    also describes the machine operation it reasoned about, and, under
-   --emit-range-obligations DIR, this module writes one SMT-LIB file per
+   --facts DIR, this module writes one SMT-LIB file per
    distinct obligation. The file asserts, in QF_BV at the operation's own
    width, that some input inside its known range gives a result OUTSIDE the
    derived range [lo, hi). So `unsat` means the derived range is proved for

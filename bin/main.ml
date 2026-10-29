@@ -38,6 +38,31 @@ let parse_file filename =
   close_in chan;
   result
 
+(* GitHub issue #1027 step 2: every file `--facts DIR` writes, under a
+   fixed name, with what it holds. CLI.md lists this table, so adding a
+   fact is a visible diff of a tracked document; [fact] refuses a name
+   that is not here. *)
+let fact_files = [
+  ("deps.d", "Make depfile: the use closure, then the policy files the compile read");
+  ("rawderef.tsv", "every raw-pointer dereference (#639)");
+  ("rawsites.tsv", "raw-authority site count per file (#739)");
+  ("callgraph.tsv", "the resolved call graph (docs/CALL_GRAPH.md)");
+  ("globals.tsv", "each mutable global's protection, then every use (docs/GLOBAL_PROTECTION.md)");
+  ("heldguards.tsv", "the guards held at each call");
+  ("overflow.tsv", "each checked arithmetic site and its operand facts");
+  ("rangeobl", "a directory: one SMT-LIB file per range obligation (docs/RANGE_OBLIGATIONS.md)");
+  ("structs.tsv", "every struct's LLVM field offsets, then its .size and .members");
+  ("frame-offsets.inc", "each exception frame's offsets as GAS .equ constants");
+  ("debug-metadata.json", "debugger metadata: discriminant names and variant layout");
+  ("allocwords", "the OCaml words this compile allocated, written at exit (#923)");
+]
+
+let rec mkdir_p dir =
+  if not (Sys.file_exists dir) then begin
+    mkdir_p (Filename.dirname dir);
+    (try Sys.mkdir dir 0o755 with Sys_error _ when Sys.file_exists dir -> ())
+  end
+
 let () =
   (* Issue #916: a full kernel compile allocates about 53 GB of short-lived
      words; the default 256K-word minor heap and space_overhead 120 spent a
@@ -48,7 +73,7 @@ let () =
     Gc.set { (Gc.get ()) with Gc.minor_heap_size = 4 * 1024 * 1024; space_overhead = 200 };
   (* GitHub issue #1027 step 1: every flag is one row of [flags] -- name,
      group, argument, one-line help, handler -- and nothing else parses
-     argv. `--emit-doc cli` prints the table as CLI.md, which
+     argv. `--generate cli` prints the table as CLI.md, which
      cli-flags-control (make langcheck) keeps fresh, so adding a flag is a
      visible diff of a tracked document. An argument that starts with '-'
      and names no row is an error, never an input file (DECISIONS
@@ -71,21 +96,9 @@ let () =
   let frame_pointers = ref false in
   let function_sections = ref false in
   let show_version = ref false in
-  let emit_doc = ref "" in
-  let emit_exception_frame_offsets = ref "" in
-  let emit_struct_layout = ref "" in
-  let emit_debug_metadata = ref "" in
-  let emit_depfile = ref "" in
-  let emit_overflow_audit = ref "" in
-  let emit_raw_deref_audit = ref "" in
-  let emit_raw_site_counts = ref "" in
-  let emit_call_graph = ref "" in
-  let emit_globals = ref "" in
-  let emit_held_guards = ref "" in
-  let emit_effect_matrix = ref false in
-  let emit_tla = ref "" in
-  let emit_tla_omit = ref None in
-  let emit_protocol_source = ref "" in
+  let facts_dir = ref "" in
+  let generate = ref None in
+  let tla_omit = ref None in
   let set r = Cli_flags.Arg (fun v -> r := v) in
   let add r = Cli_flags.Arg (fun v -> r := v :: !r) in
   let on r = Cli_flags.No_arg (fun () -> r := true) in
@@ -124,66 +137,25 @@ let () =
       "a function called from outside Takibi (repeatable)";
     flag "--check-unused-file" Policy ~arg:("<path>", "a source path") (add check_unused_files)
       "restrict the unused-function check to this file (repeatable)";
-    flag "--emit-doc" Facts ~arg:("words|cli", "'words' or 'cli'")
-      (Arg (fun v ->
-         if v <> "words" && v <> "cli" then (
-           Printf.eprintf "Error: --emit-doc requires 'words' or 'cli'\n"; exit 1);
-         emit_doc := v))
-      "print WORDS.md (words) or CLI.md (cli) and exit";
-    flag "--emit-effect-matrix" Facts (on emit_effect_matrix)
-      "print EFFECTS.md and exit";
-    flag "--emit-exception-frame-offsets" Facts ~arg:("<StructName>", "a struct name")
-      (set emit_exception_frame_offsets) "print a struct's exception-frame offsets";
-    flag "--emit-struct-layout" Facts ~arg:("<StructName>", "a struct name")
-      (set emit_struct_layout) "print a struct's layout";
-    flag "--emit-debug-metadata" Facts ~arg:path (set emit_debug_metadata)
-      "write the debug-metadata side file";
-    flag "--emit-depfile" Facts ~arg:path (set emit_depfile)
-      "write a Make depfile of the use closure";
-    flag "--emit-overflow-audit" Facts ~arg:path (set emit_overflow_audit)
-      "write the overflow audit";
-    flag "--emit-raw-deref-audit" Facts ~arg:path (set emit_raw_deref_audit)
-      "write the raw-dereference audit";
-    flag "--emit-raw-site-counts" Facts ~arg:path (set emit_raw_site_counts)
-      "write raw-site counts per file";
-    (* GitHub issue #987: the resolved call graph (docs/CALL_GRAPH.md). *)
-    flag "--emit-call-graph" Facts ~arg:path (set emit_call_graph)
-      "write the call-graph table";
-    (* GitHub issue #1012: each `let mut` global's protection
-       (docs/GLOBAL_PROTECTION.md). *)
-    flag "--emit-globals" Facts ~arg:path (set emit_globals)
-      "write the global protection table";
-    (* GitHub issue #923: allocated words, independent of host load. *)
-    flag "--emit-alloc-words" Facts ~arg:path
-      (Arg (fun path ->
-         at_exit (fun () ->
-           let words = Gc.allocated_bytes () /. float_of_int (Sys.word_size / 8) in
-           let out = open_out path in
-           Printf.fprintf out "%.0f\n" words;
-           close_out out)))
-      "write the OCaml words this run allocated, at exit";
-    flag "--emit-held-guards" Facts ~arg:path (set emit_held_guards)
-      "write the held-guard table";
-    (* GitHub issue #952: one SMT-LIB file per derived range. *)
-    flag "--emit-range-obligations" Facts ~arg:dir
-      (Arg (fun dir ->
-         Takibi.Range_obligation.enabled := true;
-         at_exit (fun () -> Takibi.Range_obligation.write_dir dir)))
-      "write one SMT-LIB file per range obligation";
-    flag "--emit-tla" Generated ~arg:dir (set emit_tla)
-      "write each protocol's TLA+ model and exit";
+    (* GitHub issue #1027 step 2: one flag for every fact a build check
+       reads; [fact_files] below names the files. *)
+    flag "--facts" Facts ~arg:dir (set facts_dir)
+      "write every fact file (listed below) into this directory";
+    flag "--generate" Generated
+      (Choice ([("effects", None); ("words", None); ("cli", None);
+                ("tla", Some "<dir>"); ("protocol-source", Some "<dir>")],
+               fun kind dir -> generate := Some (kind, dir)))
+      "print EFFECTS.md, WORDS.md or CLI.md, or write each protocol's TLA+ model or generated source into <dir>, and exit";
     (* GitHub issue #778: a model-check fault control only. *)
-    flag "--emit-tla-omit-cache" Generated ~arg:("publish|finish|refresh", "'publish', 'finish' or 'refresh'")
+    flag "--internal-tla-omit-cache" Development
+      ~arg:("publish|finish|refresh", "'publish', 'finish' or 'refresh'")
       (Arg (fun v ->
          match Protocol_decl.omit_of_string v with
-         | Some o -> emit_tla_omit := Some o
+         | Some o -> tla_omit := Some o
          | None ->
-             Printf.eprintf "Error: --emit-tla-omit-cache requires 'publish', 'finish' or 'refresh'\n";
+             Printf.eprintf "Error: --internal-tla-omit-cache requires 'publish', 'finish' or 'refresh'\n";
              exit 1))
-      "with --emit-tla, leave one cache step out (fault control)";
-    (* GitHub issue #758. *)
-    flag "--emit-protocol-source" Generated ~arg:dir (set emit_protocol_source)
-      "write each protocol's generated source and exit";
+      "with --generate tla, leave one cache step out (fault control)";
     (* GitHub issue #976 (docs/VERIFICATION_DESIGN.md). *)
     flag "--internal-trace-init-flow" Development ~arg:("<function>", "a function name")
       (Arg (fun f -> Takibi.Init_flow.trace_func := Some f))
@@ -207,21 +179,45 @@ let () =
    | Ok files -> input_files := files
    | Error message -> Printf.eprintf "Error: %s\n" message; exit 1);
   let input_files = !input_files in
+  let facts_on = !facts_dir <> "" in
+  let fact name =
+    if not (List.mem_assoc name fact_files) then
+      invalid_arg ("fact file not in fact_files: " ^ name);
+    Filename.concat !facts_dir name
+  in
+  (* DECISIONS 2026-10-16: a flag that would be ignored is an error. *)
+  if !tla_omit <> None
+     && (match !generate with Some ("tla", _) -> false | _ -> true) then (
+    Printf.eprintf "Error: --internal-tla-omit-cache requires --generate tla\n";
+    exit 1);
 
   if !show_version then (
     Printf.printf "takibi %s\n" version;
     exit 0
   );
 
-  if !emit_effect_matrix then (
-    print_string (Effect_rules.markdown ());
-    exit 0
-  );
-
-  (match !emit_doc with
-   | "words" -> print_string (Words_doc.markdown ()); exit 0
-   | "cli" -> print_string (Cli_flags.markdown flags); exit 0
+  (match !generate with
+   | Some ("effects", _) -> print_string (Effect_rules.markdown ()); exit 0
+   | Some ("words", _) -> print_string (Words_doc.markdown ()); exit 0
+   | Some ("cli", _) ->
+       print_string (Cli_flags.markdown ~facts:fact_files flags); exit 0
    | _ -> ());
+
+  (* Every fact is collected under --facts; the two whose collection costs
+     a compile without it are switched on here, and the two written at
+     exit are registered (allocwords first, so it runs last and counts the
+     obligation files too, as the old flag order did). *)
+  if facts_on then begin
+    mkdir_p !facts_dir;
+    Def_extent.enabled := true;
+    Takibi.Range_obligation.enabled := true;
+    at_exit (fun () ->
+      let words = Gc.allocated_bytes () /. float_of_int (Sys.word_size / 8) in
+      let out = open_out (fact "allocwords") in
+      Printf.fprintf out "%.0f\n" words;
+      close_out out);
+    at_exit (fun () -> Takibi.Range_obligation.write_dir (fact "rangeobl"))
+  end;
 
   if input_files = [] then (
     Printf.eprintf "Usage: %s %s\n" Sys.argv.(0) (Cli_flags.usage flags);
@@ -245,8 +241,8 @@ let () =
     result
   in
 
-  (* The parser records definition ends only for the call-graph table. *)
-  Def_extent.enabled := !emit_call_graph <> "";
+  (* The parser records definition ends only for the call-graph table,
+     which --facts switched on above. *)
   (try
     Compilation_state.reset ();
     (* GitHub issue #55: every file named on the command line is an entry
@@ -271,40 +267,40 @@ let () =
        what was actually read -- Make should still treat a target as
        depending on a file that caused a real compile error the next time
        that file changes. *)
-    if !emit_depfile <> "" then
+    if facts_on then
       Use_resolver.write_depfile
         ~policy:(Use_resolver.policy_inputs ~closure:(List.map fst resolved)
                    ~policy_files:(List.rev !device_semantics_files
                                   @ List.rev !raw_mint_files
                                   @ (if !execution_model_file = "" then []
                                      else [!execution_model_file])))
-        !emit_depfile !output_file (List.map fst resolved);
+        (fact "deps.d") !output_file (List.map fst resolved);
 
     let compiled_files = List.map fst resolved in
     let prog = List.concat_map snd resolved in
     (* GitHub issue #720: protocol declarations are validated once here and
-       removed before every later pass; --emit-tla writes each one's model
-       (<dir>/<Name>.tla and .cfg) and stops. *)
-    (* GitHub issue #758: --emit-protocol-source writes each protocol's
+       removed before every later pass; --generate tla writes each one's
+       model (<dir>/<Name>.tla and .cfg) and stops. *)
+    (* GitHub issue #758: --generate protocol-source writes each protocol's
        generated source as <dir>/<Name>.tkb and stops. *)
-    if !emit_protocol_source <> "" then begin
-      List.iter (fun (name, src) ->
-        let out = open_out (Filename.concat !emit_protocol_source (name ^ ".tkb")) in
-        output_string out src; close_out out) (Protocol_decl.generated_sources prog);
-      exit 0
-    end;
-    if !emit_tla <> "" then begin
-      let _, protocols = Protocol_decl.extract prog in
-      List.iter (fun p ->
-        let write ext text =
-          let out = open_out (Filename.concat !emit_tla
-                                (Protocol_decl.module_name ?omit:!emit_tla_omit p
-                                 ^ ext)) in
-          output_string out text; close_out out in
-        write ".tla" (Protocol_decl.to_tla ?omit:!emit_tla_omit p);
-        write ".cfg" (Protocol_decl.to_cfg p)) protocols;
-      exit 0
-    end;
+    (match !generate with
+     | Some ("protocol-source", Some dir) ->
+         List.iter (fun (name, src) ->
+           let out = open_out (Filename.concat dir (name ^ ".tkb")) in
+           output_string out src; close_out out) (Protocol_decl.generated_sources prog);
+         exit 0
+     | Some ("tla", Some dir) ->
+         let _, protocols = Protocol_decl.extract prog in
+         List.iter (fun p ->
+           let write ext text =
+             let out = open_out (Filename.concat dir
+                                   (Protocol_decl.module_name ?omit:!tla_omit p
+                                    ^ ext)) in
+             output_string out text; close_out out in
+           write ".tla" (Protocol_decl.to_tla ?omit:!tla_omit p);
+           write ".cfg" (Protocol_decl.to_cfg p)) protocols;
+         exit 0
+     | _ -> ());
     (* Otherwise each protocol becomes its generated sealed types and
        wrappers, after its actions' lowerings are checked. *)
     Protocol_decl.device_semantics_files := !device_semantics_files;
@@ -394,7 +390,7 @@ let () =
     let prog = Declared_type_resolver.run prog in
 
     (* HM type inference -- catches type errors and produces resolved types *)
-    Type_inf.set_held_guard_audit_enabled (!emit_held_guards <> "");
+    Type_inf.set_held_guard_audit_enabled facts_on;
     let prog_types = Typechecker.infer_program prog in
 
     if !raw_mint_files <> [] && not !confine_raw_authority then begin
@@ -413,22 +409,22 @@ let () =
     end;
     (* GitHub issue #739: per-file raw-site counts, declared or not, for
        choosing the next file to leave the mint list. *)
-    if !emit_raw_site_counts <> "" then begin
-      let out = open_out !emit_raw_site_counts in
+    if facts_on then begin
+      let out = open_out (fact "rawsites.tsv") in
       List.iter (fun (file, n) -> Printf.fprintf out "%d\t%s\n" n file)
         (Raw_authority_policy.site_counts ~source_program:source_prog ());
       close_out out
     end;
 
-    if !emit_globals <> "" then begin
-      let out = open_out !emit_globals in
+    if facts_on then begin
+      let out = open_out (fact "globals.tsv") in
       Global_protection.write_table out source_prog;
       Global_protection.write_uses out source_prog;
       close_out out
     end;
 
-    if !emit_call_graph <> "" then begin
-      let out = open_out !emit_call_graph in
+    if facts_on then begin
+      let out = open_out (fact "callgraph.tsv") in
       Call_graph.write_table out prog prog_types;
       close_out out
     end;
@@ -455,7 +451,7 @@ let () =
       if errors <> [] then exit 1
     end;
 
-    if !emit_overflow_audit <> "" then begin
+    if facts_on then begin
       let op_name = function
         | Ast.Add -> "add" | Ast.Sub -> "sub" | Ast.Mul -> "mul"
         | Ast.Div -> "div" | Ast.Mod -> "mod" | Ast.Shl -> "shl"
@@ -500,7 +496,7 @@ let () =
         compare (la.pos_fname, la.pos_lnum, la.pos_cnum, op_name a.overflow_op)
                 (lb.pos_fname, lb.pos_lnum, lb.pos_cnum, op_name b.overflow_op))
       in
-      let out = open_out !emit_overflow_audit in
+      let out = open_out (fact "overflow.tsv") in
       Printf.fprintf out
         "file\tline\tcolumn\toperator\tlhs_type\tlhs_fact\tlhs_excluded\trhs_type\trhs_fact\trhs_excluded\n";
       List.iter (fun site ->
@@ -519,7 +515,7 @@ let () =
       close_out out
     end;
 
-    if !emit_raw_deref_audit <> "" then begin
+    if facts_on then begin
       (* GitHub issue #639: one line per raw-pointer dereference the type
          checker recorded (Type_inf.raw_deref_site), sorted by position. *)
       let sites = Type_inf.raw_deref_sites () |> List.sort (fun a b ->
@@ -527,7 +523,7 @@ let () =
         compare (a.Type_inf.raw_file, la.pos_lnum, la.pos_cnum, a.raw_form)
                 (b.Type_inf.raw_file, lb.pos_lnum, lb.pos_cnum, b.raw_form))
       in
-      let out = open_out !emit_raw_deref_audit in
+      let out = open_out (fact "rawderef.tsv") in
       Printf.fprintf out "file\tline\tcolumn\tfunction\tform\tpointer\n";
       List.iter (fun site ->
         let loc = site.Type_inf.raw_loc in
@@ -538,8 +534,8 @@ let () =
       close_out out
     end;
 
-    if !emit_held_guards <> "" then begin
-      let out = open_out !emit_held_guards in
+    if facts_on then begin
+      let out = open_out (fact "heldguards.tsv") in
       Printf.fprintf out "file\tline\tcolumn\tcaller\tcallee\tguard\tbinding_id\tguard_type\trank\tlock\tstate\n";
       List.iter (fun site ->
         let loc = site.Type_inf.held_loc in
@@ -593,98 +589,65 @@ let () =
        long. *)
     Type_layout.check_against_codegen ();
 
-    (* GitHub issue #286 follow-up (2026-08-13): dump a struct's field
-       offsets as GAS `.equ` constants instead of emitting an object file.
-       This exists so a hand-written assembly consumer (kernel/arch/arm64/
-       kernel/exception_context.inc's `.include`d exception_context_offsets.
-       inc, generated by scripts/gen_exception_frame.py) reads offsets
-       computed by THIS function -- the same one exception_entry/
-       exception_restore codegen already calls -- instead of a second,
-       independently-maintained Python reimplementation of the same
-       packed-struct layout algorithm (and of parsing the struct's `.tkb`
-       syntax in the first place, via regex). gen_program has already run
-       by this point, so struct_fields/exception_frame_offsets reflect the
-       real, type-checked struct -- not a fresh, potentially-diverging
-       recomputation. Placed before --forbid-trap/object emission: this is
-       an alternate, terminal output mode, not a compile pass. *)
-    if !emit_exception_frame_offsets <> "" then begin
-      let struct_name = !emit_exception_frame_offsets in
-      let fields = match Hashtbl.find_opt Llvm_gen.struct_fields struct_name with
-        | Some fs -> fs
-        | None ->
-            Printf.eprintf "Error: --emit-exception-frame-offsets: no struct named '%s'\n"
-              struct_name;
-            exit 1
-      in
-      let (off, total) =
-        Llvm_gen.exception_frame_offsets "cli" "--emit-exception-frame-offsets" struct_name
-      in
-      let buf = Buffer.create 4096 in
-      Printf.ksprintf (Buffer.add_string buf)
-        "/* GENERATED by `%s --emit-exception-frame-offsets %s ...` from the\n"
-        Sys.argv.(0) struct_name;
-      Printf.ksprintf (Buffer.add_string buf)
-        " * '%s' struct's own declared field order and type_inf.ml-validated\n"
-        struct_name;
-      Buffer.add_string buf
-        " * layout -- the same computation exception_entry/exception_restore\n";
-      Buffer.add_string buf
-        " * codegen uses internally. Do not edit by hand.\n */\n";
-      Printf.ksprintf (Buffer.add_string buf) "    .equ EXC_CONTEXT_SIZE,          0x%x\n" total;
-      List.iter (fun (fname, _fty) ->
-        Printf.ksprintf (Buffer.add_string buf) "    .equ EXC_CONTEXT_%s,          0x%03x\n"
-          (String.uppercase_ascii fname) (off fname)
-      ) fields;
-      if !output_file <> "" then begin
-        let oc = open_out !output_file in
-        output_string oc (Buffer.contents buf);
-        close_out oc
-      end else
-        print_string (Buffer.contents buf);
-      exit 0
-    end;
-
-    (* Emit GDB convenience variables from LLVM's own target-aware layout
-       query. Consumers source this small file before their helper command,
-       so changing a struct's field order or padding cannot leave a second
-       hand-maintained offset table behind. *)
-    if !emit_struct_layout <> "" then begin
-      let struct_name = !emit_struct_layout in
-      let (offsets, total) =
-        try Llvm_gen.struct_layout struct_name with
-        | Llvm_gen.Error _ ->
-            Printf.eprintf "Error: --emit-struct-layout: no struct named '%s'\n"
-              struct_name;
-            exit 1
-      in
-      let prefix = "takibi_" ^ String.lowercase_ascii struct_name ^ "_" in
-      let buf = Buffer.create 4096 in
-      Printf.ksprintf (Buffer.add_string buf)
-        "# GENERATED by %s --emit-struct-layout %s\n"
-        Sys.argv.(0) struct_name;
-      Printf.ksprintf (Buffer.add_string buf)
-        "# LLVM target layout; source this file from gdb before its reader.\n";
-      List.iter (fun (field, offset) ->
-        Printf.ksprintf (Buffer.add_string buf) "set $%s%s = %Ld\n"
-          prefix field offset
-      ) offsets;
-      Printf.ksprintf (Buffer.add_string buf) "set $%ssize = %Ld\n" prefix total;
-      Printf.ksprintf (Buffer.add_string buf) "set $%smembers = %d\n"
-        prefix (Llvm_gen.struct_member_count struct_name);
-      if !output_file <> "" then begin
-        let oc = open_out !output_file in
-        output_string oc (Buffer.contents buf);
-        close_out oc
-      end else
-        print_string (Buffer.contents buf);
-      exit 0
-    end;
-
-    if !emit_debug_metadata <> "" then begin
-      let oc = open_out !emit_debug_metadata in
-      output_string oc (Llvm_gen.debug_type_metadata ());
+    (* GitHub issue #286 follow-up (2026-08-13), #1027 step 2: each
+       exception frame's field offsets as GAS `.equ` constants, so the
+       hand-written assembly (kernel/arch/arm64/kernel/exception_context.inc
+       `.include`s exception_context_offsets.inc, a copy of this file) reads
+       offsets computed by the same function exception_entry/
+       exception_restore codegen calls, never a second reimplementation of
+       the packed layout. gen_program has run, so the frames are the real,
+       type-checked structs. The frames are the ones an exception_entry or
+       exception_restore names; the constants carry no struct prefix, which
+       holds while a program has one frame. *)
+    if facts_on then begin
+      let frames = List.sort_uniq compare (List.filter_map (function
+        | Ast.ExceptionEntryDef (_, fields, _) | Ast.ExceptionRestoreDef (_, fields, _) ->
+            List.assoc_opt "frame" fields
+        | _ -> None) prog) in
+      let oc = open_out (fact "frame-offsets.inc") in
+      List.iter (fun struct_name ->
+        let fields = Hashtbl.find Llvm_gen.struct_fields struct_name in
+        let (off, total) =
+          Llvm_gen.exception_frame_offsets "cli" "--facts" struct_name in
+        Printf.fprintf oc
+          "/* GENERATED by takibi --facts (frame-offsets.inc) from the\n";
+        Printf.fprintf oc
+          " * '%s' struct's own declared field order and type_inf.ml-validated\n"
+          struct_name;
+        output_string oc
+          " * layout -- the same computation exception_entry/exception_restore\n";
+        output_string oc
+          " * codegen uses internally. Do not edit by hand.\n */\n";
+        Printf.fprintf oc "    .equ EXC_CONTEXT_SIZE,          0x%x\n" total;
+        List.iter (fun (fname, _fty) ->
+          Printf.fprintf oc "    .equ EXC_CONTEXT_%s,          0x%03x\n"
+            (String.uppercase_ascii fname) (off fname)
+        ) fields) frames;
       close_out oc;
-      exit 0
+
+      (* Every struct's layout from LLVM's own target-aware query, so a
+         debugger helper (scripts/struct_layout_gdb.py turns rows into GDB
+         convenience variables) never keeps a second offset table. One row
+         per field, then `.size` and `.members` rows; a leading dot cannot
+         be a field name. *)
+      let oc = open_out (fact "structs.tsv") in
+      output_string oc "struct\tfield\tvalue\n";
+      let names = Hashtbl.fold (fun name _ acc -> name :: acc) Llvm_gen.struct_fields []
+                  |> List.sort_uniq compare in
+      List.iter (fun name ->
+        match Llvm_gen.struct_layout name with
+        | exception Llvm_gen.Error _ -> ()
+        | (offsets, total) ->
+            List.iter (fun (field, offset) ->
+              Printf.fprintf oc "%s\t%s\t%Ld\n" name field offset) offsets;
+            Printf.fprintf oc "%s\t.size\t%Ld\n" name total;
+            Printf.fprintf oc "%s\t.members\t%d\n" name
+              (Llvm_gen.struct_member_count name)) names;
+      close_out oc;
+
+      let oc = open_out (fact "debug-metadata.json") in
+      output_string oc (Llvm_gen.debug_type_metadata ());
+      close_out oc
     end;
 
     (* GitHub issue #315/#328 follow-up: an unnecessary unsafe scope is a

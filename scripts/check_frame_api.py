@@ -18,7 +18,7 @@ now is stale and fails (#796's rule), and so does an entry for a file
 that left the mint list.
 
 Signatures come from a scan of the source, not from the compiler's
---emit-call-graph table (#987): that table carries `params` but no return
+--facts callgraph.tsv table (#987): that table carries `params` but no return
 type, and it is written only by a kernel build while this check runs in
 langcheck. When the table gains a return-type column the scan here is
 replaced by a read of it (docs/CALL_GRAPH.md, "Changing the format").
