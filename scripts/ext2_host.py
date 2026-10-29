@@ -43,6 +43,8 @@ Modes:
                     and walked: every read ends, nothing stops the program
   control           a planted rollback bug (one staged block not freed) must
                     fail the campaign or, failing that, the fault run
+  nearfull          a small write into a large file on a nearly full disk
+                    succeeds (#1086)
   self-test         the parsers and the oracle, without the program
 
 The default sizes are the linuxcheck member's; the long campaign is
@@ -50,9 +52,7 @@ The default sizes are the linuxcheck member's; the long campaign is
 
 Divergences the generator does not produce, each an open issue with its
 tier-B row or a note there: #1021 (doubly indirect files; files stay
-within 268 KiB), #1086 (every write(2) copies the whole file to newly
-claimed blocks, so it fails with ENOSPC while a file's size in blocks is
-not free; the ENOSPC check accepts that), #1087 (a write past end of file
+within 268 KiB), #1087 (a write past end of file
 allocates the skipped blocks, where Linux leaves a hole: same bytes, more
 i_blocks; the campaign writes with seekwrite, which never does), #1089 (a
 torn write is outside the recovery model; `faults --torn` shows it), and
@@ -181,16 +181,26 @@ def size_of(path):
 
 
 def write_need(path, offset, length, written):
-    """The blocks the kernel claims for the write(2) of a pwrite that
-    failed: every block of the file as it would be after that write, plus
-    the indirect block, because ext2_update_regular_file writes the whole
-    file to new blocks before it frees the old ones (#1086). Linux
-    needs the new blocks only."""
+    """The blocks the kernel claims for the failing write(2) of a pwrite:
+    since #1086 only the blocks that write changes (ext2_block_replaced:
+    the blocks it covers, the blocks past the old end, the old partial
+    last block when the file grows), plus a new indirect block when the
+    file needs one. Linux needs the new blocks only, so the difference is
+    at most the copied blocks of one 1 KiB write(2) and the indirect."""
     size = os.path.getsize(path) if os.path.exists(path) else 0
     if written:
         size = max(size, offset + written)
-    end = offset + written + min(WRITE_CHUNK, length - written)
-    return file_blocks(max(size, end))
+    start = offset + written
+    end = start + min(WRITE_CHUNK, length - written)
+    old_count = (size + 1023) // 1024
+    new_size = max(size, end)
+    new_count = (new_size + 1023) // 1024
+    need = 0
+    for index in range(new_count):
+        if index >= old_count or (index * 1024 < end and start < index * 1024 + 1024) or \
+                (index + 1 == old_count and new_size > size and size % 1024):
+            need += 1
+    return need + (1 if new_count > 12 else 0)
 
 
 def linux_apply(tree, op, kernel=None, injected=False):
@@ -643,7 +653,7 @@ def run_faults(seeds, ops, first=0, exe=EXE, modes=("reject",)):
         pristine = os.path.join(work, "pristine.img")
         make_image(pristine)
         for seed in range(first, first + seeds):
-            # small files: every write(2) copies the whole file (#1086),
+            # small files: a fault run fails every write an operation makes,
             # so a large one makes thousands of disk writes to fail
             lines = generate(seed, ops, largest=FAULT_LARGEST)
             for index in range(len(lines)):
@@ -795,6 +805,44 @@ def run_control(seeds, ops, every):
 
 # --------------------------------------------------------------- self-test
 
+def run_nearfull():
+    """GitHub issue #1086: on a nearly full disk, a small write(2) into a
+    large file and an append to it succeed, as on Linux. Before the fix
+    every write(2) copied the whole file to new blocks first, so both
+    answered ENOSPC with far more blocks free than Linux needs."""
+    with tempfile.TemporaryDirectory(prefix="ext2_host_nearfull.") as work:
+        pristine = os.path.join(work, "pristine.img")
+        make_image(pristine)
+        probe = os.path.join(work, "probe.img")
+        shutil.copyfile(pristine, probe)
+        _, free, _, out = run_program(probe, [])
+        if free is None:
+            raise HostError("no mount line: " + out[-300:])
+        # fillers, then a 200-block file (and its indirect block) that
+        # leaves 8 blocks free: less than the file, more than a write needs
+        size = 200 * 1024
+        spare = free[0] - 8 - 201
+        lines = []
+        while spare > 0:
+            blocks = min(spare, 12) if spare <= 13 else min(spare - 1, 256)
+            spare -= blocks + (1 if blocks > 12 else 0)
+            lines.append(f"pwrite {ROOT}/fill{len(lines)} 0 {blocks * 1024} 9")
+        fillers = len(lines)
+        lines += [f"pwrite {ROOT}/big 0 {size} 1",
+                 f"pwrite {ROOT}/big 5000 10 2",
+                 f"pwrite {ROOT}/big {size - 3000} 2000 3",
+                 f"pwrite {ROOT}/big {size} 1500 4"]
+        problems, results = compare_run(pristine, lines, work)
+        for line, result in list(zip(lines, results))[fillers:]:
+            if result["errno"] != "0":
+                problems.append(f"`{line}` answered {result['errno']} with "
+                                f"free={result['free']}")
+        if problems:
+            raise HostError("nearfull (#1086): " + "; ".join(problems))
+    report_pass("ext2-host nearfull", f"a {size}-byte file with 8 blocks free takes "
+                "an overwrite, a straddling write and an append (#1086)", cases=len(lines) - fillers)
+
+
 def self_test():
     match = RESULT_RE.match("3 pwrite eq/a 0 10 1 -> ENOSPC written=4 free=2/9")
     assert match and match.group(3) == "ENOSPC" and match.group(4) == "4", match
@@ -853,10 +901,13 @@ def main(argv):
     p.add_argument("--images", type=int, default=200)
     p.add_argument("--first", type=int, default=0)
     sub.add_parser("self-test")
+    sub.add_parser("nearfull")
     args = parser.parse_args(argv[1:])
     try:
         if args.mode == "self-test":
             self_test()
+        elif args.mode == "nearfull":
+            run_nearfull()
         elif args.mode == "eq":
             run_eq(args.ops)
         elif args.mode == "campaign":
@@ -873,7 +924,7 @@ def main(argv):
                 pristine = os.path.join(work, "pristine.img")
                 make_image(pristine)
                 problems, results = compare_run(pristine, lines, work)
-            for line, result in zip(lines, results):
+            for line, result in list(zip(lines, results))[fillers:]:
                 print(f"{line} -> {result['errno']} free={result['free']}")
             for problem in problems:
                 print(f"PROBLEM {problem}")
