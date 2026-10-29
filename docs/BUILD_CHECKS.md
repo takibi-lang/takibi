@@ -42,6 +42,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_agents_paths_controls.py` | an untracked directory or an empty glob does not satisfy a path root guidance names |
 | `check_ash_bin_inventory.py` | ash's expected /bin listing matches every image-recipe entry in order |
 | `check_ash_bin_inventory_controls.py` | Controls for additions, omissions, and unrecognized /bin image commands |
+| `check_make_delete_on_error.py` | the root Makefile declares `.DELETE_ON_ERROR`; a planted object recipe whose post-compile check fails makes the second make fail too, and without the declaration it would pass (#1223) |
 | `check_assume_init_sites.py` | every function in maintained kernel/ and linux_user/ Takibi code that calls `assume_init` (comments blanked) is listed in TRUSTED_BASE.md as `path:function`, and every listed site still calls it (#764) |
 | `check_kernel_compile_flags.py` | every Makefile kernel compile recipe takes `$(KERNEL_QEMU_COMPILE_FLAGS)` or `$(KERNEL_RPI5_COMPILE_FLAGS)` (directly or through a `KERNEL_*_FLAGS` variable) without respelling a shared flag, and every script run with `$(KERNELBUILD_CHECK_ARGS)` takes its flags from `scripts/kernel_compile_flags.py`; the EL0 payload define is the one exemption (#781) |
 | `check_kernel_compile_flags_controls.py` | a bypassing recipe, a `kernel/*.tkb` path compile, a respelled flag, a respelling flags variable, an unlisted define and a script spelling its own flags are refused; the EL0 define, a prerequisite line and the real tree are accepted |

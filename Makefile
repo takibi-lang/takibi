@@ -25,6 +25,13 @@ MAKEFLAGS += -j$(TAKIBI_JOBS)
 endif
 MAKEFLAGS += -Oline --no-print-directory
 
+# GitHub issue #1223: a recipe that fails deletes the target it was writing.
+# Several object recipes run checks after the compile (the ext2 mutation
+# guard, the unused-coverage and raw-deref ratchets); without this a failed
+# check left the object behind, and the next make found it up to date and
+# skipped the check. scripts/check_make_delete_on_error.py is the control.
+.DELETE_ON_ERROR:
+
 # Invoke the built binary directly rather than "dune exec takibi --": dune
 # exec re-checks/re-locks the workspace on every call, which serializes
 # concurrent invocations under `make -j`. Every .o rule below depends on
