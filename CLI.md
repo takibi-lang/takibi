@@ -2,7 +2,7 @@
 
 # Compiler command line
 
-`takibi <file.tkb>... [flags]`: 35 flags, from the table in `bin/main.ml`. GitHub issue #1027 plans their consolidation.
+`takibi <file.tkb>... [flags]`: 36 flags, from the table in `bin/main.ml`. GitHub issue #1027 plans their consolidation.
 
 ## Target and output (5)
 
@@ -36,7 +36,7 @@
 | `--external-entry` | `<function>` | a function called from outside Takibi (repeatable) |
 | `--check-unused-file` | `<path>` | restrict the unused-function check to this file (repeatable) |
 
-## Facts for build checks (13)
+## Facts for build checks (14)
 
 | Flag | Argument | Meaning |
 | --- | --- | --- |
@@ -50,6 +50,7 @@
 | `--emit-raw-deref-audit` | `<path>` | write the raw-dereference audit |
 | `--emit-raw-site-counts` | `<path>` | write raw-site counts per file |
 | `--emit-call-graph` | `<path>` | write the call-graph table |
+| `--emit-globals` | `<path>` | write the global protection table |
 | `--emit-alloc-words` | `<path>` | write the OCaml words this run allocated, at exit |
 | `--emit-held-guards` | `<path>` | write the held-guard table |
 | `--emit-range-obligations` | `<dir>` | write one SMT-LIB file per range obligation |

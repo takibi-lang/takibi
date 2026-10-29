@@ -3182,6 +3182,45 @@ let infer_tests = [
       Alcotest.(check bool) "function value" true
         (String.starts_with ~prefix:"callback@" (field "main" "values")));
 
+  (* GitHub issue #1012: --emit-globals classifies each `let mut` global by
+     the protection its type shows; the ratchet reads this column. *)
+  Alcotest.test_case "global protection table classes" `Quick
+    (fun () ->
+      ignore (parse "fn reset_only() {}");
+      let prog = parse
+        "struct no_copy AtomicWord { private value: usize; }
+         struct no_copy Lock { private word: AtomicWord; }
+         struct Mixed { a: AtomicWord; b: usize; }
+         struct Empty { }
+         let mut plain: usize = 0;
+         let mut flag: bool = false;
+         let mut word: AtomicWord;
+         let mut words: [AtomicWord; 4];
+         let mut lock: Lock;
+         let mut mixed: Mixed;
+         let mut empty: Empty;
+         let fixed: usize = 3;
+         fn main() -> usize { return plain; }" in
+      let buf = Buffer.create 256 in
+      let table = Filename.temp_file "globals" ".tsv" in
+      Out_channel.with_open_bin table (fun oc -> Global_protection.write_table oc prog);
+      Buffer.add_string buf (In_channel.with_open_bin table In_channel.input_all);
+      Sys.remove table;
+      let rows = String.split_on_char '\n' (Buffer.contents buf)
+                 |> List.filter (( <> ) "") in
+      Alcotest.(check bool) "format line" true
+        (String.starts_with ~prefix:"# takibi globals, format 1" (List.hd rows));
+      let protection name =
+        match List.find_opt (fun r ->
+          List.nth (String.split_on_char '\t' r) 2 = name) (List.tl (List.tl rows)) with
+        | Some r -> List.nth (String.split_on_char '\t' r) 6
+        | None -> "absent" in
+      List.iter (fun (name, want) ->
+        Alcotest.(check string) name want (protection name))
+        [ "plain", "none"; "flag", "none"; "word", "atomic"; "words", "atomic";
+          "lock", "composite"; "mixed", "none"; "empty", "none";
+          "fixed", "absent" ]);
+
   Alcotest.test_case "call graph body hash ignores comments, not literals" `Quick
     (fun () ->
       let hash src = List.assoc "body_hash" (List.assoc "f" (call_graph_rows src)) in

@@ -80,6 +80,7 @@ let () =
   let emit_raw_deref_audit = ref "" in
   let emit_raw_site_counts = ref "" in
   let emit_call_graph = ref "" in
+  let emit_globals = ref "" in
   let emit_held_guards = ref "" in
   let emit_effect_matrix = ref false in
   let emit_tla = ref "" in
@@ -148,6 +149,10 @@ let () =
     (* GitHub issue #987: the resolved call graph (docs/CALL_GRAPH.md). *)
     flag "--emit-call-graph" Facts ~arg:path (set emit_call_graph)
       "write the call-graph table";
+    (* GitHub issue #1012: each `let mut` global's protection
+       (docs/GLOBAL_PROTECTION.md). *)
+    flag "--emit-globals" Facts ~arg:path (set emit_globals)
+      "write the global protection table";
     (* GitHub issue #923: allocated words, independent of host load. *)
     flag "--emit-alloc-words" Facts ~arg:path
       (Arg (fun path ->
@@ -405,6 +410,12 @@ let () =
       let out = open_out !emit_raw_site_counts in
       List.iter (fun (file, n) -> Printf.fprintf out "%d\t%s\n" n file)
         (Raw_authority_policy.site_counts ~source_program:source_prog ());
+      close_out out
+    end;
+
+    if !emit_globals <> "" then begin
+      let out = open_out !emit_globals in
+      Global_protection.write_table out source_prog;
       close_out out
     end;
 

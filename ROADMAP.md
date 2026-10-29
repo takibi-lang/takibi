@@ -161,9 +161,11 @@ owners are TaskMutex, the spare stack stays masked). #980
 4. **Globals and hardware isolation (memory safety).** #1012: every
    `let mut` global is `AtomicWord`, lock-protected, `per_cpu`, region
    backing, `Place`, a `dma_fixed` or protocol owner, or boot-once (#1013),
-   or allow-listed with its reader named; 406 of 500 production globals
-   are outside that set today; the ratchet (slice 1) lands first, the
-   migration follows the order the flip breaks things. #1032: WXN and PXN
+   or allow-listed with its reader named; the ratchet (slice 1, done
+   2026-10-29: `--emit-globals` and `buildcheck_global_protection.py` in
+   kernelbuild, docs/GLOBAL_PROTECTION.md) counts 475 of 711 production
+   globals outside that set (391 of 519 outside evidence/probe files),
+   each listed; the migration follows the order the flip breaks things. #1032: WXN and PXN
    first (configuration; a B-sized slice; done 2026-10-29: the identity
    is split so only the text is executable, WXN is set, and two QEMU oops
    modes are the negative controls), then PAN with a typed

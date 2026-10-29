@@ -1,0 +1,481 @@
+# file	name	reader -- the production `let mut` globals whose type shows no
+# protection (GitHub issue #1012; docs/GLOBAL_PROTECTION.md). The list only shrinks:
+# scripts/buildcheck_global_protection.py refuses an unlisted unprotected global and a
+# stale row, and the row count is the trust-ledger category unprotected_globals.
+# "unreviewed" rows carry the 2026-10-06 disposition as a starting point (slice 3);
+# a reviewed row names the global's reader and the premise it rests on.
+kernel/arch/arm64/boot/cpu.tkb	irq_pmr_masked	unreviewed
+kernel/arch/arm64/boot/cpu.tkb	irq_pmr_ready	unreviewed
+kernel/arch/arm64/kernel/exception_evidence.tkb	crash_console_owner	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
+kernel/arch/arm64/kernel/exception_evidence.tkb	crash_fault_order	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
+kernel/arch/arm64/kernel/exception_evidence.tkb	crash_report_abandoned	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
+kernel/arch/arm64/kernel/exception_evidence.tkb	crash_report_contended	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
+kernel/arch/arm64/kernel/exception_evidence.tkb	crash_report_owner	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
+kernel/arch/arm64/kernel/exception_evidence.tkb	crash_snapshot_capturing_per_core	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
+kernel/arch/arm64/kernel/exception_evidence.tkb	crash_snapshot_per_core	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
+kernel/arch/arm64/kernel/exception_evidence.tkb	ddb_snapshot	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
+kernel/arch/arm64/kernel/exception_evidence.tkb	ddb_snapshot_published_sequence	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
+kernel/arch/arm64/kernel/exception_evidence.tkb	ddb_stopped_root	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
+kernel/arch/arm64/kernel/exception_evidence.tkb	ddb_wait_test_records	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
+kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_backtrace_test_enabled	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
+kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_breakpoint_test_enabled	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
+kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_console_hold_armed	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
+kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_console_test_enabled	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
+kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_log_test_enabled	unreviewed
+kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_memory_access	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
+kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_memory_fault_test_enabled	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
+kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_wait_test_enabled	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
+kernel/arch/arm64/kernel/gicv2.tkb	gicc	unreviewed
+kernel/arch/arm64/kernel/gicv2.tkb	gicd	unreviewed
+kernel/arch/arm64/kernel/platform_uart_common.tkb	uart_rx_handler	unreviewed; 2026-10-06 retain-singleton: one physical UART / boot installs callback before CPU0 UART IRQ unmask
+kernel/arch/arm64/kernel/secondary.tkb	kernel_online_cores	unreviewed; 2026-10-06 retain-partition: machine CPU set / boot clear/CPU_ON publication; each CPU publishes its own tick/state word
+kernel/arch/arm64/mm/asid.tkb	asid_bits	unreviewed; 2026-10-06 retain-owner: machine ASID namespace / asid_init boot metadata; LockedCell guard for mutable allocation state; WorldStopped for rollover
+kernel/arch/arm64/mm/asid.tkb	asid_last	unreviewed; 2026-10-06 retain-owner: machine ASID namespace / asid_init boot metadata; LockedCell guard for mutable allocation state; WorldStopped for rollover
+kernel/arch/arm64/mm/asid.tkb	asid_ready	unreviewed; 2026-10-06 retain-owner: machine ASID namespace / asid_init boot metadata; LockedCell guard for mutable allocation state; WorldStopped for rollover
+kernel/drivers/block/block_cache.tkb	block_cache_backend	unreviewed; 2026-10-06 candidate-context: one read cache per CPU / bounded caller-supplied CPU; release/acquire write epoch; local synchronous access
+kernel/drivers/block/block_cache.tkb	block_cache_block	unreviewed; 2026-10-06 candidate-context: one read cache per CPU / bounded caller-supplied CPU; release/acquire write epoch; local synchronous access
+kernel/drivers/block/block_cache.tkb	block_cache_data	unreviewed; 2026-10-06 candidate-context: one read cache per CPU / bounded caller-supplied CPU; release/acquire write epoch; local synchronous access
+kernel/drivers/block/block_cache.tkb	block_cache_epoch	unreviewed; 2026-10-06 candidate-context: one read cache per CPU / bounded caller-supplied CPU; release/acquire write epoch; local synchronous access
+kernel/drivers/block/block_cache.tkb	block_cache_hits	unreviewed; 2026-10-06 candidate-context: one read cache per CPU / bounded caller-supplied CPU; release/acquire write epoch; local synchronous access
+kernel/drivers/block/block_cache.tkb	block_cache_tick	unreviewed; 2026-10-06 candidate-context: one read cache per CPU / bounded caller-supplied CPU; release/acquire write epoch; local synchronous access
+kernel/drivers/block/block_cache.tkb	block_cache_used	unreviewed; 2026-10-06 candidate-context: one read cache per CPU / bounded caller-supplied CPU; release/acquire write epoch; local synchronous access
+kernel/drivers/block/block_cache.tkb	block_cache_valid	unreviewed; 2026-10-06 candidate-context: one read cache per CPU / bounded caller-supplied CPU; release/acquire write epoch; local synchronous access
+kernel/drivers/block/memory.tkb	block_device_waits	unreviewed; 2026-10-06 candidate-context: block I/O service and per-CPU read-ahead / TaskMutex for device commands; local read-ahead before device lock; epoch invalidation
+kernel/drivers/block/memory.tkb	block_fault_armed	unreviewed; 2026-10-06 candidate-fixture: one device fault-injection scenario / block-device TaskMutex; arm/disarm/hits entry functions
+kernel/drivers/block/memory.tkb	block_fault_injected	unreviewed; 2026-10-06 candidate-fixture: one device fault-injection scenario / block-device TaskMutex; arm/disarm/hits entry functions
+kernel/drivers/block/memory.tkb	block_fault_on_write	unreviewed; 2026-10-06 candidate-fixture: one device fault-injection scenario / block-device TaskMutex; arm/disarm/hits entry functions
+kernel/drivers/block/memory.tkb	block_fault_skip	unreviewed; 2026-10-06 candidate-fixture: one device fault-injection scenario / block-device TaskMutex; arm/disarm/hits entry functions
+kernel/drivers/block/memory.tkb	block_fault_sticky	unreviewed; 2026-10-06 candidate-fixture: one device fault-injection scenario / block-device TaskMutex; arm/disarm/hits entry functions
+kernel/drivers/block/memory.tkb	block_read_calls	unreviewed; 2026-10-06 candidate-context: block I/O service and per-CPU read-ahead / TaskMutex for device commands; local read-ahead before device lock; epoch invalidation
+kernel/drivers/block/memory.tkb	block_run_backend	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
+kernel/drivers/block/memory.tkb	block_run_count	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
+kernel/drivers/block/memory.tkb	block_run_data	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
+kernel/drivers/block/memory.tkb	block_run_epoch	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
+kernel/drivers/block/memory.tkb	block_run_first	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
+kernel/drivers/block/memory.tkb	block_run_hits	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
+kernel/drivers/block/memory.tkb	block_run_next	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
+kernel/drivers/block/memory.tkb	block_run_next_backend	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
+kernel/drivers/block/memory.tkb	block_run_reads	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
+kernel/drivers/block/memory.tkb	block_single_reads	unreviewed
+kernel/drivers/block/memory.tkb	block_write_calls	unreviewed; 2026-10-06 candidate-context: block I/O service and per-CPU read-ahead / TaskMutex for device commands; local read-ahead before device lock; epoch invalidation
+kernel/drivers/block/virtio_blk.tkb	virtio_blk_base	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
+kernel/drivers/block/virtio_blk.tkb	virtio_blk_completion_max_ticks	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
+kernel/drivers/block/virtio_blk.tkb	virtio_blk_completion_total_ticks	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
+kernel/drivers/block/virtio_blk.tkb	virtio_blk_completions	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
+kernel/drivers/block/virtio_blk.tkb	virtio_blk_disabled	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
+kernel/drivers/block/virtio_blk.tkb	virtio_blk_queue	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
+kernel/drivers/block/virtio_blk.tkb	virtio_blk_ready	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
+kernel/drivers/block/virtio_blk.tkb	virtio_blk_regs	unreviewed
+kernel/drivers/block/virtio_blk.tkb	virtio_blk_timeout_first	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
+kernel/drivers/block/virtio_blk.tkb	virtio_blk_timeout_last	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
+kernel/drivers/block/virtio_blk.tkb	virtio_blk_timeouts	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
+kernel/drivers/block/virtio_blk.tkb	virtio_blk_used_seen	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
+kernel/drivers/block/virtio_blk_dma.tkb	virtio_blk_used_claimed	unreviewed
+kernel/drivers/net/rp1_gem.tkb	gem	unreviewed
+kernel/drivers/net/rp1_gem.tkb	gem_pkt_kept_len	unreviewed
+kernel/drivers/net/rp1_gem.tkb	gem_rx_pkt	unreviewed
+kernel/drivers/net/rp1_gem.tkb	gem_rx_ring_cpu_address	unreviewed
+kernel/drivers/net/rp1_gem.tkb	gem_tx_down	unreviewed
+kernel/drivers/net/rp1_gem.tkb	gem_tx_next	unreviewed; 2026-10-06 review-device-layout: one GEM network controller / InitOnce; linear RX/TX capabilities; boot MMIO configuration; DMA publication
+kernel/drivers/net/rp1_gem.tkb	net_init_once	unreviewed; 2026-10-06 review-device-layout: one GEM network controller / InitOnce; linear RX/TX capabilities; boot MMIO configuration; DMA publication
+kernel/drivers/net/rp1_gem.tkb	rp1_clocks	unreviewed
+kernel/drivers/net/rp1_gem.tkb	rp1_clocks_base	unreviewed; 2026-10-06 review-device-layout: one GEM network controller / InitOnce; linear RX/TX capabilities; boot MMIO configuration; DMA publication
+kernel/drivers/net/rp1_gem.tkb	rp1_gem_base	unreviewed; 2026-10-06 review-device-layout: one GEM network controller / InitOnce; linear RX/TX capabilities; boot MMIO configuration; DMA publication
+kernel/drivers/net/rp1_gem.tkb	rp1_gem_dtb_status	unreviewed; 2026-10-06 review-device-layout: one GEM network controller / InitOnce; linear RX/TX capabilities; boot MMIO configuration; DMA publication
+kernel/drivers/net/rp1_gem.tkb	rp1_gem_net_ready	unreviewed; 2026-10-06 review-device-layout: one GEM network controller / InitOnce; linear RX/TX capabilities; boot MMIO configuration; DMA publication
+kernel/drivers/net/rp1_gem.tkb	rp1_gpio_ctrl	unreviewed
+kernel/drivers/net/rp1_gem.tkb	rp1_gpio_ctrl_base	unreviewed; 2026-10-06 review-device-layout: one GEM network controller / InitOnce; linear RX/TX capabilities; boot MMIO configuration; DMA publication
+kernel/drivers/net/rp1_gem.tkb	rp1_gpio_pads	unreviewed
+kernel/drivers/net/rp1_gem.tkb	rp1_gpio_pads_base	unreviewed; 2026-10-06 review-device-layout: one GEM network controller / InitOnce; linear RX/TX capabilities; boot MMIO configuration; DMA publication
+kernel/drivers/net/rp1_gem.tkb	rp1_gpio_rio	unreviewed
+kernel/drivers/net/rp1_gem.tkb	rp1_gpio_rio_base	unreviewed; 2026-10-06 review-device-layout: one GEM network controller / InitOnce; linear RX/TX capabilities; boot MMIO configuration; DMA publication
+kernel/drivers/net/rp1_gem_desc.tkb	gem_pkt_addr	unreviewed
+kernel/drivers/net/rp1_gem_desc.tkb	gem_pkt_rx_seen	unreviewed
+kernel/drivers/net/rp1_gem_desc.tkb	gem_pkt_tx_seen	unreviewed
+kernel/drivers/net/rp1_gem_desc.tkb	gem_rx_seen_filled	unreviewed
+kernel/drivers/net/rp1_gem_desc.tkb	gem_tx_halt_confirmed	unreviewed
+kernel/drivers/net/rp1_gem_desc.tkb	gem_tx_seen_used	unreviewed
+kernel/drivers/net/virtio_net.tkb	net_init_once	unreviewed; 2026-10-06 review-device-layout: one virtio network controller / InitOnce; linear RX/TX capabilities; IRQ publication and queue indices
+kernel/drivers/net/virtio_net.tkb	rx_avail_idx	unreviewed; 2026-10-06 review-device-layout: one virtio network controller / InitOnce; linear RX/TX capabilities; IRQ publication and queue indices
+kernel/drivers/net/virtio_net.tkb	rx_desc_pkt	unreviewed
+kernel/drivers/net/virtio_net.tkb	rx_used_seen	unreviewed; 2026-10-06 review-device-layout: one virtio network controller / InitOnce; linear RX/TX capabilities; IRQ publication and queue indices
+kernel/drivers/net/virtio_net.tkb	tx_avail_idx	unreviewed; 2026-10-06 review-device-layout: one virtio network controller / InitOnce; linear RX/TX capabilities; IRQ publication and queue indices
+kernel/drivers/net/virtio_net.tkb	tx_used_seen	unreviewed; 2026-10-06 review-device-layout: one virtio network controller / InitOnce; linear RX/TX capabilities; IRQ publication and queue indices
+kernel/drivers/net/virtio_net.tkb	virtio_base	unreviewed; 2026-10-06 review-device-layout: one virtio network controller / InitOnce; linear RX/TX capabilities; IRQ publication and queue indices
+kernel/drivers/net/virtio_net.tkb	virtio_net_gic_intid	unreviewed; 2026-10-06 review-device-layout: one virtio network controller / InitOnce; linear RX/TX capabilities; IRQ publication and queue indices
+kernel/drivers/net/virtio_net.tkb	virtio_net_queues	unreviewed
+kernel/drivers/net/virtio_net.tkb	virtio_net_ready	unreviewed; 2026-10-06 review-device-layout: one virtio network controller / InitOnce; linear RX/TX capabilities; IRQ publication and queue indices
+kernel/drivers/net/virtio_net.tkb	virtio_net_regs	unreviewed
+kernel/drivers/net/virtio_net.tkb	virtio_net_used_addr	unreviewed
+kernel/drivers/net/virtio_net.tkb	virtio_pkt_kept_len	unreviewed
+kernel/drivers/net/virtio_net_tx_dma.tkb	virtio_pkt_addr	unreviewed
+kernel/drivers/net/virtio_net_tx_dma.tkb	virtio_pkt_rx_seen	unreviewed
+kernel/drivers/serial/pl011.tkb	uart	unreviewed
+kernel/drivers/serial/terminal.tkb	terminal_literal_next	unreviewed; 2026-10-06 candidate-context: one UART terminal / settings/literal-next under process-run lock; independent flow readers use AtomicWord
+kernel/drivers/serial/terminal.tkb	terminal_settings	unreviewed; 2026-10-06 candidate-context: one UART terminal / settings/literal-next under process-run lock; independent flow readers use AtomicWord
+kernel/drivers/serial/terminal.tkb	terminal_settings_initialized	unreviewed; 2026-10-06 candidate-context: one UART terminal / settings/literal-next under process-run lock; independent flow readers use AtomicWord
+kernel/drivers/serial/terminal_echo.tkb	terminal_echo_count	unreviewed; 2026-10-06 candidate-context: one terminal echo queue / console exclusion and IRQ masking at kernel call sites; non-preemptible holders
+kernel/drivers/serial/terminal_echo.tkb	terminal_echo_dropped	unreviewed; 2026-10-06 candidate-context: one terminal echo queue / console exclusion and IRQ masking at kernel call sites; non-preemptible holders
+kernel/drivers/serial/terminal_echo.tkb	terminal_echo_head	unreviewed; 2026-10-06 candidate-context: one terminal echo queue / console exclusion and IRQ masking at kernel call sites; non-preemptible holders
+kernel/drivers/serial/terminal_echo.tkb	terminal_echo_operations	unreviewed; 2026-10-06 candidate-context: one terminal echo queue / console exclusion and IRQ masking at kernel call sites; non-preemptible holders
+kernel/drivers/serial/terminal_echo.tkb	terminal_echo_phase	unreviewed; 2026-10-06 candidate-context: one terminal echo queue / console exclusion and IRQ masking at kernel call sites; non-preemptible holders
+kernel/drivers/serial/terminal_echo.tkb	terminal_echo_tail	unreviewed; 2026-10-06 candidate-context: one terminal echo queue / console exclusion and IRQ masking at kernel call sites; non-preemptible holders
+kernel/drivers/serial/uart_rx_ring.tkb	kernel_uart_rx_buf	unreviewed; 2026-10-06 candidate-context: one terminal RX queue / process-run lock at kernel callers; DDB quiescence; host-native fixture is serial
+kernel/drivers/serial/uart_rx_ring.tkb	kernel_uart_rx_canonical	unreviewed; 2026-10-06 candidate-context: one terminal RX queue / process-run lock at kernel callers; DDB quiescence; host-native fixture is serial
+kernel/drivers/serial/uart_rx_ring.tkb	kernel_uart_rx_columns	unreviewed; 2026-10-06 candidate-context: one terminal RX queue / process-run lock at kernel callers; DDB quiescence; host-native fixture is serial
+kernel/drivers/serial/uart_rx_ring.tkb	kernel_uart_rx_dropped	unreviewed; 2026-10-06 candidate-context: one terminal RX queue / process-run lock at kernel callers; DDB quiescence; host-native fixture is serial
+kernel/drivers/serial/uart_rx_ring.tkb	kernel_uart_rx_head	unreviewed; 2026-10-06 candidate-context: one terminal RX queue / process-run lock at kernel callers; DDB quiescence; host-native fixture is serial
+kernel/drivers/serial/uart_rx_ring.tkb	kernel_uart_rx_line_columns	unreviewed; 2026-10-06 candidate-context: one terminal RX queue / process-run lock at kernel callers; DDB quiescence; host-native fixture is serial
+kernel/drivers/serial/uart_rx_ring.tkb	kernel_uart_rx_lines	unreviewed; 2026-10-06 candidate-context: one terminal RX queue / process-run lock at kernel callers; DDB quiescence; host-native fixture is serial
+kernel/drivers/serial/uart_rx_ring.tkb	kernel_uart_rx_marks	unreviewed; 2026-10-06 candidate-context: one terminal RX queue / process-run lock at kernel callers; DDB quiescence; host-native fixture is serial
+kernel/drivers/serial/uart_rx_ring.tkb	kernel_uart_rx_tail	unreviewed; 2026-10-06 candidate-context: one terminal RX queue / process-run lock at kernel callers; DDB quiescence; host-native fixture is serial
+kernel/drivers/virtio_used.tkb	virtio_used_reset_confirmed	unreviewed
+kernel/fs/elf64.tkb	ELF_IDENT_MAGIC	unreviewed; 2026-10-06 retain-immutable-data: ELF parser signature bytes / declaration initializer; reads only in validation
+kernel/fs/ext2/ext2.tkb	ext2_fence_pending	unreviewed; 2026-10-06 candidate-mount: writable filesystem mount / mutation admission; boot fixture single writer; explicit recovery
+kernel/fs/ext2/ext2.tkb	ext2_fence_pending_count	unreviewed; 2026-10-06 candidate-mount: writable filesystem mount / mutation admission; boot fixture single writer; explicit recovery
+kernel/fs/ext2/ext2.tkb	ext2_fenced	unreviewed; 2026-10-06 candidate-mount: writable filesystem mount / mutation admission; boot fixture single writer; explicit recovery
+kernel/fs/ext2/ext2.tkb	ext2_scratch	unreviewed; 2026-10-06 candidate-mount: per-CPU operations and one writable root mount / non-preemptible per-CPU scratch; mutation admission for recovery/fence state
+kernel/fs/ext2/ext2.tkb	ext2_undo_owed	unreviewed
+kernel/fs/ext2/ext2.tkb	ext2_undo_rows	unreviewed
+kernel/fs/ext2/ext2.tkb	ext2_write_blocks	unreviewed; 2026-10-06 candidate-mount: per-CPU operations and one writable root mount / non-preemptible per-CPU scratch; mutation admission for recovery/fence state
+kernel/init/ext2_fixture.tkb	ext2_release_fenced	unreviewed
+kernel/init/ext2_fixture.tkb	ext2_release_first	unreviewed
+kernel/init/ext2_fixture.tkb	ext2_release_second	unreviewed
+kernel/init/ext2_fixture.tkb	ext2_write_fixture_bitmap	unreviewed; 2026-10-06 retain-fixture: shared boot filesystem fixture / boot writes/reads static test buffers before normal users
+kernel/init/ext2_fixture.tkb	ext2_write_fixture_readback	unreviewed; 2026-10-06 retain-fixture: shared boot filesystem fixture / boot writes/reads static test buffers before normal users
+kernel/init/ext2_fixture.tkb	ext2_write_fixture_source	unreviewed; 2026-10-06 retain-fixture: shared boot filesystem fixture / boot writes/reads static test buffers before normal users
+kernel/init/test_driver.tkb	address_space_baseline	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
+kernel/init/test_driver.tkb	boot_exec_windows	unreviewed
+kernel/init/test_driver.tkb	boot_execution	unreviewed
+kernel/init/test_driver.tkb	clone_growth_probe_ok	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
+kernel/init/test_driver.tkb	exec_windows	unreviewed
+kernel/init/test_driver.tkb	ext2_read_fixture	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
+kernel/init/test_driver.tkb	ext2_symlink_fixture	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
+kernel/init/test_driver.tkb	fd_context_baseline	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
+kernel/init/test_driver.tkb	image_record_baseline	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
+kernel/init/test_driver.tkb	init_boot_fixture_pending	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
+kernel/init/test_driver.tkb	init_boot_fixture_reported	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
+kernel/init/test_driver.tkb	init_boot_fixture_status	unreviewed
+kernel/init/test_driver.tkb	kernel_exec_reserve_undercount	unreviewed
+kernel/init/test_driver.tkb	kernel_init_socket_evidence	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
+kernel/init/test_driver.tkb	kernel_test_init_script	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
+kernel/init/test_driver.tkb	kernel_test_rpi5_extended	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
+kernel/init/test_driver.tkb	page_baseline	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
+kernel/init/test_driver.tkb	page_baseline_init_root	unreviewed
+kernel/init/test_driver.tkb	process_pool_baseline	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
+kernel/init/test_driver.tkb	rootfs_metadata	unreviewed; 2026-10-06 retain-boot: retained boot image metadata / boot fills once; saved image plan borrows the permanent window
+kernel/kernel/fd_table.tkb	fd_refcount_probe_handle	unreviewed; 2026-10-06 retain-fixture: refcount contention fixture / fixture rendezvous/guarded production count operations
+kernel/kernel/fd_table.tkb	fd_refcount_probe_ready	unreviewed; 2026-10-06 retain-fixture: refcount contention fixture / fixture rendezvous/guarded production count operations
+kernel/kernel/fd_table.tkb	fd_slot_total	unreviewed; 2026-10-06 retain-pools: FD namespace and shared open descriptions / typed pool guards/pins; process ownership of chains; refcount lock
+kernel/kernel/fd_table.tkb	object_double_release_count	unreviewed; 2026-10-06 retain-evidence: FD/refcount invariant evidence / existing guarded record/refcount paths; snapshot/report readers
+kernel/kernel/fd_table.tkb	unified_fd_record_missing_count	unreviewed; 2026-10-06 retain-evidence: FD/refcount invariant evidence / existing guarded record/refcount paths; snapshot/report readers
+kernel/kernel/fd_table.tkb	unified_object_ref_bound_breaks	unreviewed; 2026-10-06 retain-evidence: FD/refcount invariant evidence / existing guarded record/refcount paths; snapshot/report readers
+kernel/kernel/freelist_contention_evidence.tkb	freelist_probe	unreviewed; 2026-10-06 retain-fixture: named freelist_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
+kernel/kernel/freelist_contention_evidence.tkb	freelist_probe_ready	unreviewed; 2026-10-06 retain-fixture: named freelist_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
+kernel/kernel/init_once_contention_evidence.tkb	init_once_probe_gate	unreviewed; 2026-10-06 retain-fixture: named init_once_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
+kernel/kernel/init_once_contention_evidence.tkb	init_once_probe_naive_complete	unreviewed; 2026-10-06 retain-fixture: named init_once_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
+kernel/kernel/log_storm_evidence.tkb	log_storm_last_round	unreviewed
+kernel/kernel/log_storm_evidence.tkb	log_storm_trace_rounds	unreviewed
+kernel/kernel/nic_irq_affinity.tkb	nic_irq_evidence_intid	unreviewed
+kernel/kernel/nic_irq_affinity.tkb	nic_irq_phase_start	unreviewed
+kernel/kernel/occupancy_drain_evidence.tkb	occupancy_probe_teardowns	unreviewed; 2026-10-06 retain-fixture: named occupancy_drain_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
+kernel/kernel/occupancy_drain_evidence.tkb	world_stop_probe_inspections	unreviewed; 2026-10-06 retain-fixture: named occupancy_drain_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
+kernel/kernel/occupancy_drain_evidence.tkb	world_stop_stale_probe_controller	unreviewed; 2026-10-06 retain-fixture: named occupancy_drain_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
+kernel/kernel/pool_contention_evidence.tkb	contention_pool_grown	unreviewed
+kernel/kernel/pool_contention_evidence.tkb	contention_pool_ready	unreviewed; 2026-10-06 retain-fixture: named pool_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
+kernel/kernel/pool_lock_wait.tkb	pool_lock_wait_cores	unreviewed
+kernel/kernel/pool_walk_contention_evidence.tkb	pool_walk_floor	unreviewed
+kernel/kernel/pool_walk_contention_evidence.tkb	pool_walk_ready	unreviewed; 2026-10-06 retain-fixture: named pool_walk_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
+kernel/kernel/process.tkb	execution_state	unreviewed; 2026-10-06 retain-partition: one execution/activity record per CPU / cpu_id selection and non-preemptible/IRQ entry protocol
+kernel/kernel/process.tkb	kernel_activity	unreviewed; 2026-10-06 retain-partition: one execution/activity record per CPU / cpu_id selection and non-preemptible/IRQ entry protocol
+kernel/kernel/process.tkb	kernel_crash_trace	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	kernel_crash_trace_next	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	kernel_idle_starvation_reported	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	kernel_process_clone_rollover_busy_injections	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	kernel_process_core0_idle_seen	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	kernel_process_cpus_that_ran	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	kernel_process_exec_failure_reason	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	kernel_process_reap_unlinked_count	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	kernel_process_rollover_busy_injections	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	kernel_process_stable_retry_busy	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	kernel_process_stable_retry_partial	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	kernel_process_start_refused_busy	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	kernel_process_start_refused_invalid	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	kernel_process_start_refused_partial	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	kernel_process_tick_wake_head	unreviewed
+kernel/kernel/process.tkb	kernel_process_tick_wake_tick_before	unreviewed
+kernel/kernel/process.tkb	kernel_process_tick_wake_tick_now	unreviewed
+kernel/kernel/process.tkb	kernel_process_tick_wake_watched_core	unreviewed
+kernel/kernel/process.tkb	kernel_process_tick_wake_watched_first	unreviewed
+kernel/kernel/process.tkb	kernel_process_tick_wake_watched_pid	unreviewed
+kernel/kernel/process.tkb	kernel_process_trace_boot_enabled	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	kernel_process_trace_enabled	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	kernel_process_trace_fail_after_exec	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	kernel_process_trace_omit_events	unreviewed
+kernel/kernel/process.tkb	kernel_process_trace_omit_pid	unreviewed
+kernel/kernel/process.tkb	kernel_process_trace_omit_pid_set	unreviewed
+kernel/kernel/process.tkb	kernel_process_trace_probe_child_frame	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	kernel_process_trace_probe_parent_frame	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	scheduled_process_boot_handed_off	unreviewed
+kernel/kernel/process.tkb	scheduled_process_freed_cpu	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	scheduled_process_freed_first_slot	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	scheduled_process_freed_site	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	scheduled_process_freed_slot_count	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	scheduled_process_missing_cpu	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	scheduled_process_missing_current	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	scheduled_process_missing_first_slot	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	scheduled_process_missing_reason	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	scheduled_process_missing_site	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	scheduled_process_peer_dispatch_enabled	unreviewed; 2026-10-06 retain-authority: machine process namespace and scheduler / run guard; typed record makers; pooled records; bootstrap and assembly continuations
+kernel/kernel/process.tkb	scheduled_process_pool_ready	unreviewed; 2026-10-06 retain-authority: machine process namespace and scheduler / run guard; typed record makers; pooled records; bootstrap and assembly continuations
+kernel/kernel/process.tkb	scheduled_process_reaped_current_count	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	scheduled_process_record_absent	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	scheduled_process_record_missing_count	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	scheduled_process_recycled_reads	unreviewed
+kernel/kernel/process.tkb	scheduled_process_stack_deepest_reaped	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	scheduled_process_stale_first_generation	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	scheduled_process_stale_first_slot	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	scheduled_process_stale_handle_reads	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
+kernel/kernel/process.tkb	spread_timer_child	unreviewed; 2026-10-06 retain-fixture: EL0 spread timer fixture / timer enter/left publication and fixture progress hooks
+kernel/kernel/process.tkb	spread_timer_parent	unreviewed; 2026-10-06 retain-fixture: EL0 spread timer fixture / timer enter/left publication and fixture progress hooks
+kernel/kernel/process.tkb	spread_timer_phase	unreviewed; 2026-10-06 retain-fixture: EL0 spread timer fixture / timer enter/left publication and fixture progress hooks
+kernel/kernel/process.tkb	terminal_foreground_session	unreviewed; 2026-10-06 candidate-terminal-owner: one controlling terminal session / process-run guarded foreground selection/signal operations
+kernel/kernel/process_test_evidence.tkb	process_test_evidence	unreviewed; 2026-10-06 retain-evidence: boot process evidence / accessor functions on existing test/dispatch paths
+kernel/kernel/profile_samples.tkb	profile_sample_active	unreviewed; 2026-10-06 candidate-diagnostics: named PMU sampling interval / one sampling CPU; per-CPU prefix buffers; local IRQ observation limits
+kernel/kernel/profile_samples.tkb	profile_sample_available	unreviewed; 2026-10-06 candidate-diagnostics: named PMU sampling interval / one sampling CPU; per-CPU prefix buffers; local IRQ observation limits
+kernel/kernel/profile_samples.tkb	profile_sample_checked	unreviewed; 2026-10-06 candidate-diagnostics: named PMU sampling interval / one sampling CPU; per-CPU prefix buffers; local IRQ observation limits
+kernel/kernel/profile_samples.tkb	profile_sample_cores	unreviewed; 2026-10-06 candidate-diagnostics: named PMU sampling interval / one sampling CPU; per-CPU prefix buffers; local IRQ observation limits
+kernel/kernel/profile_samples.tkb	profile_sample_end_counter	unreviewed; 2026-10-06 candidate-diagnostics: named PMU sampling interval / one sampling CPU; per-CPU prefix buffers; local IRQ observation limits
+kernel/kernel/profile_samples.tkb	profile_sample_end_gic	unreviewed; 2026-10-06 candidate-diagnostics: named PMU sampling interval / one sampling CPU; per-CPU prefix buffers; local IRQ observation limits
+kernel/kernel/profile_samples.tkb	profile_sample_end_pending	unreviewed; 2026-10-06 candidate-diagnostics: named PMU sampling interval / one sampling CPU; per-CPU prefix buffers; local IRQ observation limits
+kernel/kernel/profile_samples.tkb	profile_sample_end_state	unreviewed; 2026-10-06 candidate-diagnostics: named PMU sampling interval / one sampling CPU; per-CPU prefix buffers; local IRQ observation limits
+kernel/kernel/profile_session.tkb	irqsoff_core	unreviewed
+kernel/kernel/profile_session.tkb	irqsoff_standing	unreviewed
+kernel/kernel/profile_session.tkb	profile_core_state	unreviewed
+kernel/kernel/profile_session.tkb	profile_session_depth	unreviewed
+kernel/kernel/profile_session.tkb	profile_session_period	unreviewed
+kernel/kernel/profile_session.tkb	profile_session_started	unreviewed
+kernel/kernel/profile_session.tkb	profile_session_stopped	unreviewed
+kernel/kernel/profile_timeline.tkb	profile_timeline_active	unreviewed; 2026-10-06 candidate-diagnostics: named busy-pair timeline / world-stopped start/finish; IRQ-masked per-CPU writers; frozen filters
+kernel/kernel/profile_timeline.tkb	profile_timeline_cores	unreviewed; 2026-10-06 candidate-diagnostics: named busy-pair timeline / world-stopped start/finish; IRQ-masked per-CPU writers; frozen filters
+kernel/kernel/profile_timeline.tkb	profile_timeline_pid_a	unreviewed; 2026-10-06 candidate-diagnostics: named busy-pair timeline / world-stopped start/finish; IRQ-masked per-CPU writers; frozen filters
+kernel/kernel/profile_timeline.tkb	profile_timeline_pid_b	unreviewed; 2026-10-06 candidate-diagnostics: named busy-pair timeline / world-stopped start/finish; IRQ-masked per-CPU writers; frozen filters
+kernel/kernel/protocol_trace.tkb	protocol_trace_active	unreviewed; 2026-10-06 retain-protocol: bounded protocol observation interval / run-lock acquire/release observations include changes made outside the lock; closed-window reporting
+kernel/kernel/protocol_trace.tkb	protocol_trace_cores	unreviewed; 2026-10-06 retain-protocol: bounded protocol observation interval / run-lock acquire/release observations include changes made outside the lock; closed-window reporting
+kernel/kernel/protocol_trace.tkb	protocol_trace_events	unreviewed; 2026-10-06 retain-protocol: bounded protocol observation interval / run-lock acquire/release observations include changes made outside the lock; closed-window reporting
+kernel/kernel/protocol_trace.tkb	protocol_trace_lost	unreviewed; 2026-10-06 retain-protocol: bounded protocol observation interval / run-lock acquire/release observations include changes made outside the lock; closed-window reporting
+kernel/kernel/protocol_trace.tkb	protocol_trace_process_count	unreviewed; 2026-10-06 retain-protocol: bounded protocol observation interval / run-lock acquire/release observations include changes made outside the lock; closed-window reporting
+kernel/kernel/protocol_trace.tkb	protocol_trace_processes	unreviewed; 2026-10-06 retain-protocol: bounded protocol observation interval / run-lock acquire/release observations include changes made outside the lock; closed-window reporting
+kernel/kernel/protocol_trace.tkb	protocol_trace_sequence	unreviewed; 2026-10-06 retain-protocol: bounded protocol observation interval / run-lock acquire/release observations include changes made outside the lock; closed-window reporting
+kernel/kernel/protocol_trace.tkb	protocol_trace_stored	unreviewed; 2026-10-06 retain-protocol: bounded protocol observation interval / run-lock acquire/release observations include changes made outside the lock; closed-window reporting
+kernel/kernel/protocol_trace.tkb	protocol_trace_unlocked_pass	unreviewed; 2026-10-06 retain-protocol: bounded protocol observation interval / run-lock acquire/release observations include changes made outside the lock; closed-window reporting
+kernel/kernel/schedule_contention_evidence.tkb	schedule_probe_attempts	unreviewed; 2026-10-06 retain-fixture: named schedule_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
+kernel/kernel/schedule_contention_evidence.tkb	schedule_probe_handle	unreviewed; 2026-10-06 retain-fixture: named schedule_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
+kernel/kernel/schedule_contention_evidence.tkb	schedule_probe_ready	unreviewed; 2026-10-06 retain-fixture: named schedule_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
+kernel/kernel/signal_contention_evidence.tkb	signal_probe_record	unreviewed; 2026-10-06 retain-fixture: named signal_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
+kernel/kernel/stall_probe.tkb	stall_probe_event_cpu	unreviewed
+kernel/kernel/stall_probe.tkb	stall_probe_event_kind	unreviewed
+kernel/kernel/stall_probe.tkb	stall_probe_event_pid	unreviewed
+kernel/kernel/stall_probe.tkb	stall_probe_event_time	unreviewed
+kernel/kernel/stall_probe.tkb	stall_probe_idle_passes	unreviewed
+kernel/kernel/stall_probe.tkb	stall_probe_last_idle_pass	unreviewed
+kernel/kernel/stall_probe.tkb	stall_probe_last_refused_pid	unreviewed
+kernel/kernel/stall_probe.tkb	stall_probe_last_resume	unreviewed
+kernel/kernel/stall_probe.tkb	stall_probe_last_tick	unreviewed
+kernel/kernel/stall_probe.tkb	stall_probe_last_wfi	unreviewed
+kernel/kernel/stall_probe.tkb	stall_probe_next	unreviewed
+kernel/kernel/stall_probe.tkb	stall_probe_refusals	unreviewed
+kernel/kernel/stall_probe.tkb	stall_probe_watch	unreviewed
+kernel/kernel/syscall.tkb	kernel_syscall_exec_lost_count	unreviewed
+kernel/kernel/syscall.tkb	kernel_syscall_exec_refused_count	unreviewed
+kernel/kernel/syscall.tkb	syscall_filesystem	unreviewed; 2026-10-06 retain-context: filesystem service and CPU-local action scratch / boot-published filesystem; non-preemptible local scratch; stable argv owner exchange
+kernel/kernel/syscall.tkb	syscall_scratch	unreviewed; 2026-10-06 retain-context: filesystem service and CPU-local action scratch / boot-published filesystem; non-preemptible local scratch; stable argv owner exchange
+kernel/kernel/syscall.tkb	syscall_syslog_peer_reported	unreviewed; 2026-10-06 retain-context: filesystem service and CPU-local action scratch / boot-published filesystem; non-preemptible local scratch; stable argv owner exchange
+kernel/kernel/syscall_test_evidence.tkb	syscall_test_evidence	unreviewed; 2026-10-06 retain-evidence: boot syscall evidence / accessor functions on existing dispatch/report paths
+kernel/kernel/syscall_test_lifecycle.tkb	syscall_connected_fixture_pending	unreviewed; 2026-10-06 candidate-fixture: bounded/persistent shell fixture / connected flag under run lock; remaining named fixture checkpoints/boot admission
+kernel/kernel/syscall_test_lifecycle.tkb	syscall_persistent_shell	unreviewed; 2026-10-06 candidate-fixture: bounded/persistent shell fixture / connected flag under run lock; remaining named fixture checkpoints/boot admission
+kernel/kernel/syscall_test_lifecycle.tkb	syscall_persistent_shell_checkpoint_exec_commit_logged	unreviewed; 2026-10-06 candidate-fixture: bounded/persistent shell fixture / connected flag under run lock; remaining named fixture checkpoints/boot admission
+kernel/kernel/syscall_test_lifecycle.tkb	syscall_persistent_shell_checkpoint_exec_prepare_logged	unreviewed; 2026-10-06 candidate-fixture: bounded/persistent shell fixture / connected flag under run lock; remaining named fixture checkpoints/boot admission
+kernel/kernel/syscall_test_lifecycle.tkb	syscall_persistent_shell_checkpoint_fork_logged	unreviewed; 2026-10-06 candidate-fixture: bounded/persistent shell fixture / connected flag under run lock; remaining named fixture checkpoints/boot admission
+kernel/kernel/syscall_test_lifecycle.tkb	syscall_persistent_shell_checkpoint_selected_logged	unreviewed; 2026-10-06 candidate-fixture: bounded/persistent shell fixture / connected flag under run lock; remaining named fixture checkpoints/boot admission
+kernel/kernel/syscall_test_lifecycle.tkb	syscall_persistent_shell_child_pid	unreviewed; 2026-10-06 candidate-fixture: bounded/persistent shell fixture / connected flag under run lock; remaining named fixture checkpoints/boot admission
+kernel/kernel/tcp_connection_contention_evidence.tkb	tcp_pool_cost_mailboxes	unreviewed; 2026-10-06 retain-fixture: named tcp_connection_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
+kernel/kernel/tcp_connection_contention_evidence.tkb	tcp_pool_cost_samples	unreviewed; 2026-10-06 retain-fixture: named tcp_connection_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
+kernel/kernel/uart_irq_affinity.tkb	uart_irq_hang_armed_once	unreviewed
+kernel/kernel/workload_evidence.tkb	move_cost_lost	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	move_cost_records	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	move_cost_reported	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	move_cost_stored	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	workload_busy_pair	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	workload_busy_starve_armed	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	workload_busy_starve_injection_ticks	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	workload_busy_starve_remaining	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	workload_busy_starve_worker	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	workload_busy_waits	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	workload_ddb_hold_park_since	unreviewed
+kernel/kernel/workload_evidence.tkb	workload_peer_exec_control	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	workload_peer_exec_cpu	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	workload_peer_exec_pid	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	workload_peer_fork_control	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	workload_peer_fork_cpu	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	workload_peer_fork_pid	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	workload_peer_mutation_pid	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	workload_peer_mutation_seen	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	workload_peer_net_wake_block_requested	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	workload_peer_net_wake_pid	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	workload_peer_sleep_armed	unreviewed
+kernel/kernel/workload_evidence.tkb	workload_peer_sleep_done	unreviewed
+kernel/kernel/workload_evidence.tkb	workload_peer_sleep_finished	unreviewed
+kernel/kernel/workload_evidence.tkb	workload_peer_sleep_pid	unreviewed
+kernel/kernel/workload_evidence.tkb	workload_peer_wait_blocked	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	workload_peer_wait_pid	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	workload_peer_wait_reaped	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	workload_profile_active	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	workload_profile_cores	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	workload_settings_wake	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/lib/diagnostic_ring.tkb	diagnostic_trace_records	unreviewed; 2026-10-06 retain-protocol: retained per-CPU diagnostic rings / typed publish_begin/commit; per-CPU sequence; debugger test activation
+kernel/lib/diagnostic_ring.tkb	diagnostic_trace_test_enabled	unreviewed; 2026-10-06 retain-protocol: retained per-CPU diagnostic rings / typed publish_begin/commit; per-CPU sequence; debugger test activation
+kernel/lib/occupancy.tkb	kernel_world_stop	unreviewed; 2026-10-06 retain-owner: machine WorldStop controller / linear complete/partial tokens and generation acknowledgements
+kernel/mm/address_space.tkb	address_space_backing_missing_count	unreviewed; 2026-10-06 retain-partition: backing allocator; CPU-active root; permanent root0 / pool pins; CPU-local hardware root; bootstrap mint and teardown run protocol
+kernel/mm/address_space.tkb	address_space_backing_root0	unreviewed; 2026-10-06 retain-partition: backing allocator; CPU-active root; permanent root0 / pool pins; CPU-local hardware root; bootstrap mint and teardown run protocol
+kernel/mm/process_image.tkb	process_image_exec_reap_clean_count	unreviewed; 2026-10-06 retain-context: image allocator and CPU-local image operations / pool pins; closed CPU-local operation context; permanent zero page
+kernel/mm/process_image.tkb	process_image_exec_reap_count	unreviewed; 2026-10-06 retain-context: image allocator and CPU-local image operations / pool pins; closed CPU-local operation context; permanent zero page
+kernel/mm/process_image.tkb	process_image_exec_reap_stack_growth_count	unreviewed; 2026-10-06 retain-context: image allocator and CPU-local image operations / pool pins; closed CPU-local operation context; permanent zero page
+kernel/mm/process_image.tkb	process_image_record_missing_count	unreviewed; 2026-10-06 retain-context: image allocator and CPU-local image operations / pool pins; closed CPU-local operation context; permanent zero page
+kernel/mm/process_image.tkb	process_image_root0_record	unreviewed
+kernel/mm/process_image.tkb	process_image_root_stale_count	unreviewed; 2026-10-06 retain-context: image allocator and CPU-local image operations / pool pins; closed CPU-local operation context; permanent zero page
+kernel/mm/process_image.tkb	process_image_staging	unreviewed
+kernel/mm/process_image.tkb	process_image_zero_page	unreviewed; 2026-10-06 retain-context: image allocator and CPU-local image operations / pool pins; closed CPU-local operation context; permanent zero page
+kernel/net/socket_capability.tkb	network_capability_store	unreviewed; 2026-10-06 retain-owner: one network RX admission authority / indexed mutex guard and stable_replace linear owner exchange
+kernel/net/tcp.tkb	our_mac	unreviewed; 2026-10-06 retain-pools: shared connection/frame/retransmit allocators and protocol engine / typed pool guards/pins; connection owner; network capabilities; injection controls
+kernel/net/tcp.tkb	pending_tcp_probe_frame	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
+kernel/net/tcp.tkb	pin_sharing_handles	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
+kernel/net/tcp.tkb	pin_sharing_page	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
+kernel/net/tcp.tkb	tcp_absent_fallback_count	unreviewed; 2026-10-06 retain-pools: shared connection/frame/retransmit allocators and protocol engine / typed pool guards/pins; connection owner; network capabilities; injection controls
+kernel/net/tcp.tkb	tcp_ack_each_stream_segment	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
+kernel/net/tcp.tkb	tcp_advertised_window	unreviewed; 2026-10-06 retain-pools: shared connection/frame/retransmit allocators and protocol engine / typed pool guards/pins; connection owner; network capabilities; injection controls
+kernel/net/tcp.tkb	tcp_completed_closes	unreviewed; 2026-10-06 retain-pools: shared connection/frame/retransmit allocators and protocol engine / typed pool guards/pins; connection owner; network capabilities; injection controls
+kernel/net/tcp.tkb	tcp_completed_echoes	unreviewed; 2026-10-06 retain-pools: shared connection/frame/retransmit allocators and protocol engine / typed pool guards/pins; connection owner; network capabilities; injection controls
+kernel/net/tcp.tkb	tcp_completed_handshakes	unreviewed; 2026-10-06 retain-pools: shared connection/frame/retransmit allocators and protocol engine / typed pool guards/pins; connection owner; network capabilities; injection controls
+kernel/net/tcp.tkb	tcp_drop_data_segment_index	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
+kernel/net/tcp.tkb	tcp_drop_data_segment_rearm	unreviewed
+kernel/net/tcp.tkb	tcp_drop_next_fin	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
+kernel/net/tcp.tkb	tcp_drop_next_syn_ack	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
+kernel/net/tcp.tkb	tcp_injected_data_recovery_observed	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
+kernel/net/tcp.tkb	tcp_injected_data_retransmitted	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
+kernel/net/tcp.tkb	tcp_injected_fin_recovery_observed	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
+kernel/net/tcp.tkb	tcp_injected_fin_retransmitted	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
+kernel/net/tcp.tkb	tcp_injected_syn_accepted	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
+kernel/net/tcp.tkb	tcp_injected_syn_pending	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
+kernel/net/tcp.tkb	tcp_injected_syn_retransmitted	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
+kernel/net/tcp.tkb	tcp_kept_segments	unreviewed
+kernel/net/tcp.tkb	tcp_retx_pass_busy	unreviewed
+kernel/net/tcp.tkb	tcp_retx_pass_hold_until_recovered	unreviewed
+kernel/net/tcp.tkb	tcp_retx_pass_sent	unreviewed
+kernel/net/tcp.tkb	tcp_split_request_segments	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
+kernel/platform/qemu/device_map.tkb	qemu_psci_use_hvc	unreviewed
+kernel/platform/qemu/intc.tkb	qemu_gicc_base	unreviewed; 2026-10-06 candidate-device-config: QEMU interrupt controller configuration / boot DTB configuration before IRQ enable; shared GIC distributor and local interface
+kernel/platform/qemu/intc.tkb	qemu_gicd_base	unreviewed; 2026-10-06 candidate-device-config: QEMU interrupt controller configuration / boot DTB configuration before IRQ enable; shared GIC distributor and local interface
+kernel/platform/qemu/intc.tkb	qemu_pmu_gic_intid	unreviewed; 2026-10-06 candidate-device-config: QEMU interrupt controller configuration / boot DTB configuration before IRQ enable; shared GIC distributor and local interface
+kernel/platform/qemu/intc.tkb	qemu_uart_gic_intid	unreviewed; 2026-10-06 candidate-device-config: QEMU interrupt controller configuration / boot DTB configuration before IRQ enable; shared GIC distributor and local interface
+kernel/platform/qemu/timer_irq.tkb	qemu_timer_gic_intid	unreviewed; 2026-10-06 candidate-device-config: platform UART/GIC/timer/PSCI configuration / boot DTB writes before IRQ/CPU enable; MMIO consumers and entry ABI
+kernel/platform/qemu/uart.tkb	uart_base	unreviewed; 2026-10-06 candidate-device-config: platform UART/GIC/timer/PSCI configuration / boot DTB writes before IRQ/CPU enable; MMIO consumers and entry ABI
+kernel/platform/rpi5/intc.tkb	mip0	unreviewed
+kernel/platform/rpi5/intc.tkb	rp1_msix	unreviewed
+kernel/platform/rpi5/intc.tkb	rp1_msix_cfg_set	unreviewed
+kernel/platform/rpi5/pcie.tkb	bcm_reset	unreviewed
+kernel/platform/rpi5/pcie.tkb	pcie2	unreviewed
+kernel/platform/rpi5/pcie.tkb	pcie_rescal	unreviewed
+kernel/platform/rpi5/pcie.tkb	rp1_dma_pci_offset	unreviewed; 2026-10-06 candidate-device-config: RPi5 PCI root complex and RP1 address map / boot DTB discovery/validation before controller bring-up; DMA translation used later
+kernel/platform/rpi5/pcie.tkb	rpi5_bcm_reset_base	unreviewed; 2026-10-06 candidate-device-config: RPi5 PCI root complex and RP1 address map / boot DTB discovery/validation before controller bring-up; DMA translation used later
+kernel/platform/rpi5/pcie.tkb	rpi5_mip0_base	unreviewed; 2026-10-06 candidate-device-config: RPi5 PCI root complex and RP1 address map / boot DTB discovery/validation before controller bring-up; DMA translation used later
+kernel/platform/rpi5/pcie.tkb	rpi5_mip0_dtb_status	unreviewed; 2026-10-06 candidate-device-config: RPi5 PCI root complex and RP1 address map / boot DTB discovery/validation before controller bring-up; DMA translation used later
+kernel/platform/rpi5/pcie.tkb	rpi5_mip0_target	unreviewed; 2026-10-06 candidate-device-config: RPi5 PCI root complex and RP1 address map / boot DTB discovery/validation before controller bring-up; DMA translation used later
+kernel/platform/rpi5/pcie.tkb	rpi5_pcie2_base	unreviewed; 2026-10-06 candidate-device-config: RPi5 PCI root complex and RP1 address map / boot DTB discovery/validation before controller bring-up; DMA translation used later
+kernel/platform/rpi5/pcie.tkb	rpi5_pcie2_dtb_status	unreviewed; 2026-10-06 candidate-device-config: RPi5 PCI root complex and RP1 address map / boot DTB discovery/validation before controller bring-up; DMA translation used later
+kernel/platform/rpi5/pcie.tkb	rpi5_pcie_address_map_dtb_status	unreviewed; 2026-10-06 candidate-device-config: RPi5 PCI root complex and RP1 address map / boot DTB discovery/validation before controller bring-up; DMA translation used later
+kernel/platform/rpi5/pcie.tkb	rpi5_pcie_outbound_cpu_base	unreviewed; 2026-10-06 candidate-device-config: RPi5 PCI root complex and RP1 address map / boot DTB discovery/validation before controller bring-up; DMA translation used later
+kernel/platform/rpi5/pcie.tkb	rpi5_pcie_rescal_base	unreviewed; 2026-10-06 candidate-device-config: RPi5 PCI root complex and RP1 address map / boot DTB discovery/validation before controller bring-up; DMA translation used later
+kernel/platform/rpi5/pcie.tkb	rpi5_pcie_support_dtb_status	unreviewed; 2026-10-06 candidate-device-config: RPi5 PCI root complex and RP1 address map / boot DTB discovery/validation before controller bring-up; DMA translation used later
+kernel/platform/rpi5/psci_dtb.tkb	rpi5_psci_use_hvc	unreviewed; 2026-10-06 retain-singleton: boot PSCI transport / DTB selects SMC/HVC before CPU_ON
+kernel/platform/rpi5/system_timer_dtb.tkb	rpi5_system_timer	unreviewed
+kernel/platform/rpi5/timer_irq.tkb	rpi5_gic_dtb_status	unreviewed; 2026-10-06 candidate-device-config: platform UART/GIC/timer/PSCI configuration / boot DTB writes before IRQ/CPU enable; MMIO consumers and entry ABI
+kernel/platform/rpi5/timer_irq.tkb	rpi5_gicc_base	unreviewed; 2026-10-06 candidate-device-config: platform UART/GIC/timer/PSCI configuration / boot DTB writes before IRQ/CPU enable; MMIO consumers and entry ABI
+kernel/platform/rpi5/timer_irq.tkb	rpi5_gicd_base	unreviewed; 2026-10-06 candidate-device-config: platform UART/GIC/timer/PSCI configuration / boot DTB writes before IRQ/CPU enable; MMIO consumers and entry ABI
+kernel/platform/rpi5/timer_irq.tkb	rpi5_timer_gic_intid	unreviewed; 2026-10-06 candidate-device-config: platform UART/GIC/timer/PSCI configuration / boot DTB writes before IRQ/CPU enable; MMIO consumers and entry ABI
+kernel/platform/rpi5/uart.tkb	rpi5_uart_base	unreviewed; 2026-10-06 candidate-device-config: platform UART/GIC/timer/PSCI configuration / boot DTB writes before IRQ/CPU enable; MMIO consumers and entry ABI
+kernel/platform/rpi5/uart.tkb	rpi5_uart_dtb_status	unreviewed; 2026-10-06 candidate-device-config: platform UART/GIC/timer/PSCI configuration / boot DTB writes before IRQ/CPU enable; MMIO consumers and entry ABI
+kernel/platform/rpi5/usb_provision.tkb	usb_provision_batch	unreviewed; 2026-10-06 retain-boot: boot rootfs provisioning operation / immutable embedded image; bounded boot block/batch scratch; synchronous device access
+kernel/platform/rpi5/usb_provision.tkb	usb_provision_block	unreviewed; 2026-10-06 retain-boot: boot rootfs provisioning operation / immutable embedded image; bounded boot block/batch scratch; synchronous device access
+kernel/platform/rpi5/usb_provision.tkb	usb_provision_image	unreviewed; 2026-10-06 retain-boot: boot rootfs provisioning operation / immutable embedded image; bounded boot block/batch scratch; synchronous device access
+kernel/platform/rpi5/usb_xhci.tkb	msc_tag	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	msc_write10_command_count	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	rp1_usbhost0_base	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	rp1_usbhost0_dtb_status	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	rp1_xhci_cap	unreviewed
+kernel/platform/rpi5/usb_xhci.tkb	rp1_xhci_caps	unreviewed
+kernel/platform/rpi5/usb_xhci.tkb	rp1_xhci_db	unreviewed
+kernel/platform/rpi5/usb_xhci.tkb	rp1_xhci_op	unreviewed
+kernel/platform/rpi5/usb_xhci.tkb	rp1_xhci_rt	unreviewed
+kernel/platform/rpi5/usb_xhci.tkb	xhci_bulk_in_cycle	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_bulk_in_dci	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_bulk_in_enq	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_bulk_out_cycle	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_bulk_out_dci	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_bulk_out_enq	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_cmd_cycle	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_cmd_enq	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_controller_unusable	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_dcbaa	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_ep0_cycle	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_ep0_enq	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_evt_cycle	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_evt_idx	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_foreign_events	unreviewed
+kernel/platform/rpi5/usb_xhci.tkb	xhci_init_attempted	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_init_description	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_last_evt_dw3	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_last_residual	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_bulk_in_burst	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_bulk_in_ep	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_bulk_in_mps	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_bulk_out_burst	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_bulk_out_ep	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_bulk_out_mps	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_config_value	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_interface_num	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_ready	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci.tkb	xhci_slot_id	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_await_cc	unreviewed
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_await_timeout	unreviewed
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_await_want	unreviewed
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_cmd_completions	unreviewed
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_doorbell_target	unreviewed
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_doorbell_value	unreviewed
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_events_claimed	unreviewed
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_input_published_at	unreviewed
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_output_claimed	unreviewed
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_rings_claimed	unreviewed
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_rings_quiesced	unreviewed
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_tables_claimed	unreviewed
+kernel/printk/console_lock.tkb	console_measure	unreviewed; 2026-10-06 retain-owner: one physical output queue admission / IRQ-masking indexed mutex guard; measurement protected by same guard
+kernel/printk/console_lock.tkb	console_measure_enabled	unreviewed; 2026-10-06 retain-owner: one physical output queue admission / IRQ-masking indexed mutex guard; measurement protected by same guard
+kernel/printk/log.tkb	kernel_log_boot_tick	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
+kernel/printk/log.tkb	kernel_log_core_state	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
+kernel/printk/log.tkb	kernel_log_frequency	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
+kernel/printk/log.tkb	kernel_log_snapshots	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
+kernel/printk/log.tkb	kernel_log_storm_found	unreviewed
+kernel/printk/log.tkb	kernel_log_terminal_column	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
+kernel/printk/log.tkb	kernel_log_terminal_input_stopped	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
+kernel/printk/log.tkb	kernel_log_tx_count	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
+kernel/printk/log.tkb	kernel_log_tx_head	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
+kernel/printk/log.tkb	kernel_log_tx_queue	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
+kernel/printk/log.tkb	kernel_log_tx_tail	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
+kernel/printk/log.tkb	kernel_log_tx_terminal	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
+kernel/printk/log.tkb	kernel_log_wire_last	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
+kernel/printk/log.tkb	uart_user_write_sleeps	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
+kernel/printk/log.tkb	uart_user_write_waits	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
+kernel/printk/log_ring_trace.tkb	log_ring_trace_cpus	unreviewed
+kernel/printk/log_ring_trace.tkb	log_ring_trace_from	unreviewed
+kernel/printk/log_ring_trace.tkb	log_ring_trace_reader_begun	unreviewed
+kernel/printk/log_ring_trace.tkb	log_ring_trace_reader_cpu	unreviewed

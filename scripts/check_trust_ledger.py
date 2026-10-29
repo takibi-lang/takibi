@@ -22,7 +22,10 @@ the check needs no kernel build:
   per_cpu stores, raw `cpu_id()` calls (check_raw_cpu_id_sites.py);
 - explicit `kernel_invariant_stop` call sites (#1031: containment, not trust
   removed, so a separate row);
-- the frame API ratchet (check_frame_api.py RATCHET, #1018), when present.
+- the frame API ratchet (check_frame_api.py RATCHET, #1018), when present;
+- the unprotected globals (scripts/global_protection_allowlist.tsv rows,
+  which buildcheck_global_protection.py holds to the compiler's
+  --emit-globals tables, #1012).
 
 Build-measured categories (`--emit-raw-site-counts` per target, z3 range
 obligations) are recorded only by `--append --build-dir kernel/build` and are
@@ -74,6 +77,7 @@ CATEGORIES = {
     "raw_cpu_id_calls": (TRUST, "raw cpu_id() calls outside the CpuHere mint (check_raw_cpu_id_sites)"),
     "invariant_stop_sites": (TRUST, "kernel_invariant_stop call sites outside kernel/tests (#1031; containment)"),
     "frame_api_ratchet": (TRUST, "check_frame_api.py RATCHET entries (#1018)"),
+    "unprotected_globals": (TRUST, "production let mut globals whose type shows no protection (scripts/global_protection_allowlist.tsv rows, #1012)"),
     "per_cpu_stores": (JUDGE, "per_cpu store globals (#704, #638)"),
     # Build-measured: recorded by --append --build-dir only.
     "raw_sites_qemu": (TRUST, "--emit-raw-site-counts total, QEMU main.o"),
@@ -98,6 +102,8 @@ RULES = {
     "value over stop": "#1031",
     "frame API": "#1018",
     "assembly is a leaf": "#1133",
+    "typed protection": "#1012",
+    "BootOnce": "#1013",
     "code removed": "dead code deleted with no replacement",
 }
 
@@ -187,6 +193,9 @@ def measure_tree():
     counts["per_cpu_stores"] = sum(1 for e in found.values() if e in stores)
     counts["raw_cpu_id_calls"] = sum(
         n for n, kind, _ in cpu_id.LISTED.values() if kind != cpu_id.MINT)
+
+    counts["unprotected_globals"] = len(mint_list(
+        ROOT / "scripts" / "global_protection_allowlist.tsv"))
 
     frame_api = ROOT / "scripts" / "check_frame_api.py"
     if frame_api.exists():
