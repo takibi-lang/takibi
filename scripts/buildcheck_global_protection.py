@@ -19,6 +19,20 @@ rise needs an issue there and a fall names its rule.
 
   buildcheck_global_protection.py QEMU.globals.tsv RPI5.globals.tsv
   buildcheck_global_protection.py --summary TABLE...   counts per class
+
+GitHub issue #1201: a migration deletes its rows with the script rather than
+with a hand filter (one emptied the whole list during #1012 slice 3):
+
+  buildcheck_global_protection.py --drop NAME [--drop NAME...] TABLE...
+  buildcheck_global_protection.py --prune TABLE...
+
+NAME is a global's name, or FILE:NAME when two files share it. --drop
+removes the rows it names, and refuses a name that matches no row or that
+still names an unprotected global. --prune removes every stale row. Either
+writes the list only if every still-unprotected global keeps its row and
+nothing but the removed rows changed; comments and order are kept. The
+tables are the kernelbuild's, GLOBAL_PROTECTION_TABLES in the Makefile:
+kernel/build/{qemu,rpi5}/main.o.globals.tsv.
 """
 
 import collections
@@ -122,15 +136,106 @@ def check(found, allowed):
     return errors
 
 
+def stale_keys(found, allowed):
+    open_rows = {k for k, r in found.items() if unprotected(r)}
+    return set(allowed) - open_rows
+
+
+def drop_keys(found, allowed, names):
+    """The rows NAMES select, or the errors that refuse the drop."""
+    keys, errors = set(), []
+    stale = stale_keys(found, allowed)
+    for name in names:
+        if ":" in name:
+            file, bare = name.rsplit(":", 1)
+            matches = {k for k in allowed if k == (file, bare)}
+        else:
+            matches = {k for k in allowed if k[1] == name}
+        if not matches:
+            errors.append(f"--drop {name}: no row of {ALLOWLIST.name} names it")
+        for key in sorted(matches - stale):
+            errors.append(f"--drop {name}: {key[0]} {key[1]} is still an unprotected "
+                          "global; protect it before dropping its row")
+        keys |= matches & stale
+    return keys, errors
+
+
+def rewrite_allowlist(text, found, removed):
+    """TEXT without the rows REMOVED, or TableError when the result would
+    lose a row an unprotected global still needs, or change anything else."""
+    kept_lines = []
+    for line in text.splitlines(keepends=True):
+        cells = line.rstrip("\n").split("\t")
+        if (line.strip() and not line.startswith("#") and len(cells) == 3
+                and (cells[0], cells[1]) in removed):
+            continue
+        kept_lines.append(line)
+    result = "".join(kept_lines)
+    before, before_errors = parse_allowlist(text)
+    after, after_errors = parse_allowlist(result)
+    if before_errors or after_errors:
+        raise TableError("the allow-list is malformed; fix it by hand first: "
+                         + "; ".join(before_errors + after_errors))
+    lost = {k for k, r in found.items() if unprotected(r)} - set(after)
+    if lost:
+        raise TableError("refusing to write: rows for still-unprotected globals would "
+                         "be lost: " + ", ".join(f"{f} {n}" for f, n in sorted(lost)))
+    if set(before) - set(after) != set(removed) or set(after) - set(before):
+        raise TableError("refusing to write: the rewrite changed rows other than "
+                         "the ones removed")
+    if any(after[k] != before[k] for k in after):
+        raise TableError("refusing to write: a kept row's reader changed")
+    return result
+
+
 def summary(found):
     counts = collections.Counter(
         "scratch" if r["qualifier"] == "scratch" else r["protection"] for r in found.values())
     return ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
 
 
+def edit(found, drops, prune):
+    text = ALLOWLIST.read_text(encoding="utf-8")
+    allowed, errors = parse_allowlist(text)
+    if errors:
+        for error in errors:
+            print(f"global-protection: {error}", file=sys.stderr)
+        return 1
+    removed, errors = drop_keys(found, allowed, drops)
+    if prune:
+        removed |= stale_keys(found, allowed)
+    if errors:
+        for error in errors:
+            print(f"global-protection: {error}", file=sys.stderr)
+        return 1
+    try:
+        result = rewrite_allowlist(text, found, removed)
+    except TableError as error:
+        print(f"global-protection: {error}", file=sys.stderr)
+        return 1
+    ALLOWLIST.write_text(result, encoding="utf-8")
+    for file, name in sorted(removed):
+        print(f"global-protection: dropped {file} {name}")
+    print(f"global-protection: {len(allowed)} -> {len(allowed) - len(removed)} rows")
+    return 0
+
+
 def main(argv):
     show = "--summary" in argv
-    paths = [a for a in argv if a != "--summary"]
+    prune = "--prune" in argv
+    drops, paths, index = [], [], 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg == "--drop":
+            if index + 1 >= len(argv):
+                print("global-protection: --drop needs a NAME", file=sys.stderr)
+                return 2
+            drops.append(argv[index + 1])
+            index += 2
+            continue
+        if arg not in ("--summary", "--prune"):
+            paths.append(arg)
+        index += 1
     if not paths:
         print(__doc__, file=sys.stderr)
         return 2
@@ -142,6 +247,8 @@ def main(argv):
     if show:
         print(summary(found))
         return 0
+    if drops or prune:
+        return edit(found, drops, prune)
     allowed, errors = parse_allowlist(ALLOWLIST.read_text(encoding="utf-8"))
     errors += check(found, allowed)
     if errors:

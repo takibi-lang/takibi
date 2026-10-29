@@ -6,7 +6,8 @@ controls feed it synthetic tables, so they need no build: an unlisted
 unprotected global, a stale row (migrated or deleted), a duplicate row, a
 row with no reader, a scratch global, a test or model file, an empty table,
 another format and an unknown class must each be refused or handled as the
-docstring there says. The tracked allow-list is also read for shape.
+docstring there says. The --drop/--prune rewrite (#1201) must refuse a drop
+or a write that loses an unprotected global's row. The tracked allow-list is also read for shape.
 """
 
 import sys
@@ -78,6 +79,32 @@ def main():
                              + "kernel/a.tkb\t3\tx\tread\tf\n", "t")) == 1)
     expect("unknown class is refused",
            refused(lambda: g.parse_table(table(row("kernel/a.tkb", "x", "locked")), "t")))
+
+    # GitHub issue #1201: the --drop/--prune rewrite.
+    moved = table(row("kernel/a.tkb", "x"), row("kernel/a.tkb", "w", "atomic"),
+                  row("kernel/b.tkb", "x", "atomic"))
+    found = g.globals_of([("t", moved)])
+    allow = "# head\nkernel/a.tkb\tx\tr\nkernel/a.tkb\tw\tr\nkernel/b.tkb\tx\tr\n"
+    allowed, _ = g.parse_allowlist(allow, "allow")
+    keys, errs = g.drop_keys(found, allowed, ["w"])
+    expect("drop of a protected global's row is accepted",
+           errs == [] and keys == {("kernel/a.tkb", "w")})
+    keys, errs = g.drop_keys(found, allowed, ["x"])
+    expect("drop of a name an unprotected global still holds is refused",
+           any("still an unprotected" in e for e in errs))
+    keys, errs = g.drop_keys(found, allowed, ["kernel/b.tkb:x"])
+    expect("FILE:NAME drops one file's row", errs == [] and keys == {("kernel/b.tkb", "x")})
+    keys, errs = g.drop_keys(found, allowed, ["nothing"])
+    expect("drop of an unknown name is refused", any("no row" in e for e in errs))
+    expect("prune takes every stale row",
+           g.stale_keys(found, allowed) == {("kernel/a.tkb", "w"), ("kernel/b.tkb", "x")})
+    kept = g.rewrite_allowlist(allow, found, g.stale_keys(found, allowed))
+    expect("rewrite keeps comments and the unprotected row",
+           kept == "# head\nkernel/a.tkb\tx\tr\n")
+    expect("rewrite that loses an unprotected global's row is refused",
+           refused(lambda: g.rewrite_allowlist(allow, found, {("kernel/a.tkb", "x")})))
+    expect("rewrite of an emptied list is refused",
+           refused(lambda: g.rewrite_allowlist(allow, found, set(allowed))))
 
     tracked, shape = g.parse_allowlist(g.ALLOWLIST.read_text(encoding="utf-8"))
     expect("tracked allow-list is well formed", shape == [])

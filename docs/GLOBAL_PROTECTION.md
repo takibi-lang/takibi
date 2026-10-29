@@ -80,7 +80,9 @@ outside `kernel/tests` and `kernel/models`. The check refuses a production
 global whose class is `none` (or that is `scratch`) and that is not a row of
 `scripts/global_protection_allowlist.tsv` (`file`, `name`, `reader`), and a
 row that no longer names such a global, so a migrated or deleted global
-must leave the list in the same commit. The row count is the trust-ledger
+must leave the list in the same commit (`buildcheck_global_protection.py
+--drop NAME` or `--prune` on the kernelbuild tables removes such rows and
+refuses a write that loses an unprotected global's row, #1201). The row count is the trust-ledger
 category `unprotected_globals` (`scripts/check_trust_ledger.py`): a rise
 needs an accepting issue and a fall names its rule (`typed protection`,
 `BootOnce`, `per_cpu`, ...).
