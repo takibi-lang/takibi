@@ -502,3 +502,7 @@ condition below applies, and reports the land afterwards.
 ## 2026-10-29 #1193 lane receipts measure check and guest time only (option a)
 - A/B runs showed no lane slowed by #1172 or #1032; the growth was build work and host noise counted as busy lane time.
 - Build everything (dune, race-window kernels, buildcheck objects) before the first lane receipt starts, so receipts hold only check and guest time, and re-derive the budget from quiet runs of that measurement. Rejected: subtracting build time inside each lane (b), and re-deriving the number without changing the measurement (c, which #1123 discourages).
+
+## 2026-10-29 #1193 the lane budget is re-derived from the (a) measurement (option 1, provisional)
+- Under the new measurement a quiet allcheck spends about 4570 busy lane-seconds with no product cause; busy time follows host contention. The limit becomes the measured total plus the documented 30 % host-load headroom (about 5900), with the derivation in check_lane_budget.py. Provisional: re-measure after the cortex-a76 switch (#1032) lands. A contention-insensitive metric (CPU time per lane) is a separate issue.
+- The stale kept green copy (4412) is deleted with the maintainer's approval so a green allcheck can be taken.
