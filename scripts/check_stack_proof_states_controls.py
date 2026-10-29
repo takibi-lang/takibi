@@ -110,7 +110,7 @@ def main() -> int:
     CASES.note()
     clean, _ = check.check_frames({
         "control.tkb": "fn kernel_syscall_migrate_return(frame_sp: usize) {\n"
-                       "    let mut f: FrameRef = frame_ref_from_entry(frame_sp);\n"
+                       "    let mut f: FrameRef = frame_ref_from_el0_entry(frame_sp);\n"
                        "}\n"})
     if clean:
         failures.append(f"a declared entry was refused: {clean}")

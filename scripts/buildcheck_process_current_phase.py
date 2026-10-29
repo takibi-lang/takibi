@@ -33,7 +33,7 @@ private fn current_phase_control(
         current: borrow ProcessCurrent[process, ProcessState::{phase}],
         owner: borrow ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::{phase}],
-        frame: borrow FrameRef[frame_process]) -> usize {{
+        frame: borrow FrameRef[frame_process, level]) -> usize {{
     let next = {transition}({lead}owner, state{extra});
     let pid: usize = scheduled_process_record_current(current).pid;
     scheduled_process_state_drop(next);

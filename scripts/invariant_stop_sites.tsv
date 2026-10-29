@@ -56,7 +56,8 @@ kernel/kernel/process.tkb	scheduled_process_pin_release	ladder	1	-	#652	a pin re
 kernel/kernel/process.tkb	scheduled_process_exited_take	ladder	1	-	#652	a reap of a zombie whose stack a CPU still stands on (#609): StackOwnership.tla states the rule
 kernel/kernel/process.tkb	scheduled_process_start	ladder	1	-	#652	a start on a stack another CPU owns (#609): StackOwnership.tla states the rule
 kernel/kernel/process.tkb	kernel_process_root_authorities_check	frame	1	-	#1017	the root authorities disagree with TTBR0 at EL0 return: checked at the frame, the saved frame is the report
-kernel/kernel/process.tkb	kernel_process_stack_switch_complete	frame	4	-	#1017	the physical stack handoff called from assembly: CPU index, outgoing owner, current_live, incoming state disagree
+kernel/kernel/process.tkb	kernel_process_stack_switch_take	frame	4	-	#1017	the physical stack handoff called from assembly (through kernel_process_stack_switch_complete, split by level in #992): CPU index, outgoing owner, current_live, incoming state disagree
+kernel/kernel/process.tkb	scheduled_process_parked_frame	unmodelled	1	-	#992	a delivery aimed at a parked frame that is El1: blocking is stackless, so a Blocked or Startable process parked at EL0, a premise no model or type states yet; writing an El1 frame would overwrite kernel registers mid-syscall
 kernel/kernel/process.tkb	kernel_process_stack_idle_complete	frame	2	-	#1017	the exit-to-idle stack handoff called from assembly: execution state and the outgoing record disagree
 kernel/kernel/process.tkb	kernel_process_stack_idle_yield	frame	3	-	#1017	the yield-to-idle stack handoff called from assembly: execution state, outgoing record or the yield publication disagree
 kernel/kernel/process.tkb	kernel_process_stack_idle_blocked	frame	2	-	#1017	the block-to-idle stack handoff called from assembly: execution state and the outgoing record disagree

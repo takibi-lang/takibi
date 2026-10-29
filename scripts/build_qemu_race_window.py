@@ -149,7 +149,7 @@ WINDOWS = {
     # drop the marker, or the process is later Ready and refused everywhere.
     "603": {
         "spin": ("kernel/process.tkb",
-                 "fn kernel_process_block_wait4(current_authority: ProcessCurrent[current_process, ProcessState::Running], current: borrow FrameRef[process])\n"
+                 "fn kernel_process_block_wait4(current_authority: ProcessCurrent[current_process, ProcessState::Running], current: borrow FrameRef[process, level])\n"
                  "        -> BlockSwitch {\n",
                  False),
         # wait4's decision lives in pending_block_reason now, and the wait

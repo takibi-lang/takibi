@@ -14,7 +14,7 @@ def main():
     original = sources[path]
     # GitHub issue #845: the context marker repeats; these controls name the
     # first function's copy by its signature.
-    site = '        frame: borrow FrameRef[frame_process])\n        -> ScheduledProcessState[process, ProcessState::Running] '
+    site = '        frame: borrow FrameRef[frame_process, level])\n        -> ScheduledProcessState[process, ProcessState::Running] '
     controls = {
         'public witness': replace_once(original, 'private linear view ProcessCurrent[', 'linear view ProcessCurrent['),
         'public constructor': replace_once(original, 'private inline fn process_running_new(', 'inline fn process_running_new('),
