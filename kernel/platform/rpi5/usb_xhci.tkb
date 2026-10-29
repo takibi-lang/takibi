@@ -391,18 +391,17 @@ private fn usb_ctrl_xfer(bm_request_type: u32, b_request: u32, w_value: u32,
         bm_request_type | (b_request << 8) | (w_value << 16),
         w_index | (w_length << 16), 8, cyc | (1 << 6) | (2 << 10) | (trt << 16)
     };
-    if (xhci_ring_put(XHCI_RING_EP0, first_idx, setup) == false) { return 0; }
-
     let mut idx: usize = first_idx + 1;
+    let mut data: Trb = { 0, 0, 0, 0 };
 
     if (has_data) {
         let mut dir_bit: u32 = 0;
         if (dir_in) { dir_bit = 1; }
-        let mut data: Trb = {
+        let mut data_trb: Trb = {
             (buf_dma & 0xFFFFFFFF) as u32, ((buf_dma >> 32) & 0xFFFFFFFF) as u32,
             w_length, cyc | (3 << 10) | (dir_bit << 16)
         };
-        if (xhci_ring_put(XHCI_RING_EP0, idx, data) == false) { return 0; }
+        data = data_trb;
         idx = idx + 1;
     }
 
@@ -411,10 +410,20 @@ private fn usb_ctrl_xfer(bm_request_type: u32, b_request: u32, w_value: u32,
         if (dir_in) { st_dir = 0; }
     }
     let mut status: Trb = { 0, 0, 0, cyc | (1 << 5) | (4 << 10) | (st_dir << 16) };
-    if (xhci_ring_put(XHCI_RING_EP0, idx, status) == false) { return 0; }
-
     xhci_ep0_enq = idx + 1;
-    return xhci_ring_run(XHCI_RING_EP0, xhci_slot_id, 1, first_idx, idx, 1000);
+    let mut td: [Trb; 3];
+    td[0] = setup;
+    let mut count: usize = 2;
+    if (has_data) {
+        td[1] = data;
+        td[2] = status;
+        count = 3;
+    } else {
+        td[1] = status;
+        td[2] = status;
+    }
+    return xhci_ring_submit(XHCI_RING_EP0, xhci_slot_id, 1, first_idx, idx,
+                            1000, count, td as [Trb; 3..]);
 }
 
 // One bulk transfer: a single Normal TRB (Type 1) on the endpoint's own
@@ -460,7 +469,6 @@ private fn usb_bulk_xfer(dir_in: bool, buf_dma: usize, length: u32) -> u32 !{uns
         length, cyc | isp_bit | (1 << 5) | (1 << 10)
     };
     let trb_idx: usize = enq;
-    if (xhci_ring_put(ring, trb_idx, normal) == false) { return 0; }
 
     enq = enq + 1;
     if (dir_in) {
@@ -470,7 +478,12 @@ private fn usb_bulk_xfer(dir_in: bool, buf_dma: usize, length: u32) -> u32 !{uns
         xhci_bulk_out_enq = enq;
         xhci_bulk_out_cycle = cyc;
     }
-    return xhci_ring_run(ring, xhci_slot_id, dci as u32, trb_idx, trb_idx, 5000);
+    let mut td: [Trb; 3];
+    td[0] = normal;
+    td[1] = normal;
+    td[2] = normal;
+    return xhci_ring_submit(ring, xhci_slot_id, dci as u32, trb_idx, trb_idx,
+                            5000, 1, td as [Trb; 3..]);
 }
 
 // Recover a STALLed bulk endpoint. Unlike RPi3's DWC2 driver (which only
@@ -506,9 +519,13 @@ fn xhci_run_command(dw0: u32, dw1: u32, dw2: u32, trb_type: u32,
         xhci_cmd_cycle | (trb_type << 10) | (dci_u32 << 16) | (slot_u32 << 24)
     };
     let cmd_idx: usize = xhci_cmd_enq;
-    if (xhci_ring_put(XHCI_RING_CMD, cmd_idx, command) == false) { return 0; }
     xhci_cmd_advance();
-    return xhci_ring_run(XHCI_RING_CMD, 0, 0, cmd_idx, cmd_idx, 1000);
+    let mut td: [Trb; 3];
+    td[0] = command;
+    td[1] = command;
+    td[2] = command;
+    return xhci_ring_submit(XHCI_RING_CMD, 0, 0, cmd_idx, cmd_idx, 1000, 1,
+                            td as [Trb; 3..]);
 }
 
 // Reset Endpoint (TRB Type 14) clears the CONTROLLER-side Halted state
@@ -891,10 +908,6 @@ fn xhci_setup_rings_and_start() -> bool !{unsafe} {
         XhciRingAddress::Known(dma) => { cmd_ring_dma = dma; }
         XhciRingAddress::Busy => { return false; }
     }
-    let mut enable_slot: Trb = { 0, 0, 0, 0x00002401 }; // Enable Slot, Cycle=1
-    if (xhci_ring_put(XHCI_RING_CMD, 0, enable_slot) == false) {
-        return false;
-    }
 
 
     // Programming order (ERSTSZ, then ERSTBA, then ERDP last) matches
@@ -944,7 +957,16 @@ fn xhci_setup_rings_and_start() -> bool !{unsafe} {
 }
 
 fn xhci_enable_slot() -> bool !{unsafe} {
-    let enable_cc: u32 = xhci_ring_run(XHCI_RING_CMD, 0, 0, 0, 0, 1000);
+    // Enable Slot, Cycle=1, at the Command Ring's first TRB. Written here
+    // with its doorbell (GitHub issue #783), not at controller start: the
+    // controller reads a command TRB only after the doorbell.
+    let mut enable_slot: Trb = { 0, 0, 0, 0x00002401 };
+    let mut td: [Trb; 3];
+    td[0] = enable_slot;
+    td[1] = enable_slot;
+    td[2] = enable_slot;
+    let enable_cc: u32 = xhci_ring_submit(XHCI_RING_CMD, 0, 0, 0, 0, 1000, 1,
+                                          td as [Trb; 3..]);
     if (enable_cc == 0) {
         return false;
     }
@@ -1063,14 +1085,16 @@ fn xhci_address_device() -> XhciAddressOutcome !{unsafe} {
         (input_ctx_dma & 0xFFFFFFFF) as u32, ((input_ctx_dma >> 32) & 0xFFFFFFFF) as u32,
         0, (1 | (11 << 10) | (xhci_slot_id << 24)) as u32
     };
-    if (xhci_ring_put(XHCI_RING_CMD, 1, address_device) == false) {
-        return XhciAddressOutcome::Completion(0);
-    }
 
     // The port reset above queues its own async Port Status Change
     // Event (Type 34), which lands before Address Device's real Command
     // Completion Event (Type 33) -- usb_await_event() scans past it.
-    let addr_cc: u32 = xhci_ring_run(XHCI_RING_CMD, 0, 0, 1, 1, 1000);
+    let mut td: [Trb; 3];
+    td[0] = address_device;
+    td[1] = address_device;
+    td[2] = address_device;
+    let addr_cc: u32 = xhci_ring_submit(XHCI_RING_CMD, 0, 0, 1, 1, 1000, 1,
+                                        td as [Trb; 3..]);
     if (addr_cc != 1) {
         // usb_await_event() answers 0 when nothing arrived at all, and 0 is
         // not an xHCI completion code, so the caller can tell a command
@@ -1223,10 +1247,12 @@ fn xhci_configure_endpoint(in_num: {1..<16 as usize},
         (input_ctx_dma & 0xFFFFFFFF) as u32, ((input_ctx_dma >> 32) & 0xFFFFFFFF) as u32,
         0, (1 | (12 << 10) | (xhci_slot_id << 24)) as u32
     };
-    if (xhci_ring_put(XHCI_RING_CMD, 2, configure) == false) {
-        return XhciConfigureOutcome::Transfer(0);
-    }
-    let ce_cc: u32 = xhci_ring_run(XHCI_RING_CMD, 0, 0, 2, 2, 1000);
+    let mut td: [Trb; 3];
+    td[0] = configure;
+    td[1] = configure;
+    td[2] = configure;
+    let ce_cc: u32 = xhci_ring_submit(XHCI_RING_CMD, 0, 0, 2, 2, 1000, 1,
+                                      td as [Trb; 3..]);
     if (ce_cc != 1) {
         return XhciConfigureOutcome::Transfer(ce_cc);
     }
