@@ -441,3 +441,80 @@ private fn boundary_spin_end() !{unsafe} {
     }
     boundary_line(bs"boundary: unwritable handler frame ended spinning CPU 1 by SIGSEGV\n");
 }
+
+// GitHub issue #948: a read sleeping on the terminal is ended by a caught
+// signal -- EINTR without SA_RESTART, and under SA_RESTART the read goes on
+// and returns the byte typed after it. /bin/signal-terminal is this entry;
+// the ash lane runs it only on QEMU (the driver's --terminal-read-rows),
+// since a stray byte on the board's physical UART line would end the read
+// with data instead and take a byte the shell expects. The board runs
+// /bin/signal-terminal-skip, which says so.
+//
+// The kernel prints "signal-terminal: read blocked" each time this
+// program's terminal read blocks. The SA_RESTART row's sender prints
+// "signal-terminal: read signal sent" after its kill; the driver types
+// the byte at the first blocked line after that, so the byte can only
+// reach the read once the handler has run and the read has blocked again.
+fn signal_terminal_probe() !{unsafe} {
+    let mut action: [usize; 4];
+    action[0] = signal_interrupt_handler as usize;
+    action[1] = 0x04000000;
+    action[2] = signal_boundary_restorer as usize;
+    action[3] = 0;
+    if (svc5(134, 10, action as *usize as usize, 0, 8, 0) != 0) {
+        boundary_fail(bs"signal-terminal: FAIL interrupt sigaction\n");
+        return;
+    }
+    action[1] = 0x14000000;
+    if (svc5(134, 12, action as *usize as usize, 0, 8, 0) != 0) {
+        boundary_fail(bs"signal-terminal: FAIL restart sigaction\n");
+        return;
+    }
+    let me: usize = svc5(172, 0, 0, 0, 0, 0);
+    let mut ran: [usize; 1];
+    let mut byte: [u8; 1];
+    byte[0] = 0;
+
+    // Without SA_RESTART: EINTR, nothing read.
+    let interrupter: usize = interrupt_sender(me, 10, 100, 0);
+    let first: usize = signal_interrupt_svc(63, 0, byte as *u8 as usize, 1, 0,
+        ran as *usize as usize);
+    if (first != INTERRUPT_EINTR || ran[0] != 1 ||
+        interrupt_reap(interrupter) == false) {
+        boundary_fail(bs"signal-terminal: FAIL read not interrupted\n");
+        return;
+    }
+    boundary_line(bs"signal-terminal: read interrupted: handler ran, EINTR\n");
+
+    // Under SA_RESTART: the handler runs, the read blocks again, and it
+    // returns the byte the driver types then.
+    let restarter: usize = svc5(220, 17, 0, 0, 0, 0);
+    if (restarter == 0) {
+        let mut pause: [usize; 2];
+        pause[0] = 0;
+        pause[1] = 100000000;
+        svc5(101, pause as *usize as usize, 0, 0, 0, 0);
+        svc5(129, me, 12, 0, 0, 0);
+        boundary_line(bs"signal-terminal: read signal sent\n");
+        svc5(93, 0, 0, 0, 0, 0);
+        return;
+    }
+    if (restarter >= 0xFFFFFFFFFFFFF000) {
+        boundary_fail(bs"signal-terminal: FAIL fork\n");
+        return;
+    }
+    let second: usize = signal_interrupt_svc(63, 0, byte as *u8 as usize, 1, 0,
+        ran as *usize as usize);
+    if (second != 1 || byte[0] != 0x0A || ran[0] != 1 ||
+        interrupt_reap(restarter) == false) {
+        boundary_fail(bs"signal-terminal: FAIL read not restarted\n");
+        return;
+    }
+    boundary_line(bs"signal-terminal: read restarted under SA_RESTART, then read the typed byte\n");
+    svc5(93, 0, 0, 0, 0, 0);
+}
+
+fn signal_terminal_skip() !{unsafe} {
+    boundary_line(bs"signal-terminal: rows not run on the board: a stray byte on its UART line would end the read\n");
+    svc5(93, 0, 0, 0, 0, 0);
+}

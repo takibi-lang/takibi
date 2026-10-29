@@ -69,6 +69,13 @@ ALLOWED = {
         "the same test as qemu/storage over USB mass storage, including the "
         "provisioning step that writes the filesystem to the stick, and "
         "naming the stick as the root filesystem's device",
+    ("qemu", "signal_terminal"):
+        "a terminal read ended by a caught signal (#948) runs only where the "
+        "UART line is the driver's own: a stray byte on the board's physical "
+        "line would end the read with data and take a byte the shell expects",
+    ("rpi5", "signal_terminal"):
+        "the board's stand-in for qemu/signal_terminal: /bin/signal-terminal-"
+        "skip says the rows are not run there, and why (#948)",
 }
 
 

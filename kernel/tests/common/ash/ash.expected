@@ -87,6 +87,8 @@ session
 session-check
 sh
 signal-boundary
+signal-terminal
+signal-terminal-skip
 sleep
 spread
 stress-ng

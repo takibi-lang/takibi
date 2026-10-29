@@ -272,7 +272,7 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --interactive-httpd-done-file "$INTERACTIVE_HTTPD_DONE" \
     --httpd-peer-guard-file "$HTTPD_GUARD_FILE" \
     --postmortem-request-file "$POSTMORTEM_REQUEST" \
-    --peer-tty --peer-settings \
+    --peer-tty --peer-settings --terminal-read-rows \
     --workload-marker 'workload: busy pair done' \
     --validate-ash &
 uart_driver_pid=$!

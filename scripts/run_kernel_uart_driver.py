@@ -59,12 +59,22 @@ def shell_prompt_ready(output: bytes, setup: str) -> bool:
     return prompt >= 0 and clean.rfind(b"\x1b[6n") > prompt
 
 
+# GitHub issue #948: the terminal-read rows, QEMU only. Their lines belong to
+# each platform's signal_terminal view, not to the shared ash transcript.
+TERMINAL_READ_PROBE = "/bin/signal-terminal"
+TERMINAL_READ_SKIP = "/bin/signal-terminal-skip"
+TERMINAL_READ_SENT = b"signal-terminal: read signal sent\n"
+TERMINAL_READ_BLOCKED = b"signal-terminal: read blocked\n"
+
+
 def ash_command_results(transcript, commands, setup):
     """Remove exact command echoes, including terminal line wrapping."""
     lines = []
     for line in transcript:
         while line.startswith("/ # ") or line.startswith(" # "):
             line = line[4:] if line.startswith("/ # ") else line[3:]
+        if line.startswith("signal-terminal: "):
+            continue
         if line:
             lines.append(line)
     command_index = 0
@@ -466,6 +476,12 @@ def main() -> int:
     # asleep beside them. The capture waits for the kernel's verdict on
     # whether the terminal settings change woke that reader.
     parser.add_argument("--peer-settings", action="store_true")
+    # GitHub issue #948: run /bin/signal-terminal's terminal-read rows. Only
+    # QEMU lanes pass this: a stray byte on the board's physical UART line
+    # would end the read with data, so the board runs
+    # /bin/signal-terminal-skip in its place, and each platform's view
+    # expects its own lines.
+    parser.add_argument("--terminal-read-rows", action="store_true")
     args = parser.parse_args()
 
     console_captured = False
@@ -545,6 +561,9 @@ def main() -> int:
                 if line.strip() and not line.startswith("#")]
     if not commands:
         raise RuntimeError(f"empty ash input fixture: {args.stdin}")
+    if not args.terminal_read_rows:
+        commands = [TERMINAL_READ_SKIP if command == TERMINAL_READ_PROBE
+                    else command for command in commands]
     if not expected:
         raise RuntimeError(f"empty ash expected fixture: {args.expected}")
 
@@ -604,6 +623,7 @@ def main() -> int:
     peer_settings_bytes_sent = False
     ppoll_probe_byte_sent = False
     ppoll_pause_byte_sent = False
+    terminal_read_byte_sent = False
     httpd_done_seen_at = None
     capture_started = time.monotonic()
     capture_marker = (b"busybox interactive shell exit: 0" if args.ash_only
@@ -804,6 +824,18 @@ def main() -> int:
                         b"ppoll: pause blocked until a signal\n" in output):
                     write_uart_line(connection, b"")
                     ppoll_pause_byte_sent = True
+
+                # GitHub issue #948: /bin/signal-terminal's SA_RESTART row
+                # reads one byte. It goes out once the sender has signalled
+                # and the kernel has said the read blocked a third time --
+                # the EINTR row's block, this row's first, and the block of
+                # the read the handler restarted. The two lines can reach
+                # the UART in either order.
+                if (args.terminal_read_rows and not terminal_read_byte_sent and
+                        TERMINAL_READ_SENT in output and
+                        output.count(TERMINAL_READ_BLOCKED) >= 3):
+                    write_uart_line(connection, b"")
+                    terminal_read_byte_sent = True
 
                 # The one init-managed service satisfies both readiness
                 # consumers retained by the host runners. There is no second

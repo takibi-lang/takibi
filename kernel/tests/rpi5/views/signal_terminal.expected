@@ -1,0 +1,1 @@
+signal-terminal: rows not run on the board: a stray byte on its UART line would end the read

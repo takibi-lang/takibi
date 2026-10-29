@@ -61,6 +61,12 @@ mv /etc/mva /kept /etc/moved
 # runnable, so the wait has to block rather than retry in the kernel. The
 # driver types the byte it waits for once the kernel says it blocked.
 /bin/ppoll-probe
+# GitHub issue #948: a terminal read ended by a caught signal, EINTR and
+# then SA_RESTART. QEMU lanes run it (the driver's --terminal-read-rows);
+# elsewhere the driver types /bin/signal-terminal-skip instead, since a
+# stray byte on the board's UART line would end the read. The lines go to
+# each platform's signal_terminal view, not to this transcript.
+/bin/signal-terminal
 # GitHub issue #9: the affinity ABI. /bin/affinity reads its default mask,
 # narrows itself to CPU 0, and checks what the kernel refuses and what a
 # child inherits. It prints only what holds on every platform.

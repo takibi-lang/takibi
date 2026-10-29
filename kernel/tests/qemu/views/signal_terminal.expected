@@ -1,0 +1,2 @@
+signal-terminal: read interrupted: handler ran, EINTR
+signal-terminal: read restarted under SA_RESTART, then read the typed byte
