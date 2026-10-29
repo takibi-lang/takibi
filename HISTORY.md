@@ -26881,3 +26881,14 @@ keeps each boot's UART, timing, network, and projected-view artifacts in a
 separate directory so a later sample cannot overwrite the failure being
 investigated. It is deliberately outside `allcheck`: repetition improves the
 confidence of a timing-sensitive check but adds no new product coverage.
+
+## 2026-10-29: why the QEMU kernel is compiled for cortex-a53 (#1032)
+
+#1032 moved every QEMU lane to `-cpu cortex-a76` (the RPi5 core) and made
+PAN mandatory. The QEMU kernel kept its cortex-a53 compile target: the
+maintainer's requirement is that the kernel does not depend on newer
+instructions, and an ARMv8.0 target keeps the compiler from emitting
+ARMv8.1+ instructions (LSE atomics and the like). Because PAN is ARMv8.1
+and a core without it halts, the kernel no longer boots on a real A53; the
+maintainer accepted that instead of adding a no-PAN fallback. See
+DECISIONS.md, 2026-10-29 #1032.

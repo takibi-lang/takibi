@@ -493,3 +493,8 @@ condition below applies, and reports the land afterwards.
 ## 2026-10-29 #1032 keep the A53 build; one-interval user-address refinement now (#1184 later)
 - Keep compiling for cortex-a53 even though every QEMU lane runs on cortex-a76: running without the newer instructions is a requirement.
 - The compile-time user-address check uses the existing single-interval refinement, which works because the kernel range fits in one interval. Refinements over several disjoint intervals are tracked in umbrella #1184, which stays off ROADMAP.md (YAGNI) until a real need appears; its representation (for example a union of intervals) is decided when it is started.
+
+## 2026-10-29 #1032 why the QEMU kernel is still compiled for cortex-a53 (refines the entry above)
+- Compiling for cortex-a53 (ARMv8.0) keeps the compiler from emitting ARMv8.1+ instructions such as the LSE atomics, and running that kernel on cortex-a76 lanes checks it.
+- PAN (ARMv8.1) is required at boot: a core without FEAT_PAN halts, so the kernel no longer boots on a real A53. The maintainer accepted this rather than pay for a no-PAN fallback: "no newer instructions" now means the code the compiler emits, not boot on ARMv8.0 hardware.
+- No active reason to change the compile target, so it stays cortex-a53. Revisit only if a v8.0 board must boot or the A53 target starts costing work.
