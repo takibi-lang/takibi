@@ -47,13 +47,16 @@ def main() -> int:
         print("FAIL make-delete-on-error: the root Makefile does not declare "
               ".DELETE_ON_ERROR: (#1223)", file=sys.stderr)
         return 1
+    runs = 0
     first, second = second_run_status(found.group(0) + "\n")
+    runs += 2
     if first == 0 or second == 0:
         print("FAIL make-delete-on-error: with the root Makefile's declaration, "
               f"a failed post-compile check let make return {first}, then {second}",
               file=sys.stderr)
         return 1
     bare_first, bare_second = second_run_status("")
+    runs += 2
     if bare_first == 0 or bare_second != 0:
         print("FAIL make-delete-on-error: without the declaration the planted "
               f"rule should fail once and then pass (got {bare_first}, "
@@ -63,7 +66,7 @@ def main() -> int:
     report_pass("make-delete-on-error",
                 "a failed post-compile check fails the next make too; without "
                 ".DELETE_ON_ERROR the second make would pass",
-                runs=4)
+                runs=runs)
     return 0
 
 
