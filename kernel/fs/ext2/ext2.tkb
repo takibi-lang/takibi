@@ -1355,6 +1355,15 @@ fn ext2_block_bitmap_snapshot(mount: Ext2Mount,
 // - A FAILED WRITE IS TAKEN TO LEAVE THE BLOCK AS IT WAS. A torn sector or
 //   a power loss is a different failure with a different contract; this is
 //   the recoverable, rejected-write case.
+// - A TORN WRITE IS OUTSIDE THIS RECOVERY MODEL, AS ON LINUX EXT2 (GitHub
+//   issue #1089, maintainer 2026-10-29). A write that reached the device in
+//   part -- some sectors new, some old, or a power loss between two writes
+//   of one mutation -- can leave a bitmap bit set or cleared against the
+//   inodes, a free count off, or a directory entry naming a freed inode:
+//   the shapes `scripts/ext2_host.py faults --torn` records (unlink, create
+//   and the write rollback). ext2 has no journal; Linux runs e2fsck after a
+//   power loss, and so would this filesystem. ext2_recover repairs only
+//   what a rejected write left behind.
 // - THE BITMAPS ARE THE TRUTH FOR WHAT IS ALLOCATED, AND THE COUNTERS ARE
 //   DERIVED FROM THEM. Every repair clears bits it knows this operation set
 //   and then recounts both counters from the bitmaps, which is idempotent

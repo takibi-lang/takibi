@@ -215,9 +215,10 @@ next one taken. The done record of the previous queue is in HISTORY.md
    every writing lane, counters against the kernel's own; done 2026-10-25,
    `scripts/ext2_postcheck.py`), #1035 (tier C, done 2026-10-26: the ext2
    driver as a host process over a RAM disk, `scripts/ext2_host.py` in
-   linuxcheck and `make ext2-host-long`; what it found open: #1089 torn
-   writes; #1086, the whole-file copy per write, and #1087, holes
-   allocated, done 2026-10-29). The ext2
+   linuxcheck and `make ext2-host-long`; what it found: #1086, the whole-file
+   copy per write, and #1087, holes allocated, done 2026-10-29; #1089, torn
+   writes, outside the recovery model by decision, as on Linux ext2,
+   2026-10-30). The ext2
    fixes #1019 and #968 flipped their ops.eq rows to `match` when they
    landed (2026-10-25); #1021's doubly-indirect O_TRUNC row matches on a
    sparse fixture the comparing runner plants (2026-10-25; #1022's truncate row and #1023's `peer` row, a held fd

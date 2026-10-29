@@ -54,7 +54,10 @@ The default sizes are the linuxcheck member's; the long campaign is
 Divergences the generator does not produce, each an open issue with its
 tier-B row or a note there: #1021 (doubly indirect files; files stay
 within 268 KiB), #1089 (a
-torn write is outside the recovery model; `faults --torn` shows it), and
+torn write is outside the recovery model by decision, as on Linux ext2:
+`faults --torn` records what a torn write leaves -- bitmap bits and free
+counts off after unlink, create and the write rollback, an entry naming a
+deleted inode -- and fails nothing), and
 link(2), which the kernel does not implement. A rejected write may fence
 the mount; the fault run then recovers it (ext2_recover, as the boot
 fixture does) and compares the recovered image.
@@ -924,7 +927,8 @@ def main(argv):
         p.add_argument("--first", type=int, default=0)
         if name == "faults":
             p.add_argument("--torn", action="store_true",
-                           help="also torn writes (#1089: outside the claimed model)")
+                           help="also record what torn writes leave (#1089: outside "
+                                "the recovery model; reported, never failed)")
     p = sub.add_parser("replay")
     p.add_argument("seed", type=int)
     p.add_argument("length", type=int)
@@ -965,15 +969,26 @@ def main(argv):
             return 1 if problems else 0
         elif args.mode == "faults":
             checked, failures = run_faults(args.seeds, args.ops, args.first,
-                                           modes=("reject", "torn") if args.torn else ("reject",))
+                                           modes=("reject",))
             if failures:
                 print("FAIL ext2-host faults:", file=sys.stderr)
                 for failure in failures[:20]:
                     print(f"    {failure}", file=sys.stderr)
                 return 1
+            if args.torn:
+                # GitHub issue #1089 (A): a torn write is outside the
+                # recovery model, as on Linux ext2, so its findings are a
+                # record, not a verdict.
+                torn_checked, torn = run_faults(args.seeds, args.ops, args.first,
+                                                modes=("torn",))
+                print(f"RECORDED ext2-host torn writes: {torn_checked} torn writes, "
+                      f"{len(torn)} left the image unlike its all-or-nothing "
+                      "result (outside the recovery model, #1089)")
+                for finding in torn[:20]:
+                    print(f"    {finding}")
             report_pass("ext2-host faults",
                         f"{checked} failed writes "
-                        f"({'rejected and torn' if args.torn else 'rejected'}) across "
+                        f"(rejected) across "
                         f"{args.seeds} x {args.ops} operations: each failed its "
                         "operation and left the image fsck-clean and as before "
                         "(after ext2_recover where it fenced)",
