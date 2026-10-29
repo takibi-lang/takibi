@@ -3701,7 +3701,7 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
         UnifiedFdAllocResult::Allocated(fd) => {
             let installed: bool = unified_fd_probe_install(
                 fd, unified_object_alloc_first(UnifiedFdKind::OpenFile));
-            if (fd != 0 || installed == false) {
+            if (fd != 0 || installed == false) { // fd-number-ok: the probe checks the allocator gave the lowest free number
                 scheduled_process_probe_slot_release(child_slot);
                 { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; }
             }

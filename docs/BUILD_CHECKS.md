@@ -220,6 +220,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_probe_entry_gates.py` | a two-core probe's arrival gate waits on a count that only grows, never on a level the other core clears |
 | `check_mmu_off_vector_store_controls.py` | the MMU-off vector-store backstop in `buildcheck_kernel_asm_invariants.py` follows the call graph from `!{mmu_off}` roots: a misaligned q store in a reached callee is reported, an aligned one and an unreached function are not, and a graph missing a #746 function is refused (#762) |
 | `check_instr_names_in_table.py` | no instruction builtin name appears as a string literal in `lib/*.ml` or `bin/*.ml` outside `lib/instr_spec.ml`, whose rows every reader goes through (#1005, #1213) |
+| `check_terminal_by_object.py` | no kernel/kernel `.tkb` compares a descriptor (`fd`, `*_fd`) with 0, 1 or 2: the terminal is recognized by the descriptor's object, so a dup of it behaves as it does (#902, #1222); a line with a reason says `fd-number-ok:` |
 | `check_mpidr_reads.py` | MPIDR_EL1 is read only by the platform's `cpu_id()` and boot code; a snapshot that stored raw MPIDR named every RPi5 core core 0 (#830) |
 | `check_invariant_stop_controls.py` | Explicit kernel stop call-site resolution against exact ELF; wrong identity, origin, unsupported instruction and truncated RAM refusal |
 | `check_symbolize_ddb_controls.py` | Exact-capture PID/ELF registration, PIE and fixed executable PCs, verified entry/bias consistency, archived identities, segment and malformed-user-boundary refusal |

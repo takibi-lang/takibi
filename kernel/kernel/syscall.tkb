@@ -9977,9 +9977,10 @@ private inline fn syscall_sendfile_current_with(slot: borrow SyscallSlot[0],
     // GitHub issue #1042: the output must BE the terminal, not merely fd 1
     // or 2. BusyBox cat's stdout in a pipeline is a pipe, and this path
     // used to queue its bytes on the UART instead; refused, BusyBox falls
-    // back to read and write.
-    if ((output_fd != 1 && output_fd != 2) ||
-        kernel_syscall_terminal_is_open(output_fd) == false ||
+    // back to read and write. GitHub issue #1222: and it is the terminal
+    // whatever its number, as reads and polls are since #902; a dup of the
+    // terminal is a terminal.
+    if (kernel_syscall_terminal_is_open(output_fd) == false ||
         kernel_syscall_file_is_open(input_fd) == false ||
         kernel_syscall_file_readable(input_fd) == false) {
         return SyscallAction::Resume(LINUX_EBADF);
