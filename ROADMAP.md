@@ -173,7 +173,11 @@ owners are TaskMutex, the spare stack stays masked). #980
    first (configuration; a B-sized slice; done 2026-10-29: the identity
    is split so only the text is executable, WXN is set, and two QEMU oops
    modes are the negative controls), then PAN with a typed
-   `user_access` window, then the IOMMU (QEMU `smmuv3`, then BCM2712's
+   `user_access` window (done 2026-10-30 on a branch: every QEMU lane
+   emulates cortex-a76, PAN is set per core and on every exception entry,
+   a linear `UserAccessWindow` wraps each user access, and a range's base
+   is refined to the user-window interval; `el1_read_user` is the
+   negative control), then the IOMMU (QEMU `smmuv3`, then BCM2712's
    PCIe IOMMU for RP1), which turns the device-semantics claims of
    `kernel/DEVICE_SEMANTICS_FILES` from trusted into enforced. Each step
    has a negative control and an RPi5 measurement.

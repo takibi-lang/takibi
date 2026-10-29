@@ -586,6 +586,24 @@ negative controls. What stays trusted is the descriptor construction itself
 pins its UXN/PXN constants and the WXN bit in the linked image) and the
 linker scripts' text-alignment assertions.
 
+EL1 cannot touch user memory by accident (#1032, PAN slice). PSTATE.PAN is
+set on every core at boot (`kernel_pan_require`, which halts a core
+without FEAT_PAN) and on every exception entry (SCTLR_EL1.SPAN clear), so an
+EL1 load or store to an EL0-accessible page faults. The only way to clear it
+is the linear `UserAccessWindow` (`kernel/mm/user_access.tkb`), opened and
+closed by the `kernel/mm/user_memory.tkb` accessors around one access each;
+the compiler requires every opened window to be closed, and a range's base
+has the refined type `{USER_TEXT_VA..<USER_RANGE_END as usize}`, so a
+window dereferences only an address proven inside the user window. The
+QEMU oops lane's `el1_read_user` mode is the negative control. Trusted: the
+three assembly leaves in `user_entry.S` (`scripts/buildcheck_kernel_asm_invariants.py`
+refuses a PAN write anywhere else and an SCTLR write that leaves SPAN set),
+their callers (`scripts/allowed_callers.tsv`), and the per-access extent,
+which stays a runtime check (`user_range_span_ok`). That a kernel raw
+dereference outside a window never names a user address is enforced by PAN
+in hardware, not proven: kernel addresses are not one interval on RPi5
+(#1184).
+
 Tests and hardware integration checks provide evidence for these properties;
 they do not convert them into language theorems.
 
