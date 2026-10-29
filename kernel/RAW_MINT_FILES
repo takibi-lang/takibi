@@ -14,6 +14,9 @@ kernel/drivers/dma_address.tkb
 # inbound offset (0 on QEMU virt, rp1_dma_pci_offset behind RP1). Callers
 # are fixed in scripts/allowed_callers.tsv; the IOMMU (#1032) enforces it.
 kernel/drivers/net/rp1_gem.tkb
+# rp1_gem: 1 site left, DDB RX descriptor read, #1164 (its rings are
+# rp1_gem_desc.tkb protocol owners since #740; its RP1 clock and GPIO
+# registers are IoHandles attached in the device map since 2026-10-29, #1163).
 kernel/drivers/net/virtio_net.tkb
 # virtio_net: 1 site left, DDB used-index read, #1164 (its queues are a
 # typed global written through checked indexes since 2026-10-28, #637).

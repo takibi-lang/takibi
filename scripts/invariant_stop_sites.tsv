@@ -81,7 +81,7 @@ kernel/mm/page.tkb	page_allocator_init_frames	unmodelled	4	-	#799	the bootstrap 
 kernel/mm/page.tkb	page_allocator_apply_memory	unmodelled	4	handler	#799	extent slots misaligned, frame build failed, empty frames misaligned or too few: boot layout facts; the function returns PageAllocatorMemoryResult::Invalid on one path already
 kernel/platform/qemu/device_map.tkb	qemu_uart_attach_bootstrap	ladder	1	-	#1049	the fixed UART window is refused (too small): constant base and size against sizeof, decidable at compile time
 kernel/platform/rpi5/device_map.tkb	rpi5_uart_attach_bootstrap	ladder	1	-	#1049	the fixed UART window is refused: constant size against sizeof
-kernel/platform/rpi5/device_map.tkb	rpi5_gem_attach_bootstrap	ladder	1	-	#1049	the fixed GEM window is too small: constant size against sizeof
+kernel/platform/rpi5/device_map.tkb	rpi5_gem_attach_bootstrap	ladder	5	-	#1049	the fixed GEM window, or the RP1 clock or GPIO ctrl, RIO or pads window (#1163), is too small: constant size against sizeof (the four RP1 windows are exactly sizeof, so TooSmall cannot fire)
 kernel/platform/rpi5/device_map.tkb	rpi5_pcie_windows_attach	ladder	3	-	#1049	the PCIe bridge, rescal and reset windows are too small: constant sizes against sizeof
 kernel/platform/rpi5/device_map.tkb	rpi5_xhci_attach_bootstrap	ladder	4	-	#1049	the xHCI capability, operational, runtime and doorbell windows are too small: each size is sizeof of its register block, so TooSmall cannot fire
 kernel/platform/rpi5/device_map.tkb	rpi5_xhci_refuse	unmodelled	1	-	#1031	the controller reported a register block outside the device window: a hardware answer

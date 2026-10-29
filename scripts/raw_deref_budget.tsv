@@ -13,7 +13,6 @@ kernel/arch/arm64/kernel/exception_evidence.tkb	173	0	Private per-CPU crash cach
 kernel/arch/arm64/kernel/frame_ref.tkb	3	0	the exception-frame mint site: a FrameRef's words are read and written here and nowhere else (#637 C); plus the bounded current-stack word read of the irqsoff frame walk (#811), kept beside the interrupted-stack one it mirrors
 kernel/arch/arm64/mm/mmu.tkb	2	0	page-table entries as a raw table (#637 H)
 kernel/boot/fdt.tkb	1	0	the device tree blob as raw memory (#637 H)
-kernel/drivers/net/rp1_gem.tkb	0	9	RP1 clock and GPIO registers (#637 A); GEM registers use an IoHandle (#733)
 kernel/mm/user_memory.tkb	7	0	the user-range mint site: user addresses become slices here (#637 D)
 kernel/platform/qemu/device_map.tkb	0	3	virtio-mmio magic and device-id probes during DTB discovery (#637 A); the device-window mint
 kernel/printk/log.tkb	21	0	the syslog snapshot buffers and NUL-terminated string walks; per-CPU line state is indexed since #613 slice 5 (#637 B)

@@ -74,6 +74,13 @@ SOURCES = {
     "brcmstb-reset": ("linux", "drivers/reset/reset-brcmstb.c at " + LINUX
                       + " (SW_INIT_SET/CLEAR, bank size 0x18)"),
     "bcm2712-mip": ("linux", "drivers/irqchip/irq-bcm2712-mip.c at " + LINUX),
+    "rp1-clocks": ("linux", "drivers/clk/clk-rp1.c at " + LINUX
+                   + " (CLK_ETH_CTRL 0x064); RP1 Peripherals RP-008370-DS"),
+    "rp1-gpio": ("linux", "drivers/pinctrl/pinctrl-rp1.c at " + LINUX
+                 + " (IO_BANK1 at 0x4000, 8 bytes per GPIO, CTRL at +4; "
+                 "RIO bank 1 at 0x4000, OUT +0, OE +4, SET alias +0x2000, "
+                 "CLR alias +0x3000; PADS bank 1 at 0x4000, GPIO n at "
+                 "4 + 4n); RP1 Peripherals RP-008370-DS, 3.1"),
 }
 
 # struct -> {field: (offset, element count or None for a scalar, source)}
@@ -151,6 +158,13 @@ TABLES = {
     },
     "Rp1MsixTable": {"words": (0x0, 61 * 4, "pci-msix")},
     "Rp1MsixCfgSet": {"cfg": (0x0, 64, "rp1-msix-cfg")},
+    "Rp1ClocksEthRegs": {"clk_eth_ctrl": (0x64, None, "rp1-clocks")},
+    "Rp1GpioCtrlRegs": {"gpio32_ctrl": (0x4024, None, "rp1-gpio")},
+    "Rp1GpioRioRegs": {name: (offset, None, "rp1-gpio") for name, offset in {
+        "bank1_out_set": 0x6000, "bank1_oe_set": 0x6004,
+        "bank1_out_clr": 0x7000,
+    }.items()},
+    "Rp1GpioPadsRegs": {"gpio32": (0x4014, None, "rp1-gpio")},
 }
 
 # Checked against the xHCI specification by check_xhci_register_offsets.py.

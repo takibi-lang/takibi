@@ -48,6 +48,32 @@ fn rpi5_gem_attach_bootstrap() !{unsafe} {
         IoAttach::Attached => {}
         IoAttach::TooSmall => { kernel_invariant_stop(); }
     }
+    // RP1's clock and GPIO blocks for the PHY reset and the Ethernet TX
+    // clock (#1163), each only as large as the registers named.
+    let RegionBytes::Assumed(clocks) =
+        region_bytes_assume(RP1_CLOCKS_BASE, sizeof(Rp1ClocksEthRegs)) else {};
+    match io_handle_attach(&rp1_clocks, clocks) {
+        IoAttach::Attached => {}
+        IoAttach::TooSmall => { kernel_invariant_stop(); }
+    }
+    let RegionBytes::Assumed(ctrl) =
+        region_bytes_assume(RP1_GPIO_CTRL_BASE, sizeof(Rp1GpioCtrlRegs)) else {};
+    match io_handle_attach(&rp1_gpio_ctrl, ctrl) {
+        IoAttach::Attached => {}
+        IoAttach::TooSmall => { kernel_invariant_stop(); }
+    }
+    let RegionBytes::Assumed(rio) =
+        region_bytes_assume(RP1_GPIO_RIO_BASE, sizeof(Rp1GpioRioRegs)) else {};
+    match io_handle_attach(&rp1_gpio_rio, rio) {
+        IoAttach::Attached => {}
+        IoAttach::TooSmall => { kernel_invariant_stop(); }
+    }
+    let RegionBytes::Assumed(pads) =
+        region_bytes_assume(RP1_GPIO_PADS_BASE, sizeof(Rp1GpioPadsRegs)) else {};
+    match io_handle_attach(&rp1_gpio_pads, pads) {
+        IoAttach::Attached => {}
+        IoAttach::TooSmall => { kernel_invariant_stop(); }
+    }
 }
 
 // pcie2, its SERDES calibration reset and bcm_reset, at the bases the

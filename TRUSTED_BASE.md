@@ -233,8 +233,10 @@ rules globally.
     rpi-6.6.y), the de facto specification for BCM2712 blocks with no
     public datasheet: `pcie-brcmstb.c` (PCIe misc and RC registers;
     HARD_DEBUG from `pcie_offsets_bcm2712`), `reset-brcmstb-rescal.c`,
-    `reset-brcmstb.c` and `irq-bcm2712-mip.c`. Only offsets and array sizes
-    were taken.
+    `reset-brcmstb.c`, `irq-bcm2712-mip.c`, and for RP1's Ethernet TX
+    clock enable and the PHY-reset GPIO32 (#1163) `clk-rp1.c` and
+    `pinctrl-rp1.c`, which the RP1 Peripherals datasheet's GPIO chapter
+    agrees with. Only offsets and array sizes were taken.
   - **Board evidence or a stated stride.** PCIe UBUS_BAR2_CONFIG_REMAP_HI
     (0x40B8) is not named in Linux; it is BAR2 LO + 4 by the BAR1 LO/HI
     pair's stride, and the kernel writes it 0.

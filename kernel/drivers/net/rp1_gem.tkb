@@ -50,6 +50,30 @@ io struct Rp1GemRegs {
 // Attached by the platform device map before the GEM interrupt is enabled.
 let mut gem: IoHandle(Rp1GemRegs);
 
+// The RP1 clock and GPIO registers net_init and gem_phy_reset touch
+// (#1163, #637 stage 3): the Ethernet TX clock enable, and GPIO32 (the PHY
+// reset, bank 1 pin 4) in IO_BANK1, its pad, and RIO bank 1's atomic set
+// (+0x2000) and clear (+0x3000) aliases. Attached by the platform device
+// map with the GEM window, at the bases the boot DTB check compares.
+io struct Rp1ClocksEthRegs {
+    clk_eth_ctrl: u32 at 0x64;
+}
+io struct Rp1GpioCtrlRegs {
+    gpio32_ctrl: u32 at 0x4024;
+}
+io struct Rp1GpioRioRegs {
+    bank1_out_set: u32 at 0x6000;
+    bank1_oe_set: u32 at 0x6004;
+    bank1_out_clr: u32 at 0x7000;
+}
+io struct Rp1GpioPadsRegs {
+    gpio32: u32 at 0x4014;
+}
+let mut rp1_clocks: IoHandle(Rp1ClocksEthRegs);
+let mut rp1_gpio_ctrl: IoHandle(Rp1GpioCtrlRegs);
+let mut rp1_gpio_rio: IoHandle(Rp1GpioRioRegs);
+let mut rp1_gpio_pads: IoHandle(Rp1GpioPadsRegs);
+
 // Only net_rx_acquire can validate a hardware-supplied length and mint this
 // owner.  Protocol code can borrow the buffer, then must release it or turn it
 // into a reply-ready owner exactly once.
@@ -162,31 +186,16 @@ fn gem_mdio_write(reg: u32, value: u32) -> bool {
     return gem_mdio_wait();
 }
 
-fn gem_phy_reset() !{unsafe} {
+fn gem_phy_reset() {
     // RPi5 board DTS: PHY reset is RP1 GPIO32, active low, 5 ms.
     // GPIO32 is bank 1 bit 4. Put the pin in GPIO mode, drive low, then
     // release it high before touching MDIO.
-    let ctrl: *io u32 = unsafe {
-        (rp1_gpio_ctrl_base + 0x4024) as *io u32
-    };
-    let rio_out_clr: *io u32 = unsafe {
-        (rp1_gpio_rio_base + 0x7000) as *io u32
-    };
-    let rio_out_set: *io u32 = unsafe {
-        (rp1_gpio_rio_base + 0x6000) as *io u32
-    };
-    let rio_oe_set: *io u32 = unsafe {
-        (rp1_gpio_rio_base + 0x6004) as *io u32
-    };
-    let pad: *io u32 = unsafe {
-        (rp1_gpio_pads_base + 0x4014) as *io u32
-    };
-    *rio_out_clr = 1 << 4;
-    *rio_oe_set = 1 << 4;
-    *pad = (*pad | (1 << 6)) & 0xFFFFFF7F;
-    *ctrl = (*ctrl & 0xFFFFFFE0) | 5;
+    rp1_gpio_rio.bank1_out_clr = 1 << 4;
+    rp1_gpio_rio.bank1_oe_set = 1 << 4;
+    rp1_gpio_pads.gpio32 = (rp1_gpio_pads.gpio32 | (1 << 6)) & 0xFFFFFF7F;
+    rp1_gpio_ctrl.gpio32_ctrl = (rp1_gpio_ctrl.gpio32_ctrl & 0xFFFFFFE0) | 5;
     delay_us(5000);
-    *rio_out_set = 1 << 4;
+    rp1_gpio_rio.bank1_out_set = 1 << 4;
     delay_us(10000);
 }
 
@@ -366,10 +375,7 @@ fn net_init() -> NetInitResult !{unsafe} {
 
     // Keep the firmware-selected parent/divider but explicitly enable the
     // RP1 Ethernet TX clock; unlike clk_sys this branch is not critical.
-    let eth_clk_ctrl: *io u32 = unsafe {
-        (rp1_clocks_base + 0x64) as *io u32
-    };
-    *eth_clk_ctrl = *eth_clk_ctrl | (1 << 11);
+    rp1_clocks.clk_eth_ctrl = rp1_clocks.clk_eth_ctrl | (1 << 11);
 
     // Drain any transmission retained by an earlier SWD-loaded kernel before
     // replacing the descriptor base.  A cold boot completes immediately.
