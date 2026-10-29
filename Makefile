@@ -957,6 +957,12 @@ linuxcheck: linuxbuild compiler-fuzz
 	 exp=$$(grep '^userspace itimer: ' kernel/tests/common/views/linux_file.expected); \
 	 if [ -n "$$exp" ] && [ "$$got" = "$$exp" ]; then echo "PASS  itimer probe (host Linux)"; \
 	 else echo "FAIL  itimer probe (host Linux)"; echo "  expected: $$exp"; echo "  got:      $$got"; exit 1; fi
+	@# GitHub issue #1176: the credentials probe, the same way.
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) --no-print-directory $(KERNEL_CREDENTIALS_LINUX_ELF)
+	@got=$$(qemu-aarch64 $(KERNEL_CREDENTIALS_LINUX_ELF)); \
+	 exp=$$(grep '^userspace credentials: ' kernel/tests/common/views/linux_file.expected); \
+	 if [ -n "$$exp" ] && [ "$$got" = "$$exp" ]; then echo "PASS  credentials probe (host Linux)"; \
+	 else echo "FAIL  credentials probe (host Linux)"; echo "  expected: $$exp"; echo "  got:      $$got"; exit 1; fi
 	@bash scripts/lane_timing.sh end linuxcheck 0
 
 # GitHub issue #1035: the long ext2 tier C runs, outside every lane:
@@ -1089,6 +1095,8 @@ KERNEL_MMAP_REGION_LINUX_ELF := $(KERNEL_BUILD_DIR)/mmap_region_probe.elf
 KERNEL_CLOCK_LINUX_ELF := $(KERNEL_BUILD_DIR)/clock_probe.elf
 # GitHub issue #1172: its itimer probe alone, for host Linux.
 KERNEL_ITIMER_LINUX_ELF := $(KERNEL_BUILD_DIR)/itimer_probe.elf
+# GitHub issue #1176: its credentials probe alone, for host Linux.
+KERNEL_CREDENTIALS_LINUX_ELF := $(KERNEL_BUILD_DIR)/credentials_probe.elf
 KERNEL_BUSY_LOOP_TKB     := $(KERNEL_DIR)/arch/arm64/kernel/busy_loop.tkb
 KERNEL_BUSY_LOOP_O       := $(KERNEL_BUILD_DIR)/busy_loop.o
 KERNEL_BUSY_LOOP_A_ELF   := $(KERNEL_BUILD_DIR)/busy_a.elf
@@ -1431,6 +1439,7 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 $(KERNEL_SHELL_EXT2_IMAGE): $(KERNEL_EXT2_IMAGE) \
 	$(KERNEL_EXT2_FIXTURE_DIR)/inittab.shell $(KERNEL_EXT2_FIXTURE_DIR)/restart.sh \
 	$(KERNEL_EXT2_FIXTURE_DIR)/load.sh $(KERNEL_EXT2_FIXTURE_DIR)/load-job.sh \
+	$(KERNEL_EXT2_FIXTURE_DIR)/passwd $(KERNEL_EXT2_FIXTURE_DIR)/group \
 	$(KERNEL_HANG_CORE_ELF)
 	cp $(KERNEL_EXT2_IMAGE) $@.tmp
 	debugfs -w -R 'rm /etc/inittab' $@.tmp >/dev/null 2>&1
@@ -1443,6 +1452,9 @@ $(KERNEL_SHELL_EXT2_IMAGE): $(KERNEL_EXT2_IMAGE) \
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/load-job.sh $@.tmp:/bin/load-job.sh
 	debugfs -w -R 'set_inode_field /bin/load.sh mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/load-job.sh mode 0100755' $@.tmp >/dev/null 2>&1
+	# GitHub issue #1176: load.sh runs stress-ng as `load` through su.
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/passwd $@.tmp:/etc/passwd
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/group $@.tmp:/etc/group
 	# GitHub issue #980: in /lib, which no ash listing shows.
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_HANG_CORE_ELF) $@.tmp:/lib/hang-core
 	debugfs -w -R 'set_inode_field /lib/hang-core mode 0100755' $@.tmp >/dev/null 2>&1
@@ -1491,7 +1503,7 @@ endef
 # so the resulting ET_DYN ELF has zero dynamic relocations -- verified
 # empirically before this rule existed (see HISTORY.md's #241 entry).
 $(KERNEL_RPI5_USER_PAYLOAD_TKB_O): $(KERNEL_RPI5_USER_PAYLOAD_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
-	$(call KERNEL_EL0_COMPILE,initial_user_payload sigaltstack_probe_alone shared_mapping_probe_alone mmap_region_probe_alone realtime_clock_probe_alone itimer_probe_alone)
+	$(call KERNEL_EL0_COMPILE,initial_user_payload sigaltstack_probe_alone shared_mapping_probe_alone mmap_region_probe_alone realtime_clock_probe_alone itimer_probe_alone credentials_probe_alone)
 
 $(KERNEL_RPI5_USER_PAYLOAD_ASM_O): $(KERNEL_RPI5_USER_PAYLOAD_ASM_S) | $(KERNEL_BUILD_DIR)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
@@ -1518,6 +1530,8 @@ $(KERNEL_CLOCK_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_
 
 $(KERNEL_ITIMER_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O)
 	$(LLD) -pie --no-dynamic-linker -e itimer_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) -o $@
+$(KERNEL_CREDENTIALS_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O)
+	$(LLD) -pie --no-dynamic-linker -e credentials_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
 # GitHub issue #448: the CPU-bound pair /etc/inittab starts. One source and

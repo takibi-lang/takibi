@@ -10,3 +10,4 @@ userspace mmap region: 2 MiB MAP_SHARED shared across fork, 8 MiB MAP_PRIVATE ze
 userspace mmap region limits: madvise unknown and MADV_REMOVE EINVAL, unmapped ENOMEM, over 16 MiB ENOMEM ok
 userspace clocks: CLOCK_REALTIME and CLOCK_MONOTONIC advance across a 20 ms nanosleep, unknown clock EINVAL ok
 userspace itimer: ITIMER_REAL one-shot and interval SIGALRM, getitimer and old value, bad which and usec EINVAL, fork child unarmed, default SIGALRM ends a sleeper ok
+userspace credentials: a non-root child gets EPERM for other ids, EINVAL for setuid(-1), EFAULT, and its ids across fork ok

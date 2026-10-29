@@ -1002,6 +1002,7 @@ fn initial_user_payload() !{unsafe} {
         mmap_region_kernel_probe();
         realtime_clock_probe();
         itimer_probe();
+        credentials_probe();
         svc5(93, 0, 0, 0, 0, 0);
     }
 }
@@ -1829,6 +1830,123 @@ fn fail_halt() !{unsafe} {
     // The exit syscall cannot return; retain a visible fail-stop if it does.
     while (true) {
     }
+}
+
+/* GitHub issue #1176: per-process credentials. Every process was uid 0,
+ * and stress-ng's exec stressor refuses root. A fork child drops to a
+ * non-root uid and gid (1000 when it starts as root, as on Takibi; its own
+ * ids when it does not, as under qemu-aarch64 on an unprivileged host), then
+ * checks what Linux lets a non-root process do: getresuid/getresgid agree
+ * with getuid/geteuid/getgid/getegid, -1 keeps an id, its own ids are
+ * allowed and others EPERM, setuid(-1) EINVAL, setgroups EPERM, a bad
+ * pointer EFAULT, and a fork grandchild inherits the ids. Root may change
+ * freely: the drop itself is that case. The child exits with the number of
+ * the first check that fails. `credentials_probe_alone` runs under
+ * qemu-aarch64 in `make linuxcheck` against this line of the linux_file
+ * view. */
+const SETGID_SYSCALL: usize = 144;
+const SETUID_SYSCALL: usize = 146;
+const SETRESUID_SYSCALL: usize = 147;
+const GETRESUID_SYSCALL: usize = 148;
+const SETRESGID_SYSCALL: usize = 149;
+const GETRESGID_SYSCALL: usize = 150;
+const SETGROUPS_SYSCALL: usize = 159;
+const ID_KEEP: usize = 0xFFFFFFFF;
+const CREDENTIALS_DROP_ID: usize = 1000;
+
+fn credentials_probe_alone() !{unsafe} {
+    credentials_probe();
+    svc5(93, 0, 0, 0, 0, 0);
+}
+
+// getresgid (group) or getresuid into three 8-byte cells; true when the call
+// returned 0 and all three equal `want`.
+fn credentials_probe_res(group: bool, base: *u8, want: usize) -> bool !{unsafe} {
+    for cell: usize in 0..<3 { payload_write_u64(base, cell * 8, 0xFFFFFFFFFFFFFFFF); }
+    let mut answer: usize = 0;
+    if (group) {
+        answer = svc5(GETRESGID_SYSCALL, ptr_of(base, 0), ptr_of(base, 8), ptr_of(base, 16), 0, 0);
+    } else {
+        answer = svc5(GETRESUID_SYSCALL, ptr_of(base, 0), ptr_of(base, 8), ptr_of(base, 16), 0, 0);
+    }
+    if (answer != 0) { return false; }
+    for cell: usize in 0..<3 {
+        if ((payload_read_u64(base, cell * 8) & 0xFFFFFFFF) != want) { return false; }
+    }
+    return true;
+}
+
+fn credentials_probe_child() -> usize !{unsafe} {
+    let mut ids: [u8; 24];
+    let ids_base: *u8 = ids as *u8;
+    let mut uid: usize = svc5(174, 0, 0, 0, 0, 0);
+    let mut gid: usize = svc5(176, 0, 0, 0, 0, 0);
+    if (svc5(175, 0, 0, 0, 0, 0) == 0) {
+        // Root may change freely: the group first, as a dropping program must.
+        if (svc5(SETRESGID_SYSCALL, CREDENTIALS_DROP_ID, CREDENTIALS_DROP_ID,
+                 CREDENTIALS_DROP_ID, 0, 0) != 0) { return 1; }
+        if (svc5(SETRESUID_SYSCALL, CREDENTIALS_DROP_ID, CREDENTIALS_DROP_ID,
+                 CREDENTIALS_DROP_ID, 0, 0) != 0) { return 2; }
+        uid = CREDENTIALS_DROP_ID;
+        gid = CREDENTIALS_DROP_ID;
+    }
+    if (uid == 0) { return 3; }
+    if (credentials_probe_res(false, ids_base, uid) == false) { return 4; }
+    if (credentials_probe_res(true, ids_base, gid) == false) { return 5; }
+    if (svc5(174, 0, 0, 0, 0, 0) != uid || svc5(175, 0, 0, 0, 0, 0) != uid) { return 6; }
+    if (svc5(176, 0, 0, 0, 0, 0) != gid || svc5(177, 0, 0, 0, 0, 0) != gid) { return 7; }
+    if (svc5(SETRESUID_SYSCALL, ID_KEEP, ID_KEEP, ID_KEEP, 0, 0) != 0) { return 8; }
+    if (svc5(SETRESUID_SYSCALL, uid, uid, uid, 0, 0) != 0) { return 9; }
+    if (svc5(SETRESUID_SYSCALL, 0, ID_KEEP, ID_KEEP, 0, 0) != EPERM_RC) { return 10; }
+    if (svc5(SETRESUID_SYSCALL, ID_KEEP, uid + 1, ID_KEEP, 0, 0) != EPERM_RC) { return 11; }
+    if (svc5(SETRESGID_SYSCALL, ID_KEEP, gid, ID_KEEP, 0, 0) != 0) { return 12; }
+    if (svc5(SETRESGID_SYSCALL, ID_KEEP, ID_KEEP, 0, 0, 0) != EPERM_RC) { return 13; }
+    if (svc5(SETUID_SYSCALL, uid, 0, 0, 0, 0) != 0) { return 14; }
+    if (svc5(SETUID_SYSCALL, 0, 0, 0, 0, 0) != EPERM_RC) { return 15; }
+    if (svc5(SETUID_SYSCALL, ID_KEEP, 0, 0, 0, 0) != EINVAL_RC) { return 16; }
+    if (svc5(SETGID_SYSCALL, gid, 0, 0, 0, 0) != 0) { return 17; }
+    if (svc5(SETGID_SYSCALL, 0, 0, 0, 0, 0) != EPERM_RC) { return 18; }
+    if (svc5(SETGROUPS_SYSCALL, 0, 0, 0, 0, 0) != EPERM_RC) { return 19; }
+    if (svc5(GETRESUID_SYSCALL, 1, ptr_of(ids_base, 8), ptr_of(ids_base, 16), 0, 0)
+            != EFAULT_RC) { return 20; }
+    // The refusals changed nothing.
+    if (credentials_probe_res(false, ids_base, uid) == false) { return 21; }
+    // A fork grandchild inherits the ids.
+    let grandchild: usize = svc5(220, SIGCHLD, 0, 0, 0, 0);
+    if (grandchild == 0) {
+        let mut code: usize = 1;
+        if (svc5(175, 0, 0, 0, 0, 0) == uid && svc5(177, 0, 0, 0, 0, 0) == gid) { code = 0; }
+        svc5(93, code, 0, 0, 0, 0);
+    }
+    if (grandchild >= 0x8000000000000000) { return 22; }
+    payload_write_u64(ids_base, 0, 0xFF);
+    if (svc5(260, grandchild, ptr_of(ids_base, 0), 0, 0, 0) != grandchild) { return 23; }
+    if ((payload_read_u64(ids_base, 0) & 0xFFFFFFFF) != 0) { return 24; }
+    return 0;
+}
+
+fn credentials_probe() !{unsafe} {
+    let child: usize = svc5(220, SIGCHLD, 0, 0, 0, 0);
+    if (child == 0) {
+        svc5(93, credentials_probe_child(), 0, 0, 0, 0);
+    }
+    fail_if(child >= 0x8000000000000000);
+    let mut status: [u8; 8];
+    let status_base: *u8 = status as *u8;
+    payload_write_u64(status_base, 0, 0xFF);
+    fail_if(svc5(260, child, ptr_of(status_base, 0), 0, 0, 0) != child);
+    // The parent keeps its own ids.
+    let mut ids: [u8; 24];
+    let ids_base: *u8 = ids as *u8;
+    fail_if(credentials_probe_res(false, ids_base,
+                                  svc5(174, 0, 0, 0, 0, 0)) == false);
+    let mut message: []const u8 =
+        bs"userspace credentials: a non-root child gets EPERM for other ids, EINVAL for setuid(-1), EFAULT, and its ids across fork ok\n";
+    if ((payload_read_u64(status_base, 0) & 0xFFFF) != 0) {
+        message = bs"userspace credentials: FAILED, the child's exit status names the check\n";
+    }
+    fail_if(svc5(64, 1, (unsafe { message as *u8 }) as usize,
+                 message.len, 0, 0) != message.len);
 }
 
 fn fail_if(bad: bool) {

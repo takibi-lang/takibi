@@ -1568,6 +1568,180 @@ private fn syscall_statfs_with(slot: borrow SyscallSlot[0],
     }
 }
 
+// GitHub issue #1176: the uid/gid family over ProcessCredentials, as
+// Linux's kernel/sys.c does it for the initial user namespace. Privilege
+// (CAP_SETUID / CAP_SETGID) is an effective uid of 0: with no capability
+// sets here, that is what Linux's root-compatible capability rules give.
+// An id argument is the low 32 bits; 0xFFFFFFFF (-1) leaves an id alone.
+const AARCH64_NR_SETREGID: usize = 143;
+const AARCH64_NR_SETGID: usize = 144;
+const AARCH64_NR_SETREUID: usize = 145;
+const AARCH64_NR_SETUID: usize = 146;
+const AARCH64_NR_SETRESUID: usize = 147;
+const AARCH64_NR_GETRESUID: usize = 148;
+const AARCH64_NR_SETRESGID: usize = 149;
+const AARCH64_NR_GETRESGID: usize = 150;
+const AARCH64_NR_GETGROUPS: usize = 158;
+const AARCH64_NR_SETGROUPS: usize = 159;
+const LINUX_ID_KEEP: u32 = 0xFFFFFFFF;
+// include/uapi/linux/limits.h
+const LINUX_NGROUPS_MAX: usize = 65536;
+
+// One id of an unprivileged caller's request: -1, or one of the three it
+// holds.
+fn syscall_id_allowed(wanted: u32, real: u32, effective: u32, saved: u32) -> bool {
+    return wanted == LINUX_ID_KEEP || wanted == real || wanted == effective ||
+        wanted == saved;
+}
+
+fn syscall_id_or(wanted: u32, old: u32) -> u32 {
+    if (wanted == LINUX_ID_KEEP) { return old; }
+    return wanted;
+}
+
+// getresuid/getresgid: three u32 stores through three pointers, each its
+// own EFAULT, in Linux's order.
+fn syscall_getres_ids(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+                      first: usize, second: usize, third: usize,
+                      real: u32, effective: u32, saved: u32) -> usize {
+    match user_range_check_write(current_authority, first, 4) {
+        UserWriteRangeResult::Fault => { return LINUX_EFAULT; }
+        UserWriteRangeResult::Ok(range) => {
+            match user_write_u32(range, 0, real) {
+                UserWriteResult::Fault => { return LINUX_EFAULT; }
+                UserWriteResult::Written => {}
+            }
+        }
+    }
+    match user_range_check_write(current_authority, second, 4) {
+        UserWriteRangeResult::Fault => { return LINUX_EFAULT; }
+        UserWriteRangeResult::Ok(range) => {
+            match user_write_u32(range, 0, effective) {
+                UserWriteResult::Fault => { return LINUX_EFAULT; }
+                UserWriteResult::Written => {}
+            }
+        }
+    }
+    match user_range_check_write(current_authority, third, 4) {
+        UserWriteRangeResult::Fault => { return LINUX_EFAULT; }
+        UserWriteRangeResult::Ok(range) => {
+            match user_write_u32(range, 0, saved) {
+                UserWriteResult::Fault => { return LINUX_EFAULT; }
+                UserWriteResult::Written => { return 0; }
+            }
+        }
+    }
+}
+
+fn syscall_id_call(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+                   number: usize, x0: usize, x1: usize, x2: usize) -> usize {
+    let mut ids: ProcessCredentials = kernel_process_current_credentials(current_authority);
+    let privileged: bool = ids.euid == 0;
+    let a: u32 = (x0 & 0xFFFFFFFF) as u32;
+    let b: u32 = (x1 & 0xFFFFFFFF) as u32;
+    let c: u32 = (x2 & 0xFFFFFFFF) as u32;
+    if (number == 174) { return ids.ruid as usize; }
+    if (number == 175) { return ids.euid as usize; }
+    if (number == 176) { return ids.rgid as usize; }
+    if (number == 177) { return ids.egid as usize; }
+    if (number == AARCH64_NR_GETRESUID) {
+        return syscall_getres_ids(current_authority, x0, x1, x2, ids.ruid, ids.euid, ids.suid);
+    }
+    if (number == AARCH64_NR_GETRESGID) {
+        return syscall_getres_ids(current_authority, x0, x1, x2, ids.rgid, ids.egid, ids.sgid);
+    }
+    if (number == AARCH64_NR_GETGROUPS) {
+        // No supplementary groups are kept: an empty list for any size.
+        if ((x0 & 0xFFFFFFFF) >= 0x80000000) { return LINUX_EINVAL; }
+        return 0;
+    }
+    if (number == AARCH64_NR_SETGROUPS) {
+        // Linux checks the size, then CAP_SETGID, then reads the list.
+        // The list is read for EFAULT and not kept (getgroups stays empty).
+        let size: usize = x0 & 0xFFFFFFFF;
+        if (size > LINUX_NGROUPS_MAX) { return LINUX_EINVAL; }
+        if (privileged == false) { return LINUX_EPERM; }
+        if (size == 0) { return 0; }
+        match user_range_check_read(current_authority, x1, size * 4) {
+            UserReadRangeResult::Fault => { return LINUX_EFAULT; }
+            UserReadRangeResult::Ok(range) => { return 0; }
+        }
+    }
+    if (number == AARCH64_NR_SETRESUID) {
+        if (privileged == false &&
+            (syscall_id_allowed(a, ids.ruid, ids.euid, ids.suid) == false ||
+             syscall_id_allowed(b, ids.ruid, ids.euid, ids.suid) == false ||
+             syscall_id_allowed(c, ids.ruid, ids.euid, ids.suid) == false)) {
+            return LINUX_EPERM;
+        }
+        ids.ruid = syscall_id_or(a, ids.ruid);
+        ids.euid = syscall_id_or(b, ids.euid);
+        ids.suid = syscall_id_or(c, ids.suid);
+    } else if (number == AARCH64_NR_SETRESGID) {
+        if (privileged == false &&
+            (syscall_id_allowed(a, ids.rgid, ids.egid, ids.sgid) == false ||
+             syscall_id_allowed(b, ids.rgid, ids.egid, ids.sgid) == false ||
+             syscall_id_allowed(c, ids.rgid, ids.egid, ids.sgid) == false)) {
+            return LINUX_EPERM;
+        }
+        ids.rgid = syscall_id_or(a, ids.rgid);
+        ids.egid = syscall_id_or(b, ids.egid);
+        ids.sgid = syscall_id_or(c, ids.sgid);
+    } else if (number == AARCH64_NR_SETUID) {
+        if (a == LINUX_ID_KEEP) { return LINUX_EINVAL; }
+        if (privileged) {
+            ids.ruid = a;
+            ids.euid = a;
+            ids.suid = a;
+        } else if (a == ids.ruid || a == ids.suid) {
+            ids.euid = a;
+        } else {
+            return LINUX_EPERM;
+        }
+    } else if (number == AARCH64_NR_SETGID) {
+        if (a == LINUX_ID_KEEP) { return LINUX_EINVAL; }
+        if (privileged) {
+            ids.rgid = a;
+            ids.egid = a;
+            ids.sgid = a;
+        } else if (a == ids.rgid || a == ids.sgid) {
+            ids.egid = a;
+        } else {
+            return LINUX_EPERM;
+        }
+    } else if (number == AARCH64_NR_SETREUID) {
+        // The real id may become the old real or effective one; the
+        // effective any of the three. Setting the real id, or an effective
+        // id other than the old real one, makes the saved id the new
+        // effective one.
+        if (privileged == false &&
+            ((a != LINUX_ID_KEEP && a != ids.ruid && a != ids.euid) ||
+             syscall_id_allowed(b, ids.ruid, ids.euid, ids.suid) == false)) {
+            return LINUX_EPERM;
+        }
+        let old_real: u32 = ids.ruid;
+        ids.ruid = syscall_id_or(a, ids.ruid);
+        ids.euid = syscall_id_or(b, ids.euid);
+        if (a != LINUX_ID_KEEP || (b != LINUX_ID_KEEP && b != old_real)) {
+            ids.suid = ids.euid;
+        }
+    } else if (number == AARCH64_NR_SETREGID) {
+        if (privileged == false &&
+            ((a != LINUX_ID_KEEP && a != ids.rgid && a != ids.egid) ||
+             syscall_id_allowed(b, ids.rgid, ids.egid, ids.sgid) == false)) {
+            return LINUX_EPERM;
+        }
+        let old_real: u32 = ids.rgid;
+        ids.rgid = syscall_id_or(a, ids.rgid);
+        ids.egid = syscall_id_or(b, ids.egid);
+        if (a != LINUX_ID_KEEP || (b != LINUX_ID_KEEP && b != old_real)) {
+            ids.sgid = ids.egid;
+        }
+    }
+    kernel_process_current_set_credentials(current_authority, ids);
+    return 0;
+}
+
 // GitHub issue #1147: a create call's `mode` as the new inode gets it, the
 // bits `keep` names less the caller's umask.
 fn syscall_umasked(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
@@ -5506,6 +5680,7 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
     // the uid/gid family, gettid, clock_gettime, and getcpu (#533).
     if (number == 172 || number == 173 || number == 178 ||
         (number >= 174 && number <= 177) || number == 113 ||
+        number == AARCH64_NR_GETRESUID || number == AARCH64_NR_GETRESGID ||
         number == AARCH64_NR_GETCPU) {
         return true;
     }
@@ -6149,8 +6324,8 @@ fn syscall_signal_frame_write(current_authority: borrow ProcessCurrent[current_p
             // CLD_KILLED, si_status (24) the exit code or the signal (GitHub
             // issue #885; si_uid, si_utime and si_stime stay 0). Any other
             // signal, and a SIGCHLD kill sent, is SI_USER (0) with si_pid
-            // the kill(2) sender and si_uid (20) the sender's uid, always 0
-            // here (GitHub issue #894). Sender pid 0 means the kernel raised
+            // the kill(2) sender and si_uid (20) 0, not yet the
+            // sender's real uid (GitHub issues #894, #1176). Sender pid 0 means the kernel raised
             // it (the terminal's ^C, ^\ and ^Z; no process has pid 0), which
             // Linux reports as SI_KERNEL with si_pid and si_uid 0 (GitHub
             // issue #895).
@@ -8818,8 +8993,18 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     if (number == 172 || number == 178) {
         return syscall_finish_current(frame, SyscallAction::Resume(kernel_process_current_pid()), current_authority);
     }
-    if (number == 173 || (number >= 174 && number <= 177)) {
+    if (number == 173) {
         return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority);
+    }
+    if (number == 174 || number == 175 || number == 176 || number == 177 ||
+        number == AARCH64_NR_SETREGID || number == AARCH64_NR_SETGID ||
+        number == AARCH64_NR_SETREUID || number == AARCH64_NR_SETUID ||
+        number == AARCH64_NR_SETRESUID || number == AARCH64_NR_GETRESUID ||
+        number == AARCH64_NR_SETRESGID || number == AARCH64_NR_GETRESGID ||
+        number == AARCH64_NR_GETGROUPS || number == AARCH64_NR_SETGROUPS) {
+        return syscall_finish_current(frame,
+            SyscallAction::Resume(syscall_id_call(current_authority, number, x0, x1, x2)),
+            current_authority);
     }
     if (number == 214) {
         if (x0 == 0) { return syscall_finish_current(frame, SyscallAction::Resume(kernel_syscall_heap_break()), current_authority); }

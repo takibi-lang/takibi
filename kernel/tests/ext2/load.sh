@@ -33,6 +33,16 @@ root=${LOAD_ROOT:-}
 export LOAD_ROOT
 
 busybox mkdir -p "$root/load"
+# stress-ng's exec stressor refuses to run as root (GitHub issue #1176), so
+# a root caller -- Takibi's shell -- runs every stressor as /etc/passwd's
+# `load` user through BusyBox su; an unprivileged caller, the Linux
+# reference column, runs them as itself. A file, not a command
+# substitution, carries the uid (see above).
+busybox id -u >"$root/load/uid"
+read uid <"$root/load/uid"
+if [ "$uid" -eq 0 ]; then
+    busybox chmod 1777 "$root/load"
+fi
 for phase in "$@"; do
     count=$((count + 1))
     echo "load: begin $phase"
@@ -47,8 +57,12 @@ for phase in "$@"; do
                 busybox xargs -P 4 -n 1 "$root/bin/load-job.sh" <"$root/load/jobs"
             ;;
         fork|exec|pipe)
-            "$root/bin/stress-ng" --"$phase" 4 --timeout "${seconds}s" \
-                --metrics-brief --temp-path "$root/load" </dev/null 2>&1
+            stress="$root/bin/stress-ng --$phase 4 --timeout ${seconds}s --metrics-brief --temp-path $root/load"
+            if [ "$uid" -eq 0 ]; then
+                busybox su -s /bin/sh load -c "$stress" </dev/null 2>&1
+            else
+                $stress </dev/null 2>&1
+            fi
             ;;
         hackbench)
             "$root/bin/hackbench" -P -p -g 4 -l "$loops" </dev/null 2>&1

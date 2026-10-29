@@ -298,6 +298,18 @@ struct SignalAltStack {
     flags: usize;
 }
 
+// GitHub issue #1176: a process's user and group ids, as Linux's struct
+// cred keeps them (no fsuid, no supplementary groups, no capabilities).
+// All zero, root, in a zeroed record, which is what init starts with.
+struct ProcessCredentials {
+    ruid: u32;
+    euid: u32;
+    suid: u32;
+    rgid: u32;
+    egid: u32;
+    sgid: u32;
+}
+
 // GitHub issue #264 first stage: keep the scheduler/lifecycle bookkeeping
 // for one process slot together. This is deliberately a plain data struct:
 // the linear ScheduledProcessOwner/state protocol, stable store, SlotMap,
@@ -376,8 +388,8 @@ struct ProcessRecord {
     // standard signal pending, indexed by signum - 1, for siginfo's si_pid
     // with SI_USER. Written when the signal becomes pending and not while
     // it stays pending (Linux keeps the first instance's siginfo); 0 when
-    // the kernel raised it. u32 because si_pid is; si_uid needs no slot,
-    // since every process is uid 0.
+    // the kernel raised it. u32 because si_pid is; si_uid has no slot yet
+    // and reads 0 (GitHub issue #1176 gave processes real uids).
     signal_sender: [u32; PROCESS_SIGNAL_ACTIONS];
     // GitHub issues #627 and #629: each standard signal's action as
     // rt_sigaction installed it, indexed by signum - 1. handler 0 is
@@ -405,6 +417,11 @@ struct ProcessRecord {
     itimer_real_due: usize;
     itimer_real_interval_ticks: usize;
     itimer_real_interval_us: usize;
+    // GitHub issue #1176: the process's ids. Read and written only by the
+    // process itself (the uid/gid syscalls) and copied into a fork child
+    // while it is Constructing, so no lock; execve keeps them (there are
+    // no set-user-ID images here).
+    credentials: ProcessCredentials;
     // rt_sigsuspend's mask swap, as Linux's saved_sigmask: the mask the
     // caller had, put back into the signal frame (and so restored by
     // rt_sigreturn) or restored directly when nothing is delivered.
@@ -2638,6 +2655,10 @@ private fn scheduled_process_copy_signal_mask(parent: borrow ProcessCurrent[p, P
     let umask_word: usize =
         scheduled_process_record_current(parent).umask_from_default;
     scheduled_process_record_owned(child).umask_from_default = umask_word;
+    // Linux: fork keeps the credentials.
+    let mut credentials: ProcessCredentials =
+        scheduled_process_record_current(parent).credentials;
+    scheduled_process_record_owned(child).credentials = credentials;
 }
 
 // Linux: a child inherits its parent's affinity mask across fork, and
@@ -3194,6 +3215,8 @@ private fn scheduled_process_record_reset(guard: borrow ProcessRunGuard[lock],
     record.itimer_real_due = 0;
     record.itimer_real_interval_ticks = 0;
     record.itimer_real_interval_us = 0;
+    let mut root: ProcessCredentials = { 0, 0, 0, 0, 0, 0 };
+    record.credentials = root;
     record.sigsuspend_saved_mask = 0;
     record.sigsuspend_mask_saved = false;
     record.sigwait_suspend = false;
@@ -8500,6 +8523,27 @@ fn kernel_process_current_set_umask(
     if (execution_state[execution_cpu_index()].current_live) {
         scheduled_process_record_current(current_authority)
             .umask_from_default = (mask & 0x1FF) ^ PROCESS_UMASK_DEFAULT;
+    }
+}
+
+// GitHub issue #1176: the current process's ids; root when no process
+// is current (the kernel's own boot-time calls).
+fn kernel_process_current_credentials(
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running])
+        -> ProcessCredentials {
+    if (execution_state[execution_cpu_index()].current_live) {
+        return scheduled_process_record_current(current_authority).credentials;
+    }
+    let mut root: ProcessCredentials = { 0, 0, 0, 0, 0, 0 };
+    return root;
+}
+
+fn kernel_process_current_set_credentials(
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+        credentials: ProcessCredentials) {
+    if (execution_state[execution_cpu_index()].current_live) {
+        scheduled_process_record_current(current_authority).credentials =
+            credentials;
     }
 }
 
