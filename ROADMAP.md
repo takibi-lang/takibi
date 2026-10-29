@@ -233,7 +233,8 @@ next one taken. The done record of the previous queue is in HISTORY.md
    item (the DCBAA stays legacy until sub-region authority; #783, the
    batched TD write path, done 2026-10-30), #740's step 3 (a socket's receive queue keeping
    the packet, after the profiler's copy-cost measurement), #779 (line
-   ownership of split or converted regions), #790 (size review).
+   ownership of split or converted regions); #790 (size review) done
+   2026-10-30, docs/DEVICE_PROTOCOL_SIZE_REVIEW_2026-10-30.md.
 5. **Independent pillar issues, moved from A (2026-10-16).** #789 (lock
    order as ranked capability tokens, absorbing `acquires_lock_<rank>_<name>`,
    after the syntax review); with it, #850's migration of the IRQ words to
