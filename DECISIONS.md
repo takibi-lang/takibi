@@ -489,3 +489,7 @@ condition below applies, and reports the land afterwards.
   a compile-time check that a kernel raw dereference cannot target a user
   address (refinements) is wanted; its feasibility is assessed first.
   [active] #1032
+
+## 2026-10-29 #1032 keep the A53 build; one-interval user-address refinement now (#1184 later)
+- Keep compiling for cortex-a53 even though every QEMU lane runs on cortex-a76: running without the newer instructions is a requirement.
+- The compile-time user-address check uses the existing single-interval refinement, which works because the kernel range fits in one interval. Refinements over several disjoint intervals are tracked in umbrella #1184, which stays off ROADMAP.md (YAGNI) until a real need appears; its representation (for example a union of intervals) is decided when it is started.
