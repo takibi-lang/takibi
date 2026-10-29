@@ -28,6 +28,11 @@ let preempt_off_mint_name = "preempt_off_enter"
 let preempt_off_exit_name = "preempt_off_exit"
 let preempt_off_mints : (string * int, unit) Hashtbl.t = Hashtbl.create 32
 let preempt_off_exits : (string * int, unit) Hashtbl.t = Hashtbl.create 32
+(* GitHub issue #638 stage 4: the test of a fallible `preempt_off ... else`,
+   recorded the same way so it alone reaches the private
+   `preempt_off_available` across files. *)
+let preempt_off_available_name = "preempt_off_available"
+let preempt_off_availables : (string * int, unit) Hashtbl.t = Hashtbl.create 8
 
 let reset () =
   Hashtbl.reset stores;
@@ -36,7 +41,8 @@ let reset () =
   Hashtbl.reset globals;
   Hashtbl.reset rewritten;
   Hashtbl.reset preempt_off_mints;
-  Hashtbl.reset preempt_off_exits
+  Hashtbl.reset preempt_off_exits;
+  Hashtbl.reset preempt_off_availables
 
 let mark_store name = Hashtbl.replace stores name ()
 let is_store name = Hashtbl.mem stores name
@@ -64,12 +70,17 @@ let mark_preempt_off_mint loc = Hashtbl.replace preempt_off_mints (loc_key loc) 
 let is_preempt_off_mint loc = Hashtbl.mem preempt_off_mints (loc_key loc)
 let mark_preempt_off_exit loc = Hashtbl.replace preempt_off_exits (loc_key loc) ()
 let is_preempt_off_exit loc = Hashtbl.mem preempt_off_exits (loc_key loc)
+let mark_preempt_off_available loc =
+  Hashtbl.replace preempt_off_availables (loc_key loc) ()
+let is_preempt_off_available loc =
+  Hashtbl.mem preempt_off_availables (loc_key loc)
 
 (* A call the parser wrote for a preempt_off block: the mint or the exit.
    Only these reach the authority file's private pair from another file. *)
 let is_preempt_off_call name loc =
   (name = preempt_off_mint_name && is_preempt_off_mint loc)
   || (name = preempt_off_exit_name && is_preempt_off_exit loc)
+  || (name = preempt_off_available_name && is_preempt_off_available loc)
 
 (* The block a `preempt_off` statement parses to: its first statement binds
    the recorded mint and its last calls the recorded exit. *)

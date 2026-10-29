@@ -73,6 +73,23 @@ fn mutex_irq_restore(flags: usize) !{restores_saved_irq} {
     if (flags == 0) { enable_irq(); }
 }
 
+// GitHub issue #638 stage 4: IRQs masked with no lock, as a guard. A call
+// to an `interrupt` function from a function that is not itself one needs
+// a live irq_masking_guard (the compiler checks it), and a test that drives
+// a tick path from task context holds this one around the call.
+linear struct IrqMaskGuard[unit: usize] {
+    private flags: usize;
+}
+
+fn irq_mask_take() -> IrqMaskGuard[0] !{irq_masking_guard} {
+    let mut guard: IrqMaskGuard[0] = { mutex_irq_save() };
+    return guard;
+}
+
+fn irq_mask_give(guard: sink IrqMaskGuard[0]) {
+    mutex_irq_restore(guard.flags);
+}
+
 // Returns the state a matching pool_lock_release must restore: 1 if IRQs
 // were already masked when this was called, 0 if they were enabled.
 //

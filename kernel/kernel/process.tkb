@@ -10012,6 +10012,15 @@ private fn kernel_process_probe_blocks_to(
     return same;
 }
 
+// GitHub issue #638 stage 4: the tick path runs masked, so the probe
+// drives it from task context under an IRQ-masking guard.
+private fn kernel_process_probe_tick_masked(sp: usize) -> usize {
+    let mask: IrqMaskGuard[0] = irq_mask_take();
+    let address: usize = kernel_process_probe_tick_address(sp);
+    irq_mask_give(mask);
+    return address;
+}
+
 // The frame address a tick resumes, 1 when it leaves for idle instead.
 private fn kernel_process_probe_tick_address(sp: usize) -> usize
         !{interrupt} {
@@ -10489,13 +10498,13 @@ fn kernel_process_scheduler_probe() -> bool !{changes_witness_ProcessCurrent} {
     // delivery may be aimed at it (scheduled_process_parked_frame would
     // fail-stop the boot here).
     kernel_process_scheduler_probe_frame_a_spsr(KERNEL_PROCESS_PROBE_SPSR_EL1H);
-    let parent_sp: usize = kernel_process_probe_tick_address(kernel_process_scheduler_probe_frame_b());
+    let parent_sp: usize = kernel_process_probe_tick_masked(kernel_process_scheduler_probe_frame_b());
     kernel_process_scheduler_probe_frame_a_spsr(0);
     if (kernel_process_scheduler_probe_stack_arrive() == false ||
         kernel_process_scheduler_probe_stack_depart() == false) {
         return false;
     }
-    let child_sp: usize = kernel_process_probe_tick_address(kernel_process_scheduler_probe_frame_a());
+    let child_sp: usize = kernel_process_probe_tick_masked(kernel_process_scheduler_probe_frame_a());
     if (kernel_process_scheduler_probe_stack_arrive() == false) {
         return false;
     }

@@ -1029,6 +1029,30 @@ stmt:
       { desc = Block ({ desc = Let (true, id, None, Some mint, None);
                         loc = $startpos(id) } :: b @ [exit]);
         loc = $symbolstartpos } }
+  | PREEMPT_OFF LPAREN id = IDENT RPAREN LBRACE b = stmts RBRACE
+    ELSE LBRACE e = stmts RBRACE
+    (* GitHub issue #638 stage 4 (maintainer, D2 (i)): the fallible region.
+       `preempt_off (cpu) { b } else { e }` runs b as the region when this
+       CPU can be named -- the private `preempt_off_available()`, recorded
+       like the mint -- and e, with no authority, when it cannot, so a
+       caller such as the IRQ mask keeps a fallback instead of stopping. *)
+    { let call_loc = $startpos($2) in
+      Per_cpu_registry.mark_preempt_off_mint call_loc;
+      let mint = { desc = Call (Per_cpu_registry.preempt_off_mint_name, []);
+                   loc = call_loc } in
+      let exit_loc = $endpos(b) in
+      Per_cpu_registry.mark_preempt_off_exit exit_loc;
+      let exit = { desc = Expr { desc = Call (Per_cpu_registry.preempt_off_exit_name, []);
+                                 loc = exit_loc };
+                   loc = exit_loc } in
+      let region = { desc = Block ({ desc = Let (true, id, None, Some mint, None);
+                                     loc = $startpos(id) } :: b @ [exit]);
+                     loc = $symbolstartpos } in
+      let test_loc = $startpos($1) in
+      Per_cpu_registry.mark_preempt_off_available test_loc;
+      let test = { desc = Call (Per_cpu_registry.preempt_off_available_name, []);
+                   loc = test_loc } in
+      { desc = If (test, [region], e); loc = $symbolstartpos } }
   | IF LPAREN c = expr RPAREN LBRACE t = stmts RBRACE p = else_part
     { { desc = If(c, t, p); loc = $symbolstartpos } }
   | WHILE LPAREN c = expr RPAREN LBRACE b = stmts RBRACE

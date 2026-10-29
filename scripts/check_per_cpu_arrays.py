@@ -107,8 +107,6 @@ LISTED = {
     ("kernel/printk/log.tkb", "kernel_log_storm_found"): (CROSS, "the log-storm report"),
     ("kernel/printk/log_ring_trace.tkb", "log_ring_trace_cpus"): (CROSS, "the log ring trace dump"),
     # Own-CPU only, left an ordinary array by decision or for now.
-    ("kernel/arch/arm64/boot/cpu.tkb", "irq_pmr_masked"): (PENDING, "PMR shadow: an out-of-range CPU must fall back to DAIF, not stop in the mint; revisited with #638, option 2 of #981"),
-    ("kernel/arch/arm64/boot/cpu.tkb", "irq_pmr_ready"): (PENDING, "PMR shadow, as irq_pmr_masked"),
     ("kernel/printk/log.tkb", "kernel_log_peer_probe_emitted"): (PENDING, "log.tkb waits for #613"),
 }
 

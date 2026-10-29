@@ -11736,6 +11736,17 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   in
   let lock_guard_types = inherit_stored_guard_types lock_guard_types in
   let irq_guard_types = inherit_stored_guard_types irq_guard_types in
+  (* GitHub issue #638 stage 4 (maintainer, D1 (a)): an `interrupt`
+     function runs with ordinary IRQs masked, so it cannot be preempted --
+     which holds only if every call to it is made masked. check_affine_func
+     accepts a call to one from a function that declares `interrupt` or
+     `exception` (both run masked), or while an `irq_masking_guard` guard
+     is live in the caller (a borrowed one included); any other call is a
+     type error. *)
+  let interrupt_fns = List.fold_left (fun acc -> function
+    | Ast.FuncDef f when has_annotation f.effects "interrupt" ->
+        StringSet.add (overload_key f.name f.params) acc
+    | _ -> acc) StringSet.empty prog in
   let irq_restorers =
     let restores = ref (StringMap.fold (fun caller callees acc ->
         if StringSet.mem Instr_spec.irq_unmask callees
@@ -13116,6 +13127,28 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                     target directly"
                    what visible_name held.Effect_rules.label))
              | [] -> ());
+          (* GitHub issue #638 stage 4; see interrupt_fns. *)
+          if StringSet.mem target interrupt_fns
+             && not (has_annotation fdef.Ast.effects "interrupt"
+                     || has_annotation fdef.Ast.effects "exception"
+                     || has_annotation fdef.Ast.effects "nmi") then begin
+            let masked_by = List.find_opt (fun (visible_name, id) ->
+              let rec irq_guard ty = match strip_borrow ty with
+                | Ast.TypeIndexed (guard_name, _) | Ast.TypeView (guard_name, _)
+                | Ast.TypeNamed guard_name -> StringMap.mem guard_name irq_guard_types
+                | Ast.TypeExists (_, _, body) -> irq_guard body
+                | _ -> false in
+              irq_guard (binding_type id visible_name)
+              && not (ResourceFlow.is_consumed_on_all_paths
+                        (PVar (id, visible_name)) moved)) guard_bindings in
+            if masked_by = None then
+              raise (TypeError (e.loc, Printf.sprintf
+                "'%s' is an interrupt function, which runs with IRQs masked, \
+                 but function '%s' declares neither interrupt nor exception \
+                 and holds no irq_masking_guard guard here; call it only \
+                 from a masked context (#638)"
+                name fdef.Ast.name))
+          end;
           (* GitHub issue #528; see irq_restorers. A guard passed to this
              call is being handed over -- released, usually -- rather than
              held across it. *)

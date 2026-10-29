@@ -40,14 +40,13 @@ CALL = re.compile(r"\bcpu_id\s*\(\s*\)")
 
 # file -> (count, kind, reason)
 LISTED = {
-    "kernel/arch/arm64/boot/cpu.tkb": (7, FLIP, "not yet reviewed for migration"),
     "kernel/arch/arm64/kernel/exception_evidence.tkb": (9, FLIP, "not yet reviewed for migration"),
     "kernel/arch/arm64/kernel/secondary.tkb": (3, FLIP, "not yet reviewed for migration"),
     "kernel/arch/arm64/kernel/timer.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/drivers/block/memory.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/fs/ext2/mutation_lock.tkb": (2, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/console_contention_evidence.tkb": (1, FLIP, "not yet reviewed for migration"),
-    "kernel/kernel/cpu_authority.tkb": (1, MINT, "the CpuHere mint itself"),
+    "kernel/kernel/cpu_authority.tkb": (2, MINT, "the CpuHere mint itself and its availability test (#638 stage 4)"),
     "kernel/kernel/irq_counts.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/log_storm_evidence.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/nic_irq_affinity.tkb": (1, FLIP, "not yet reviewed for migration"),

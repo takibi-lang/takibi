@@ -737,6 +737,33 @@
       "changes": {
         "frame_lines": "#1217 DDB snapshot field and uart-tx wait detail for echo pending, TXIM and the owed writer wake"
       }
+    },
+    {
+      "date": "2026-10-29",
+      "head": "34de2e42",
+      "counts": {
+        "raw_mint_files": 14,
+        "frame_lines": 12230,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 214,
+        "raw_deref_io": 7,
+        "raw_deref_builtin_region": 113,
+        "unsafe_blocks": 151,
+        "extern_fns": 61,
+        "invariant_stop_sites": 118,
+        "assembly_lines": 2503,
+        "per_cpu_ordinary_arrays": 71,
+        "per_cpu_stores": 7,
+        "raw_cpu_id_calls": 150,
+        "unprotected_globals": 426,
+        "frame_api_ratchet": 7
+      },
+      "changes": {
+        "per_cpu_ordinary_arrays": "per_cpu: the PMR shadow becomes a per_cpu store behind a fallible preempt_off (#638 stage 4)",
+        "per_cpu_stores": "per_cpu: IrqPmrShadow (#638 stage 4)",
+        "raw_cpu_id_calls": "preempt_off: cpu.tkb's seven raw reads become fallible preempt_off regions; the mint file adds its availability test (#638 stage 4)",
+        "unprotected_globals": "per_cpu: irq_pmr_masked and irq_pmr_ready (#638 stage 4)"
+      }
     }
   ]
 }

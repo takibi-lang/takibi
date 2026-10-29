@@ -54,47 +54,52 @@
 //   touches no GIC register, which is what boot code before the device map
 //   needs.
 use "kernel/lib/execution_model.tkb";
+use "kernel/kernel/cpu_authority.tkb";
 use "kernel/arch/arm64/kernel/gicv2.tkb";
 
 // Per core: 1 when ordinary IRQs are masked at the GIC (the shadow of
-// GICC_PMR), and 1 once the core's CPU interface takes the mask. Each slot
-// is written only by its own core.
-private let mut irq_pmr_masked: [usize; KERNEL_MAX_CORES];
-private let mut irq_pmr_ready: [usize; KERNEL_MAX_CORES];
+// GICC_PMR), and 1 once the core's CPU interface takes the mask. A per-CPU
+// store (GitHub issue #638 stage 4): each element is reachable only through
+// its own CPU's authority, minted by a fallible preempt_off region whose
+// else arm is the DAIF-only fallback an unnamed CPU (an MPIDR past
+// KERNEL_MAX_CORES) has always had.
+struct per_cpu IrqPmrShadow {
+    private masked: usize;
+    private ready: usize;
+}
+
+private let mut irq_pmr: [IrqPmrShadow; KERNEL_MAX_CORES];
 
 // This core's GIC CPU interface is configured: from here the mask is the
 // priority mask, starting unmasked. DAIF.I is unchanged.
 fn irq_mask_cpu_interface_ready() {
-    let raw: usize = cpu_id();
-    if (raw >= KERNEL_MAX_CORES) { return; }
-    let core: {0..<KERNEL_MAX_CORES as usize} = raw;
-    irq_pmr_masked[core] = 0;
-    irq_priority_mask_write(false);
-    irq_pmr_ready[core] = 1;
+    preempt_off (cpu) {
+        irq_pmr[cpu].masked = 0;
+        irq_priority_mask_write(false);
+        irq_pmr[cpu].ready = 1;
+    } else { }
 }
 
 fn enable_irq() {
-    let raw: usize = cpu_id();
-    if (raw < KERNEL_MAX_CORES) {
-        let core: {0..<KERNEL_MAX_CORES as usize} = raw;
-        if (irq_pmr_ready[core] != 0) {
-            irq_pmr_masked[core] = 0;
+    preempt_off (cpu) {
+        if (irq_pmr[cpu].ready != 0) {
+            irq_pmr[cpu].masked = 0;
             irq_priority_mask_write(false);
         }
-    }
+    } else { }
     msr_daifclr_irq();
 }
 
 fn disable_irq() !{masks_irq} {
-    let raw: usize = cpu_id();
-    if (raw < KERNEL_MAX_CORES) {
-        let core: {0..<KERNEL_MAX_CORES as usize} = raw;
-        if (irq_pmr_ready[core] != 0) {
-            irq_pmr_masked[core] = 1;
+    let mut pmr: bool = false;
+    preempt_off (cpu) {
+        if (irq_pmr[cpu].ready != 0) {
+            irq_pmr[cpu].masked = 1;
             irq_priority_mask_write(true);
-            return;
+            pmr = true;
         }
-    }
+    } else { }
+    if (pmr) { return; }
     msr_daifset_irq();
 }
 
@@ -104,10 +109,11 @@ fn disable_irq() !{masks_irq} {
 // else.
 fn irq_mask_state() -> usize {
     let daif_masked: usize = (mrs_daif() >> 7) & 1;
-    let raw: usize = cpu_id();
-    if (raw >= KERNEL_MAX_CORES) { return daif_masked; }
-    let core: {0..<KERNEL_MAX_CORES as usize} = raw;
-    return daif_masked | irq_pmr_masked[core];
+    let mut pmr_masked: usize = 0;
+    preempt_off (cpu) {
+        pmr_masked = irq_pmr[cpu].masked;
+    } else { }
+    return daif_masked | pmr_masked;
 }
 
 // The local_irq_save half: masks only when IRQs were not already masked, and
@@ -126,11 +132,14 @@ fn irq_save() -> usize {
 // one is active; the mask is for the time after the handler's own EOI.
 // Returns the mask this handler interrupted, for irq_nest_close.
 fn irq_nest_open() -> usize !{masks_irq} {
-    let raw: usize = cpu_id();
-    if (raw >= KERNEL_MAX_CORES) { return 1; }
-    let core: {0..<KERNEL_MAX_CORES as usize} = raw;
-    let interrupted: usize = irq_pmr_masked[core];
-    irq_pmr_masked[core] = 1;
+    let mut interrupted: usize = 1;
+    let mut named: bool = false;
+    preempt_off (cpu) {
+        interrupted = irq_pmr[cpu].masked;
+        irq_pmr[cpu].masked = 1;
+        named = true;
+    } else { }
+    if (named == false) { return 1; }
     irq_priority_mask_write(true);
     msr_daifclr_irq();
     return interrupted;
@@ -140,20 +149,19 @@ fn irq_nest_open() -> usize !{masks_irq} {
 // the exit path, then the mask it interrupted.
 fn irq_nest_close(interrupted: usize) !{restores_saved_irq} {
     msr_daifset_irq();
-    let raw: usize = cpu_id();
-    if (raw >= KERNEL_MAX_CORES) { return; }
-    let core: {0..<KERNEL_MAX_CORES as usize} = raw;
-    irq_pmr_masked[core] = interrupted;
-    irq_priority_mask_write(interrupted != 0);
+    preempt_off (cpu) {
+        irq_pmr[cpu].masked = interrupted;
+        irq_priority_mask_write(interrupted != 0);
+    } else { }
 }
 
 // Every return to EL0, with DAIF.I set: EL0 runs unmasked, whatever the
 // kernel path before it left in the priority mask.
 fn irq_mask_reset_el0() {
-    let raw: usize = cpu_id();
-    if (raw >= KERNEL_MAX_CORES) { return; }
-    let core: {0..<KERNEL_MAX_CORES as usize} = raw;
-    if (irq_pmr_ready[core] == 0) { return; }
-    irq_pmr_masked[core] = 0;
-    irq_priority_mask_write(false);
+    preempt_off (cpu) {
+        if (irq_pmr[cpu].ready != 0) {
+            irq_pmr[cpu].masked = 0;
+            irq_priority_mask_write(false);
+        }
+    } else { }
 }

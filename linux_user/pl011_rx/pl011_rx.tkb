@@ -80,26 +80,45 @@ private fn delivered_in_order() -> bool {
     return ok;
 }
 
-fn app_main() !{interrupt, unsafe} {
+// GitHub issue #638 stage 4: the drain is an interrupt function, so it is
+// called masked. On the host nothing interrupts; this guard is the masked
+// context the compiler requires of a non-interrupt caller.
+linear struct HostIrqMask[unit: usize] { private held: usize; }
+
+fn host_irq_mask() -> HostIrqMask[0] !{irq_masking_guard} {
+    let mut guard: HostIrqMask[0] = { 1 };
+    return guard;
+}
+
+fn host_irq_unmask(guard: sink HostIrqMask[0]) { }
+
+fn drain_once() -> bool !{unsafe} {
+    let mask: HostIrqMask[0] = host_irq_mask();
+    let more: bool = uart_rx_drain();
+    host_irq_unmask(mask);
+    return more;
+}
+
+fn app_main() !{unsafe} {
     // Three bytes: below the 1/8 trigger (4 of 32), the burst #868 stranded.
     load(3);
-    let first: bool = uart_rx_drain();
+    let first: bool = drain_once();
     check("a 3-byte burst is all delivered by one interrupt",
           first == false && delivered_len == 3 && fifo_next == 3);
     check("the burst arrives in order", delivered_in_order());
 
     load(1);
-    let single: bool = uart_rx_drain();
+    let single: bool = drain_once();
     check("a single byte is delivered", single == false && delivered_len == 1);
 
     load(0);
-    let empty: bool = uart_rx_drain();
+    let empty: bool = drain_once();
     check("an empty FIFO delivers nothing", empty == false && delivered_len == 0);
 
     // A flood larger than the FIFO: one interrupt takes one FIFO's worth and
     // the rest is left for the next, so IRQ-masked time stays bounded.
     load(40);
-    let flood: bool = uart_rx_drain();
+    let flood: bool = drain_once();
     check("one interrupt reads at most the 32-word FIFO depth",
           flood == false && delivered_len == 32 && fifo_next == 32);
     check("the flood arrives in order", delivered_in_order());
@@ -107,14 +126,14 @@ fn app_main() !{interrupt, unsafe} {
     // A BREAK word (DR.BE) mid-burst ends the drain and enters the debugger.
     load(5);
     fifo[2] = 1 << 10;
-    let brk: bool = uart_rx_drain();
+    let brk: bool = drain_once();
     check("a BREAK word stops the drain and reports the debugger",
           brk && delivered_len == 2 && fifo_next == 3 && break_cleared);
 
     // BEMIS latched with the FIFO empty, as the board reports a BREAK.
     load(0);
     break_latched = true;
-    let latched: bool = uart_rx_drain();
+    let latched: bool = drain_once();
     check("a latched BREAK with an empty FIFO reports the debugger",
           latched && break_cleared && break_latched == false);
 }

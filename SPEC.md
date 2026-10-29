@@ -2193,6 +2193,25 @@ ordinary private-function rule.
   every `break` or `continue` whose loop encloses the block. Blocks nest: a
   `return` ends every enclosing block, innermost first.
 
+**The fallible form** (GitHub issue #638 stage 4):
+
+```takibi
+preempt_off (cpu) {
+    shadow[cpu].masked = 1;
+} else {
+    mask_without_shadow();
+}
+```
+
+`preempt_off (name) { body } else { fallback }` first calls the authority
+file's third private function, `preempt_off_available() -> bool`, reachable
+only from such a statement. When it answers true the body runs as the
+region above; when false, `fallback` runs with no authority bound and is not
+a region (it may block). The kernel's test answers true exactly when the
+mint would neither stop nor find TPIDR_EL1 naming another CPU than MPIDR, so
+a caller that must not stop -- the IRQ mask, whose stop path masks IRQs
+again -- keeps a fallback instead.
+
 The region is the lexical form of a linear `PreemptOff` token minted on
 entry and consumed at every exit; a later step exposes the token for regions
 that are not lexical. The kernel's pair raises and lowers a per-CPU preempt
@@ -2275,6 +2294,15 @@ contract and a seed, not a required annotation on every caller.
 `interrupt` and `exception` mark roots whose complete reachable call graphs
 must not contain `may_block`, `allocates` or `logs`; `interrupt_wait()` is
 intrinsically `may_block`. Diagnostics include one offending call path.
+
+**An `interrupt` function is called only masked** (GitHub issue #638
+stage 4). It runs with ordinary IRQs masked, which is what makes interrupt
+context non-preemptible, so every direct call to one must come from a
+function that declares `interrupt`, `exception` or `nmi`, or be made while
+a guard returned by an `irq_masking_guard` function is live in the caller
+(a borrowed guard parameter counts). Any other call is a type error. A test
+that drives a tick path from task context holds such a guard
+(`irq_mask_take` / `irq_mask_give` in `kernel/lib/pool_lock.tkb`).
 
 **`locks` is the exception, and deliberately so** (GitHub issue #449). It
 propagates like the others -- "does this call path take a lock" is the

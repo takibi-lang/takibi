@@ -54,7 +54,7 @@ private let mut stall_probe_event_kind: [AtomicWord; STALL_PROBE_EVENTS];
 private let mut stall_probe_event_cpu: [AtomicWord; STALL_PROBE_EVENTS];
 private let mut stall_probe_event_time: [AtomicWord; STALL_PROBE_EVENTS];
 
-fn stall_probe_note(which: usize) !{interrupt} {
+fn stall_probe_note(which: usize) !{} {
     if (KERNEL_STALL_PROBES == 0) { return; }
     let raw: usize = cpu_id();
     if (raw >= KERNEL_MAX_CORES) { return; }

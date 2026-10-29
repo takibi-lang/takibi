@@ -8,7 +8,7 @@
 # Columns (tab-separated): check name, guarded function, allowed callers as
 # comma-separated file:function, issue, reason (printed on a refusal).
 # Adding a caller is a review: write why it may name the function here.
-cpu-offset-callers	kernel_cpu_offset	kernel/kernel/cpu_authority.tkb:preempt_slot	#638	TPIDR_EL1 is read only by cpu_authority.tkb's preempt_slot(); any other caller is a second, unreviewed way to name the current CPU
+cpu-offset-callers	kernel_cpu_offset	kernel/kernel/cpu_authority.tkb:preempt_slot_index	#638	TPIDR_EL1 is read only by cpu_authority.tkb's preempt_slot_index(); any other caller is a second, unreviewed way to name the current CPU
 exec-inode-writer	scheduled_process_set_exec_inode	kernel/kernel/syscall.tkb:syscall_exec_inode_store	#1106	the exec inode is stored only from a SyscallExecInode by syscall.tkb's syscall_exec_inode_store; any other caller would store an inode the format check never judged
 ddb-dcache-civac-callers	kernel_ddb_dcache_clean_invalidate	kernel/drivers/net/rp1_gem.tkb:kernel_net_rx_frame_pending	#1095	dc civac is DDB-only: rp1_gem.tkb's kernel_net_rx_frame_pending() is its one reviewed caller; any other caller is cache maintenance outside the DMA owners
 virtio-span-address-callers	virtio_span_address	kernel/drivers/block/virtio_blk.tkb:virtio_blk_desc_span,kernel/drivers/net/virtio_net_tx_dma.tkb:virtio_pkt_post_rx,kernel/drivers/net/virtio_net_tx_dma.tkb:virtio_pkt_tx_posted,kernel/drivers/virtio_used.tkb:virtio_used_go	#1162	the QEMU virt (no bus offset) address of a DMA span is given only to a virtio-mmio queue or descriptor by these reviewed writers; a new caller is a new device-visible address, reviewed against dma_address.tkb's rule

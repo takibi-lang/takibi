@@ -27,7 +27,7 @@
 //   linker scripts assert the stride is 1 << PERCPU_STACK_GROUP_SHIFT), so
 //   preempt_slot() names this core's count. It is read by the assembly
 //   helper kernel_cpu_offset (user_entry.S; no compiler builtin, DECISIONS
-//   2026-10-25), and preempt_slot() is its one caller
+//   2026-10-25), and preempt_slot_index() is its one caller
 //   (scripts/buildcheck_allowed_callers.py). With
 //   KERNEL_PREEMPT_ASSERTS, every region entry checks the two agree.
 //   No public function mints one (scripts/check_cpu_authority_mints.py);
@@ -73,8 +73,14 @@ private let mut preempt_counts: [PreemptCount; KERNEL_MAX_CORES];
 
 // This CPU's slot, from TPIDR_EL1 alone: no cpu_id() and no CpuHere, so a
 // blocking point (and later the EL1 IRQ return) can find it.
+// TPIDR_EL1's slot number, unchecked: the one read of kernel_cpu_offset
+// (scripts/allowed_callers.tsv).
+private fn preempt_slot_index() -> usize {
+    return kernel_cpu_offset() >> PERCPU_STACK_GROUP_SHIFT;
+}
+
 private fn preempt_slot() -> CpuHere {
-    let slot: usize = kernel_cpu_offset() >> PERCPU_STACK_GROUP_SHIFT;
+    let slot: usize = preempt_slot_index();
     if (slot < KERNEL_MAX_CORES) {
         let id: {0..<KERNEL_MAX_CORES as usize} = slot;
         let mut cpu: CpuHere = { id };
@@ -104,6 +110,19 @@ private fn preempt_off_enter() -> CpuHere {
     kernel_invariant_stop();
     let mut unreachable: CpuHere = { 0 };
     return unreachable;
+}
+
+// GitHub issue #638 stage 4 (maintainer, D2 (i)): the test of a fallible
+// `preempt_off (cpu) { ... } else { ... }`. True exactly when
+// preempt_off_enter would neither stop nor find TPIDR_EL1 disagreeing with
+// MPIDR, so the region's mint cannot reach kernel_invariant_stop from
+// here; false sends the caller to its else arm with no authority. The IRQ
+// mask needs this: the stop path masks IRQs, so a mask that stopped would
+// re-enter itself.
+private fn preempt_off_available() -> bool {
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES) { return false; }
+    return preempt_slot_index() == core;
 }
 
 // Called by the compiler at every exit of a preempt_off block.

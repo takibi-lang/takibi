@@ -4,8 +4,6 @@
 # stale row, and the row count is the trust-ledger category unprotected_globals.
 # "unreviewed" rows carry the 2026-10-06 disposition as a starting point (slice 3);
 # a reviewed row names the global's reader and the premise it rests on.
-kernel/arch/arm64/boot/cpu.tkb	irq_pmr_masked	unreviewed
-kernel/arch/arm64/boot/cpu.tkb	irq_pmr_ready	unreviewed
 kernel/arch/arm64/kernel/exception_evidence.tkb	crash_console_owner	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
 kernel/arch/arm64/kernel/exception_evidence.tkb	crash_fault_order	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
 kernel/arch/arm64/kernel/exception_evidence.tkb	crash_report_abandoned	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB

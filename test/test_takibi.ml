@@ -12548,7 +12548,7 @@ linear struct Owner746b[page: usize] {
         fn effect_irq22(callback: fn !{}() -> void) !{interrupt} {
           callback();
         }
-        fn effect_install22() { effect_irq22(effect_callback22); }");
+        fn effect_install22() !{interrupt} { effect_irq22(effect_callback22); }");
 
   Alcotest.test_case "Slice 5: interrupt rejects a may-block callback contract" `Quick
     (expect_type_error "<indirect call !{may_block}>"
@@ -28570,6 +28570,7 @@ let preempt_off_tests =
       let mut cpu: Cpu638 = { 0 }; return cpu;
     }
     private fn preempt_off_exit() { }
+    private fn preempt_off_available() -> bool { return true; }
     fn bump638(cpu: Cpu638) { stores638[cpu].value = stores638[cpu].value + 1; }
     extern fn sleep638() !{may_block};" in
   let files body = ["mint638.tkb", mint; "user638.tkb", body] in
@@ -28674,6 +28675,58 @@ let preempt_off_tests =
              } }";
         check "a body that always returns has no fall-through exit" 1
           "fn f638() -> usize { preempt_off (cpu) { return stores638[cpu].value; } }");
+    (* Stage 4 (maintainer, D2 (i)): the fallible region. *)
+    good "a fallible block with an else arm" "fn good638() -> usize {
+      let mut v: usize = 0;
+      preempt_off (cpu) { bump638(cpu); v = 1; } else { v = 2; }
+      return v;
+    }";
+    bad "the else arm holds no authority" "cpu"
+      "fn bad638() { preempt_off (cpu) { } else { bump638(cpu); } }";
+    bad "blocking in the region of a fallible block is still refused"
+      "may block via sleep638"
+      "fn bad638() { preempt_off (cpu) { sleep638(); } else { } }";
+    good "the else arm may block: it is not a region" "fn good638() {
+      preempt_off (cpu) { bump638(cpu); } else { sleep638(); }
+    }";
+    bad "the availability test cannot be called directly"
+      "'preempt_off_available' is a private function"
+      "fn bad638() -> bool { return preempt_off_available(); }";
+    Alcotest.test_case "a fallible block lowers to the test, the region and its exit" `Quick
+      (expect_codegen_ok (mint ^ "fn good638(flag: bool) -> usize {
+        preempt_off (cpu) {
+          if (flag) { return stores638[cpu].value; }
+          bump638(cpu);
+        } else { return 7; }
+        return 0;
+      }"));
+  ]
+
+(* GitHub issue #638 stage 4 (maintainer, D1 (a)): an interrupt function runs
+   masked, so it may be called only from an interrupt, exception or nmi
+   function, or while an irq_masking_guard guard is live. *)
+let interrupt_caller_tests =
+  let base = "linear struct G638[unit: usize] { private flags: usize; }
+    fn take638() -> G638[0] !{irq_masking_guard} { let mut g: G638[0] = { 0 }; return g; }
+    fn give638(g: sink G638[0]) { }
+    fn tick638() -> usize !{interrupt} { return 1; }
+    " in
+  let good title body = Alcotest.test_case title `Quick
+      (fun () -> ignore (infer (base ^ body))) in
+  let bad title body = Alcotest.test_case title `Quick
+      (expect_type_error "is an interrupt function, which runs with IRQs masked"
+        (base ^ body)) in
+  [
+    good "from another interrupt function" "fn h638() -> usize !{interrupt} { return tick638(); }";
+    good "from an exception function" "fn h638() -> usize !{exception} { return tick638(); }";
+    good "from an nmi function" "fn h638() -> usize !{nmi} { return tick638(); }";
+    good "while a masking guard is live" "fn h638() -> usize {
+      let m: G638[0] = take638(); let v: usize = tick638(); give638(m); return v; }";
+    good "with a borrowed masking guard" "fn h638(m: borrow G638[0]) -> usize { return tick638(); }";
+    bad "from a plain function" "fn h638() -> usize { return tick638(); }";
+    bad "from an effect-free function" "fn h638() -> usize !{} { return tick638(); }";
+    bad "after the guard is given back" "fn h638() -> usize {
+      let m: G638[0] = take638(); give638(m); return tick638(); }";
   ]
 
 (* Default construction must obey the existing private ownership boundary. *)
@@ -30086,6 +30139,7 @@ let named_groups_unisolated = [
   "private-default-construction", private_default_construction_tests;
   "cpu-authority-initialization", cpu_authority_initialization_tests;
   "preempt-off", preempt_off_tests;
+  "interrupt-callers", interrupt_caller_tests;
   "ext2-slot", ext2_slot_tests;
   "runtime-bounds", runtime_bounds_tests;
   "core",     core_tests;
