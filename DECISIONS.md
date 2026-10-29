@@ -475,3 +475,9 @@ condition below applies, and reports the land afterwards.
   reads (DDB is irregular; the IOMMU matters more). The file count is a
   proxy: the trusted core should end as protocol codegen, one address mint
   and MMU/IOMMU configuration. [active] #637 #1161 #1162 #1163 #1032 #1164
+- 2026-10-30 #992: FrameRef carries its exception level as an enum-valued
+  static index, `affine struct FrameRef[process: usize, level: ExceptionLevel]`
+  with `enum ExceptionLevel { El0; El1; }`, the mechanism
+  ScheduledProcessState already uses; a provisional spelling #1006 may rename
+  mechanically. The Pending/Delivered index waits for #1000. [active] #992
+  #1006 #1000
