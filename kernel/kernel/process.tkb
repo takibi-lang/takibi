@@ -3295,7 +3295,7 @@ private fn scheduled_process_release_slot_resources(slot: ProcessSlot) !{unsafe}
 // The destructive annotation also excludes this lock holder's live record
 // loans, including loans through another authority. It adds no pin or lock.
 private fn scheduled_process_slot_remove(
-        guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+        guard: borrow ProcessRunGuard[process_run],
         slot: ProcessSlot) !{unsafe, record_mutates_ProcessRunGuard,
                       changes_witness_RegionInspection__ProcessRecord} {
     let mut held: RegionHeld(ProcessRecord) = process_pool_held_at(slot.word);
@@ -3853,11 +3853,11 @@ fn process_run_lock() -> ProcessRunGuard[&scheduled_process_run_lock]
 }
 
 // Release an opening hold whose snapshot was already observed once.
-private fn process_run_unlock_observed(guard: sink ProcessRunGuard[scheduled_process_run_lock]) {
+private fn process_run_unlock_observed(guard: sink ProcessRunGuard[process_run]) {
     mutex_release(&scheduled_process_run_lock, guard.flags);
 }
 
-fn process_run_unlock(guard: sink ProcessRunGuard[scheduled_process_run_lock]) {
+fn process_run_unlock(guard: sink ProcessRunGuard[process_run]) {
     // GitHub issue #606: this hold's step, before anyone else can take one.
     if (protocol_trace_is_active()) {
         kernel_process_protocol_observe(false);
@@ -3880,8 +3880,8 @@ fn process_run_unlock(guard: sink ProcessRunGuard[scheduled_process_run_lock]) {
 // `unsafe`, so it is counted in the trusted base and any use outside that
 // probe is visible in the inventory rather than only in review.
 fn process_run_guard_forge_unlocked()
-        -> ProcessRunGuard[scheduled_process_run_lock] !{unsafe} {
-    let mut guard: ProcessRunGuard[scheduled_process_run_lock] = { 0 };
+        -> ProcessRunGuard[process_run] !{unsafe} {
+    let mut guard: ProcessRunGuard[process_run] = { 0 };
     return guard;
 }
 
@@ -3889,7 +3889,7 @@ fn process_run_guard_forge_unlocked()
 // release -- but it is linear, so it still has to be given somewhere, and
 // the probe cannot simply drop it.
 fn process_run_guard_discard_unlocked(
-        guard: sink ProcessRunGuard[scheduled_process_run_lock]) !{unsafe} {}
+        guard: sink ProcessRunGuard[process_run]) !{unsafe} {}
 
 fn scheduled_process_ready_take(guard: borrow ProcessRunGuard[lock],
                                 handle: ProcessHandle)
@@ -5937,7 +5937,7 @@ fn kernel_process_cpu_allows_slot(guard: borrow ProcessRunGuard[lock], cpu: usiz
 // shared process state and is written under this same guard, so require it
 // for the snapshot used at the syscall boundary.
 fn kernel_process_current_cpu_allows(
-        guard: borrow ProcessRunGuard[scheduled_process_run_lock]) -> bool {
+        guard: borrow ProcessRunGuard[process_run]) -> bool {
     if (execution_state[execution_cpu_index()].current_live == false) { return true; }
     return kernel_process_cpu_allows_slot(guard,
         cpu_id(), process_slot_of(execution_state[execution_cpu_index()].current_handle.pool_index));
@@ -5949,7 +5949,7 @@ fn kernel_process_current_cpu_allows(
 private let mut kernel_process_core0_idle_seen: bool;
 
 fn kernel_process_core0_idle_was_seen(
-        guard: borrow ProcessRunGuard[scheduled_process_run_lock]) -> bool {
+        guard: borrow ProcessRunGuard[process_run]) -> bool {
     return kernel_process_core0_idle_seen;
 }
 
@@ -6517,7 +6517,7 @@ private let mut kernel_idle_starvation: [IdleStarvation; KERNEL_MAX_CORES];
 private let mut kernel_idle_starvation_reported: bool = false;
 
 private fn kernel_process_idle_starvation_note(
-        guard: borrow ProcessRunGuard[scheduled_process_run_lock]) !{unsafe} {
+        guard: borrow ProcessRunGuard[process_run]) !{unsafe} {
     let raw_cpu: usize = cpu_id();
     if (raw_cpu >= KERNEL_MAX_CORES) { return; }
     let mut left: usize = 0;
@@ -7940,7 +7940,7 @@ variant BlockSwitch {
 // exited after wait4 decided to block reruns wait4 instead of leaving its
 // parent Blocked beside a zombie.
 private fn kernel_process_block_to_idle(
-        guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+        guard: borrow ProcessRunGuard[process_run],
         from: ProcessHandle, current: borrow FrameRef[process, level],
         reason: ProcessWaitReason, trace_aux: usize) -> bool !{changes_witness_ProcessCurrent} {
     if (execution_state[execution_cpu_index()].current_live == false ||
@@ -8297,7 +8297,7 @@ must_use variant ProcessSignalPendingResult {
 
 // Take `signum` off the pending set of `record` (which `handle` names),
 // with the siginfo recorded for it.
-private fn taken_signal_take(guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+private fn taken_signal_take(guard: borrow ProcessRunGuard[process_run],
                              record: borrow &mut ProcessRecord,
                              handle: ProcessHandle,
                              signum: usize @ signal) -> TakenSignal[signal] {
@@ -8913,7 +8913,7 @@ must_use variant ProcessSignalSendResult {
 }
 
 private fn kernel_process_signal_deliver_to(
-        guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+        guard: borrow ProcessRunGuard[process_run],
         target: ProcessHandle, signum: usize, sender_pid: usize)
         -> ProcessSignalSendResult !{unsafe} {
     return kernel_process_signal_deliver_traced(guard, target, signum,
@@ -8923,7 +8923,7 @@ private fn kernel_process_signal_deliver_to(
 // `trace_peer` is what the lifecycle trace names as the cause (GitHub issue
 // #652): the sender, or for an exit's SIGCHLD the child that exited.
 private fn kernel_process_signal_deliver_traced(
-        guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+        guard: borrow ProcessRunGuard[process_run],
         target: ProcessHandle, signum: usize, sender_pid: usize,
         trace_peer: usize)
         -> ProcessSignalSendResult !{unsafe} {
@@ -9065,7 +9065,7 @@ private fn kernel_process_signal_deliver_traced(
 }
 
 fn kernel_process_signal_child_exit(
-        guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+        guard: borrow ProcessRunGuard[process_run],
         parent: ProcessHandle, child_pid: usize, child_status: ProcessEnd) {
     // GitHub issue #885: the siginfo goes with the SIGCHLD that is queued;
     // a second exit while one is pending is merged into it, as on Linux.
@@ -9094,7 +9094,7 @@ fn kernel_process_signal_child_exit(
 private let mut terminal_foreground_session: usize;
 
 fn kernel_process_terminal_reader(
-        guard: borrow ProcessRunGuard[scheduled_process_run_lock]) {
+        guard: borrow ProcessRunGuard[process_run]) {
     if (execution_state[execution_cpu_index()].current_live) {
         terminal_foreground_session = scheduled_process_record_of_locked(guard,
             execution_state[execution_cpu_index()].current_handle).session_id;
@@ -9108,7 +9108,7 @@ fn kernel_process_terminal_reader(
 // asleep, without a new UART interrupt. Wake Linux retrying readers only;
 // the internal scalar waiter must receive a real byte from the RX handler.
 fn kernel_process_terminal_settings_wake(
-        guard: borrow ProcessRunGuard[scheduled_process_run_lock]) {
+        guard: borrow ProcessRunGuard[process_run]) {
     let mut cursor = scheduled_process_first_slot();
     let mut walking: bool = true;
     while (walking) {
@@ -9145,7 +9145,7 @@ fn kernel_process_terminal_settings_wake(
 // process record under the run lock, which is what a fixture asking "is the
 // reader blocked yet" needs instead of a guess from elapsed time.
 fn kernel_process_pid_blocked_in_uart_read(
-        guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+        guard: borrow ProcessRunGuard[process_run],
         pid: usize) -> bool {
     let mut cursor = scheduled_process_first_slot();
     let mut walking: bool = true;
@@ -9174,7 +9174,7 @@ fn kernel_process_pid_blocked_in_uart_read(
 // second after every child it reaps and only then returns to such a wait; a
 // fixture that needs init parked asks this rather than for any Blocked state.
 fn kernel_process_pid_parked_on_signal(
-        guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+        guard: borrow ProcessRunGuard[process_run],
         pid: usize) -> bool {
     let mut cursor = scheduled_process_first_slot();
     let mut walking: bool = true;
@@ -9202,7 +9202,7 @@ fn kernel_process_pid_parked_on_signal(
 // 2 running, 3 blocked; wait 1 uart-rx, 2 child-exit. delivery is 1 for a read
 // that retries, 0 for a scalar wait.
 fn kernel_process_pid_log_wait(
-        guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+        guard: borrow ProcessRunGuard[process_run],
         pid: usize) {
     match scheduled_process_slot_for_pid_locked(guard, pid) {
         ProcessSlotForPidResult::Missing => {
@@ -9227,7 +9227,7 @@ fn kernel_process_pid_log_wait(
 }
 
 fn kernel_process_terminal_signal(
-        guard: borrow ProcessRunGuard[scheduled_process_run_lock], signum: usize) {
+        guard: borrow ProcessRunGuard[process_run], signum: usize) {
     if (terminal_foreground_session == 0) { return; }
     let mut cursor = scheduled_process_first_slot();
     let mut walking: bool = true;
@@ -11023,7 +11023,7 @@ fn kernel_process_parent_is_root(current_authority: borrow ProcessCurrent[curren
 // caller compares two fixture children. Unlike parent_is_root(), this keeps
 // a process created by an interactive shell tied to that exact shell.
 fn kernel_process_current_parent_pid(
-        guard: borrow ProcessRunGuard[scheduled_process_run_lock]) -> usize {
+        guard: borrow ProcessRunGuard[process_run]) -> usize {
     if (execution_state[execution_cpu_index()].current_live == false) { return 0; }
     let mut current: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
     let record: &mut ProcessRecord = scheduled_process_record_of_locked(guard, current);
@@ -11086,7 +11086,7 @@ fn kernel_process_session_create() -> ProcessSessionResult {
 // The caller holds ProcessRunGuard when it uses this snapshot to make a
 // cross-core placement decision or publish placement evidence.
 fn kernel_process_current_affinity_mask(
-        guard: borrow ProcessRunGuard[scheduled_process_run_lock]) -> usize {
+        guard: borrow ProcessRunGuard[process_run]) -> usize {
     if (execution_state[execution_cpu_index()].current_live == false) { return 0; }
     return scheduled_process_affinity_mask(guard,
         process_slot_of(execution_state[execution_cpu_index()].current_handle.pool_index));

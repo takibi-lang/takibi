@@ -9293,6 +9293,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   raise (TypeError (loc, Printf.sprintf
                     "static name '%s' is used with inconsistent static sorts" name))
               | Some _ -> ()
+              | None when !allow_implicit_static
+                          && sort = Ast.TypeNamed "addr"
+                          && StringSet.mem name !global_address_names ->
+                  (* GitHub issue #1207: a bare name in an addr slot binds a
+                     new static parameter, which only looks like the global
+                     of that name; guarded_by and every `&name` mean the
+                     global itself, so the two spellings disagreed. *)
+                  raise (TypeError (loc, Printf.sprintf
+                    "static name '%s' would bind a new addr parameter that shadows the global '%s'; write '&%s' for the global, or rename the parameter"
+                    name name name))
               | None when !allow_implicit_static -> Hashtbl.add scope name sort
               | None -> raise (TypeError (loc, Printf.sprintf
                   "static name '%s' is not bound by this function signature or struct"

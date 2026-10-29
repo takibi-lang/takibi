@@ -568,7 +568,11 @@ linear struct Name[n: usize] { field: T; }   // indexed runtime obligation
   local binding shadows its name; a runtime address of that local does
   not match the global identity. Private globals may be named only from
   their declaring file. Generic substitution preserves that reference's
-  original source location and identity.
+  original source location and identity. A bare name in an `addr` slot
+  that the signature does not bind would bind a new parameter; when it is
+  also a global's name it is refused (#1207), so `Guard[lock_name]` can
+  never read as the global it is not: write `&lock_name`, or name the
+  parameter for what it is.
 - `private let mut cell: Cell[&pool];` anchors a container to one global
   pool. A handle inferred from `&pool` matches that identity; a handle
   from another pool is a type error. The identity is erased: no runtime

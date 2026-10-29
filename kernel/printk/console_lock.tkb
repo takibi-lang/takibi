@@ -53,7 +53,7 @@ linear struct ConsoleGuard[lock: addr] {
 // mutex_acquire masks interrupts, then takes the word, and returns the state
 // a matching release restores -- so this is safe from the transmit and
 // receive interrupt handlers and from code that already has them masked.
-fn console_lock() -> ConsoleGuard[console_tx_lock]
+fn console_lock() -> ConsoleGuard[console_tx]
         !{acquires_lock_50_console, lock_guard_50_console,
           irq_masking_guard} {
     let before: i64 = read_cntpct();
@@ -70,12 +70,12 @@ fn console_lock() -> ConsoleGuard[console_tx_lock]
             console_measure.acquire_max = ticks;
         }
     }
-    let mut guard: ConsoleGuard[console_tx_lock] =
+    let mut guard: ConsoleGuard[console_tx] =
         { acquisition.flags, started, measured };
     return guard;
 }
 
-fn console_unlock(guard: sink ConsoleGuard[console_tx_lock]) {
+fn console_unlock(guard: sink ConsoleGuard[console_tx]) {
     if (guard.measured && console_measure_enabled) {
         let ticks: usize = (read_cntpct() - guard.started) as usize;
         console_measure.hold_ticks += ticks;
@@ -92,17 +92,17 @@ must_use variant ConsoleTry[lock: addr] {
     Taken(ConsoleGuard[lock]);
 }
 
-fn console_try_lock() -> ConsoleTry[console_tx_lock] !{unsafe} {
+fn console_try_lock() -> ConsoleTry[console_tx] !{unsafe} {
     match mutex_try_acquire(&console_tx_lock) {
         MutexTry::Busy => { return ConsoleTry::Busy; }
         MutexTry::Taken(flags) => {
-            let mut guard: ConsoleGuard[console_tx_lock] = { flags, 0, false };
+            let mut guard: ConsoleGuard[console_tx] = { flags, 0, false };
             return ConsoleTry::Taken(guard);
         }
     }
 }
 
-fn console_try_unlock(guard: sink ConsoleGuard[console_tx_lock]) !{unsafe} {
+fn console_try_unlock(guard: sink ConsoleGuard[console_tx]) !{unsafe} {
     mutex_try_release(&console_tx_lock, guard.flags);
 }
 

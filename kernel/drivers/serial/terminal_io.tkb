@@ -87,7 +87,7 @@ private fn terminal_io_erase_word() -> usize {
     return columns;
 }
 
-fn terminal_io_receive(guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+fn terminal_io_receive(guard: borrow ProcessRunGuard[process_run],
                        received: u8) !{unsafe} {
     match terminal_input_decode(received) {
         TerminalInput::Byte(value) => { terminal_io_store(value, 0); }

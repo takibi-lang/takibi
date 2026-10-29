@@ -15121,6 +15121,14 @@ let codegen_tests = [
   Alcotest.test_case "a static address cannot name a local-only pool" `Quick
     (expect_type_error "must name a global let declaration"
       "struct LocalCell[p: addr] { value: usize; } fn f() { let mut pool: usize = 0; let mut cell: LocalCell[&pool] = {0}; }");
+  (* GitHub issue #1207: a bare name in an addr slot binds a new parameter;
+     spelled like a global, it read as that global and was not. *)
+  Alcotest.test_case "a bare addr static named like a global is refused" `Quick
+    (expect_type_error "shadows the global 'pool'"
+      "struct Guard[p: addr] { value: usize; } let mut pool: usize; fn f(g: Guard[pool]) {}");
+  Alcotest.test_case "the global's own spelling and a renamed parameter both pass" `Quick
+    (expect_codegen_ok
+      "struct Guard[p: addr] { value: usize; } let mut pool: usize; fn f(g: Guard[&pool]) {} fn h(g: Guard[any]) {}");
   Alcotest.test_case "a static address cannot name a function" `Quick
     (expect_type_error "must name a global let declaration"
       "struct FnCell[p: addr] { value: usize; } fn pool() {} let mut cell: FnCell[&pool];");

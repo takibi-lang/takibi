@@ -762,11 +762,11 @@ fn kernel_log_tx_resume(previous: KernelLogTxStandDown, priority: usize) !{unsaf
     }
 }
 
-private fn kernel_log_tx_pending(guard: borrow ConsoleGuard[console_tx_lock]) -> bool {
+private fn kernel_log_tx_pending(guard: borrow ConsoleGuard[console_tx]) -> bool {
     return kernel_log_tx_count != 0;
 }
 
-private fn kernel_log_tx_full(guard: borrow ConsoleGuard[console_tx_lock]) -> bool {
+private fn kernel_log_tx_full(guard: borrow ConsoleGuard[console_tx]) -> bool {
     return kernel_log_tx_count >= KERNEL_LOG_TX_QUEUE_BYTES;
 }
 
@@ -774,7 +774,7 @@ private fn kernel_log_tx_full(guard: borrow ConsoleGuard[console_tx_lock]) -> bo
 // handler on core 0 and producers run on any CPU, so producer and consumer
 // share the count. The guard parameter is what makes a call without the lock
 // unwritable. The lock masks interrupts, as the bare mask it replaces did.
-private fn kernel_log_tx_push(guard: borrow ConsoleGuard[console_tx_lock],
+private fn kernel_log_tx_push(guard: borrow ConsoleGuard[console_tx],
                               value: u8) -> bool {
     if (kernel_log_tx_count >= KERNEL_LOG_TX_QUEUE_BYTES) { return false; }
     let slot: usize = kernel_log_tx_tail;
@@ -794,7 +794,7 @@ private fn kernel_log_tx_push(guard: borrow ConsoleGuard[console_tx_lock],
 
 // Tags keep a signal flush from discarding queued kernel diagnostics.
 private fn kernel_log_tx_push_terminal(
-        guard: borrow ConsoleGuard[console_tx_lock], value: u8) -> bool {
+        guard: borrow ConsoleGuard[console_tx], value: u8) -> bool {
     let slot: usize = kernel_log_tx_tail;
     if (kernel_log_tx_push(guard, value) == false) { return false; }
     if (slot < KERNEL_LOG_TX_QUEUE_BYTES) { kernel_log_tx_terminal[slot] = true; }
@@ -802,7 +802,7 @@ private fn kernel_log_tx_push_terminal(
 }
 
 private fn kernel_log_terminal_column_byte(
-        guard: borrow ConsoleGuard[console_tx_lock], value: u8) {
+        guard: borrow ConsoleGuard[console_tx], value: u8) {
     if (value == 13) { kernel_log_terminal_column = 0; }
     else if (value == 8) {
         if (kernel_log_terminal_column != 0) {
@@ -851,7 +851,7 @@ fn uart_terminal_flush_output() {
 
 must_use variant KernelLogTxByte { Empty; Byte(u8); }
 
-private fn kernel_log_tx_pop(guard: borrow ConsoleGuard[console_tx_lock])
+private fn kernel_log_tx_pop(guard: borrow ConsoleGuard[console_tx])
         -> KernelLogTxByte {
     if (kernel_log_tx_count == 0) { return KernelLogTxByte::Empty; }
     let slot: usize = kernel_log_tx_head;
@@ -888,7 +888,7 @@ private fn uart_tx_spin_store(c: u8) !{unsafe} {
 }
 
 // The same under a hold the caller already has, for a whole line.
-private fn uart_tx_spin_store_locked(guard: borrow ConsoleGuard[console_tx_lock],
+private fn uart_tx_spin_store_locked(guard: borrow ConsoleGuard[console_tx],
                                      c: u8) !{unsafe} {
     let spin_from: i64 = read_cntpct();
     while (uart_tx_fifo_full()) { }
@@ -969,7 +969,7 @@ fn uart_terminal_output_pending() -> bool {
 }
 
 private fn uart_terminal_output_pending_locked(
-        guard: borrow ConsoleGuard[console_tx_lock]) -> bool {
+        guard: borrow ConsoleGuard[console_tx]) -> bool {
     return kernel_log_tx_pending(guard) || terminal_echo_pending();
 }
 
@@ -988,7 +988,7 @@ fn uart_terminal_resume_output() !{unsafe} {
 // function, and a console that could block on one could not report the
 // deadlock it is in.
 private fn uart_tx_drain_into_fifo(
-        guard: borrow ConsoleGuard[console_tx_lock]) !{unsafe} {
+        guard: borrow ConsoleGuard[console_tx]) !{unsafe} {
     if (terminal_output_paused()) { return; }
     uart_tx_drain_into_fifo_force(guard);
 }
@@ -1023,14 +1023,14 @@ fn uart_tx_service() !{unsafe} {
 private let mut kernel_log_tx_writer_wake_owed: AtomicWord;
 
 private fn kernel_log_tx_writer_room_locked(
-        guard: borrow ConsoleGuard[console_tx_lock]) -> bool {
+        guard: borrow ConsoleGuard[console_tx]) -> bool {
     return terminal_output_paused() == false && terminal_echo_pending() == false &&
            kernel_log_tx_count <= KERNEL_LOG_TX_WRITER_LOW_WATER;
 }
 
 // Fatal/DDB flushes must remain available even after a user sent XOFF.
 private fn uart_tx_drain_into_fifo_force(
-        guard: borrow ConsoleGuard[console_tx_lock]) !{unsafe} {
+        guard: borrow ConsoleGuard[console_tx]) !{unsafe} {
     let room_before: bool = kernel_log_tx_writer_room_locked(guard);
     let mut draining: bool = true;
     while (draining && uart_terminal_output_pending_locked(guard) && uart_tx_fifo_full() == false) {
@@ -1172,7 +1172,7 @@ private let mut uart_user_write_sleeps: usize = 0;
 // shared queue is live there is no queue to wait on and the bytes spin as they always have,
 // so the answer is the most one call takes.
 private fn uart_user_write_room_locked(
-        guard: borrow ConsoleGuard[console_tx_lock]) -> usize {
+        guard: borrow ConsoleGuard[console_tx]) -> usize {
     if (terminal_output_paused()) { return 0; }
     if (terminal_echo_pending()) { return 0; }
     if (kernel_log_tx_is_live() == false) {
@@ -1224,7 +1224,7 @@ fn kernel_log_ring_report() !{logs, unsafe} {
 // while the guard still serializes the IRQ mask. Before the queue is live,
 // the caller spins byte by byte through uart_putc, which takes the lock itself.
 private fn uart_user_write_locked(
-        guard: borrow ConsoleGuard[console_tx_lock], bytes: borrow []const u8)
+        guard: borrow ConsoleGuard[console_tx], bytes: borrow []const u8)
         -> (usize, bool) !{unsafe} {
     if (terminal_output_paused()) { return (0, false); }
     if (terminal_echo_pending()) { return (0, false); }
@@ -1399,7 +1399,7 @@ private fn kernel_log_emit_line(core: {0..<KERNEL_MAX_CORES as usize}) !{unsafe}
 
 // One byte of a line into the queue, making room by waiting out the FIFO
 // when the queue is full -- only reached by a line longer than the queue.
-private fn kernel_log_emit_byte_locked(guard: borrow ConsoleGuard[console_tx_lock],
+private fn kernel_log_emit_byte_locked(guard: borrow ConsoleGuard[console_tx],
                                        value: u8) !{unsafe} {
     while (kernel_log_tx_full(guard)) {
         while (uart_tx_fifo_full()) { }

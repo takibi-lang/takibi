@@ -4095,7 +4095,7 @@ fn syscall_ppoll_dispatch(current_authority: borrow ProcessCurrent[current_proce
 // settings and the receive ring are shared with the RX handler on whichever
 // core takes the UART interrupt, and with readers on every core.
 fn syscall_terminal_settings_commit(
-        guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+        guard: borrow ProcessRunGuard[process_run],
         settings: borrow [u8; TERMINAL_TERMIOS_BYTES..], command: usize)
         -> TerminalSettingsResult !{unsafe} {
     match terminal_settings_apply(settings) {
@@ -5162,7 +5162,7 @@ private fn syscall_ext2_write_locked(fd: usize, content: []u8) -> usize {
 // parent a lookup finds could otherwise be renamed or removed by another
 // core before the mutation it gates -- the atomicity core 0's
 // non-preemptible dispatch used to give for free.
-private fn syscall_mkdirat_under(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+private fn syscall_mkdirat_under(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], guard: borrow Ext2MutationGuard[ext2_mutation],
         x0: usize, x1: usize, permissions: usize) -> usize !{unsafe} {
     let slot: SyscallSlot[0] = syscall_slot_acquire();
     let result: usize = syscall_mkdirat_under_with(slot, current_authority, guard, x0, x1, permissions);
@@ -5171,7 +5171,7 @@ private fn syscall_mkdirat_under(current_authority: borrow ProcessCurrent[curren
 }
 
 private fn syscall_mkdirat_under_with(slot: borrow SyscallSlot[0],
-        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], guard: borrow Ext2MutationGuard[ext2_mutation],
         x0: usize, x1: usize, permissions: usize) -> usize !{unsafe} {
     // mkdirat(dirfd, pathname, mode), GitHub issue #538. `permissions` is
     // the mode with the umask applied (GitHub issue #1147); every process
@@ -5209,7 +5209,7 @@ private fn syscall_mkdirat_under_with(slot: borrow SyscallSlot[0],
 // parent a lookup finds could otherwise be renamed or removed by another
 // core before the mutation it gates -- the atomicity core 0's
 // non-preemptible dispatch used to give for free.
-private fn syscall_unlinkat_under(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+private fn syscall_unlinkat_under(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], guard: borrow Ext2MutationGuard[ext2_mutation],
         x0: usize, x1: usize, x2: usize) -> usize !{unsafe} {
     let slot: SyscallSlot[0] = syscall_slot_acquire();
     let result: usize = syscall_unlinkat_under_with(slot, current_authority, guard, x0, x1, x2);
@@ -5218,7 +5218,7 @@ private fn syscall_unlinkat_under(current_authority: borrow ProcessCurrent[curre
 }
 
 private fn syscall_unlinkat_under_with(slot: borrow SyscallSlot[0],
-        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], guard: borrow Ext2MutationGuard[ext2_mutation],
         x0: usize, x1: usize, x2: usize) -> usize !{unsafe} {
     // unlinkat(dirfd, pathname, flags), GitHub issue #538: unlink with no
     // flag, rmdir with AT_REMOVEDIR, and EINVAL for any other flag.
@@ -5265,7 +5265,7 @@ private fn syscall_unlinkat_under_with(slot: borrow SyscallSlot[0],
 // parent a lookup finds could otherwise be renamed or removed by another
 // core before the mutation it gates -- the atomicity core 0's
 // non-preemptible dispatch used to give for free.
-private fn syscall_renameat_under(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+private fn syscall_renameat_under(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], guard: borrow Ext2MutationGuard[ext2_mutation],
         x0: usize, x1: usize, x2: usize, x3: usize) -> usize !{unsafe} {
     let slot: SyscallSlot[0] = syscall_slot_acquire();
     let result: usize = syscall_renameat_under_with(slot, current_authority, guard, x0, x1, x2, x3);
@@ -5274,7 +5274,7 @@ private fn syscall_renameat_under(current_authority: borrow ProcessCurrent[curre
 }
 
 private fn syscall_renameat_under_with(slot: borrow SyscallSlot[0],
-        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], guard: borrow Ext2MutationGuard[ext2_mutation],
         x0: usize, x1: usize, x2: usize, x3: usize) -> usize !{unsafe} {
     // renameat(olddirfd, oldpath, newdirfd, newpath), GitHub issue #538.
     // Both paths are read through the one per-core path buffer, so the
@@ -7198,7 +7198,7 @@ private fn syscall_openat_with(slot: borrow SyscallSlot[0],
 // ENOENT and O_EXCL means nothing. O_TRUNC asks for write access, so a
 // directory is EISDIR.
 private fn syscall_openat_create_under(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
-        guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        guard: borrow Ext2MutationGuard[ext2_mutation],
         x0: usize, x1: usize, x2: usize, permissions: usize) -> SyscallAction !{unsafe} {
     let slot: SyscallSlot[0] = syscall_slot_acquire();
     let action: SyscallAction = syscall_openat_create_under_with(slot,
@@ -7209,7 +7209,7 @@ private fn syscall_openat_create_under(current_authority: borrow ProcessCurrent[
 
 private fn syscall_openat_create_under_with(slot: borrow SyscallSlot[0],
         current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
-        guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        guard: borrow Ext2MutationGuard[ext2_mutation],
         x0: usize, x1: usize, x2: usize, permissions: usize) -> SyscallAction !{unsafe} {
     let create: bool = (x2 & LINUX_O_CREAT) != 0;
     let exclusive: bool = create && (x2 & LINUX_O_EXCL) != 0;
@@ -7270,7 +7270,7 @@ private fn syscall_openat_create_under_with(slot: borrow SyscallSlot[0],
 // ftruncate wants an ext2 file open for writing (EINVAL otherwise, as
 // Linux; EBADF for no descriptor at all) and leaves its offset alone.
 private fn syscall_truncate_under(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
-        guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        guard: borrow Ext2MutationGuard[ext2_mutation],
         number: usize, x0: usize, x1: usize) -> usize !{unsafe} {
     let slot: SyscallSlot[0] = syscall_slot_acquire();
     let answer: usize = syscall_truncate_under_with(slot, current_authority,
@@ -7281,7 +7281,7 @@ private fn syscall_truncate_under(current_authority: borrow ProcessCurrent[curre
 
 private fn syscall_truncate_under_with(slot: borrow SyscallSlot[0],
         current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
-        guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        guard: borrow Ext2MutationGuard[ext2_mutation],
         number: usize, x0: usize, x1: usize) -> usize !{unsafe} {
     let mount: Ext2Mount = match syscall_filesystem_lookup() {
         SyscallFilesystemReady::Unconfigured => { return LINUX_EBADF; }

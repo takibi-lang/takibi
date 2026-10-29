@@ -110,7 +110,7 @@ linear struct Ext2MutationGuard[lock: addr] {
 // overlap a mutation that also ran only on core 0.
 private let mut ext2_readers: AtomicWord;
 
-fn ext2_mutation_take() -> Ext2MutationGuard[ext2_mutation_lock]
+fn ext2_mutation_take() -> Ext2MutationGuard[ext2_mutation]
         !{acquires_lock_20_ext2_mutation, lock_guard_20_ext2_mutation,
           unsafe} {
     static_assert(KERNEL_PREEMPTIBLE == 0,
@@ -123,7 +123,7 @@ fn ext2_mutation_take() -> Ext2MutationGuard[ext2_mutation_lock]
     // count and gone to core 0.
     dsb_ish();
     while (atomic_word_load(&ext2_readers) != 0) { }
-    let mut guard: Ext2MutationGuard[ext2_mutation_lock] = { cpu_id() };
+    let mut guard: Ext2MutationGuard[ext2_mutation] = { cpu_id() };
     return guard;
 }
 
@@ -131,11 +131,11 @@ fn ext2_mutation_take() -> Ext2MutationGuard[ext2_mutation_lock]
 // only: the lock without the wait, which is what ext2_mutation_take was
 // before #559. `unsafe` so any other use is visible in the trusted base.
 fn ext2_mutation_take_without_readers_unchecked()
-        -> Ext2MutationGuard[ext2_mutation_lock]
+        -> Ext2MutationGuard[ext2_mutation]
         !{acquires_lock_20_ext2_mutation, lock_guard_20_ext2_mutation,
           unsafe} {
     task_mutex_acquire(&ext2_mutation_lock);
-    let mut guard: Ext2MutationGuard[ext2_mutation_lock] = { cpu_id() };
+    let mut guard: Ext2MutationGuard[ext2_mutation] = { cpu_id() };
     return guard;
 }
 
@@ -160,7 +160,7 @@ fn ext2_read_leave() !{unsafe} {
         atomic_word_fetch_add(&ext2_readers, 0xFFFFFFFFFFFFFFFF);
 }
 
-fn ext2_mutation_give(guard: sink Ext2MutationGuard[ext2_mutation_lock]) {
+fn ext2_mutation_give(guard: sink Ext2MutationGuard[ext2_mutation]) {
     task_mutex_release(&ext2_mutation_lock);
 }
 

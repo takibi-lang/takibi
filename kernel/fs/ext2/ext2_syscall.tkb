@@ -55,7 +55,7 @@ fn ext2_syscall_write_errno(result: Ext2ResizeResult) -> usize {
 // only past EOF, as Linux does; shrinking is O_TRUNC's (#1016), not a
 // write's.
 fn ext2_syscall_write_at(mount: Ext2Mount,
-        guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        guard: borrow Ext2MutationGuard[ext2_mutation],
         inode: usize, offset: usize, content: []u8) -> usize !{unsafe} {
     let length: usize = content.len;
     if (offset > EXT2_MAX_SINGLE_FILE_BLOCKS * KERNEL_BLOCK_SIZE - length) {
@@ -74,7 +74,7 @@ fn ext2_syscall_write_at(mount: Ext2Mount,
 must_use variant Ext2SyscallOpenResult { Errno(usize); Opened(usize); }
 
 fn ext2_syscall_open_leaf(mount: Ext2Mount,
-        guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        guard: borrow Ext2MutationGuard[ext2_mutation],
         parent_inode: usize, leaf: borrow []u8,
         create: bool, exclusive: bool, truncate: bool, permissions: usize)
         -> Ext2SyscallOpenResult !{unsafe} {
@@ -112,7 +112,7 @@ fn ext2_syscall_open_leaf(mount: Ext2Mount,
 }
 
 fn ext2_syscall_mkdir(mount: Ext2Mount,
-        guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        guard: borrow Ext2MutationGuard[ext2_mutation],
         parent_inode: usize, leaf: borrow []u8, permissions: usize)
         -> usize !{unsafe} {
     let mut answer: usize = 0;
@@ -139,7 +139,7 @@ fn ext2_syscall_mkdir(mount: Ext2Mount,
 // ext2 layer does not release; EPERM is Linux's word for a filesystem that
 // does not allow the unlink.
 fn ext2_syscall_unlink(mount: Ext2Mount,
-        guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        guard: borrow Ext2MutationGuard[ext2_mutation],
         parent_inode: usize, leaf: borrow []u8) -> usize !{unsafe} {
     let answer: usize = match ext2_unlink_name(
             mount, parent_inode, leaf) {
@@ -156,7 +156,7 @@ fn ext2_syscall_unlink(mount: Ext2Mount,
 // lives across both, and handing it back is what ext2_directory_keep does on
 // every path that does not remove.
 fn ext2_syscall_rmdir(mount: Ext2Mount,
-        guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        guard: borrow Ext2MutationGuard[ext2_mutation],
         parent_inode: usize, leaf: borrow []u8) -> usize !{unsafe} {
     let mut answer: usize = 0;
     match ext2_claim_directory(mount, parent_inode, leaf) {
@@ -186,7 +186,7 @@ fn ext2_syscall_rmdir(mount: Ext2Mount,
 // does not do; EPERM is Linux's word for a filesystem that does not allow
 // the rename.
 fn ext2_syscall_rename(mount: Ext2Mount,
-        guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        guard: borrow Ext2MutationGuard[ext2_mutation],
         old_directory: usize, old_name: borrow []u8,
         new_parent_inode: usize, new_leaf: borrow []u8) -> usize !{unsafe} {
     let answer: usize = match ext2_rename_in(

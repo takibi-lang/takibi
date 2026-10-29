@@ -1714,7 +1714,7 @@ private let mut workload_settings_wake: WorkloadSettingsWake;
 // that completes TCGETS and TCSETSW on the secondary is the reader-to-be; a
 // rerun on core 0 would complete them there and leave its mask short.
 fn workload_settings_wake_ioctl_served(
-        guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+        guard: borrow ProcessRunGuard[process_run],
         command: usize) {
     if (workload_settings_wake.parent_pid == 0 ||
         workload_settings_wake.reader_pid != 0) { return; }
@@ -2340,7 +2340,7 @@ fn workload_busy_record_progress(
 // already had (init did not restart it too) and its counter must have moved
 // while A was away (it kept running rather than waiting on its sibling).
 private fn workload_busy_restart_step(
-        guard: borrow ProcessRunGuard[scheduled_process_run_lock], tag: usize) -> usize !{unsafe} {
+        guard: borrow ProcessRunGuard[process_run], tag: usize) -> usize !{unsafe} {
     if (workload_busy_pair.restart_requested == false) {
         if (tag != WORKLOAD_BUSY_TAG_A) { return 0; }
         workload_busy_pair.restart_requested = true;

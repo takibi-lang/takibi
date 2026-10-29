@@ -157,7 +157,7 @@ fn host_parent(mount: Ext2Mount, path: borrow []const u8) -> HostParent !{unsafe
 // openat(2) of PATH for writing: its inode, or the errno.
 must_use variant HostOpen { Errno(usize); Opened(usize); }
 
-fn host_open(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+fn host_open(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation],
              path: borrow []const u8, truncate: bool) -> HostOpen !{unsafe} {
     match host_parent(mount, path) {
         HostParent::Missing => { return HostOpen::Errno(LINUX_ENOENT); }
@@ -181,7 +181,7 @@ fn host_open(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation_loc
 
 // The directory-entry operations: resolve the parent, copy the leaf into a
 // mutable buffer (the syscalls hand ext2 a []u8 from the path buffer).
-fn host_leaf_op(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+fn host_leaf_op(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation],
                 op: usize, path: borrow []const u8) -> usize !{unsafe} {
     match host_parent(mount, path) {
         HostParent::Missing => { return LINUX_ENOENT; }
@@ -201,7 +201,7 @@ fn host_leaf_op(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation_
     }
 }
 
-fn host_rename(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+fn host_rename(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation],
                old_path: borrow []const u8, new_path: borrow []const u8) -> usize !{unsafe} {
     let mut old_parent: usize = 0;
     let mut old_start: usize = 0;
@@ -240,7 +240,7 @@ fn host_rename(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation_l
 }
 
 // write(2)s of LEN pattern bytes from OFF, at most WRITE_CHUNK each.
-fn host_pwrite(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+fn host_pwrite(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation],
                inode: usize, offset: usize, length: usize, seed: usize) -> usize !{unsafe} {
     let mut done: usize = 0;
     host_written = 0;
@@ -266,7 +266,7 @@ fn host_pwrite(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation_l
 
 // dd if=SRC of=DST conv=notrunc: read SRC a block at a time, write each at
 // the same offset of DST.
-fn host_overwrite(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+fn host_overwrite(mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation],
                   inode: usize, source_path: borrow []const u8) -> usize !{unsafe} {
     let source: usize = match ext2_lookup_path(mount, source_path) {
         Ext2LookupResult::Found(found) => { found }
