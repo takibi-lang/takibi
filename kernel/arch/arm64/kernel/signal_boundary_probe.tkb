@@ -193,6 +193,38 @@ private fn boundary_interrupts() !{unsafe} {
     }
     boundary_line(bs"boundary: nanosleep interrupted: handler ran, EINTR, time left\n");
 
+    // GitHub issue #432: clock_nanosleep(CLOCK_MONOTONIC) takes the same
+    // deadline. Relative, a caught signal ends it with EINTR and the time
+    // left in rem; with TIMER_ABSTIME it ends with EINTR and writes nothing
+    // to rem, as on Linux. Both under SA_RESTART, which never reruns them.
+    left[0] = 99;
+    left[1] = 0;
+    let relative_sender: usize = interrupt_sender(me, 12, 100, 0);
+    let relative: usize = signal_interrupt_svc(115, 1, 0,
+        request as *usize as usize, left as *usize as usize,
+        ran as *usize as usize);
+    if (relative != INTERRUPT_EINTR || ran[0] != 1 || left[0] > 3 ||
+        (left[0] == 0 && left[1] == 0) ||
+        interrupt_reap(relative_sender) == false) {
+        boundary_fail(bs"boundary: FAIL clock_nanosleep not interrupted\n");
+        return;
+    }
+    let mut deadline: [usize; 2];
+    svc5(113, 1, deadline as *usize as usize, 0, 0, 0);
+    deadline[0] = deadline[0] + 4;
+    left[0] = 99;
+    left[1] = 7;
+    let absolute_sender: usize = interrupt_sender(me, 12, 100, 0);
+    let absolute: usize = signal_interrupt_svc(115, 1, 1,
+        deadline as *usize as usize, left as *usize as usize,
+        ran as *usize as usize);
+    if (absolute != INTERRUPT_EINTR || ran[0] != 1 || left[0] != 99 ||
+        left[1] != 7 || interrupt_reap(absolute_sender) == false) {
+        boundary_fail(bs"boundary: FAIL absolute clock_nanosleep not interrupted\n");
+        return;
+    }
+    boundary_line(bs"boundary: clock_nanosleep interrupted: EINTR, time left when relative, rem untouched when absolute\n");
+
     // wait4 without SA_RESTART: EINTR, and the child is still there.
     let waited: usize = interrupt_sender(me, 10, 100, 300);
     let mut status: [u8; 4];
