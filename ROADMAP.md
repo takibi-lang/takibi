@@ -167,8 +167,8 @@ owners are TaskMutex, the spare stack stays masked). #980
    backing, `Place`, a `dma_fixed` or protocol owner, or boot-once (#1013),
    or allow-listed with its reader named; the ratchet (slice 1, done
    2026-10-29: `--emit-globals` and `buildcheck_global_protection.py` in
-   kernelbuild, docs/GLOBAL_PROTECTION.md) counts 475 of 712 production
-   globals outside that set (391 of 519 outside evidence/probe files),
+   kernelbuild, docs/GLOBAL_PROTECTION.md) counted 475 of 712 production
+   globals outside that set (391 of 519 outside evidence/probe files), 452 since 2026-10-29 slice 3 (stall_probe and process.tkb counters to AtomicWord),
    each listed; the migration follows the order the flip breaks things. #1032: WXN and PXN
    first (configuration; a B-sized slice; done 2026-10-29: the identity
    is split so only the text is executable, WXN is set, and two QEMU oops
