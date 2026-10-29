@@ -62,6 +62,12 @@ if ! command -v gdb-multiarch >/dev/null 2>&1; then
     exit 1
 fi
 
+# GitHub issue #1032: the guest runs at EL1 with PSTATE.PAN set, and
+# QEMU's gdbstub translates a memory access with the CPU's current
+# permissions, so a GDB write to a user page from an EL1 stop is refused
+# like the kernel's own would be. Each write to a user page below clears
+# PAN in CPSR (bit 22) around the one write and puts the saved value back
+# before the guest runs again.
 case "$MODE" in
     brk)
         fault_instruction=0xd4200000
@@ -356,7 +362,10 @@ PYLINE
             -ex "continue"
             -ex "disable 2"
             -ex "set \$takibi_target = $target_expr"
+            -ex "set \$takibi_cpsr = \$cpsr"
+            -ex "set \$cpsr = \$cpsr & ~0x400000"
             -ex "set {int}\$takibi_target = $fault_instruction"
+            -ex "set \$cpsr = \$takibi_cpsr"
             -ex "printf \"takibi-exec-target=0x%016lx\\n\", \$takibi_target"
             -ex "set \$pc = \$takibi_target"
             -ex "detach"
@@ -429,7 +438,10 @@ PYLINE
             -ex "delete"
             -ex "set scheduler-locking on"
             -ex "takibi-park-threads kernel_idle_loop $peer_threads"
+            -ex "set \$takibi_cpsr = \$cpsr"
+            -ex "set \$cpsr = \$cpsr & ~0x400000"
             -ex "set {int}(*(long *)(\$x0 + 0x100)) = $fault_instruction"
+            -ex "set \$cpsr = \$takibi_cpsr"
             -ex "set \$peer_probe_word = {int}kernel_log_peer_probe_step"
             -ex "set {int}kernel_log_peer_probe_step = $fault_instruction"
             -ex "break *crash_snapshot_capture thread 2"
@@ -476,7 +488,10 @@ PYLINE
             -ex "break *el0_context_resume thread 1"
             -ex "continue"
             -ex "call (void) kernel_process_trace_report()"
+            -ex "set \$takibi_cpsr = \$cpsr"
+            -ex "set \$cpsr = \$cpsr & ~0x400000"
             -ex "set {int}(*(long *)(\$x0 + 0x100)) = $fault_instruction"
+            -ex "set \$cpsr = \$takibi_cpsr"
             -ex "disable 3"
             -ex "break el1_exception_evidence_from_frame"
             -ex "continue"
