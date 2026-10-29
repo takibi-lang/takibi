@@ -31,7 +31,12 @@ if [ "$count" -eq 2 ]; then
     printf '%s\n' 'MMU: enabled'
     exit 0
 fi
-if [ "$count" -eq 3 ]; then exit 0; fi
+if [ "$count" -eq 3 ]; then
+    if [ "$RPI5_FAKE_CASE" != no_smc ]; then
+        printf '%s\n' 'takibi-reset: smc #0 at 0x295b44'
+    fi
+    exit 0
+fi
 if [ "$RPI5_FAKE_CASE" = transient_then_safe ] && [ "$count" -ge 5 ]; then
     printf '%s\n' 'bcm2712.cpu0 halted in AArch64 state, current mode: EL2H'
     printf '%s\n' 'pc (/64): 0x0000000000080000'
@@ -91,6 +96,14 @@ def verify() -> None:
         raise SystemExit("EL1 preflight did not preserve its exception level")
     if "resume" not in args[3]:
         raise SystemExit("transient observation left the CPU halted")
+    # GitHub issue #1197: an EL1 kernel with WXN cannot fetch the trampoline
+    # written to RESET_ADDR, so the reset must jump to an smc #0 in its text.
+    if "read_memory" not in args[2] or "reg pc $takibi_smc" not in args[2]:
+        raise SystemExit("EL1 reset does not jump to the resident kernel's smc")
+
+    result, count, args = run_case("no_smc")
+    if result.returncode == 0 or count != 3 or "smc #0" not in result.stderr:
+        raise SystemExit("EL1 reset without an smc #0 was not refused")
 
     result, count, args = run_case("never_safe")
     if result.returncode == 0:

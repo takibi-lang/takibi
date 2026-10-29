@@ -170,7 +170,40 @@ if [ "$preflight_ok" != true ]; then
 fi
 if [ "$preflight_mode" = "EL1H" ]; then RESET_CPSR=0x3c5; else RESET_CPSR=0x3c9; fi
 
-timeout --foreground "$OPENOCD_TIMEOUT" openocd "${OPENOCD_ARGS[@]}" "${OPENOCD_SPEED_ARGS[@]}" \
+# GitHub issue #1197: an EL1H preflight means a Takibi kernel with its EL1
+# MMU on. Since #1032 that kernel maps everything outside its text
+# writable and execute-never (SCTLR_EL1.WXN), so the trampoline written at
+# RESET_ADDR is fetched from an XN page: the core took an instruction abort
+# into the kernel's DDB instead of resetting, the verify loop below accepted
+# that still-running kernel, and the loader then wrote its image into the
+# read-only text and aborted (dscr 0x03047d53). Only a power cycle got back
+# to the stub. The kernel's own text is the one executable range, and every
+# kernel has a PSCI `smc #0` in it, so jump to that instruction instead. The
+# resident kernel may be any earlier build, so find the word in RAM rather
+# than in today's ELF. An EL2H stub runs with its MMU off and keeps the
+# written trampoline.
+RESET_FIND_SMC=(-c "set takibi_smc $RESET_ADDR")
+if [ "$preflight_mode" = "EL1H" ]; then
+    RESET_FIND_SMC=(
+        -c 'set takibi_smc 0
+            for {set base 0x200000} {$base < 0x400000 && $takibi_smc == 0} {incr base 0x10000} {
+                set i 0
+                foreach w [read_memory $base 32 0x4000] {
+                    if {$w == 0xd4000003} { set takibi_smc [expr {$base + 4 * $i}]; break }
+                    incr i
+                }
+            }
+            if {$takibi_smc == 0} {
+                echo "takibi-reset: no smc #0 in resident kernel text"
+            } else {
+                echo [format "takibi-reset: smc #0 at 0x%x" $takibi_smc]
+            }'
+    )
+fi
+
+# Reading up to 2 MiB of text over SWD outlasts the 10 s session default.
+RESET_LOG=$(mktemp)
+timeout --foreground "${RPI5_RESET_SESSION_TIMEOUT:-90}" openocd "${OPENOCD_ARGS[@]}" "${OPENOCD_SPEED_ARGS[@]}" \
     -c 'init' \
     -c 'targets bcm2712.cpu0' \
     -c 'halt' \
@@ -185,11 +218,22 @@ timeout --foreground "$OPENOCD_TIMEOUT" openocd "${OPENOCD_ARGS[@]}" "${OPENOCD_
     -c "mww $((CACHE_PUBLISH_ADDR + 24)) 0xd5033f9f" \
     -c "mww $((CACHE_PUBLISH_ADDR + 28)) 0xd5033fdf" \
     -c "mww $((CACHE_PUBLISH_ADDR + 32)) 0x14000000" \
-    -c "reg cpsr $RESET_CPSR" \
-    -c "reg x0 $PSCI_SYSTEM_RESET" \
-    -c "reg pc $RESET_ADDR" \
+    "${RESET_FIND_SMC[@]}" \
+    -c "if {\$takibi_smc != 0} {
+            reg cpsr $RESET_CPSR
+            reg x0 $PSCI_SYSTEM_RESET
+            reg pc \$takibi_smc
+        }" \
     -c 'resume' \
-    -c 'shutdown' > /dev/null 2>&1 || true
+    -c 'shutdown' > "$RESET_LOG" 2>&1 || true
+if [ "$preflight_mode" = "EL1H" ] && ! grep -q 'takibi-reset: smc #0 at' "$RESET_LOG"; then
+    echo "error: could not find the resident kernel's smc #0 for PSCI SYSTEM_RESET -- log follows" >&2
+    cat "$RESET_LOG" >&2
+    rm -f "$RESET_LOG"
+    exit 1
+fi
+grep 'takibi-reset:' "$RESET_LOG" || true
+rm -f "$RESET_LOG"
 
 # Full SD-card boot (EEPROM -> TF-A -> config.txt -> kernel_2712.img)
 # takes noticeably longer than the reset itself. A successful SWD reconnect
