@@ -6127,6 +6127,28 @@ fn stored_release(holder: sink StoredHolder[k]) { stored_drop(holder.token); }
     (expect_ok (no_address_array_field_prelude ^ "fn r(o: L[1], o2: L[1]) -> u8 { let l: L[1] = mkl(o); fin(l); let mut l: L[1] = mkl(o2); let v: u8 = l.a[1]; fin(l); return v; }"));
   Alcotest.test_case "#1279: a let-else binder still indexes" `Quick
     (expect_ok (no_address_array_field_prelude ^ "variant W { A(P); B; } fn w(g: *P) -> W { return W::A(mkp(g)); } fn r(g: *P) -> u8 { let W::A(p) = w(g) else { W::B => { return 0; } }; return p.a[1]; }"));
+  (* #1281: which binding a name means is tyenv's scoping, not the name. The
+     binders are indexed because an immutable let of an unindexed struct is
+     refused at the binding, whatever it holds. *)
+  Alcotest.test_case "#1281: an immutable let shadowing a let-else binder" `Quick
+    (expect_type_error "of immutable binding 'q'"
+      (no_address_array_field_prelude ^ "variant W { A(N[1]); B; } fn w(g: *N[1]) -> W { let mut n: N[1] = *g; return W::A(n); } fn r(g: *N[1]) -> u8 { let W::A(q) = w(g) else { W::B => { return 0; } }; let q: N[1] = *g; return q.s.a[1]; }"));
+  Alcotest.test_case "#1281: a let-else binder in a block leaves an outer immutable let" `Quick
+    (expect_type_error "of immutable binding 'q'"
+      (no_address_array_field_prelude ^ "variant W { A(N[1]); B; } fn w(g: *N[1]) -> W { let mut n: N[1] = *g; return W::A(n); } fn r(g: *N[1], c: bool) -> u8 { let q: N[1] = *g; if (c) { let W::A(q) = w(g) else { W::B => { return 0; } }; let v: u8 = q.s.a[1]; } return q.s.a[1]; }"));
+  Alcotest.test_case "#1281: an immutable let in a block leaves a let-else binder" `Quick
+    (expect_ok (no_address_array_field_prelude ^ "variant W { A(N[1]); B; } fn w(g: *N[1]) -> W { let mut n: N[1] = *g; return W::A(n); } fn r(g: *N[1], c: bool) -> u8 { let W::A(q) = w(g) else { W::B => { return 0; } }; if (c) { let q: N[1] = *g; let v: u8 = q.s.b; } return q.s.a[1]; }"));
+  Alcotest.test_case "#1281: a let-else binder keeps its address across a join" `Quick
+    (expect_ok (no_address_array_field_prelude ^ "variant W { A(N[1]); B; } fn w(g: *N[1]) -> W { let mut n: N[1] = *g; return W::A(n); } fn r(g: *N[1], c: bool) -> u8 { let W::A(q) = w(g) else { W::B => { return 0; } }; while (c) { if (c) { return 1; } } return q.s.a[1]; }"));
+  Alcotest.test_case "#1281: address of an array element of an immutable binding" `Quick
+    (expect_type_error "of immutable binding 'l'"
+      (no_address_array_field_prelude ^ "fn r(o: L[1]) { let l: L[1] = mkl(o); let q: *u8 = &l.a[1]; fin(l); }"));
+  Alcotest.test_case "#1281: assignment to an array element of an immutable binding" `Quick
+    (expect_type_error "of immutable binding 'l'"
+      (no_address_array_field_prelude ^ "fn r(o: L[1]) { let l: L[1] = mkl(o); l.a[1] = 3; fin(l); }"));
+  Alcotest.test_case "#1281: address of an array element of a call result" `Quick
+    (expect_type_error "of a call's result"
+      (no_address_array_field_prelude ^ "fn r(g: *P) -> *u8 { return &mkp(g).a[1]; }"));
   Alcotest.test_case "#1279: a global still indexes" `Quick
     (expect_ok (no_address_array_field_prelude ^ "let mut h: P; fn r() -> u8 { return h.a[1]; }"));
   Alcotest.test_case "Slice 1: immutable indexed owner fields cannot be assigned" `Quick

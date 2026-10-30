@@ -516,10 +516,13 @@ let rec is_integer_ty t =
 let place_static_identities : static_term StringMap.t ref = ref StringMap.empty
 let global_address_names : StringSet.t ref = ref StringSet.empty
 let locally_bound_names : StringSet.t ref = ref StringSet.empty
-(* Names a `LetMatch` (let-match, let-else) bound in the current function.
-   Its binder is immutable afterwards but codegen stores it in a stack slot,
-   so unlike another immutable binding it has an address (#1279). *)
-let let_match_bound_names : StringSet.t ref = ref StringSet.empty
+(* The immutable binders a `LetMatch` (let-match, let-else) made in the current
+   function, as their tyenv entries. Such a binder is immutable afterwards but
+   codegen stores it in a stack slot, so unlike another immutable binding it has
+   an address (#1279). The entry, compared physically, rather than the name: a
+   later or an enclosing immutable `let` of that name has its own entry, and
+   tyenv's scoping decides which of them a use means (#1281). *)
+let let_match_binder_entries : (string * (ty * bool)) list ref = ref []
 let active_readonly_borrows : StringSet.t ref = ref StringSet.empty
 let function_param_modes : Ast.type_expr option list StringMap.t ref =
   ref StringMap.empty
@@ -6769,9 +6772,10 @@ and check_array_field_base_has_address ~fname senv eenv tyenv fenv
               temporary with no address; bind it with `let mut` first" fname))
        | Ast.Var name
          when StringSet.mem name !locally_bound_names
-              && not (StringSet.mem name !let_match_bound_names)
               && (match StringMap.find_opt name tyenv with
-                  | Some (_, false) -> true
+                  | Some ((_, false) as entry) ->
+                      not (List.exists (fun (n, e) -> n = name && e == entry)
+                             !let_match_binder_entries)
                   | _ -> false) ->
            raise (TypeError (base.loc, Printf.sprintf
              "cannot use array field '.%s' of immutable binding '%s': it has \
@@ -8382,7 +8386,6 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       value_static_identities := StringMap.remove name !value_static_identities;
       invalidate_place_binding name;
       locally_bound_names := StringSet.add name !locally_bound_names;  (* issue #214 *)
-      let_match_bound_names := StringSet.add name !let_match_bound_names;
       let ty = of_ast_opt ty_opt in
       let tyenv' = StringMap.add name (ty, true) tyenv in
       let raw_locals' = StringMap.add name ty raw_locals in
@@ -8399,7 +8402,12 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
           "stable owner container storage must be a private mutable global, not a local value"));
       record_stmt_binding_type s 0 ty;
       let tyenv''' =
-        if is_mut then tyenv'' else StringMap.add name (ty, false) tyenv''
+        if is_mut then tyenv''
+        else begin
+          let entry = (ty, false) in
+          let_match_binder_entries := (name, entry) :: !let_match_binder_entries;
+          StringMap.add name entry tyenv''
+        end
       in
       (tyenv''', raw_locals'')
 
@@ -8604,7 +8612,7 @@ let infer_func ~key senv eenv fenv genv (fdef : Ast.func) : func_info =
     (* GitHub issue #214: reset per function, then seed with this
        function's own parameter names -- see locally_bound_names' own
        comment. *)
-    let_match_bound_names := StringSet.empty;
+    let_match_binder_entries := [];
     locally_bound_names := StringSet.empty;
     active_binding_exclusions := IntMap.empty;
     List.iter (fun (name, _) ->
@@ -9283,7 +9291,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         Hashtbl.replace private_functions name (Ast.source_file_of_loc def_loc)
     | _ -> ()
   ) prog;
-  let_match_bound_names := StringSet.empty;
+  let_match_binder_entries := [];
   locally_bound_names := StringSet.empty;
   opaque_struct_names_all := opaque_names;
   Hashtbl.reset private_opaque_types;
