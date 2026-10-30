@@ -22,6 +22,7 @@ docs/talks/*/review/
 # the ordinary, git-tracked kernel/arch/arm64/kernel/exception_context.inc,
 # which holds the hand-written SAVE/RESTORE macro bodies and is NOT gitignored.
 kernel/arch/arm64/kernel/exception_context_offsets.inc
+kernel/arch/arm64/kernel/exception_context_offsets.inc.d
 
 # ocamlbuild working directory
 _build/

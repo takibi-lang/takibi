@@ -530,3 +530,7 @@ condition below applies, and reports the land afterwards.
 - #709/#710 (after the #1224 audit found no handle crossing the syscall boundary): #709 (a) at release the slot at the last generation retires instead of returning to Free, public API unchanged, with a test-only boundary injection; #710 (a) the insert outcome gains an `Exhausted` case, refused before any freelist mutation.
 - #755: (a) an immutable integer binding keeps one static for its lifetime; (d) versioned statics for mutable bindings is considered later if a consumer needs it.
 - #901: (c) now, (b) through #1000's chokepoint as tracked in #1225; no separate mask-restore path (a).
+
+## 2026-10-30 maintainer decisions, third batch
+- #779: (c) for now: line alignment is decided at each device-protocol P_init from the concrete b and o after monomorphization; (a), a visible `region line(T)` kind, remains the growth path if #1006 wants it spelled (issue #779 comment).
+- #774: (A) with the handled set as a per-platform `enum IrqSource` instead of a const array: the IAR id is converted with the checked `match id as IrqSource { ... miss => ... }` (#608), claims are per-variant (`IrqClaim[Pmu]`), source clears take only their own claim and return `IrqAcked`, EOI takes only `IrqAcked`, `miss` consumes the claim through `irq_unclaimed`. Disequality facts are implemented when a consumer first needs them (issue filed 2026-10-30).
