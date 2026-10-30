@@ -114,6 +114,10 @@ checkpoint on main is not a reason to come back: the coordinator's rebase
 review for the rebased head, but only if your review was current for your
 own head, which is what this rule guarantees.
 
+When the branch changes kernel code or layout, also run `make
+kernel-memory-map-check` on the final head: it needs the two kernel builds and
+no QEMU, and a stale row stopped #1013's land in allcheck's prebuild.
+
 Also run, on the final head after the rebase, `make langcheck linuxcheck test`
 in full -- not only the lanes you think your change touches. They take
 minutes and need no board, and they are the land's own prechecks: on
