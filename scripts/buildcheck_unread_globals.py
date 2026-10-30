@@ -6,12 +6,9 @@ GitHub issue #1263: #1259 deleted two counters nothing read and a survey found
 ten more, each paying for a store and a line of comment promising a reader
 that did not exist. Reads the `--facts globals.tsv` uses table of both kernels
 (docs/GLOBAL_PROTECTION.md) and refuses a global, across the union, whose every
-use is a plain assignment or a whole-statement atomic_word_store or
-atomic_word_fetch_add on one line.
-
-The table says `address` for `&g` without saying what the callee does, so the
-atomic case reads the use's source line. A use it cannot classify counts as a
-read: the check can miss a write-only global, never refuse a read one.
+use is `write` or `atomic_store`. The table classifies each use, so nothing here
+reads a source line (#1275): an unclassified use counts as a read, and the check
+can miss a write-only global, never refuse a read one.
 
 A `dma_fixed` global is skipped: the compiler reaches it through its generated
 owner, so its name is never used. A reader the table cannot see: scripts/*.gdb
@@ -20,12 +17,11 @@ reading by symbol (named in a gdb file).
 GitHub issue #1270: the converse. #1012 found two TCP words nothing ever set,
 with dead branches behind them. A scalar or single AtomicWord global with at
 least one use, none of which can write it, is refused: it should be a `let`, or
-gone with its branches. Only those types: an array or struct can be written
-through a pointer its plain read or cast yields, which the table cannot see. An
-`address` use writes unless every `&g` on its line is an atomic_word_load. A
-writer the table cannot see: a debugger setting the symbol, declared in
-scripts/debugger_set_globals.tsv with a script that sets it (#1273, since any
-mention used to pass). A row is refused when its script has no assignment of
+gone with its branches. A `load` or `atomic_load` cannot write. A `read`, `index`
+or `cast` of an array or struct can yield a pointer something writes through, so
+it counts as a write. A writer the table cannot see: a debugger setting the
+symbol, declared in scripts/debugger_set_globals.tsv with a script that sets it
+(#1273, since any mention used to pass). A row is refused when its script has no assignment of
 the name, when the name is not a global, and when the program also writes it.
 
 Usage: buildcheck_unread_globals.py QEMU.facts/globals.tsv RPI5.facts/globals.tsv
@@ -44,9 +40,12 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUILTIN = "<builtin"
 SCALAR = re.compile(r"^(bool|[iu](8|16|32|64)|isize|usize|u16be|u32be|fn|AtomicWord|\*.*)$")
 DEBUGGER_SET = "scripts/debugger_set_globals.tsv"
-SLICE_EQ_OR_CONST = re.compile(r"\bslice_eq\(|\bas\s+\[\]const\b")
-ATOMIC_WRITE_ONLY = re.compile(
-    r"^\s*atomic_word_(store|fetch_add|fetch_sub)\(&[^;]*\);\s*$")
+WRITE_ONLY = {"write", "atomic_store"}
+# Never writes, whatever the global's type.
+CANNOT_WRITE = {"load", "atomic_load"}
+# Yields a scalar's value, but an array's or struct's decayed pointer, which the
+# table cannot follow.
+VALUE_ONLY = {"read", "index", "cast"}
 
 
 def load(path: pathlib.Path, globs: dict, uses: dict) -> None:
@@ -64,44 +63,14 @@ def load(path: pathlib.Path, globs: dict, uses: dict) -> None:
             globs[row[2]] = (row[0], row[5])
 
 
-def is_write_only(use: tuple[str, int, str], root: pathlib.Path) -> bool:
-    file, line, kind = use
-    if kind == "write":
-        return True
-    if kind != "address":
+def is_write_only(use: tuple[str, int, str]) -> bool:
+    return use[2] in WRITE_ONLY
+
+
+def writes(use: tuple[str, int, str], kind: str) -> bool:
+    if use[2] in CANNOT_WRITE or (SCALAR.match(kind) and use[2] in VALUE_ONLY):
         return False
-    source = (root / file).read_text(encoding="utf-8").splitlines()[line - 1]
-    return ATOMIC_WRITE_ONLY.match(source) is not None
-
-
-def may_write(use: tuple[str, int, str], name: str, root: pathlib.Path) -> bool:
-    file, line, kind = use
-    if kind == "write" or kind == "region":
-        return True
-    if kind != "address":
-        return False
-    source = (root / file).read_text(encoding="utf-8").splitlines()[line - 1]
-    addresses = len(re.findall(rf"&{re.escape(name)}\b", source))
-    loads = len(re.findall(rf"atomic_word_load\(&{re.escape(name)}\b", source))
-    return addresses == 0 or loads != addresses
-
-
-def composite_may_write(use: tuple[str, int, str], name: str,
-                        root: pathlib.Path) -> bool:
-    """`may_write` for an array or struct: only a source line that shows a read
-    clears a use. One use per line, since the table's kinds are per use."""
-    file, line, kind = use
-    if kind not in ("index", "cast"):
-        return may_write(use, name, root) or kind == "read"
-    source = (root / file).read_text(encoding="utf-8").splitlines()[line - 1]
-    word = re.escape(name)
-    if len(re.findall(rf"\b{word}\b", source)) != 1:
-        return True
-    if kind == "index" and re.search(
-            rf"\b{word}\[[^\[\]]*\](?!\s*(\.|\[|as\b))", source) \
-            and ".." not in source:
-        return False
-    return SLICE_EQ_OR_CONST.search(source) is None
+    return True
 
 
 def sets_by_debugger(script: str, name: str) -> bool:
@@ -109,12 +78,6 @@ def sets_by_debugger(script: str, name: str) -> bool:
     word = re.escape(name)
     return re.search(rf"&{word}\s*=\s*\d|\b{word}\s+\d\b|\"{word}\",\s*\"\d\"",
                      script) is not None
-
-
-def writes(use: tuple[str, int, str], name: str, kind: str, root: pathlib.Path) -> bool:
-    if SCALAR.match(kind):
-        return may_write(use, name, root)
-    return composite_may_write(use, name, root)
 
 
 def declared_debugger_set(globs: dict, uses: dict, root: pathlib.Path) -> tuple[set, list]:
@@ -126,7 +89,7 @@ def declared_debugger_set(globs: dict, uses: dict, root: pathlib.Path) -> tuple[
         declared.add(name)
         if name not in globs:
             errors.append(f"{DEBUGGER_SET}: {name} is not a global")
-        elif any(writes(use, name, globs[name][1], root) for use in uses[name]):
+        elif any(writes(use, globs[name][1]) for use in uses[name]):
             errors.append(f"{DEBUGGER_SET}: {name} is written by the program")
         path = root / setter
         if not path.is_file() or not sets_by_debugger(
@@ -141,7 +104,7 @@ def find_unwritten(globs: dict, uses: dict, root: pathlib.Path) -> list[str]:
         if file.startswith(BUILTIN) or not uses[name]:
             continue
         if name not in declared \
-                and not any(writes(use, name, kind, root) for use in uses[name]):
+                and not any(writes(use, kind) for use in uses[name]):
             unwritten.append(f"{file}: {name} is never written")
     return unwritten
 
@@ -153,7 +116,7 @@ def find_unread(globs: dict, uses: dict, root: pathlib.Path) -> list[str]:
     for name, (file, _) in sorted(globs.items()):
         if file.startswith(BUILTIN):
             continue
-        if all(is_write_only(use, root) for use in uses[name]) \
+        if all(is_write_only(use) for use in uses[name]) \
                 and not re.search(rf"\b{re.escape(name)}\b", outside):
             unread.append(f"{file}: {name} is never read")
     return unread

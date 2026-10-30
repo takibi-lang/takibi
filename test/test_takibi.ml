@@ -3222,7 +3222,7 @@ let infer_tests = [
       let rows = String.split_on_char '\n' (Buffer.contents buf)
                  |> List.filter (( <> ) "") in
       Alcotest.(check bool) "format line" true
-        (String.starts_with ~prefix:"# takibi globals, format 2" (List.hd rows));
+        (String.starts_with ~prefix:"# takibi globals, format 3" (List.hd rows));
       let protection name =
         match List.find_opt (fun r ->
           List.nth (String.split_on_char '\t' r) 2 = name) (List.tl (List.tl rows)) with
@@ -24091,8 +24091,64 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
          true (has "handler" "read" "dispatch" "defs.tkb");
        Alcotest.(check bool) "a parameter shadows a called global" false
          (has "handler" "read" "shadow_call" "defs.tkb");
-       Alcotest.(check bool) "g[1] in another file indexes g" true (has "g" "index" "reader" "user.tkb");
+       Alcotest.(check bool) "g[1] in another file loads g" true (has "g" "load" "reader" "user.tkb");
        Alcotest.(check bool) "h as usize casts h" true (has "h" "cast" "reader" "user.tkb"));
+
+  (* GitHub issue #1275: the table itself says when a use is a read, so
+     scripts/buildcheck_unread_globals.py reads no source line. *)
+  Alcotest.test_case "issue #1275: the uses table tells a scalar read and an atomic's direction from a decayed pointer" `Quick
+    (fun () ->
+       Compilation_state.reset ();
+       let lexbuf = Lexing.from_string
+         "struct S { a: usize; b: [u8; 4]; }
+          let mut s: S;
+          let mut w: AtomicWord;
+          let mut bytes: [u8; 4];
+          let mut s2: [u8; 4];
+          fn field() -> usize { return s.a; }
+          fn decays() -> *u8 { return s.b as *u8; }
+          fn whole() -> []u8 { return bytes[0..<2]; }
+          fn elem() -> u8 { return bytes[1]; }
+          fn eq(x: []const u8) -> bool {
+            return slice_eq(
+              bytes[0..<4],
+              x);
+          }
+          fn eq_cast(x: []const u8) -> bool { return slice_eq(x, s2 as []u8); }
+          fn konst() -> []const u8 { return bytes as []const u8; }
+          fn stores() {
+            atomic_word_store(
+              &w,
+              1);
+          }
+          fn adds() { atomic_word_fetch_add(&w, 1); }
+          fn used() -> usize { return atomic_word_fetch_add(&w, 1); }
+          fn loads() -> usize { return atomic_word_load(&w); }" in
+       Lexing.set_filename lexbuf "a.tkb";
+       let prog = Parser.program Lexer.read lexbuf in
+       let path = Filename.temp_file "takibi-uses-" ".tsv" in
+       let out = open_out path in
+       Global_protection.write_uses out prog;
+       close_out out;
+       let rows = In_channel.with_open_bin path In_channel.input_lines in
+       let has name kind fn =
+         List.exists (fun r ->
+           match String.split_on_char '\t' r with
+           | [_; _; n; k; func] -> n = name && k = kind && func = fn
+           | _ -> false) rows in
+       let check what name kind fn =
+         Alcotest.(check bool) what true (has name kind fn) in
+       check "a scalar field loads" "s" "load" "field";
+       check "an array field decays to a read" "s" "read" "decays";
+       check "a slice stays an index" "bytes" "index" "whole";
+       check "a scalar element loads" "bytes" "load" "elem";
+       check "a multi-line slice_eq operand loads" "bytes" "load" "eq";
+       check "a cast slice_eq operand loads" "s2" "load" "eq_cast";
+       check "a const-slice cast loads" "bytes" "load" "konst";
+       check "a multi-line store is an atomic_store" "w" "atomic_store" "stores";
+       check "a whole-statement add is an atomic_store" "w" "atomic_store" "adds";
+       check "a used add stays an address" "w" "address" "used";
+       check "a load is an atomic_load" "w" "atomic_load" "loads");
 
   Alcotest.test_case "opaque handle pointers codegen without a concrete layout" `Quick
     (expect_codegen_ok

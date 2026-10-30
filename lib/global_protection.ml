@@ -25,7 +25,7 @@
 
 open Ast
 
-let format_version = 2
+let format_version = 3
 
 let columns = [ "file"; "line"; "name"; "visibility"; "qualifier"; "type"; "protection" ]
 
@@ -111,7 +111,14 @@ let write_table (out : out_channel) (prog : toplevel list) =
 
    - `write`   the root of an assignment's target (`g = ..`, `g.f = ..`,
                `g[i] = ..`);
-   - `address` the root of `&g`, `&g.f`, `&g[i]`;
+   - `atomic_store` `&g..` given to a whole-statement atomic_word_store,
+               atomic_word_fetch_add or atomic_word_fetch_sub: it writes and
+               nothing sees the old value;
+   - `atomic_load` `&g..` given to atomic_word_load: it reads and cannot write;
+   - `address` any other root of `&g`, `&g.f`, `&g[i]`;
+   - `load`    a read that yields no pointer into `g` (GitHub issue #1275): a
+               field or element path of scalar type (`g.f`, `g[i]`, `g[i].f`),
+               an operand of slice_eq, or a cast to a const slice;
    - `region`  the operand of a region claim (`region_of(g)`);
    - `index`   the base of an index or slice (`g[i]`, `g[a..<b]`);
    - `cast`    the operand of a cast (`g as T`);
@@ -137,9 +144,60 @@ let write_uses (out : out_channel) (prog : toplevel list) =
     | Var n -> Some (n, e)
     | FieldGet (b, _) | Index (b, _) | SliceOf (b, _, _) -> root b
     | _ -> None in
+  (* Declared types, to tell a scalar path from one that decays to a pointer.
+     Anything not resolved here (a generic field, a named alias) stays `read`,
+     the weaker claim. Parameters of a generic struct are not resolved. *)
+  let global_types = List.fold_left (fun acc -> function
+    | LetDef (name, Some ty, _, _, _, _, _) -> (name, ty) :: acc
+    | _ -> acc) [] prog in
+  let struct_fields = List.filter_map (function
+    | StructDef (name, fs, _, _, _, _)
+    | OwnedStructDef (name, _, _, fs, _, _, _, _, _) -> Some (name, fs)
+    | _ -> None) prog in
+  let rec strip = function
+    | TypeRefined (_, _, t) | TypeMultiple (_, t) | TypeSingleton (t, _) -> strip t
+    | t -> t in
+  let rec path_type (e : expr) = match e.desc with
+    | Var n -> List.assoc_opt n global_types
+    | FieldGet (b, f) ->
+        (match Option.map strip (path_type b) with
+         | Some (TypeNamed s | TypePtr (TypeNamed s)) ->
+             Option.bind (List.assoc_opt s struct_fields) (List.assoc_opt f)
+         | _ -> None)
+    | Index (b, _) ->
+        (match Option.map strip (path_type b) with
+         | Some (TypeArray (t, _) | TypeArraySym (t, _) | TypePtr t | TypeSlice (t, _, _)) ->
+             Some t
+         | _ -> None)
+    | _ -> None in
+  let is_scalar_path e = match Option.map strip (path_type e) with
+    | Some (TypeBool | TypeI8 | TypeI16 | TypeI32 | TypeI64 | TypeU8 | TypeU16
+           | TypeU32 | TypeU64 | TypeU16Be | TypeU32Be | TypeIsize | TypeUsize
+           | TypePtr _ | TypeFn _) -> true
+    | _ -> false in
+  let global_root locals e = match root e with
+    | Some (n, v) when S.mem n globals && not (S.mem n locals) -> Some (n, v)
+    | _ -> None in
   let rec expr fn locals kind (e : expr) =
     let sub = expr fn locals "read" in
+    (* A place rooted at a global that the row itself classifies; its index
+       and slice operands are ordinary reads. *)
+    let place kind (place : expr) (n, v) =
+      row fn v n kind; lvalue_parts fn locals place in
     match e.desc with
+    | FieldGet _ | Index _ when is_scalar_path e && global_root locals e <> None ->
+        place "load" e (Option.get (global_root locals e))
+    | Call ("atomic_word_load", [ { desc = AddrOf inner; _ } ])
+      when global_root locals inner <> None ->
+        place "atomic_load" inner (Option.get (global_root locals inner))
+    | Call ("slice_eq", args) ->
+        List.iter (fun (a : expr) ->
+          let a = match a.desc with Cast (_, inner) -> inner | _ -> a in
+          match global_root locals a with
+          | Some g -> place "load" a g
+          | None -> sub a) args
+    | Cast (TypeSlice (_, _, SliceReadonly), inner) when global_root locals inner <> None ->
+        place "load" inner (Option.get (global_root locals inner))
     | Var n ->
         if S.mem n globals && not (S.mem n locals) then row fn e n kind
     | Assign (lhs, rhs) ->
@@ -190,6 +248,18 @@ let write_uses (out : out_channel) (prog : toplevel list) =
   and stmt fn locals (s : stmt) =
     let e = expr fn locals "read" in
     match s.desc with
+    | Expr { desc = Call (("atomic_word_store" | "atomic_word_fetch_add"
+                          | "atomic_word_fetch_sub"),
+                          { desc = AddrOf inner; _ } :: rest); _ }
+      when (match root inner with
+            | Some (n, _) -> S.mem n globals && not (S.mem n locals)
+            | None -> false) ->
+        (match root inner with
+         | Some (n, v) -> row fn v n "atomic_store"
+         | None -> ());
+        lvalue_parts fn locals inner;
+        List.iter e rest;
+        locals
     | Return (Some x) | Expr x | Yield x | StaticAssert (x, _) -> e x; locals
     | Return None | Break | Continue -> locals
     | Block b | UnsafeBlock b -> stmts fn locals b; locals

@@ -27,7 +27,7 @@ and the second names the columns:
 | `type` | the declared type, spelled compactly (`[AtomicWord;4]`, `LockedCell(usize)`) |
 | `protection` | one class below |
 
-## The uses table (format 2, GitHub issue #769)
+## The uses table (format 3, GitHub issues #769 and #1275)
 
 After the globals' rows, a line `# uses` and a column header start a
 second table: one row per use of a global anywhere in the program,
@@ -38,7 +38,7 @@ shadows the global for the rest of its scope).
 | --- | --- |
 | `file`, `line` | where the use is |
 | `name` | the global |
-| `kind` | `write` (root of an assignment target), `address` (`&g`, `&g.f`, `&g[i]`), `region` (`region_of(g)`), `index` (`g[i]`, `g[a..<b]`), `cast` (`g as T`), or `read` (any other use, including `g(x)` through a global function pointer) |
+| `kind` | `write` (root of an assignment target), `atomic_store` (`&g..` given to a whole-statement `atomic_word_store`, `atomic_word_fetch_add` or `atomic_word_fetch_sub`), `atomic_load` (`&g..` given to `atomic_word_load`), `address` (any other `&g`, `&g.f`, `&g[i]`), `region` (`region_of(g)`), `load` (a read that yields no pointer into `g`: a path of scalar type such as `g.f`, `g[i]`, `g[i].f`, an operand of `slice_eq`, or a cast to a const slice), `index` (any other `g[i]`, `g[a..<b]`), `cast` (any other `g as T`), or `read` (any other use, including an array field `g.f` and `g(x)` through a global function pointer) |
 | `function` | the function containing the use; `-` for another global's initializer |
 
 It is the inventory a migration of a global needs (#637's region seal,
@@ -76,20 +76,18 @@ boot") is `none` until its type says so.
 ## Unread globals
 
 `scripts/buildcheck_unread_globals.py` reads the uses table of both kernels and
-refuses a global only ever assigned or atomically stored. `address` does not
-say what a callee does, so an atomic use is classified from its source line, and
-an unclassifiable one counts as a read: it can miss a case, never refuse a
-real reader.
+refuses a global whose every use is `write` or `atomic_store`. It reads no source
+line, and any other kind counts as a read: it can miss a case, never refuse a real
+reader.
 
-The same check refuses the converse: a scalar or single `AtomicWord` global with
-uses, none of which can write it. An `address` use counts as a write unless it
-is an `atomic_word_load`. A flag a debugger sets is declared in
+The same check refuses the converse: a global with uses, none of which can write
+it. `load` and `atomic_load` cannot write. `read`, `index` and `cast` cannot write
+a scalar or single `AtomicWord`, but an array or struct can be written through the
+pointer or slice they yield, so for one of those they count as a write, as does any
+`address` use. A flag a debugger sets is declared in
 `scripts/debugger_set_globals.tsv` (`name`, `setter`): a row is refused when the
 named script has no assignment of the symbol, when the name is not a global, and
-when the program also writes it. An array or struct can be written through a pointer
-or slice its plain read or cast yields, so it is judged only from uses whose
-source line shows a read: a single element `g[i]`, an argument of `slice_eq`, a
-cast to a const slice. Any other use counts as a write.
+when the program also writes it.
 
 ## The ratchet
 

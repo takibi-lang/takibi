@@ -15,7 +15,7 @@ import sys
 import buildcheck_global_protection as g
 from pass_line import report_pass
 
-HEAD = "# takibi globals, format 2; see docs/GLOBAL_PROTECTION.md\n" + "\t".join(g.COLUMNS) + "\n"
+HEAD = "# takibi globals, format 3; see docs/GLOBAL_PROTECTION.md\n" + "\t".join(g.COLUMNS) + "\n"
 
 
 def table(*rows):
@@ -71,7 +71,7 @@ def main():
     expect("no production rows is refused",
            refused(lambda: g.globals_of([("t", table(row("kernel/tests/t.tkb", "x")))])))
     expect("other format is refused",
-           refused(lambda: g.parse_table(HEAD.replace("format 2", "format 1"), "t")))
+           refused(lambda: g.parse_table(HEAD.replace("format 3", "format 1"), "t")))
     # GitHub issue #769: format 2's uses table follows the rows.
     expect("the uses table after the rows is not read as globals",
            len(g.parse_table(table(row("kernel/a.tkb", "x", "atomic"))

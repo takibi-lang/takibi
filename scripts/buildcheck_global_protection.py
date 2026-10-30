@@ -43,7 +43,7 @@ from pass_line import report_pass
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ALLOWLIST = ROOT / "scripts" / "global_protection_allowlist.tsv"
-FORMAT = 2
+FORMAT = 3
 USES_MARK = "# uses"
 HEADER = "# takibi globals, format "
 COLUMNS = ("file", "line", "name", "visibility", "qualifier", "type", "protection")

@@ -11,19 +11,12 @@ import tempfile
 from buildcheck_unread_globals import find_unread, find_unwritten, load, sets_by_debugger
 from pass_line import report_pass
 
-SOURCE = """\
-atomic_word_store(&stored, 0);
-atomic_word_fetch_add(&counted, 1);
-let v = atomic_word_fetch_add(&used, 1) + 1;
-atomic_word_load(&loaded);
-atomic_word_store(&gdb_read, 0);
-"""
 USES = {
-    "stored": [("a.tkb", 1, "address")],
-    "counted": [("a.tkb", 2, "address")],
+    "stored": [("a.tkb", 1, "atomic_store")],
+    "counted": [("a.tkb", 1, "atomic_store")],
     "used": [("a.tkb", 3, "address")],
-    "loaded": [("a.tkb", 4, "address")],
-    "gdb_read": [("a.tkb", 5, "address")],
+    "loaded": [("a.tkb", 1, "atomic_load")],
+    "gdb_read": [("a.tkb", 1, "atomic_store")],
     "assigned": [("a.tkb", 1, "write")],
     "read_too": [("a.tkb", 1, "write"), ("a.tkb", 1, "read")],
 }
@@ -31,18 +24,6 @@ GLOBALS = {name: ("a.tkb", "usize") for name in USES}
 GLOBALS.update({"unused": ("a.tkb", "usize"),
                 "claim": ("<builtin region>", "usize")})
 EXPECTED = ["assigned", "counted", "stored", "unused"]
-WRITTEN_SOURCE = """\
-let v = atomic_word_load(&only_loaded);
-atomic_word_store(&stored_word, 0);
-fill(&passed);
-if (slice_eq(bytes, table as []u8)) {
-let v = element[i];
-let v = view as []const u8;
-fill(given as []u8);
-let s = sliced[0..<4];
-let p = decayed;
-let v = table_twice as []u8; slice_eq(table_twice as []u8, x);
-"""
 WRITTEN_GLOBALS = {
     "never_set": ("a.tkb", "bool"),
     "only_loaded": ("a.tkb", "AtomicWord"),
@@ -58,27 +39,29 @@ WRITTEN_GLOBALS = {
     "given": ("a.tkb", "[u8;4]"),
     "sliced": ("a.tkb", "[u8;4]"),
     "decayed": ("a.tkb", "[u8;4]"),
-    "table_twice": ("a.tkb", "[u8;4]"),
+    "field_read": ("a.tkb", "Fields"),
+    "field_decayed": ("a.tkb", "Fields"),
     "no_use": ("a.tkb", "usize"),
 }
 WRITTEN_USES = {
     "never_set": [("a.tkb", 1, "read")],
-    "only_loaded": [("a.tkb", 1, "address")],
-    "stored_word": [("a.tkb", 2, "address")],
+    "only_loaded": [("a.tkb", 1, "atomic_load")],
+    "stored_word": [("a.tkb", 1, "atomic_store")],
     "passed": [("a.tkb", 3, "address")],
     "set_here": [("a.tkb", 1, "read"), ("a.tkb", 1, "write")],
     "set_by_runner": [("a.tkb", 1, "read")],
     "only_mentioned": [("a.tkb", 1, "read")],
     "array": [("a.tkb", 1, "cast")],
-    "table": [("a.tkb", 4, "cast")],
-    "element": [("a.tkb", 5, "index")],
-    "view": [("a.tkb", 6, "cast")],
+    "table": [("a.tkb", 1, "load")],
+    "element": [("a.tkb", 1, "load")],
+    "view": [("a.tkb", 1, "load")],
     "given": [("a.tkb", 7, "cast")],
     "sliced": [("a.tkb", 8, "index")],
     "decayed": [("a.tkb", 9, "read")],
-    "table_twice": [("a.tkb", 10, "cast")],
+    "field_read": [("a.tkb", 1, "load")],
+    "field_decayed": [("a.tkb", 1, "read")],
 }
-WRITTEN_EXPECTED = ["element", "never_set", "only_loaded", "only_mentioned", "table", "view"]
+WRITTEN_EXPECTED = ["element", "field_read", "never_set", "only_loaded", "only_mentioned", "table", "view"]
 DECLARATIONS = "name\tsetter\nset_by_runner\tscripts/run.sh\n"
 # One bad row each: not a global, a global the program writes, a script that
 # only mentions the name, and a script that does not exist.
@@ -102,7 +85,6 @@ SETTER_SHAPES = {
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         root = pathlib.Path(tmp)
-        (root / "a.tkb").write_text(SOURCE)
         (root / "scripts").mkdir()
         (root / "scripts/p.gdb").write_text("x/4gu &gdb_read\n")
         table = root / "globals.tsv"
@@ -122,7 +104,6 @@ def main() -> int:
         uses = collections.defaultdict(list, USES)
         got = [row.split(": ")[1].split()[0]
                for row in find_unread(GLOBALS, uses, root)]
-        (root / "a.tkb").write_text(WRITTEN_SOURCE)
         (root / "scripts/run.sh").write_text(
             "set &set_by_runner = 1\nawk only_mentioned\n")
         (root / "scripts/debugger_set_globals.tsv").write_text(DECLARATIONS)
