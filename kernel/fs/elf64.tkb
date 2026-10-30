@@ -113,7 +113,7 @@ must_use variant DistroElfPlanSegment {
 
 // EI_MAG0..EI_MAG3 ("\x7FELF"), EI_CLASS(2=ELFCLASS64), EI_DATA(1=little
 // endian), EI_VERSION(1=EV_CURRENT).
-let mut ELF_IDENT_MAGIC: [u8; 7] = {0x7F, 0x45, 0x4C, 0x46, 2, 1, 1};
+let ELF_IDENT_MAGIC: [u8; 7] = {0x7F, 0x45, 0x4C, 0x46, 2, 1, 1};
 
 // A PT_LOAD's page span as process_image_map_segments maps it: from the
 // page holding p_vaddr to the page after p_vaddr + p_memsz. The one

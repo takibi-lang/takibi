@@ -94,7 +94,6 @@ kernel/drivers/serial/uart_rx_ring.tkb	kernel_uart_rx_lines	unreviewed; 2026-10-
 kernel/drivers/serial/uart_rx_ring.tkb	kernel_uart_rx_marks	unreviewed; 2026-10-06 candidate-context: one terminal RX queue / process-run lock at kernel callers; DDB quiescence; host-native fixture is serial
 kernel/drivers/serial/uart_rx_ring.tkb	kernel_uart_rx_tail	unreviewed; 2026-10-06 candidate-context: one terminal RX queue / process-run lock at kernel callers; DDB quiescence; host-native fixture is serial
 kernel/drivers/virtio_used.tkb	virtio_used_reset_confirmed	unreviewed
-kernel/fs/elf64.tkb	ELF_IDENT_MAGIC	unreviewed; 2026-10-06 retain-immutable-data: ELF parser signature bytes / declaration initializer; reads only in validation
 kernel/fs/ext2/ext2.tkb	ext2_fence_pending	unreviewed; 2026-10-06 candidate-mount: writable filesystem mount / mutation admission; boot fixture single writer; explicit recovery
 kernel/fs/ext2/ext2.tkb	ext2_fence_pending_count	unreviewed; 2026-10-06 candidate-mount: writable filesystem mount / mutation admission; boot fixture single writer; explicit recovery
 kernel/fs/ext2/ext2.tkb	ext2_scratch	unreviewed; 2026-10-06 candidate-mount: per-CPU operations and one writable root mount / non-preemptible per-CPU scratch; mutation admission for recovery/fence state

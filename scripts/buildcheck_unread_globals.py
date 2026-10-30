@@ -44,6 +44,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUILTIN = "<builtin"
 SCALAR = re.compile(r"^(bool|[iu](8|16|32|64)|isize|usize|u16be|u32be|fn|AtomicWord|\*.*)$")
 DEBUGGER_SET = "scripts/debugger_set_globals.tsv"
+SLICE_EQ_OR_CONST = re.compile(r"\bslice_eq\(|\bas\s+\[\]const\b")
 ATOMIC_WRITE_ONLY = re.compile(
     r"^\s*atomic_word_(store|fetch_add|fetch_sub)\(&[^;]*\);\s*$")
 
@@ -85,11 +86,35 @@ def may_write(use: tuple[str, int, str], name: str, root: pathlib.Path) -> bool:
     return addresses == 0 or loads != addresses
 
 
+def composite_may_write(use: tuple[str, int, str], name: str,
+                        root: pathlib.Path) -> bool:
+    """`may_write` for an array or struct: only a source line that shows a read
+    clears a use. One use per line, since the table's kinds are per use."""
+    file, line, kind = use
+    if kind not in ("index", "cast"):
+        return may_write(use, name, root) or kind == "read"
+    source = (root / file).read_text(encoding="utf-8").splitlines()[line - 1]
+    word = re.escape(name)
+    if len(re.findall(rf"\b{word}\b", source)) != 1:
+        return True
+    if kind == "index" and re.search(
+            rf"\b{word}\[[^\[\]]*\](?!\s*(\.|\[|as\b))", source) \
+            and ".." not in source:
+        return False
+    return SLICE_EQ_OR_CONST.search(source) is None
+
+
 def sets_by_debugger(script: str, name: str) -> bool:
     """`set *(char *)&g = 1` in gdb, or the `g 1` and "g", "1" of a JTAG poke."""
     word = re.escape(name)
     return re.search(rf"&{word}\s*=\s*\d|\b{word}\s+\d\b|\"{word}\",\s*\"\d\"",
                      script) is not None
+
+
+def writes(use: tuple[str, int, str], name: str, kind: str, root: pathlib.Path) -> bool:
+    if SCALAR.match(kind):
+        return may_write(use, name, root)
+    return composite_may_write(use, name, root)
 
 
 def declared_debugger_set(globs: dict, uses: dict, root: pathlib.Path) -> tuple[set, list]:
@@ -101,7 +126,7 @@ def declared_debugger_set(globs: dict, uses: dict, root: pathlib.Path) -> tuple[
         declared.add(name)
         if name not in globs:
             errors.append(f"{DEBUGGER_SET}: {name} is not a global")
-        elif any(may_write(use, name, root) for use in uses[name]):
+        elif any(writes(use, name, globs[name][1], root) for use in uses[name]):
             errors.append(f"{DEBUGGER_SET}: {name} is written by the program")
         path = root / setter
         if not path.is_file() or not sets_by_debugger(
@@ -113,10 +138,10 @@ def declared_debugger_set(globs: dict, uses: dict, root: pathlib.Path) -> tuple[
 def find_unwritten(globs: dict, uses: dict, root: pathlib.Path) -> list[str]:
     declared, unwritten = declared_debugger_set(globs, uses, root)
     for name, (file, kind) in sorted(globs.items()):
-        if file.startswith(BUILTIN) or not SCALAR.match(kind) or not uses[name]:
+        if file.startswith(BUILTIN) or not uses[name]:
             continue
         if name not in declared \
-                and not any(may_write(use, name, root) for use in uses[name]):
+                and not any(writes(use, name, kind, root) for use in uses[name]):
             unwritten.append(f"{file}: {name} is never written")
     return unwritten
 

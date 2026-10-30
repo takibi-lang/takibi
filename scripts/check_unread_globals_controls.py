@@ -35,6 +35,13 @@ WRITTEN_SOURCE = """\
 let v = atomic_word_load(&only_loaded);
 atomic_word_store(&stored_word, 0);
 fill(&passed);
+if (slice_eq(bytes, table as []u8)) {
+let v = element[i];
+let v = view as []const u8;
+fill(given as []u8);
+let s = sliced[0..<4];
+let p = decayed;
+let v = table_twice as []u8; slice_eq(table_twice as []u8, x);
 """
 WRITTEN_GLOBALS = {
     "never_set": ("a.tkb", "bool"),
@@ -45,6 +52,13 @@ WRITTEN_GLOBALS = {
     "set_by_runner": ("a.tkb", "bool"),
     "only_mentioned": ("a.tkb", "bool"),
     "array": ("a.tkb", "[u8;4]"),
+    "table": ("a.tkb", "[u8;4]"),
+    "element": ("a.tkb", "[usize;4]"),
+    "view": ("a.tkb", "[u8;4]"),
+    "given": ("a.tkb", "[u8;4]"),
+    "sliced": ("a.tkb", "[u8;4]"),
+    "decayed": ("a.tkb", "[u8;4]"),
+    "table_twice": ("a.tkb", "[u8;4]"),
     "no_use": ("a.tkb", "usize"),
 }
 WRITTEN_USES = {
@@ -56,8 +70,15 @@ WRITTEN_USES = {
     "set_by_runner": [("a.tkb", 1, "read")],
     "only_mentioned": [("a.tkb", 1, "read")],
     "array": [("a.tkb", 1, "cast")],
+    "table": [("a.tkb", 4, "cast")],
+    "element": [("a.tkb", 5, "index")],
+    "view": [("a.tkb", 6, "cast")],
+    "given": [("a.tkb", 7, "cast")],
+    "sliced": [("a.tkb", 8, "index")],
+    "decayed": [("a.tkb", 9, "read")],
+    "table_twice": [("a.tkb", 10, "cast")],
 }
-WRITTEN_EXPECTED = ["never_set", "only_loaded", "only_mentioned"]
+WRITTEN_EXPECTED = ["element", "never_set", "only_loaded", "only_mentioned", "table", "view"]
 DECLARATIONS = "name\tsetter\nset_by_runner\tscripts/run.sh\n"
 # One bad row each: not a global, a global the program writes, a script that
 # only mentions the name, and a script that does not exist.
@@ -133,6 +154,7 @@ def main() -> int:
                 "a load, a real read, a gdb reader, a dma_fixed backing and "
                 "a builtin are not; a scalar or word nothing writes is refused, "
                 "a store, a passed address, a declared debugger set and an array "
+                "passed, sliced or decayed "
                 f"are not; {len(BAD_DECLARATIONS)} bad declarations and "
                 f"{len(SETTER_SHAPES)} setter shapes judged",
                 cases=len(GLOBALS) + len(BAD_DECLARATIONS) + len(SETTER_SHAPES))
