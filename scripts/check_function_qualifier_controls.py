@@ -16,7 +16,6 @@ from pass_line import CaseCount, report_pass
 
 MATCHERS = {
     'check_liveness_proof_escapes': 'FN_RE',
-    'check_address_space_root_mints': 'FN_RE',
     'check_wall_clock_bounds': 'FN_RE',
     'check_platform_file_parity': 'FN_RE',
     'check_stack_proof_states': 'FUNCTION_RE',

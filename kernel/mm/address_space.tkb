@@ -600,7 +600,7 @@ fn address_space_is_live(root: AddressSpaceRoot) -> bool {
 // Process lifecycle code obtains this after selecting a scheduled process.
 // Boot-only probes use address_space_boot_root() explicitly instead.
 // The mint: a root from a slot and the backing handle read for it under an
-// authority. Its callers are listed by scripts/check_address_space_root_mints.py.
+// authority. Its callers are listed in scripts/allowed_callers.tsv.
 fn address_space_root_mint(slot: ProcessSlot, backing: ProcessPoolHandleWords)
         -> AddressSpaceRoot {
     let mut root: AddressSpaceRoot = { process_slot_address(slot), backing };

@@ -2826,7 +2826,7 @@ private fn process_backing_words(record: borrow &mut ProcessRecord)
 // GitHub issue #693 step 5: a process's address-space root, with its
 // backing handle read under an authority over the record. These,
 // address_space_boot_root and the backing's publisher are the makers
-// scripts/check_address_space_root_mints.py allows.
+// scripts/allowed_callers.tsv allows.
 fn scheduled_process_address_space_root_owned(
         owner: borrow ScheduledProcessOwner[process]) -> AddressSpaceRoot !{unsafe} {
     // The boot thread runs on the kernel's own root (#831).

@@ -31,7 +31,9 @@ used only by rp1_gem.tkb's DDB RX look (#1095; no compiler builtin,
 DECISIONS 2026-10-25), and the three functions of the device-address
 mint kernel/drivers/dma_address.tkb (virtio_span_address,
 rp1_span_bus_address, dma_span_cpu_address; #1162), whose writers are each
-a reviewed place a device or the DDB look is given a span's address.
+a reviewed place a device or the DDB look is given a span's address, and
+address_space_root_mint, the maker of an AddressSpaceRoot (#693; moved here
+from a regex over .tkb text under #567, which missed a function-value use).
 Lexically, scripts/check_mpidr_reads.py is the sibling for MPIDR_EL1.
 
 Exit code only (0 = pass, 1 = fail).
