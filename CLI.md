@@ -47,7 +47,7 @@
 | --- | --- | --- |
 | `--generate` | `effects\|words\|cli\|tla <dir>\|protocol-source <dir>` | print EFFECTS.md, WORDS.md or CLI.md, or write each protocol's TLA+ model or generated source into <dir>, and exit |
 
-## Compiler development (4)
+## Compiler development (5)
 
 | Flag | Argument | Meaning |
 | --- | --- | --- |
