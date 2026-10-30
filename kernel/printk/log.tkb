@@ -4,6 +4,21 @@
 // under the console lock. Userspace writes and the direct crash/DDB UART
 // paths do not enter this ring; interrupt-safe classified events remain
 // kernel/diagnostic/event.tkb's job.
+//
+// GitHub issue #1230: WHAT A LINE MAY CARRY. syslog(READ_ALL) hands this
+// ring to any process (there is no dmesg_restrict or CAP_SYSLOG yet), so
+// a line that can be written while user processes still run must not
+// carry a pool slot index or a generation (of a region table or pool,
+// process, descriptor object, pipe, socket or inode-cache record). Pids,
+// fds, inode numbers, counts and addresses are fine. Slots appear only on
+// fail-stop paths (kernel_process_root_authorities_check,
+// kernel_stack_guard_fail), after which no user process runs; ddb prints
+// generations straight to the UART, not here; test images may print both.
+// Generations are not secret (docs/HANDLE_BOUNDARY_AUDIT_2026-10-29.md,
+// F1/F2: user space can neither pass one in nor use one it learned), so
+// this keeps the boundary honest rather than defending a secret. A line
+// that needs to name a slot outside those paths makes this a privilege
+// question first: add a syslog privilege check before it.
 use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/printk/number.tkb";
