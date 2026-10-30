@@ -813,6 +813,32 @@
         "frame_lines": "#1230 the log ring's header states which log lines may carry a slot or generation (comment only)",
         "unprotected_globals": "code removed: #1218 usb_provision_block is gone and usb_provision_image is an immutable compressed embed; one new scratch usb_provision_expanded replaces both, so 2 rows become 1"
       }
+    },
+    {
+      "date": "2026-10-30",
+      "head": "301c804b",
+      "counts": {
+        "raw_mint_files": 14,
+        "frame_lines": 12286,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 214,
+        "raw_deref_io": 7,
+        "raw_deref_builtin_region": 113,
+        "unsafe_blocks": 151,
+        "extern_fns": 61,
+        "invariant_stop_sites": 119,
+        "assembly_lines": 2503,
+        "per_cpu_ordinary_arrays": 71,
+        "per_cpu_stores": 7,
+        "raw_cpu_id_calls": 150,
+        "unprotected_globals": 418,
+        "frame_api_ratchet": 7
+      },
+      "changes": {
+        "frame_lines": "#1013 BootPhase threaded through the boot path and the MAC set at link-up",
+        "invariant_stop_sites": "#1013 boot_once_unwritten_stop: a read of a BootOnce cell before its boot write stops with a named line",
+        "unprotected_globals": "BootOnce (#1013): seven QEMU and TCP boot-configuration globals"
+      }
     }
   ]
 }
