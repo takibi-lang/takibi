@@ -77,7 +77,6 @@ LISTED = {
     ("kernel/kernel/process.tkb", "execution_state"): (CROSS, "the scheduler's cross-CPU wakes and DDB"),
     ("kernel/kernel/process.tkb", "kernel_activity"): (CROSS, "DDB's per-CPU activity view"),
     ("kernel/kernel/process.tkb", "kernel_crash_trace_next"): (CROSS, "the crash trace report"),
-    ("kernel/kernel/process.tkb", "kernel_process_tick_wake_head"): (CROSS, "tick wakes posted by another CPU"),
     ("kernel/kernel/process.tkb", "kernel_process_tick_wake_due"): (CROSS, "tick wakes posted by another CPU"),
     ("kernel/kernel/process.tkb", "kernel_process_tick_wake_tick_now"): (CROSS, "the tick-wake report"),
     ("kernel/kernel/process.tkb", "kernel_process_tick_wake_tick_before"): (CROSS, "the tick-wake report"),

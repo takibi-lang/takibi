@@ -137,26 +137,11 @@ kernel/kernel/process.tkb	kernel_activity	unreviewed; 2026-10-06 retain-partitio
 kernel/kernel/process.tkb	kernel_crash_trace	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	kernel_crash_trace_next	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	kernel_process_exec_failure_reason	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	kernel_process_tick_wake_head	unreviewed
-kernel/kernel/process.tkb	kernel_process_tick_wake_tick_before	unreviewed
-kernel/kernel/process.tkb	kernel_process_tick_wake_tick_now	unreviewed
-kernel/kernel/process.tkb	kernel_process_tick_wake_watched_core	unreviewed
-kernel/kernel/process.tkb	kernel_process_tick_wake_watched_first	unreviewed
-kernel/kernel/process.tkb	kernel_process_tick_wake_watched_pid	unreviewed
-kernel/kernel/process.tkb	kernel_process_trace_boot_enabled	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	kernel_process_trace_enabled	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	kernel_process_trace_fail_after_exec	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	kernel_process_trace_omit_events	unreviewed
-kernel/kernel/process.tkb	kernel_process_trace_omit_pid	unreviewed
-kernel/kernel/process.tkb	kernel_process_trace_omit_pid_set	unreviewed
 kernel/kernel/process.tkb	kernel_process_trace_probe_child_frame	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	kernel_process_trace_probe_parent_frame	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	scheduled_process_freed_site	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	scheduled_process_missing_site	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	scheduled_process_record_absent	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	spread_timer_child	unreviewed; 2026-10-06 retain-fixture: EL0 spread timer fixture / timer enter/left publication and fixture progress hooks
-kernel/kernel/process.tkb	spread_timer_parent	unreviewed; 2026-10-06 retain-fixture: EL0 spread timer fixture / timer enter/left publication and fixture progress hooks
-kernel/kernel/process.tkb	spread_timer_phase	unreviewed; 2026-10-06 retain-fixture: EL0 spread timer fixture / timer enter/left publication and fixture progress hooks
 kernel/kernel/process_test_evidence.tkb	process_test_evidence	unreviewed; 2026-10-06 retain-evidence: boot process evidence / accessor functions on existing test/dispatch paths
 kernel/kernel/profile_samples.tkb	profile_sample_active	unreviewed; 2026-10-06 candidate-diagnostics: named PMU sampling interval / one sampling CPU; per-CPU prefix buffers; local IRQ observation limits
 kernel/kernel/profile_samples.tkb	profile_sample_available	unreviewed; 2026-10-06 candidate-diagnostics: named PMU sampling interval / one sampling CPU; per-CPU prefix buffers; local IRQ observation limits

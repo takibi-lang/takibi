@@ -214,3 +214,11 @@ file's comment lines are not rows.
   holds the console lock and so cannot take the run lock, reads
   `terminal_flow_controls`, the STOP and START bytes published by each apply; both
   are `AtomicWord`s that only a holder writes. 302 -> 292 unprotected.
+- 2026-10-30: scheduler state in `kernel/kernel/process.tkb` behind the run lock,
+  with no new region element type: a tick-wake list's heads and the watched pid
+  are a linear record in a `Place` `guarded_by(scheduled_process_run_lock)`, and so
+  is the spread-timer fixture's phase and handles. Functions that reach them name
+  `ProcessRunGuard[&scheduled_process_run_lock]`, so the lock is now public. Each
+  core's tick times and the process trace's switches become `AtomicWord`; the
+  omitted pid and its flag become one word, pid plus 1, so a reader cannot pair one
+  pid with another's flag. 303 -> 288 unprotected.

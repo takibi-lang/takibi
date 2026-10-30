@@ -4254,7 +4254,7 @@ fn scheduled_process_yield(
 // core's tick-wake list, in the same critical section, which is why the run
 // guard is a parameter: a block that could not queue does not compile.
 fn scheduled_process_block(
-        guard: borrow ProcessRunGuard[lock],
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
         owner: borrow ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Running],
         reason: ProcessWaitReason)
@@ -4283,7 +4283,7 @@ private fn scheduled_process_wait_settle(record: borrow &mut ProcessRecord) {
 
 // A wake leaves nothing pending: the wait it ends is cleared with the state.
 fn scheduled_process_wake(
-        guard: borrow ProcessRunGuard[lock],
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
         owner: borrow ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Blocked])
         -> ScheduledProcessState[process, ProcessState::Ready] {
@@ -4298,7 +4298,7 @@ fn scheduled_process_wake(
 // the CPU that admits it delivers that child's result even if a sibling
 // exits meanwhile (GitHub issue #633).
 fn scheduled_process_wake_keeping_wait4(
-        guard: borrow ProcessRunGuard[lock],
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
         owner: borrow ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Blocked],
         child_pid: usize)
@@ -4311,7 +4311,7 @@ fn scheduled_process_wake_keeping_wait4(
 // Every wake passes here, so this is where a record leaves its core's
 // tick-wake list (GitHub issue #829), whichever waker ended the wait.
 private fn scheduled_process_wake_ready(
-        guard: borrow ProcessRunGuard[lock],
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
         owner: borrow ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Blocked])
         -> ScheduledProcessState[process, ProcessState::Ready] {
@@ -5225,11 +5225,11 @@ private fn kernel_crash_trace_cpu() -> {0..<KERNEL_MAX_CORES as usize} {
 // A debugger-owned boot-test switch. Production BSS leaves this false, while
 // a test may set it before the first process reset to retain a real workload's
 // tail without adding UART traffic or a production control surface.
-private let mut kernel_process_trace_boot_enabled: bool;
+private let mut kernel_process_trace_boot_enabled: AtomicWord;
 // Debugger-owned test configuration only. It makes the QEMU oops regression
 // stop immediately after a real child exec commit, proving one lifecycle tail
 // contains fork, exec prepare, and exec commit. Normal boot leaves it false.
-private let mut kernel_process_trace_fail_after_exec: bool;
+private let mut kernel_process_trace_fail_after_exec: AtomicWord;
 // Debugger-owned test configuration only (GitHub issue #632). Nonzero makes
 // the next stable activation find the ASID counter exhausted and treat that
 // many world-stop attempts as Busy before stopping the world for real, which
@@ -5294,7 +5294,7 @@ must_use variant KernelChildExecPrepareResult {
     // old image is still intact, so execve answers ENOMEM.
     ReserveOutOfMemory;
 }
-private let mut kernel_process_trace_enabled: bool;
+private let mut kernel_process_trace_enabled: AtomicWord;
 // GitHub issue #652: debugger-owned filters, set from DDB (`trace omit N`,
 // `trace pid N`) or GDB, never by kernel code. A long workload's ring is
 // otherwise all AddressSpaceActivate records and one busy process's
@@ -5302,9 +5302,13 @@ private let mut kernel_process_trace_enabled: bool;
 // overwritten. Bit N of the mask drops event kind N; a record whose
 // SUBJECT pid is the omitted pid is dropped (`trace pid none` clears it).
 // Read only after the enabled check, so a disabled trace pays nothing.
-private let mut kernel_process_trace_omit_events: usize;
-private let mut kernel_process_trace_omit_pid_set: bool;
-private let mut kernel_process_trace_omit_pid: usize;
+private fn kernel_process_trace_is_enabled() -> bool {
+    return atomic_word_load(&kernel_process_trace_enabled) != 0;
+}
+private let mut kernel_process_trace_omit_events: AtomicWord;
+// The omitted pid plus one, so one load sees both whether a pid is omitted and
+// which; zero omits none.
+private let mut kernel_process_trace_omit_pid_word: AtomicWord;
 
 // Layout: sequence, cpu, kind, subject pid/generation, peer
 // pid/generation, state, wait reason, root, saved SP, event-specific aux.
@@ -5365,12 +5369,13 @@ fn kernel_process_trace_record(event: usize, pid: usize, generation: usize,
                                peer_pid: usize, peer_generation: usize,
                                state: usize, wait_reason: usize, root: usize,
                                saved_sp: usize, aux: usize) !{unsafe} {
-    if (kernel_process_trace_enabled == false) { return; }
-    if (event < 64 && (kernel_process_trace_omit_events & (1 << event)) != 0) {
+    if (kernel_process_trace_is_enabled() == false) { return; }
+    if (event < 64 &&
+        (atomic_word_load(&kernel_process_trace_omit_events) & (1 << event)) != 0) {
         return;
     }
-    if (kernel_process_trace_omit_pid_set &&
-        pid == kernel_process_trace_omit_pid) {
+    let omitted: usize = atomic_word_load(&kernel_process_trace_omit_pid_word);
+    if (omitted != 0 && pid == omitted - 1) {
         return;
     }
     // Publish the reservation before touching the entry. An IRQ that arrives
@@ -5408,55 +5413,59 @@ fn kernel_process_trace_record(event: usize, pid: usize, generation: usize,
     kernel_crash_trace[base + KERNEL_PROCESS_TRACE_SEQUENCE_WORD] = sequence;
 }
 
-fn kernel_process_trace_enable() { kernel_process_trace_enabled = true; }
+fn kernel_process_trace_enable() { atomic_word_store(&kernel_process_trace_enabled, 1); }
 // GitHub issue #652: a probe that switched the trace on for its own evidence
 // hands it back to the boot's setting, not to off. Switching it off here
 // ended a debugger-enabled trace at the first probe, so a boot traced from
 // the start lost everything after the scheduler probe.
 fn kernel_process_trace_disable() {
-    kernel_process_trace_enabled = kernel_process_trace_boot_enabled;
+    atomic_word_store(&kernel_process_trace_enabled,
+                      atomic_word_load(&kernel_process_trace_boot_enabled));
 }
 
 // GitHub issue #652: the DDB controls. `on` also sets the boot switch, so
 // an execution reset or a probe's disable keeps it on.
 fn kernel_process_trace_debugger_set(enabled: bool) {
-    kernel_process_trace_boot_enabled = enabled;
-    kernel_process_trace_enabled = enabled;
+    let mut word: usize = 0;
+    if (enabled) { word = 1; }
+    atomic_word_store(&kernel_process_trace_boot_enabled, word);
+    atomic_word_store(&kernel_process_trace_enabled, word);
 }
 
 fn kernel_process_trace_debugger_enabled() -> bool {
-    return kernel_process_trace_enabled;
+    return kernel_process_trace_is_enabled();
 }
 
 // False when `event` names no kind.
 fn kernel_process_trace_debugger_omit_event(event: usize) -> bool {
     if (event == 0 || event > ProcessTraceEventLast) { return false; }
-    kernel_process_trace_omit_events =
-        kernel_process_trace_omit_events | (1 << event);
+    atomic_word_store(&kernel_process_trace_omit_events,
+        atomic_word_load(&kernel_process_trace_omit_events) | (1 << event));
     return true;
 }
 
 fn kernel_process_trace_debugger_omit_pid(set: bool, pid: usize) {
-    kernel_process_trace_omit_pid_set = set;
-    kernel_process_trace_omit_pid = pid;
+    let mut word: usize = 0;
+    if (set) { word = pid + 1; }
+    atomic_word_store(&kernel_process_trace_omit_pid_word, word);
 }
 
 fn kernel_process_trace_debugger_keep_all() {
-    kernel_process_trace_omit_events = 0;
-    kernel_process_trace_omit_pid_set = false;
-    kernel_process_trace_omit_pid = 0;
+    atomic_word_store(&kernel_process_trace_omit_events, 0);
+    atomic_word_store(&kernel_process_trace_omit_pid_word, 0);
 }
 
 fn kernel_process_trace_debugger_omitted_events() -> usize {
-    return kernel_process_trace_omit_events;
+    return atomic_word_load(&kernel_process_trace_omit_events);
 }
 
 // The omitted pid, or None.
 must_use variant ProcessTraceOmittedPid { None; Pid(usize); }
 
 fn kernel_process_trace_debugger_omitted_pid() -> ProcessTraceOmittedPid {
-    if (kernel_process_trace_omit_pid_set) {
-        return ProcessTraceOmittedPid::Pid(kernel_process_trace_omit_pid);
+    let omitted: usize = atomic_word_load(&kernel_process_trace_omit_pid_word);
+    if (omitted != 0) {
+        return ProcessTraceOmittedPid::Pid(omitted - 1);
     }
     return ProcessTraceOmittedPid::None;
 }
@@ -5464,7 +5473,7 @@ fn kernel_process_trace_debugger_omitted_pid() -> ProcessTraceOmittedPid {
 // GitHub issue #652: a pending caught signal taken into its handler (or
 // found unwritable) on the current process.
 fn kernel_process_trace_signal_take(signum: usize, outcome: usize) !{unsafe} {
-    if (kernel_process_trace_enabled == false) { return; }
+    if (kernel_process_trace_is_enabled() == false) { return; }
     if (execution_state[execution_cpu_index()].current_live == false) { return; }
     let mut current: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
     kernel_process_trace_handle_peer_pid(ProcessTraceSignalTake, current, 0,
@@ -5474,7 +5483,7 @@ fn kernel_process_trace_signal_take(signum: usize, outcome: usize) !{unsafe} {
 // GitHub issue #652: the value the current process's wait4 returns to EL0
 // from the syscall itself (a zombie found, WNOHANG, or an error).
 fn kernel_process_trace_wait4_return(value: usize, status: usize) !{unsafe} {
-    if (kernel_process_trace_enabled == false) { return; }
+    if (kernel_process_trace_is_enabled() == false) { return; }
     if (execution_state[execution_cpu_index()].current_live == false) { return; }
     let mut current: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
     kernel_process_trace_handle_peer_pid(ProcessTraceWait4Return, current,
@@ -5485,7 +5494,7 @@ fn kernel_process_trace_wait4_return(value: usize, status: usize) !{unsafe} {
 // `parent` is the blocked parent whose saved frame receives `value`.
 fn kernel_process_trace_wait4_deliver(parent: borrow ScheduledProcessOwner[process],
                                       value: usize, status: usize) !{unsafe} {
-    if (kernel_process_trace_enabled == false) { return; }
+    if (kernel_process_trace_is_enabled() == false) { return; }
     kernel_process_trace_record(
         ProcessTraceWait4Return,
         scheduled_process_pid_of_slot(process_slot_of(parent.pool_index)),
@@ -5495,7 +5504,7 @@ fn kernel_process_trace_wait4_deliver(parent: borrow ScheduledProcessOwner[proce
 }
 
 fn kernel_process_trace_fail_after_exec_requested() -> bool {
-    return kernel_process_trace_fail_after_exec;
+    return atomic_word_load(&kernel_process_trace_fail_after_exec) != 0;
 }
 
 fn kernel_process_exec_failure_clear() {
@@ -5588,7 +5597,7 @@ fn kernel_process_trace_handle(event: usize, subject: ProcessHandle,
 fn kernel_process_trace_handle_peer_pid(event: usize, subject: ProcessHandle,
                                         peer: usize, aux: usize) !{unsafe} {
     // Before the peeks: a disabled trace costs the signal path one load.
-    if (kernel_process_trace_enabled == false) { return; }
+    if (kernel_process_trace_is_enabled() == false) { return; }
     let state: ProcessSlotState = scheduled_process_peek_state(
         process_slot_of(subject.pool_index));
     let reason: ProcessWaitReason = scheduled_process_peek_wait_reason(
@@ -5789,7 +5798,8 @@ fn kernel_process_execution_reset() !{changes_witness_ProcessCurrent} {
     scheduled_process_table_clear();
     execution_state[execution_cpu_index()].current_live = false;
     process_test_evidence_reset();
-    kernel_process_trace_enabled = kernel_process_trace_boot_enabled;
+    atomic_word_store(&kernel_process_trace_enabled,
+                      atomic_word_load(&kernel_process_trace_boot_enabled));
     kernel_process_crash_trace_reset();
     // No per-slot clearing loop: scheduled_process_table_clear above
     // destroyed every pooled record, the previous boot thread included, which
@@ -6179,9 +6189,32 @@ must_use variant ProcessAffinityResult { Missing; Invalid; Mask(usize); }
 // parent can consume a previous run's observation. Only the lower-EL timer
 // changes Armed, and only its no-successor leave completes Changed.
 enum SpreadTimerPhase: u8 { Dormant = 0; Armed = 1; Changed = 2; Left = 3; Observed = 4; }
-private let mut spread_timer_phase: SpreadTimerPhase;
-private let mut spread_timer_parent: ProcessHandle;
-private let mut spread_timer_child: ProcessHandle;
+// Empty until the first arm, which reads as Dormant. Linear, as a guarded
+// place's content must be; the run lock is what serializes the fixture's three
+// steps across cores.
+linear struct SpreadTimerRecord[unit: usize] {
+    phase: SpreadTimerPhase;
+    armed_parent: ProcessHandle;
+    armed_child: ProcessHandle;
+}
+struct SpreadTimerStore {
+    private record: Place(SpreadTimerRecord[0]) guarded_by(scheduled_process_run_lock);
+}
+private let mut spread_timer_store: SpreadTimerStore;
+
+private fn spread_timer_record_retire(record: sink SpreadTimerRecord[0]) {}
+
+private fn spread_timer_phase_set(guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+                                  phase: SpreadTimerPhase) {
+    match place_take(guard, spread_timer_store.record) {
+        Place::Empty => {}
+        Place::Full(taken) => {
+            let mut record: SpreadTimerRecord[0] = taken;
+            record.phase = phase;
+            let Place::Empty = place_put(guard, spread_timer_store.record, record);
+        }
+    }
+}
 // A cold timer does one atomic load instead of taking the run lock for a
 // dormant test. This is only a hint; all phase/handle access stays guarded.
 private let mut spread_timer_active: AtomicWord;
@@ -6213,13 +6246,19 @@ fn kernel_process_spread_timer_progress(pid: usize, arm: bool)
     };
     let mut parent: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
     if (arm) {
-        let available: bool = match spread_timer_phase {
-            SpreadTimerPhase::Dormant => { true }
-            SpreadTimerPhase::Armed => { false }
-            SpreadTimerPhase::Changed => { false }
-            SpreadTimerPhase::Left => { false }
-            SpreadTimerPhase::Observed => {
-                scheduled_process_handle_matches(spread_timer_child) == false
+        let available: bool = match place_borrow(guard, spread_timer_store.record) {
+            Place::Empty => { true }
+            Place::Full(record) => {
+                let free: bool = match record.phase {
+                    SpreadTimerPhase::Dormant => { true }
+                    SpreadTimerPhase::Armed => { false }
+                    SpreadTimerPhase::Changed => { false }
+                    SpreadTimerPhase::Left => { false }
+                    SpreadTimerPhase::Observed => {
+                        scheduled_process_handle_matches(record.armed_child) == false
+                    }
+                };
+                free
             }
         };
         if (available == false ||
@@ -6229,9 +6268,12 @@ fn kernel_process_spread_timer_progress(pid: usize, arm: bool)
             process_run_unlock(guard);
             return SpreadTimerResult::Invalid;
         }
-        spread_timer_parent = parent;
-        spread_timer_child = child;
-        spread_timer_phase = SpreadTimerPhase::Armed;
+        let mut armed: SpreadTimerRecord[0] = { SpreadTimerPhase::Armed, parent, child };
+        match place_take(guard, spread_timer_store.record) {
+            Place::Empty => {}
+            Place::Full(old) => { spread_timer_record_retire(old); }
+        }
+        let Place::Empty = place_put(guard, spread_timer_store.record, armed);
         // Opening CPU 0 and arming are one publication, not two syscalls
         // with a window in which the child could already have left EL0.
         match scheduled_process_set_affinity_mask(guard, slot, 1) {
@@ -6243,19 +6285,26 @@ fn kernel_process_spread_timer_progress(pid: usize, arm: bool)
         process_run_unlock(guard);
         return SpreadTimerResult::Armed;
     }
-    if (scheduled_process_same_slot(parent, spread_timer_parent) == false ||
-        scheduled_process_same_generation(parent, spread_timer_parent) == false ||
-        scheduled_process_same_slot(child, spread_timer_child) == false ||
-        scheduled_process_same_generation(child, spread_timer_child) == false) {
-        process_run_unlock(guard);
-        return SpreadTimerResult::Invalid;
-    }
-    let result: SpreadTimerResult = match spread_timer_phase {
+    // Another pair than the armed one reads as Dormant, which answers Invalid.
+    let seen: SpreadTimerPhase = match place_borrow(guard, spread_timer_store.record) {
+        Place::Empty => { SpreadTimerPhase::Dormant }
+        Place::Full(record) => {
+            let mut phase: SpreadTimerPhase = record.phase;
+            if (scheduled_process_same_slot(parent, record.armed_parent) == false ||
+                scheduled_process_same_generation(parent, record.armed_parent) == false ||
+                scheduled_process_same_slot(child, record.armed_child) == false ||
+                scheduled_process_same_generation(child, record.armed_child) == false) {
+                phase = SpreadTimerPhase::Dormant;
+            }
+            phase
+        }
+    };
+    let result: SpreadTimerResult = match seen {
         SpreadTimerPhase::Dormant => { SpreadTimerResult::Invalid }
         SpreadTimerPhase::Armed => { SpreadTimerResult::Pending }
         SpreadTimerPhase::Changed => { SpreadTimerResult::Pending }
         SpreadTimerPhase::Left => {
-            spread_timer_phase = SpreadTimerPhase::Observed;
+            spread_timer_phase_set(guard, SpreadTimerPhase::Observed);
             atomic_word_store(&spread_timer_active, 0);
             SpreadTimerResult::Observed
         }
@@ -6268,49 +6317,62 @@ fn kernel_process_spread_timer_progress(pid: usize, arm: bool)
 private fn kernel_process_spread_timer_enter(frame: borrow FrameRef[process, level]) {
     if (atomic_word_load(&spread_timer_active) == 0) { return; }
     let guard = process_run_lock();
-    match spread_timer_phase {
-        SpreadTimerPhase::Armed => {
+    // The run-guarded calls cannot sit inside the borrow, so ask first, then act.
+    let changing: bool = match place_borrow(guard, spread_timer_store.record) {
+        Place::Empty => { false }
+        Place::Full(record) => {
+            let mut armed: bool = false;
+            match record.phase {
+                SpreadTimerPhase::Armed => { armed = true; }
+                SpreadTimerPhase::Dormant => {}
+                SpreadTimerPhase::Changed => {}
+                SpreadTimerPhase::Left => {}
+                SpreadTimerPhase::Observed => {}
+            }
             // core-role: spread-timer fixture: the child starts on core 0 and
             // is re-pinned away
-            if (cpu_id() == 0 && execution_state[execution_cpu_index()].current_live &&
-                scheduled_process_handle_matches(spread_timer_child) &&
+            armed && cpu_id() == 0 && execution_state[execution_cpu_index()].current_live &&
+                scheduled_process_handle_matches(record.armed_child) &&
                 scheduled_process_same_slot(execution_state[execution_cpu_index()].current_handle,
-                    spread_timer_child) &&
+                    record.armed_child) &&
                 scheduled_process_same_generation(execution_state[execution_cpu_index()].current_handle,
-                    spread_timer_child) &&
-                kernel_process_frame_belongs_to(spread_timer_child, frame)) {
-                match scheduled_process_set_affinity_mask(guard,
-                        process_slot_of(spread_timer_child.pool_index), 2) {
-                    ProcessAffinityWrite::Written => {}
-                    // A fixture's own process is never pinned.
-                    ProcessAffinityWrite::Pinned => { kernel_invariant_stop(); }
-                }
-                spread_timer_phase = SpreadTimerPhase::Changed;
-            }
+                    record.armed_child) &&
+                kernel_process_frame_belongs_to(record.armed_child, frame)
         }
-        SpreadTimerPhase::Dormant => {}
-        SpreadTimerPhase::Changed => {}
-        SpreadTimerPhase::Left => {}
-        SpreadTimerPhase::Observed => {}
+    };
+    if (changing) {
+        // The current process is the child: the check above just said so.
+        let mut current: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
+        match scheduled_process_set_affinity_mask(guard,
+                process_slot_of(current.pool_index), 2) {
+            ProcessAffinityWrite::Written => {}
+            // A fixture's own process is never pinned.
+            ProcessAffinityWrite::Pinned => { kernel_invariant_stop(); }
+        }
+        spread_timer_phase_set(guard, SpreadTimerPhase::Changed);
     }
     process_run_unlock(guard);
 }
 
-private fn kernel_process_spread_timer_left(guard: borrow ProcessRunGuard[lock],
-                                            outgoing: ProcessHandle) {
-    match spread_timer_phase {
-        SpreadTimerPhase::Changed => {
-            // core-role: spread-timer fixture: the child leaves core 0
-            if (cpu_id() == 0 && scheduled_process_same_slot(outgoing, spread_timer_child) &&
-                scheduled_process_same_generation(outgoing, spread_timer_child)) {
-                spread_timer_phase = SpreadTimerPhase::Left;
+private fn kernel_process_spread_timer_left(
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock], outgoing: ProcessHandle) {
+    let left: bool = match place_borrow(guard, spread_timer_store.record) {
+        Place::Empty => { false }
+        Place::Full(record) => {
+            let mut changed: bool = false;
+            match record.phase {
+                SpreadTimerPhase::Changed => { changed = true; }
+                SpreadTimerPhase::Dormant => {}
+                SpreadTimerPhase::Armed => {}
+                SpreadTimerPhase::Left => {}
+                SpreadTimerPhase::Observed => {}
             }
+            // core-role: spread-timer fixture: the child leaves core 0
+            changed && cpu_id() == 0 && scheduled_process_same_slot(outgoing, record.armed_child) &&
+                scheduled_process_same_generation(outgoing, record.armed_child)
         }
-        SpreadTimerPhase::Dormant => {}
-        SpreadTimerPhase::Armed => {}
-        SpreadTimerPhase::Left => {}
-        SpreadTimerPhase::Observed => {}
-    }
+    };
+    if (left) { spread_timer_phase_set(guard, SpreadTimerPhase::Left); }
 }
 
 // Pid 0 is the caller, as in Linux.
@@ -9034,7 +9096,7 @@ must_use variant ProcessSignalSendResult {
 }
 
 private fn kernel_process_signal_deliver_to(
-        guard: borrow ProcessRunGuard[process_run],
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
         target: ProcessHandle, signum: usize, sender_pid: usize)
         -> ProcessSignalSendResult !{unsafe} {
     return kernel_process_signal_deliver_traced(guard, target, signum,
@@ -9044,7 +9106,7 @@ private fn kernel_process_signal_deliver_to(
 // `trace_peer` is what the lifecycle trace names as the cause (GitHub issue
 // #652): the sender, or for an exit's SIGCHLD the child that exited.
 private fn kernel_process_signal_deliver_traced(
-        guard: borrow ProcessRunGuard[process_run],
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
         target: ProcessHandle, signum: usize, sender_pid: usize,
         trace_peer: usize)
         -> ProcessSignalSendResult !{unsafe} {
@@ -9186,7 +9248,7 @@ private fn kernel_process_signal_deliver_traced(
 }
 
 fn kernel_process_signal_child_exit(
-        guard: borrow ProcessRunGuard[process_run],
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
         parent: ProcessHandle, child_pid: usize, child_status: ProcessEnd) {
     // GitHub issue #885: the siginfo goes with the SIGCHLD that is queued;
     // a second exit while one is pending is merged into it, as on Linux.
@@ -9230,7 +9292,7 @@ fn kernel_process_terminal_reader(
 // asleep, without a new UART interrupt. Wake Linux retrying readers only;
 // the internal scalar waiter must receive a real byte from the RX handler.
 fn kernel_process_terminal_settings_wake(
-        guard: borrow ProcessRunGuard[process_run]) {
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock]) {
     let mut cursor = scheduled_process_first_slot();
     let mut walking: bool = true;
     while (walking) {
@@ -9349,7 +9411,7 @@ fn kernel_process_pid_log_wait(
 }
 
 fn kernel_process_terminal_signal(
-        guard: borrow ProcessRunGuard[process_run], signum: usize) {
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock], signum: usize) {
     let foreground: usize = atomic_word_load(&terminal_foreground_session);
     if (foreground == 0) { return; }
     let mut cursor = scheduled_process_first_slot();
@@ -9455,7 +9517,6 @@ fn kernel_process_block_deadline(current: borrow FrameRef[process, level])
 // - Unlink walks its core's list from the head, so it is linear in the
 //   sleepers queued on one core, which is a handful.
 
-private let mut kernel_process_tick_wake_head: [usize; KERNEL_MAX_CORES];
 private let mut kernel_process_tick_wake_due: [AtomicWord; KERNEL_MAX_CORES];
 
 // GitHub issue #863: what a tick-wake records for a probe, so the probe
@@ -9468,33 +9529,99 @@ private let mut kernel_process_tick_wake_due: [AtomicWord; KERNEL_MAX_CORES];
 // run lock): when a tick ends its deadline wait, the tick records its core
 // plus one and whether it was that core's first tick at or after the
 // deadline (the tick before it fell short of the deadline).
-private let mut kernel_process_tick_wake_tick_now: [usize; KERNEL_MAX_CORES];
-private let mut kernel_process_tick_wake_tick_before: [usize; KERNEL_MAX_CORES];
-private let mut kernel_process_tick_wake_watched_pid: usize;
-private let mut kernel_process_tick_wake_watched_core: usize;
-private let mut kernel_process_tick_wake_watched_first: bool;
+private let mut kernel_process_tick_wake_tick_now: [AtomicWord; KERNEL_MAX_CORES];
+private let mut kernel_process_tick_wake_tick_before: [AtomicWord; KERNEL_MAX_CORES];
+
+// The list heads and the watch, reached only under the run lock that already
+// orders the lists' links in the process records. Empty, until the first write,
+// reads as every list empty and no pid watched.
+linear struct TickWakeLists[unit: usize] {
+    heads: [usize; KERNEL_MAX_CORES];
+    watched_pid: usize;
+    watched_core: usize;
+    watched_first: bool;
+}
+struct TickWakeStore {
+    private lists: Place(TickWakeLists[0]) guarded_by(scheduled_process_run_lock);
+}
+private let mut tick_wake_store: TickWakeStore;
+
+private fn tick_wake_lists_retire(lists: sink TickWakeLists[0]) {}
+
+private fn tick_wake_lists_install(guard: borrow ProcessRunGuard[&scheduled_process_run_lock]) {
+    if (place_is_full(guard, tick_wake_store.lists)) { return; }
+    let mut empty: TickWakeLists[0] = { { 0, 0, 0, 0 }, 0, 0, false };
+    match place_put(guard, tick_wake_store.lists, empty) {
+        Place::Empty => {}
+        Place::Full(previous) => { tick_wake_lists_retire(previous); }
+    }
+}
+
+private fn tick_wake_head_of(guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+                             core: {0..<KERNEL_MAX_CORES as usize}) -> usize {
+    let mut head: usize = 0;
+    match place_take(guard, tick_wake_store.lists) {
+        Place::Empty => {}
+        Place::Full(taken) => {
+            let mut lists: TickWakeLists[0] = taken;
+            head = lists.heads[core];
+            let Place::Empty = place_put(guard, tick_wake_store.lists, lists);
+        }
+    }
+    return head;
+}
+
+private fn tick_wake_head_set(guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+                              core: {0..<KERNEL_MAX_CORES as usize}, head: usize) {
+    tick_wake_lists_install(guard);
+    match place_take(guard, tick_wake_store.lists) {
+        Place::Empty => {}
+        Place::Full(taken) => {
+            let mut lists: TickWakeLists[0] = taken;
+            lists.heads[core] = head;
+            let Place::Empty = place_put(guard, tick_wake_store.lists, lists);
+        }
+    }
+}
 
 // Start watching pid (0 stops), forgetting any earlier record.
-fn kernel_process_tick_wake_watch(guard: borrow ProcessRunGuard[lock], pid: usize) {
-    kernel_process_tick_wake_watched_pid = pid;
-    kernel_process_tick_wake_watched_core = 0;
-    kernel_process_tick_wake_watched_first = false;
+fn kernel_process_tick_wake_watch(guard: borrow ProcessRunGuard[&scheduled_process_run_lock], pid: usize) {
+    tick_wake_lists_install(guard);
+    match place_take(guard, tick_wake_store.lists) {
+        Place::Empty => {}
+        Place::Full(taken) => {
+            let mut lists: TickWakeLists[0] = taken;
+            lists.watched_pid = pid;
+            lists.watched_core = 0;
+            lists.watched_first = false;
+            let Place::Empty = place_put(guard, tick_wake_store.lists, lists);
+        }
+    }
 }
 
 // The watched pid's tick wake: 0 while none, else the waking core plus one.
-fn kernel_process_tick_wake_watched_core_locked(guard: borrow ProcessRunGuard[lock]) -> usize {
-    return kernel_process_tick_wake_watched_core;
+fn kernel_process_tick_wake_watched_core_locked(guard: borrow ProcessRunGuard[&scheduled_process_run_lock]) -> usize {
+    let core: usize = match place_borrow(guard, tick_wake_store.lists) {
+        Place::Empty => { 0 }
+        Place::Full(lists) => { lists.watched_core }
+    };
+    return core;
 }
 
 // Whether the recorded wake came on its core's first tick past the deadline.
-fn kernel_process_tick_wake_watched_first_locked(guard: borrow ProcessRunGuard[lock]) -> bool {
-    return kernel_process_tick_wake_watched_first;
+fn kernel_process_tick_wake_watched_first_locked(guard: borrow ProcessRunGuard[&scheduled_process_run_lock]) -> bool {
+    let first: bool = match place_borrow(guard, tick_wake_store.lists) {
+        Place::Empty => { false }
+        Place::Full(lists) => { lists.watched_first }
+    };
+    return first;
 }
 
 // The start of a tick on core: shift its tick times. Own core only.
 private fn kernel_process_tick_wake_note(core: {0..<KERNEL_MAX_CORES as usize}, now: usize) {
-    kernel_process_tick_wake_tick_before[core] = kernel_process_tick_wake_tick_now[core];
-    kernel_process_tick_wake_tick_now[core] = now;
+    atomic_word_store(&kernel_process_tick_wake_tick_before[core],
+                      atomic_word_load(&kernel_process_tick_wake_tick_now[core]));
+    atomic_word_store(&kernel_process_tick_wake_tick_now[core], now);
 }
 
 // What a Blocked record's wait asks of a tick: 0 for nothing (not a tick
@@ -9514,16 +9641,16 @@ private fn kernel_process_tick_wake_due_of(
 // Queue a record that has just been published Blocked on this core's list,
 // when its wait is one a tick ends. Called from scheduled_process_block only.
 private fn kernel_process_tick_wake_enqueue(
-        guard: borrow ProcessRunGuard[lock], slot: ProcessSlot) !{unsafe} {
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock], slot: ProcessSlot) !{unsafe} {
     let due: usize = kernel_process_tick_wake_due_of(guard, slot);
     if (due == 0) { return; }
     let raw_core: usize = cpu_id();
     if (raw_core >= KERNEL_MAX_CORES) { return; }
     let core: {0..<KERNEL_MAX_CORES as usize} = raw_core;
     scheduled_process_record_locked(guard, slot).tick_wake_core = core + 1;
-    scheduled_process_record_locked(guard, slot).tick_wake_next =
-        kernel_process_tick_wake_head[core];
-    kernel_process_tick_wake_head[core] = slot.word | 1;
+    let head: usize = tick_wake_head_of(guard, core);
+    scheduled_process_record_locked(guard, slot).tick_wake_next = head;
+    tick_wake_head_set(guard, core, slot.word | 1);
     let earliest: usize = atomic_word_load(&kernel_process_tick_wake_due[core]);
     if (earliest == 0 || due < earliest) {
         atomic_word_store(&kernel_process_tick_wake_due[core], due);
@@ -9533,7 +9660,7 @@ private fn kernel_process_tick_wake_enqueue(
 // Take a record off whichever core's list holds it; nothing for a record
 // that is on none. Called from scheduled_process_wake_ready only.
 private fn kernel_process_tick_wake_unlink(
-        guard: borrow ProcessRunGuard[lock], slot: ProcessSlot) !{unsafe} {
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock], slot: ProcessSlot) !{unsafe} {
     let marker: usize = scheduled_process_record_locked(guard, slot).tick_wake_core;
     if (marker == 0) { return; }
     let raw_core: usize = marker - 1;
@@ -9541,10 +9668,11 @@ private fn kernel_process_tick_wake_unlink(
     let core: {0..<KERNEL_MAX_CORES as usize} = raw_core;
     let target: usize = slot.word | 1;
     let after: usize = scheduled_process_record_locked(guard, slot).tick_wake_next;
-    if (kernel_process_tick_wake_head[core] == target) {
-        kernel_process_tick_wake_head[core] = after;
+    let head: usize = tick_wake_head_of(guard, core);
+    if (head == target) {
+        tick_wake_head_set(guard, core, after);
     } else {
-        let mut link: usize = kernel_process_tick_wake_head[core];
+        let mut link: usize = head;
         while (link != 0) {
             let mut at: ProcessSlot = process_slot_from_pool(link ^ 1);
             let next: usize = scheduled_process_record_locked(guard, at).tick_wake_next;
@@ -9564,7 +9692,7 @@ private fn kernel_process_tick_wake_unlink(
 // directly from its saved frame with the result armed for it; a NetRx
 // waiter just runs again and retries. The wake unlinks the record.
 private fn kernel_process_tick_wake_one(
-        guard: borrow ProcessRunGuard[lock], slot: ProcessSlot) !{interrupt, unsafe} {
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock], slot: ProcessSlot) !{interrupt, unsafe} {
     let reason: ProcessWaitReason =
         scheduled_process_record_wait_reason_locked(guard, slot);
     match scheduled_process_blocked_take_slot(guard, slot) {
@@ -9585,17 +9713,27 @@ private fn kernel_process_tick_wake_one(
                         .deadline_result);
             }
             let mut woken_slot: ProcessSlot = process_slot_of(owner.pool_index);
-            if (reason != ProcessWaitReason::NetRx &&
-                kernel_process_tick_wake_watched_pid != 0 &&
-                scheduled_process_record_locked(guard, woken_slot).pid ==
-                    kernel_process_tick_wake_watched_pid) {
+            let watched_pid: usize = match place_borrow(guard, tick_wake_store.lists) {
+                Place::Empty => { 0 }
+                Place::Full(lists) => { lists.watched_pid }
+            };
+            if (reason != ProcessWaitReason::NetRx && watched_pid != 0 &&
+                scheduled_process_record_locked(guard, woken_slot).pid == watched_pid) {
                 let raw_core: usize = cpu_id();
                 if (raw_core < KERNEL_MAX_CORES) {
                     let core: {0..<KERNEL_MAX_CORES as usize} = raw_core;
-                    kernel_process_tick_wake_watched_core = core + 1;
-                    kernel_process_tick_wake_watched_first =
-                        kernel_process_tick_wake_tick_before[core] <
+                    let first: bool =
+                        atomic_word_load(&kernel_process_tick_wake_tick_before[core]) <
                             scheduled_process_record_locked(guard, woken_slot).deadline_ticks;
+                    match place_take(guard, tick_wake_store.lists) {
+                        Place::Empty => {}
+                        Place::Full(taken) => {
+                            let mut lists: TickWakeLists[0] = taken;
+                            lists.watched_core = core + 1;
+                            lists.watched_first = first;
+                            let Place::Empty = place_put(guard, tick_wake_store.lists, lists);
+                        }
+                    }
                 }
             }
             let ready = scheduled_process_wake(guard, owner, blocked);
@@ -9622,11 +9760,11 @@ private fn kernel_process_tick_wake_one(
 // One core's tick: wake what is due on its own list, and recompute when the
 // list is next due. The scan reads the next link before a wake unlinks the
 // record it stands on.
-fn kernel_process_tick_wake_scan(guard: borrow ProcessRunGuard[lock],
+fn kernel_process_tick_wake_scan(guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
                                  core: {0..<KERNEL_MAX_CORES as usize},
                                  now: usize) !{interrupt, unsafe} {
     let mut next_due: usize = 0;
-    let mut link: usize = kernel_process_tick_wake_head[core];
+    let mut link: usize = tick_wake_head_of(guard, core);
     while (link != 0) {
         let mut slot: ProcessSlot = process_slot_from_pool(link ^ 1);
         let next: usize = scheduled_process_record_locked(guard, slot).tick_wake_next;
@@ -9661,8 +9799,11 @@ fn kernel_process_tick_wake_if_due() !{interrupt, unsafe} {
 // Boot probes clear the whole table; no record survives to be on a list.
 private fn kernel_process_tick_wake_clear() !{unsafe} {
     let guard = process_run_lock();
+    match place_take(guard, tick_wake_store.lists) {
+        Place::Empty => {}
+        Place::Full(lists) => { tick_wake_lists_retire(lists); }
+    }
     for core: usize in 0..<KERNEL_MAX_CORES {
-        kernel_process_tick_wake_head[core] = 0;
         atomic_word_store(&kernel_process_tick_wake_due[core], 0);
     }
     process_run_unlock(guard);
@@ -9685,7 +9826,7 @@ fn kernel_process_block_uart_tx(current: borrow FrameRef[process, level])
 // one and the deadline wake all read process state and move a process from
 // Blocked to Ready out of an interrupt handler; two of the three took no
 // lock and walked one chain, and this is the other of those two.
-fn kernel_process_uart_tx_wake_all(guard: borrow ProcessRunGuard[lock])
+fn kernel_process_uart_tx_wake_all(guard: borrow ProcessRunGuard[&scheduled_process_run_lock])
         !{interrupt, unsafe} {
     let mut cursor = scheduled_process_first_slot();
     let mut walking: bool = true;
@@ -9859,7 +10000,7 @@ must_use variant ProcessUartWakeResult { Missing; Consumed; RetryRead; }
 // Blocked under the same lock only after finding the ring empty (see
 // kernel_process_block_reserved). So on any CPU, either this finds the reader
 // Blocked, or the reader finds this byte in the ring.
-fn kernel_process_uart_wake(guard: borrow ProcessRunGuard[lock], value: usize)
+fn kernel_process_uart_wake(guard: borrow ProcessRunGuard[&scheduled_process_run_lock], value: usize)
         -> ProcessUartWakeResult !{interrupt, unsafe} {
     // GitHub issue #592 made this reachable with no current process: core 0
     // idles now, and a reader pinned to a peer blocks on the terminal while
