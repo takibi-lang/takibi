@@ -46,6 +46,7 @@ private fn replay_process_allocate() -> ReplayProcessAllocation {
     intrusive_pool_unlock(&replay_process, guard);
     match result {
         IntrusivePoolInsertResult::OutOfMemory => { return ReplayProcessAllocation::Failed; }
+        IntrusivePoolInsertResult::Exhausted => { return ReplayProcessAllocation::Failed; }
         IntrusivePoolInsertResult::Allocated(owner) => {
             let mut parts: IntrusiveOwnerParts = intrusive_owner_into_parts(&replay_process, owner);
             return ReplayProcessAllocation::Ready(parts);

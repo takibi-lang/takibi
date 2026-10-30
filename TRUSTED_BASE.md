@@ -587,6 +587,12 @@ Takibi does not currently establish all of the following:
   only there and on the GIC's SGI paths (`scripts/check_irq_eoi.py`).
   Trusted: that each clear's handler really clears its source, and
   `irq_source_code`'s decode of the INTIDs;
+- that `linux_user/intrusive_pool`'s generation counter never repeats an
+  identity (#710): insert refuses with `Exhausted` once the last generation
+  (the largest `usize`) is issued, before any mutation; the callers handle
+  the case because the variant is closed, but the counter arithmetic itself
+  is the library's code, checked at the boundary by a native fixture, not
+  proved;
 - absence of stack overflow, resource exhaustion, or nontermination;
 - correctness of linker scripts, memory maps, ABI declarations, assembly, LLVM,
   firmware, peripherals, or silicon;

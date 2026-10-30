@@ -57,6 +57,10 @@ fn app_main() !{unsafe} {
             uart_puts("insert failed\n");
             return;
         }
+        IntrusivePoolInsertResult::Exhausted => {
+            uart_puts("insert failed\n");
+            return;
+        }
     }
 
     uart_puts("the pool's own invariants hold under this provider too: ");

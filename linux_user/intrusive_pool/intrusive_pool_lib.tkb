@@ -103,6 +103,17 @@ use "kernel/lib/locked_cell.tkb";
 //   and if the same page comes back later as a chunk of this same pool,
 //   the pool-global (never per-chunk) generation counter is what still
 //   rejects a stale handle.
+// - THE GENERATION BUDGET IS FINITE AND NEVER WRAPS (issue #710). A pool
+//   issues generations 1 ..= INTRUSIVE_POOL_LAST_GENERATION (the largest
+//   usize; 0 means free), each once, pool-wide. Issuing the last one sets
+//   next_generation to 0, and every later insert or insert_zeroed answers
+//   Exhausted before it grows a chunk or touches a free chain, so the
+//   pool's state and the caller's ownership are unchanged. Removal,
+//   reclaim and probing keep working; only allocation ends. On a 64-bit
+//   target the budget is not reached in practice; the native fixture
+//   check_generation_exhaustion reaches it through the test-only
+//   intrusive_pool_set_next_generation_for_test. Trusted: the arithmetic
+//   above (the `== LAST` test before the increment), which no type proves.
 // - A chunk quarantined by the alloc-path check (issue #352) is leaked on
 //   purpose: its page is never returned to the provider and it is never
 //   allocated from again. That is bounded by the number of corruption
@@ -585,8 +596,19 @@ private linear struct IntrusiveOwner[pool_id: addr, allocation: usize] {
 // allocator lives at, since a fallible acquire must return a variant.
 must_use variant IntrusivePoolInsertResult[pool_id: addr] {
     OutOfMemory;
+    // GitHub issue #710: the pool has issued its last generation. Refused
+    // before any freelist or chunk mutation, so the pool and the caller's
+    // ownership are as they were; no later insert on this pool succeeds.
+    Exhausted;
     Allocated(exists allocation: usize. IntrusiveOwner[pool_id, allocation]);
 }
+
+// GitHub issue #710: the generation budget. Generations run 1 ..=
+// INTRUSIVE_POOL_LAST_GENERATION (0 means free); issuing the last one sets
+// next_generation to 0, which no insert accepts, so no generation is ever
+// issued twice. intrusive_pool_set_next_generation_for_test is the test-only
+// injection that reaches the boundary.
+const INTRUSIVE_POOL_LAST_GENERATION: usize = 0xFFFFFFFFFFFFFFFF;
 
 // growable_pool's own grow result has to distinguish THREE
 // outcomes (issue #295): its own MAX_CHUNKS ceiling, the global page
@@ -922,6 +944,16 @@ fn intrusive_pool_lock(T: type, pool: &mut IntrusivePool(T) @ pool_id)
 fn intrusive_pool_unlock(T: type, pool: &mut IntrusivePool(T) @ pool_id,
                          guard: sink IntrusivePoolGuard[pool_id]) {
     pool_lock_release(pool.pool_tag, &(*pool).lock, guard.flags);
+}
+
+// GitHub issue #710: test-only. Moves the pool's generation counter near
+// its limit so a native fixture reaches the last generation; a value of 0
+// is refused, as is lowering it (an issued generation would come again).
+fn intrusive_pool_set_next_generation_for_test(T: type,
+        pool: &mut IntrusivePool(T) @ pool_id, next: usize) -> bool {
+    if (next == 0 || next < pool.next_generation) { return false; }
+    pool.next_generation = next;
+    return true;
 }
 
 fn intrusive_pool_init(T: type, pool: &mut IntrusivePool(T) @ pool_id) {
@@ -1501,6 +1533,10 @@ private fn intrusive_pool_insert_unchecked(T: type, pool: &mut IntrusivePool(T) 
                                            guard: borrow IntrusivePoolGuard[pool_id],
                                            zero_payload: bool)
         -> IntrusivePoolInsertResult[pool_id] !{unsafe} {
+    // GitHub issue #710: before any grow or freelist mutation.
+    if (pool.next_generation == 0) {
+        return IntrusivePoolInsertResult::Exhausted;
+    }
     if (pool.partial_head == 0) {
         match intrusive_pool_grow_one_chunk(pool) {
             IntrusivePoolGrowResult::OutOfMemory => {
@@ -1567,7 +1603,11 @@ private fn intrusive_pool_insert_unchecked(T: type, pool: &mut IntrusivePool(T) 
     // caller's payload.
     header.free_head = *intrusive_slot_link_at(pool, slot_address);
     let generation: usize = pool.next_generation;
-    pool.next_generation = generation + 1;
+    if (generation == INTRUSIVE_POOL_LAST_GENERATION) {
+        pool.next_generation = 0;
+    } else {
+        pool.next_generation = generation + 1;
+    }
     // GitHub issue #514: clear the storage BEFORE the stamp, not after it.
     // The stamp is what makes this slot answer Live, and the link read one
     // line above is still sitting in the payload's own first word until
@@ -2439,6 +2479,7 @@ fn intrusive_pool_boot_probe() -> bool !{unsafe} {
     intrusive_pool_unlock(&pool, g0);
     let a0 = match first {
         IntrusivePoolInsertResult::OutOfMemory => { return false; }
+        IntrusivePoolInsertResult::Exhausted => { return false; }
         IntrusivePoolInsertResult::Allocated(o) => { o }
     };
     // One chunk is one RUN, whose page count this pool derives from T
@@ -2480,6 +2521,7 @@ fn intrusive_pool_boot_probe() -> bool !{unsafe} {
     intrusive_pool_unlock(&pool, g2);
     let a1 = match second {
         IntrusivePoolInsertResult::OutOfMemory => { return false; }
+        IntrusivePoolInsertResult::Exhausted => { return false; }
         IntrusivePoolInsertResult::Allocated(o) => { o }
     };
     let recycled: bool =

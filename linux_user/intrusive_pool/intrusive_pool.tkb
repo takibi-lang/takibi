@@ -170,6 +170,7 @@ fn check_allocation_transfer() -> AllocationTransferTest !{unsafe} {
     intrusive_pool_unlock(&allocation_transfer_pool, guard);
     let IntrusivePoolInsertResult::Allocated(owner) = inserted else {
         IntrusivePoolInsertResult::OutOfMemory => { return AllocationTransferTest::Unavailable; }
+        IntrusivePoolInsertResult::Exhausted => { return AllocationTransferTest::Unavailable; }
     };
     let mut slot: IntrusiveSlotAddress = intrusive_owner_slot(owner);
     let generation = intrusive_owner_generation_indexed(owner);
@@ -222,6 +223,74 @@ fn check_allocation_transfer() -> AllocationTransferTest !{unsafe} {
     return AllocationTransferTest::Checked(checked);
 }
 
+// GitHub issue #710: the generation budget's last identity. The counter is
+// moved to two below the limit (test-only injection); insert and
+// insert_zeroed then hand out the last two generations, the second exactly
+// INTRUSIVE_POOL_LAST_GENERATION, and the next insert of either kind is
+// Exhausted with the pool's counts unchanged. Freeing a slot does not
+// revive the budget, and the live owners are removed normally afterwards.
+fn check_generation_exhaustion() -> bool !{unsafe} {
+    let mut pool: IntrusivePool(usize);
+    intrusive_pool_init(&pool);
+    if (intrusive_pool_set_next_generation_for_test(&pool,
+            INTRUSIVE_POOL_LAST_GENERATION - 1) == false) { return false; }
+    let g1 = intrusive_pool_lock(&pool);
+    let r1 = intrusive_pool_insert(&pool, g1);
+    intrusive_pool_unlock(&pool, g1);
+    let first = match r1 {
+        IntrusivePoolInsertResult::Allocated(o) => { o }
+        IntrusivePoolInsertResult::OutOfMemory => { return false; }
+        IntrusivePoolInsertResult::Exhausted => { return false; }
+    };
+    let g2 = intrusive_pool_lock(&pool);
+    let r2 = intrusive_pool_insert_zeroed(&pool, g2);
+    intrusive_pool_unlock(&pool, g2);
+    let last = match r2 {
+        IntrusivePoolInsertResult::Allocated(o) => { o }
+        IntrusivePoolInsertResult::OutOfMemory => { intrusive_owner_drop(first); return false; }
+        IntrusivePoolInsertResult::Exhausted => { intrusive_owner_drop(first); return false; }
+    };
+    let mut ok: bool =
+        intrusive_owner_generation(first) == INTRUSIVE_POOL_LAST_GENERATION - 1
+        && intrusive_owner_generation(last) == INTRUSIVE_POOL_LAST_GENERATION;
+    // Free one slot: a free chain entry exists, yet the budget is spent.
+    let g3 = intrusive_pool_lock(&pool);
+    if (intrusive_remove_succeeded(intrusive_pool_remove(&pool, g3, first)) == false) {
+        ok = false;
+    }
+    intrusive_pool_unlock(&pool, g3);
+    let live_before: usize = intrusive_pool_live_count(&pool);
+    let chunks_before: usize = intrusive_pool_chunk_count(&pool);
+    let g4 = intrusive_pool_lock(&pool);
+    let r4 = intrusive_pool_insert(&pool, g4);
+    let r5 = intrusive_pool_insert_zeroed(&pool, g4);
+    intrusive_pool_unlock(&pool, g4);
+    match r4 {
+        IntrusivePoolInsertResult::Exhausted => {}
+        IntrusivePoolInsertResult::OutOfMemory => { ok = false; }
+        IntrusivePoolInsertResult::Allocated(o) => { ok = false; intrusive_owner_drop(o); }
+    }
+    match r5 {
+        IntrusivePoolInsertResult::Exhausted => {}
+        IntrusivePoolInsertResult::OutOfMemory => { ok = false; }
+        IntrusivePoolInsertResult::Allocated(o) => { ok = false; intrusive_owner_drop(o); }
+    }
+    if (intrusive_pool_live_count(&pool) != live_before
+        || intrusive_pool_chunk_count(&pool) != chunks_before) { ok = false; }
+    let g5 = intrusive_pool_lock(&pool);
+    if (intrusive_remove_succeeded(intrusive_pool_remove(&pool, g5, last)) == false) {
+        ok = false;
+    }
+    intrusive_pool_unlock(&pool, g5);
+    if (intrusive_pool_live_count(&pool) != 0) { ok = false; }
+    // Cleanup at the limit: the reserve chunk goes back to the provider.
+    let g6 = intrusive_pool_lock(&pool);
+    let released: usize = intrusive_pool_reclaim(&pool, g6);
+    intrusive_pool_unlock(&pool, g6);
+    if (released != 1 || intrusive_pool_chunk_count(&pool) != 0) { ok = false; }
+    return ok;
+}
+
 fn app_main() {
     page_allocator_init();
     uart_puts("intrusive_pool\n");
@@ -234,6 +303,9 @@ fn app_main() {
     mutex_release(&inspection_pool.lock, inspection_flags);
     uart_puts("inspection observes held metadata and unlock: ");
     uart_print(refused && intrusive_pool_inspection_busy(&inspection_pool) == false);
+    uart_puts("\n");
+    uart_puts("last generation issued once, then Exhausted with state unchanged: ");
+    uart_print(check_generation_exhaustion());
     uart_puts("\n");
     uart_puts("allocation proof transfer, unlock, foreign, stale and free: ");
     match check_allocation_transfer() {
@@ -338,6 +410,7 @@ fn app_main() {
         intrusive_pool_unlock(&pool_huge, hg);
         match hr {
             IntrusivePoolInsertResult::OutOfMemory => { huge_going = false; }
+            IntrusivePoolInsertResult::Exhausted => { huge_going = false; }
             IntrusivePoolInsertResult::Allocated(h) => {
                 let mut address: IntrusiveSlotAddress = intrusive_owner_slot(h);
                 if (huge_base == 0) { huge_base = intrusive_slot_address_chunk_base(&pool_huge, address); }
@@ -467,6 +540,10 @@ fn app_main() {
             uart_puts("pool_a insert 0 failed\n");
             return;
         }
+        IntrusivePoolInsertResult::Exhausted => {
+            uart_puts("pool_a insert 0 failed\n");
+            return;
+        }
     };
     let g2 = intrusive_pool_lock(&pool_a);
     let r2 = intrusive_pool_insert(&pool_a, g2);
@@ -474,6 +551,11 @@ fn app_main() {
     let a1 = match r2 {
         IntrusivePoolInsertResult::Allocated(o) => { o }
         IntrusivePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_a insert 1 failed\n");
+            intrusive_owner_drop(a0);
+            return;
+        }
+        IntrusivePoolInsertResult::Exhausted => {
             uart_puts("pool_a insert 1 failed\n");
             intrusive_owner_drop(a0);
             return;
@@ -517,6 +599,11 @@ fn app_main() {
     let a1b = match r4 {
         IntrusivePoolInsertResult::Allocated(o) => { o }
         IntrusivePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_a reinsert failed\n");
+            intrusive_owner_drop(a0);
+            return;
+        }
+        IntrusivePoolInsertResult::Exhausted => {
             uart_puts("pool_a reinsert failed\n");
             intrusive_owner_drop(a0);
             return;
@@ -578,6 +665,11 @@ fn app_main() {
             intrusive_owner_drop(a0);
             return;
         }
+        IntrusivePoolInsertResult::Exhausted => {
+            uart_puts("pool_b insert 0 failed\n");
+            intrusive_owner_drop(a0);
+            return;
+        }
     };
     let mut a0_slot: IntrusiveSlotAddress = intrusive_owner_slot(a0);
     let a0_generation: usize = intrusive_owner_generation(a0);
@@ -629,6 +721,7 @@ fn app_main() {
                 wanted = wanted + 1;
             }
             IntrusivePoolInsertResult::OutOfMemory => { exhausted = true; }
+            IntrusivePoolInsertResult::Exhausted => { exhausted = true; }
         }
     }
     uart_puts("200 live objects from a pool declared with no capacity ");
@@ -712,6 +805,7 @@ fn app_main() {
                 filled = filled + 1;
             }
             IntrusivePoolInsertResult::OutOfMemory => { fill_failed = true; }
+            IntrusivePoolInsertResult::Exhausted => { fill_failed = true; }
         }
     }
     uart_puts("two chunks filled before the drain (live, chunks, pages): ");
@@ -823,6 +917,10 @@ fn app_main() {
             uart_puts("pool_r reuse failed\n");
             return;
         }
+        IntrusivePoolInsertResult::Exhausted => {
+            uart_puts("pool_r reuse failed\n");
+            return;
+        }
     }
 
     // GitHub issue #354: reclaim on demand. Everything above is REACTIVE
@@ -907,6 +1005,10 @@ fn app_main() {
             uart_puts("pool_z insert failed\n");
             return;
         }
+        IntrusivePoolInsertResult::Exhausted => {
+            uart_puts("pool_z insert failed\n");
+            return;
+        }
     }
 
     if (intrusive_pool_probe(&pool_r) == false) { probes_ok = false; }
@@ -928,6 +1030,10 @@ fn app_main() {
     let c0 = match r19 {
         IntrusivePoolInsertResult::Allocated(o) => { o }
         IntrusivePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_c insert 0 failed\n");
+            return;
+        }
+        IntrusivePoolInsertResult::Exhausted => {
             uart_puts("pool_c insert 0 failed\n");
             return;
         }
@@ -956,6 +1062,10 @@ fn app_main() {
             uart_puts("pool_c insert 1 failed\n");
             return;
         }
+        IntrusivePoolInsertResult::Exhausted => {
+            uart_puts("pool_c insert 1 failed\n");
+            return;
+        }
     };
     uart_puts("the poisoned slot is itself still handed out normally: ");
     uart_print(intrusive_slot_address_identity(intrusive_owner_slot(c1)) == c_slot1);
@@ -974,6 +1084,7 @@ fn app_main() {
             intrusive_owner_drop(o);
         }
         IntrusivePoolInsertResult::OutOfMemory => { rejected = true; }
+        IntrusivePoolInsertResult::Exhausted => { rejected = true; }
     }
     uart_puts("a corrupted next_free is rejected, not returned ");
     uart_puts("(rejected, handed back the poison, counted): ");
@@ -1001,6 +1112,10 @@ fn app_main() {
             uart_puts("\n");
         }
         IntrusivePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_c recovery failed\n");
+            return;
+        }
+        IntrusivePoolInsertResult::Exhausted => {
             uart_puts("pool_c recovery failed\n");
             return;
         }
@@ -1059,6 +1174,10 @@ fn app_main() {
             uart_puts("pool_c post-drain insert failed\n");
             return;
         }
+        IntrusivePoolInsertResult::Exhausted => {
+            uart_puts("pool_c post-drain insert failed\n");
+            return;
+        }
     }
 
     // The quieter half of the same primitive: point the chain at a LIVE
@@ -1100,6 +1219,10 @@ fn app_main() {
             uart_puts("pool_c alias setup insert failed\n");
             return;
         }
+        IntrusivePoolInsertResult::Exhausted => {
+            uart_puts("pool_c alias setup insert failed\n");
+            return;
+        }
     }
     let mut alias_rejected: bool = false;
     let mut aliased: bool = false;
@@ -1112,6 +1235,7 @@ fn app_main() {
             intrusive_owner_drop(o);
         }
         IntrusivePoolInsertResult::OutOfMemory => { alias_rejected = true; }
+        IntrusivePoolInsertResult::Exhausted => { alias_rejected = true; }
     }
     uart_puts("a chain pointing at a LIVE slot is refused, and its existing ");
     uart_puts("occupant is untouched (rejected, aliased, counted, occupant kept): ");
@@ -1176,6 +1300,10 @@ fn app_main() {
             uart_puts("pool_u insert failed\n");
             return;
         }
+        IntrusivePoolInsertResult::Exhausted => {
+            uart_puts("pool_u insert failed\n");
+            return;
+        }
     };
     // What the pool itself put there, stated so it does not depend on
     // what the page provider happened to hand over: the first word is the
@@ -1206,6 +1334,10 @@ fn app_main() {
     let u1 = match r30 {
         IntrusivePoolInsertResult::Allocated(o) => { o }
         IntrusivePoolInsertResult::OutOfMemory => {
+            uart_puts("pool_u reinsert failed\n");
+            return;
+        }
+        IntrusivePoolInsertResult::Exhausted => {
             uart_puts("pool_u reinsert failed\n");
             return;
         }
@@ -1280,6 +1412,7 @@ fn app_main() {
                 placed = placed + 1;
             }
             IntrusivePoolInsertResult::OutOfMemory => { hit_provider_limit = true; }
+            IntrusivePoolInsertResult::Exhausted => { hit_provider_limit = true; }
         }
     }
     uart_puts("1960-byte objects placed before the PROVIDER ran out ");
@@ -1388,6 +1521,7 @@ fn irq_reachable_probe() !{interrupt, unsafe} {
     match intrusive_pool_insert(&irq_reachable_pool, g) {
         IntrusivePoolInsertResult::Allocated(o) => { intrusive_owner_drop(o); }
         IntrusivePoolInsertResult::OutOfMemory => {}
+        IntrusivePoolInsertResult::Exhausted => {}
     }
     intrusive_pool_unlock(&irq_reachable_pool, g);
 }

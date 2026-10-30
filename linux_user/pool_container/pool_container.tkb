@@ -89,6 +89,7 @@ fn app_main() !{unsafe} {
                 built = built + 1;
             }
             IntrusivePoolInsertResult::OutOfMemory => { going = false; }
+            IntrusivePoolInsertResult::Exhausted => { going = false; }
         }
     }
     uart_puts("nodes chained until the PAGE PROVIDER ran out, with no N in ");

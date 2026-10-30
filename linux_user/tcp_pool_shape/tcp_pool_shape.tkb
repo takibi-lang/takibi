@@ -208,12 +208,17 @@ fn push_retx(conn: borrow *TcpConnection) -> bool !{unsafe} {
     intrusive_pool_unlock(&frames, fg);
     match fr {
         IntrusivePoolInsertResult::OutOfMemory => { return false; }
+        IntrusivePoolInsertResult::Exhausted => { return false; }
         IntrusivePoolInsertResult::Allocated(frame_owner) => {
             let rg = intrusive_pool_lock(&retxs);
             let rr = intrusive_pool_insert_zeroed(&retxs, rg);
             intrusive_pool_unlock(&retxs, rg);
             match rr {
                 IntrusivePoolInsertResult::OutOfMemory => {
+                    intrusive_owner_drop(frame_owner);
+                    return false;
+                }
+                IntrusivePoolInsertResult::Exhausted => {
                     intrusive_owner_drop(frame_owner);
                     return false;
                 }
@@ -296,6 +301,7 @@ fn app_main() !{unsafe} {
         intrusive_pool_unlock(&conns, cg);
         match cr {
             IntrusivePoolInsertResult::OutOfMemory => { going = false; }
+            IntrusivePoolInsertResult::Exhausted => { going = false; }
             IntrusivePoolInsertResult::Allocated(conn_owner) => {
                 let conn: *TcpConnection = intrusive_pool_ref(&conns, conn_owner);
                 conn.mutex = 0;
@@ -317,6 +323,10 @@ fn app_main() !{unsafe} {
                         going = false;
                         intrusive_owner_drop(conn_owner);
                     }
+                    IntrusivePoolInsertResult::Exhausted => {
+                        going = false;
+                        intrusive_owner_drop(conn_owner);
+                    }
                     IntrusivePoolInsertResult::Allocated(rx_owner) => {
                         let rx: *NetFrame = intrusive_pool_ref(&frames, rx_owner);
                         rx.len = 0;
@@ -335,6 +345,7 @@ fn app_main() !{unsafe} {
                         intrusive_pool_unlock(&frames, tg);
                         match tr {
                             IntrusivePoolInsertResult::OutOfMemory => { going = false; }
+                            IntrusivePoolInsertResult::Exhausted => { going = false; }
                             IntrusivePoolInsertResult::Allocated(tx_owner) => {
                                 let tx: *NetFrame = intrusive_pool_ref(&frames, tx_owner);
                                 tx.len = 54;                 // a SYN-ACK
@@ -347,6 +358,10 @@ fn app_main() !{unsafe} {
                                 intrusive_pool_unlock(&retxs, rg);
                                 match rr {
                                     IntrusivePoolInsertResult::OutOfMemory => {
+                                        going = false;
+                                        intrusive_owner_drop(tx_owner);
+                                    }
+                                    IntrusivePoolInsertResult::Exhausted => {
                                         going = false;
                                         intrusive_owner_drop(tx_owner);
                                     }
@@ -614,6 +629,7 @@ fn app_main() !{unsafe} {
     let mut stale_generation: usize = 0;
     match seed {
         IntrusivePoolInsertResult::OutOfMemory => {}
+        IntrusivePoolInsertResult::Exhausted => {}
         IntrusivePoolInsertResult::Allocated(seed_owner) => {
             stale_slot = intrusive_owner_slot(seed_owner);
             stale_generation = intrusive_owner_generation(seed_owner);
@@ -629,6 +645,9 @@ fn app_main() !{unsafe} {
     intrusive_pool_unlock(&conns, refill_g);
     match refill {
         IntrusivePoolInsertResult::OutOfMemory => {
+            uart_puts("a stale (slot, generation) pair is refused: no refill\n");
+        }
+        IntrusivePoolInsertResult::Exhausted => {
             uart_puts("a stale (slot, generation) pair is refused: no refill\n");
         }
         IntrusivePoolInsertResult::Allocated(fresh) => {
