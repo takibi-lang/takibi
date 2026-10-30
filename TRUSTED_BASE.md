@@ -607,6 +607,11 @@ Takibi does not currently establish all of the following:
   the case because the variant is closed, but the counter arithmetic itself
   is the library's code, checked at the boundary by a native fixture, not
   proved;
+- that `FreelistCore`'s and the page allocator's generation counters never
+  repeat an identity (#1241): the same rule, in `freelist_generation_after`
+  and the checks in front of it; checked at the boundary by
+  `linux_user/freelist_pool` and `page_generation_exhaustion_probe`, not
+  proved;
 - absence of stack overflow, resource exhaustion, or nontermination;
 - correctness of linker scripts, memory maps, ABI declarations, assembly, LLVM,
   firmware, peripherals, or silicon;

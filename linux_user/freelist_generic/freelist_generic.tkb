@@ -99,6 +99,7 @@ fn app_main() {
     freelist_core_init(&parts_pool);
     let probe = match freelist_core_insert(&parts_pool) {
         FreelistPopResult::Empty => { uart_puts("parts probe alloc failed\n"); return; }
+        FreelistPopResult::Exhausted => { uart_puts("parts probe alloc failed\n"); return; }
         FreelistPopResult::Popped(o) => { o }
     };
     let probe_index_before: usize = freelist_owner_index(probe);
@@ -118,6 +119,7 @@ fn app_main() {
     uart_puts("pool still full after into_parts (no release): ");
     match freelist_core_insert(&parts_pool) {
         FreelistPopResult::Empty => { uart_puts("true\n"); }
+        FreelistPopResult::Exhausted => { uart_puts("false (out of generations)\n"); }
         FreelistPopResult::Popped(o) => {
             uart_puts("false (wrongly had room)\n");
             freelist_core_remove(&parts_pool, o);
@@ -130,6 +132,7 @@ fn app_main() {
     uart_puts("pool free again after releasing the reconstructed owner: ");
     match freelist_core_insert(&parts_pool) {
         FreelistPopResult::Empty => { uart_puts("false (wrongly still full)\n"); }
+        FreelistPopResult::Exhausted => { uart_puts("false (wrongly still full)\n"); }
         FreelistPopResult::Popped(o) => {
             uart_puts("true\n");
             freelist_core_remove(&parts_pool, o);
@@ -140,6 +143,7 @@ fn app_main() {
 
     let a = match freelist_insert(&usize_pool) {
         FreelistPopResult::Empty => { uart_puts("alloc a failed\n"); return; }
+        FreelistPopResult::Exhausted => { uart_puts("alloc a failed\n"); return; }
         FreelistPopResult::Popped(o) => { o }
     };
     let b = match freelist_insert(&usize_pool) {
@@ -148,10 +152,21 @@ fn app_main() {
             freelist_remove(&usize_pool, a);
             return;
         }
+        FreelistPopResult::Exhausted => {
+            uart_puts("alloc b failed\n");
+            freelist_remove(&usize_pool, a);
+            return;
+        }
         FreelistPopResult::Popped(o) => { o }
     };
     let c = match freelist_insert(&usize_pool) {
         FreelistPopResult::Empty => {
+            uart_puts("alloc c failed\n");
+            freelist_remove(&usize_pool, a);
+            freelist_remove(&usize_pool, b);
+            return;
+        }
+        FreelistPopResult::Exhausted => {
             uart_puts("alloc c failed\n");
             freelist_remove(&usize_pool, a);
             freelist_remove(&usize_pool, b);
@@ -181,10 +196,21 @@ fn app_main() {
             freelist_remove(&usize_pool, c);
             return;
         }
+        FreelistPopResult::Exhausted => {
+            uart_puts("reuse 1 failed\n");
+            freelist_remove(&usize_pool, c);
+            return;
+        }
         FreelistPopResult::Popped(o) => { o }
     };
     let r2 = match freelist_insert(&usize_pool) {
         FreelistPopResult::Empty => {
+            uart_puts("reuse 2 failed\n");
+            freelist_remove(&usize_pool, r1);
+            freelist_remove(&usize_pool, c);
+            return;
+        }
+        FreelistPopResult::Exhausted => {
             uart_puts("reuse 2 failed\n");
             freelist_remove(&usize_pool, r1);
             freelist_remove(&usize_pool, c);
@@ -215,6 +241,7 @@ fn app_main() {
 
     match freelist_insert(&usize_pool) {
         FreelistPopResult::Empty => { uart_puts("usize pool exhausted as expected\n"); }
+        FreelistPopResult::Exhausted => { uart_puts("usize pool out of generations\n"); }
         FreelistPopResult::Popped(o) => {
             uart_puts("unexpected extra usize allocation\n");
             freelist_remove(&usize_pool, o);
@@ -234,10 +261,16 @@ fn app_main() {
 
     let p1 = match freelist_insert(&point_pool) {
         FreelistPopResult::Empty => { uart_puts("alloc p1 failed\n"); return; }
+        FreelistPopResult::Exhausted => { uart_puts("alloc p1 failed\n"); return; }
         FreelistPopResult::Popped(o) => { o }
     };
     let p2 = match freelist_insert(&point_pool) {
         FreelistPopResult::Empty => {
+            uart_puts("alloc p2 failed\n");
+            freelist_remove(&point_pool, p1);
+            return;
+        }
+        FreelistPopResult::Exhausted => {
             uart_puts("alloc p2 failed\n");
             freelist_remove(&point_pool, p1);
             return;
@@ -262,6 +295,7 @@ fn app_main() {
 
     match freelist_insert(&point_pool) {
         FreelistPopResult::Empty => { uart_puts("point pool exhausted as expected\n"); }
+        FreelistPopResult::Exhausted => { uart_puts("point pool out of generations\n"); }
         FreelistPopResult::Popped(o) => {
             uart_puts("unexpected extra point allocation\n");
             freelist_remove(&point_pool, o);

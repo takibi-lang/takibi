@@ -60,6 +60,15 @@
 //   ScheduledProcessStore, kernel/net/tcp.tkb's TcpConnectionStore, and
 //   kernel/mm/process_image.tkb's ProcessCloneVmStore already establish
 //   -- not a change to this file itself.
+// - THE GENERATION BUDGET IS FINITE AND NEVER WRAPS (issue #1241). The
+//   counter is core-wide, not per slot, so the rule is #710's refusal rather
+//   than #709's per-slot retirement: a core issues generations 1 ..=
+//   FREELIST_LAST_GENERATION, each once. Issuing the last one sets
+//   next_generation to 0, and every later insert answers Exhausted with the
+//   free chain untouched. Removal keeps working; only allocation ends.
+//   linux_user/freelist_pool reaches the boundary through the test-only
+//   freelist_core_set_next_generation_for_test. Trusted: the arithmetic in
+//   freelist_generation_after, which no type proves.
 // - Capacity N is fixed at compile time (a const-generic parameter), not
 //   grown or shrunk at runtime.
 // - freelist_core_init()/slotmap_init() must run before first use (see
@@ -76,7 +85,21 @@ use "kernel/lib/execution_model.tkb";
 
 must_use variant FreelistPopResult {
     Empty;
+    // GitHub issue #1241: the core has issued its last generation. Refused
+    // before any list mutation; no later insert on this core succeeds.
+    Exhausted;
     Popped(exists allocation: usize. FreelistOwner[allocation]);
+}
+
+// GitHub issue #1241: the generation budget. 0 means "none left", which also
+// makes a core that was never initialized refuse rather than issue 0.
+const FREELIST_LAST_GENERATION: usize = 0xFFFFFFFFFFFFFFFF;
+
+// The counter value after issuing `generation`. Shared with kernel/mm/page.tkb,
+// whose runtime list and run counters obey the same budget.
+fn freelist_generation_after(generation: usize) -> usize {
+    if (generation == FREELIST_LAST_GENERATION) { return 0; }
+    return generation + 1;
 }
 
 // A head read that has not yet been committed. Normal callers never see
@@ -191,6 +214,9 @@ private fn freelist_core_insert_commit(
         pending: sink FreelistPopPending[pending_head])
         -> FreelistPopResult !{allocates} {
     let head: usize = pending.head;
+    if (core.next_generation == 0) {
+        return FreelistPopResult::Exhausted;
+    }
     if (head < N) {
         // GitHub issue #217: the begin step only produces Pending after
         // narrowing head to the array bound. Recheck at this function
@@ -198,7 +224,7 @@ private fn freelist_core_insert_commit(
         // exception.
         core.free_head = core.next_free[head];
         let generation: usize = core.next_generation;
-        core.next_generation = generation + 1;
+        core.next_generation = freelist_generation_after(generation);
         return FreelistPopResult::Popped(freelist_owner_new(head, generation));
     }
     return FreelistPopResult::Empty;
@@ -235,6 +261,16 @@ fn freelist_core_insert_probe_commit(
 
 fn freelist_core_insert_probe_cancel(
         pending: sink FreelistPopPending[pending_head]) !{unsafe} {}
+
+// GitHub issue #1241: test-only. Moves the counter near its limit so a native
+// fixture reaches the last generation; 0 is refused, as is lowering it (an
+// issued generation would come again).
+fn freelist_core_set_next_generation_for_test(core: &mut FreelistCore(N),
+                                              next: usize) -> bool {
+    if (next == 0 || next < core.next_generation) { return false; }
+    core.next_generation = next;
+    return true;
+}
 
 // GitHub issue #380: take every free entry in [first, first + count) OFF
 // the list, in ONE pass over it.

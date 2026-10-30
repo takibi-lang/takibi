@@ -320,6 +320,10 @@ fn growable_pool_insert(T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX
         FreelistPopResult::Popped(owner) => {
             return growable_pool_finish_insert(pool, owner);
         }
+        // GitHub issue #1241: refused before growing a chunk.
+        FreelistPopResult::Exhausted => {
+            return GrowablePoolInsertResult::OutOfMemory;
+        }
         FreelistPopResult::Empty => {
             let chunk: usize = pool.active_chunks;
             match growable_pool_grow_one_chunk(pool) {
@@ -335,6 +339,9 @@ fn growable_pool_insert(T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX
             match freelist_core_insert(&pool.core) {
                 FreelistPopResult::Popped(owner) => {
                     return growable_pool_finish_insert(pool, owner);
+                }
+                FreelistPopResult::Exhausted => {
+                    return GrowablePoolInsertResult::OutOfMemory;
                 }
                 FreelistPopResult::Empty => {
                     // Unreachable in practice: a freshly activated chunk

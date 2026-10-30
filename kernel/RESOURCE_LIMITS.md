@@ -39,6 +39,14 @@ slots or pages remain; maintained callers map this to their existing resource
 failure and do not grow another chunk. Chunk release does not reset the
 budget. The intrusive process pool uses its own generation representation.
 
+The page allocator's three generation counters (bootstrap free list, runtime
+free list, runs) and `kernel/lib`'s `FreelistCore` each issue 1 through the
+largest `usize` once, then refuse before any mutation: `FreelistPopResult`'s
+`Exhausted`, surfaced by `page_alloc` and `page_alloc_contiguous` as
+`OutOfMemory`. `page_generation_exhaustion_probe` reaches the runtime pair at
+boot; `linux_user/freelist_pool` reaches the core. The descriptor table has no
+counter of its own: its generations are its RegionPools'.
+
 | Resource | Constant | Value | Scope | Alloc / release | Exhaustion result |
 |---|---|---|---|---|---|
 | Terminal echo operations | `TERMINAL_ECHO_OPERATIONS` | 4096 compact operations (16 KiB) | One UART, CPU 0 | `terminal_echo_push` / `terminal_echo_read`, IRQs masked | `Full`, with a saturating drop count reported by the terminal-echo view; a whole canonical-line kill occupies one operation |
@@ -263,6 +271,8 @@ baseline and on the process-table probe that reports and continues.
 
 - `unified_object_ref_ceiling_probe` (the computed reference bound -- a
   real 256-iteration retain loop, not a shortcut)
+- `page_generation_exhaustion_probe` (the page counters' last generation --
+  writes the two counters directly under the pool lock, and restores them)
 - `page_mapping_ref_ceiling_probe` (the computed mapping bound -- writes the
   pool's own `map_refcount` field directly to reach the 4.2M boundary
   without looping that many times, since only the boundary CHECK, not the

@@ -226,6 +226,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_mpidr_reads.py` | MPIDR_EL1 is read only by the platform's `cpu_id()` and boot code; a snapshot that stored raw MPIDR named every RPi5 core core 0 (#830) |
 | `check_irq_eoi.py` | GICC_EOIR is written only by `irq_eoi` (which takes a source clear's `IrqAcked`) and the GIC's SGI paths; a dispatcher that EOIs directly could end an IRQ whose source was never cleared, the #497 PMU storm (#774) |
 | `check_handle_boundary.py` | No slot or generation word reaches `user_write_*`, `copy_to_user*`, `SyscallAction::Resume` or `el0_context_set_x0`; index and projected-call selectors are not the written value. Lexical, rung 3 until an opaque Generation type (#1228, from the #1224 audit) |
+| `check_generation_counters.py` | A kernel name containing `generation` is assigned its value plus one only in `kernel/lib/freelist.tkb` (`freelist_generation_after`, which refuses rather than wraps) and the ASID rollover; a planted increment is refused. Lexical: a counter named otherwise is missed (#1241). |
 | `check_invariant_stop_controls.py` | Explicit kernel stop call-site resolution against exact ELF; wrong identity, origin, unsupported instruction and truncated RAM refusal |
 | `check_symbolize_ddb_controls.py` | Exact-capture PID/ELF registration, PIE and fixed executable PCs, verified entry/bias consistency, archived identities, segment and malformed-user-boundary refusal |
 | `check_qemu_lane_ports.py` | QEMU lanes do not claim conflicting protocol ports, and every lane fits the per-session port block |

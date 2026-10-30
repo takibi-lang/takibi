@@ -24,6 +24,7 @@ fn app_main() {
     let mut a_generation: usize = 0;
     match refcount_pool_alloc(&pool) {
         RefcountAllocResult::Full => { uart_puts("a alloc failed\n"); return; }
+        RefcountAllocResult::Exhausted => { uart_puts("a alloc failed\n"); return; }
         RefcountAllocResult::Allocated(pair) => {
             let (index, generation) = pair;
             a_index = index;
@@ -42,6 +43,7 @@ fn app_main() {
     let mut b_generation: usize = 0;
     match refcount_pool_alloc(&pool) {
         RefcountAllocResult::Full => { uart_puts("b alloc failed\n"); return; }
+        RefcountAllocResult::Exhausted => { uart_puts("b alloc failed\n"); return; }
         RefcountAllocResult::Allocated(pair) => {
             let (index, generation) = pair;
             b_index = index;
@@ -117,6 +119,7 @@ fn app_main() {
     let mut c_generation: usize = 0;
     match refcount_pool_alloc(&pool) {
         RefcountAllocResult::Full => { uart_puts("c alloc failed\n"); return; }
+        RefcountAllocResult::Exhausted => { uart_puts("c alloc failed\n"); return; }
         RefcountAllocResult::Allocated(pair) => {
             let (index, generation) = pair;
             c_index = index;
@@ -150,5 +153,27 @@ fn app_main() {
         RefcountReleaseResult::Invalid => { uart_puts("c release wrongly invalid\n"); }
     }
 
+    // GitHub issue #1241: the core's refusal reaches the caller as its own case.
+    let mut exhausted: RefcountSlotMap(2);
+    refcount_pool_init(&exhausted);
+    if (freelist_core_set_next_generation_for_test(&exhausted.core, 0xFFFFFFFFFFFFFFFF)) {
+        match refcount_pool_alloc(&exhausted) {
+            RefcountAllocResult::Full => { uart_puts("last: full\n"); }
+            RefcountAllocResult::Exhausted => { uart_puts("last: refused\n"); }
+            RefcountAllocResult::Allocated(pair) => {
+                let (index, generation) = pair;
+                if (refcount_pool_abandon(&exhausted, index, generation) == false) {
+                    uart_puts("last: abandon refused\n");
+                }
+            }
+        }
+        match refcount_pool_alloc(&exhausted) {
+            RefcountAllocResult::Full => { uart_puts("after last: full\n"); }
+            RefcountAllocResult::Exhausted => { uart_puts("refcount after last: exhausted\n"); }
+            RefcountAllocResult::Allocated(pair) => {
+                uart_puts("after last: issued again\n");
+            }
+        }
+    }
     uart_puts("done\n");
 }

@@ -11,4 +11,5 @@ reused index == a's old index: true
 reused generation != a's old generation: true
 occupant generation for b: 2 == 2
 live count after full drain: 0
+slotmap after last: exhausted, live 0
 done

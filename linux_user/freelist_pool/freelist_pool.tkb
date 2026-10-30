@@ -68,12 +68,53 @@ fn payload_get(owner: borrow FreelistOwner[allocation]) -> usize {
     return 0;
 }
 
+// GitHub issue #1241: a core issues its last generation once, then refuses
+// with its free chain untouched; removal still works.
+fn check_generation_exhaustion() {
+    let mut core: FreelistCore(4);
+    freelist_core_init(&core);
+    uart_puts("lowering the counter refused: ");
+    uart_print(freelist_core_set_next_generation_for_test(&core, 0) == false);
+    uart_puts("\n");
+    if (freelist_core_set_next_generation_for_test(
+            &core, FREELIST_LAST_GENERATION) == false) {
+        uart_puts("generation injection failed\n");
+        return;
+    }
+    match freelist_core_insert(&core) {
+        FreelistPopResult::Empty => { uart_puts("last generation: empty\n"); }
+        FreelistPopResult::Exhausted => { uart_puts("last generation: refused\n"); }
+        FreelistPopResult::Popped(owner) => {
+            uart_puts("last generation issued: ");
+            uart_print(freelist_owner_generation(owner) == FREELIST_LAST_GENERATION);
+            uart_puts("\n");
+            freelist_core_remove(&core, owner);
+        }
+    }
+    let head: usize = core.free_head;
+    match freelist_core_insert(&core) {
+        FreelistPopResult::Empty => { uart_puts("after last: empty\n"); }
+        FreelistPopResult::Exhausted => { uart_puts("after last: exhausted\n"); }
+        FreelistPopResult::Popped(owner) => {
+            uart_puts("after last: issued again\n");
+            freelist_core_remove(&core, owner);
+        }
+    }
+    uart_puts("free chain untouched: ");
+    uart_print(core.free_head == head);
+    uart_puts("\n");
+}
+
 fn app_main() {
     freelist_core_init(&pool);
     uart_puts("freelist_pool\n");
 
     let FreelistPopResult::Popped(a) = freelist_core_insert(&pool) else {
         FreelistPopResult::Empty => {
+            uart_puts("alloc a failed\n");
+            return;
+        }
+        FreelistPopResult::Exhausted => {
             uart_puts("alloc a failed\n");
             return;
         }
@@ -84,9 +125,20 @@ fn app_main() {
             freelist_core_remove(&pool, a);
             return;
         }
+        FreelistPopResult::Exhausted => {
+            uart_puts("alloc b failed\n");
+            freelist_core_remove(&pool, a);
+            return;
+        }
     };
     let FreelistPopResult::Popped(c) = freelist_core_insert(&pool) else {
         FreelistPopResult::Empty => {
+            uart_puts("alloc c failed\n");
+            freelist_core_remove(&pool, a);
+            freelist_core_remove(&pool, b);
+            return;
+        }
+        FreelistPopResult::Exhausted => {
             uart_puts("alloc c failed\n");
             freelist_core_remove(&pool, a);
             freelist_core_remove(&pool, b);
@@ -122,6 +174,11 @@ fn app_main() {
             freelist_core_remove(&pool, c);
             return;
         }
+        FreelistPopResult::Exhausted => {
+            uart_puts("reuse 1 failed\n");
+            freelist_core_remove(&pool, c);
+            return;
+        }
         FreelistPopResult::Popped(o) => { o }
     };
     let r2: exists s2: usize. FreelistOwner[s2] = match freelist_core_insert(&pool) {
@@ -131,10 +188,23 @@ fn app_main() {
             freelist_core_remove(&pool, c);
             return;
         }
+        FreelistPopResult::Exhausted => {
+            uart_puts("reuse 2 failed\n");
+            freelist_core_remove(&pool, r1);
+            freelist_core_remove(&pool, c);
+            return;
+        }
         FreelistPopResult::Popped(o) => { o }
     };
     let r3: exists s3: usize. FreelistOwner[s3] = match freelist_core_insert(&pool) {
         FreelistPopResult::Empty => {
+            uart_puts("reuse 3 failed\n");
+            freelist_core_remove(&pool, r1);
+            freelist_core_remove(&pool, r2);
+            freelist_core_remove(&pool, c);
+            return;
+        }
+        FreelistPopResult::Exhausted => {
             uart_puts("reuse 3 failed\n");
             freelist_core_remove(&pool, r1);
             freelist_core_remove(&pool, r2);
@@ -183,6 +253,9 @@ fn app_main() {
         FreelistPopResult::Empty => {
             uart_puts("pool exhausted as expected\n");
         }
+        FreelistPopResult::Exhausted => {
+            uart_puts("pool out of generations\n");
+        }
         FreelistPopResult::Popped(o) => {
             uart_puts("unexpected extra allocation: ");
             uart_print(freelist_owner_index(o));
@@ -216,6 +289,14 @@ fn app_main() {
             freelist_core_remove(&pool, c);
             return;
         }
+        FreelistPopResult::Exhausted => {
+            uart_puts("alias probe: unexpectedly empty\n");
+            freelist_core_remove(&pool, r1);
+            freelist_core_remove(&pool, r2);
+            freelist_core_remove(&pool, r3);
+            freelist_core_remove(&pool, c);
+            return;
+        }
         FreelistPopResult::Popped(o) => { o }
     };
     uart_puts("bare FreelistCore double free aliases c's index: ");
@@ -227,5 +308,6 @@ fn app_main() {
     freelist_core_remove(&pool, r2);
     freelist_core_remove(&pool, r3);
     freelist_core_remove(&pool, c);
+    check_generation_exhaustion();
     uart_puts("done\n");
 }

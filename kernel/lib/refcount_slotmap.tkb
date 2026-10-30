@@ -73,6 +73,9 @@ fn refcount_pool_init(pool: &mut RefcountSlotMap(N)) {
 
 must_use variant RefcountAllocResult {
     Full;
+    // GitHub issue #1241: the core issued its last generation; see
+    // kernel/lib/freelist.tkb. No slot changed.
+    Exhausted;
     Allocated((usize, usize));
 }
 
@@ -84,6 +87,7 @@ fn refcount_pool_alloc(pool: &mut RefcountSlotMap(N))
         -> RefcountAllocResult {
     match freelist_core_insert(&pool.core) {
         FreelistPopResult::Empty => { return RefcountAllocResult::Full; }
+        FreelistPopResult::Exhausted => { return RefcountAllocResult::Exhausted; }
         FreelistPopResult::Popped(owner) => {
             let index: usize = freelist_owner_index(owner);
             let generation_value: usize = freelist_owner_generation(owner);

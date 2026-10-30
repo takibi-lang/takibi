@@ -998,6 +998,8 @@ private fn page_alloc_contiguous_locked(frames: borrow PageFrameStore[fbc, fbo, 
                                         owner: PageOwnerTag)
         -> PageRunAllocResult !{allocates, requires_mmu, unsafe} {
     if (count < 1) { return PageRunAllocResult::OutOfMemory; }
+    // GitHub issue #1241: refused before any candidate is claimed.
+    if (pool.run_generation == 0) { return PageRunAllocResult::OutOfMemory; }
     if (owner == PageOwnerTag::Unowned ||
         owner == PageOwnerTag::Unavailable) {
         return PageRunAllocResult::OutOfMemory;
@@ -1138,7 +1140,7 @@ private fn page_run_claim(frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, fso,
                 return PageRunAllocResult::OutOfMemory;
             }
             let generation: usize = pool.run_generation;
-            pool.run_generation = generation + 1;
+            pool.run_generation = freelist_generation_after(generation);
             return PageRunAllocResult::Allocated(
                 page_run_owner_new(run_frames, candidate, physical, count, generation));
             }
@@ -2275,6 +2277,9 @@ private fn page_alloc_locked(frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, f
             FreelistPopResult::Empty => {
                 return PageAllocResult::OutOfMemory;
             }
+            FreelistPopResult::Exhausted => {
+                return PageAllocResult::OutOfMemory;
+            }
             FreelistPopResult::Popped(slot) => {
                 let (index, generation) = freelist_owner_into_parts(slot);
                 if (index < BOOTSTRAP_PAGE_COUNT) {
@@ -2289,6 +2294,8 @@ private fn page_alloc_locked(frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, f
             }
         }
     }
+    // GitHub issue #1241: before the reservation or the list is touched.
+    if (pool.runtime_next_generation == 0) { return PageAllocResult::OutOfMemory; }
     let index: usize = pool.runtime_free_head;
     if (index >= page_capacity(pool, metas, extents)) { return PageAllocResult::OutOfMemory; }
     if (page_reserve_admits(pool, 1) == false) { return PageAllocResult::OutOfMemory; }
@@ -2304,7 +2311,7 @@ private fn page_alloc_locked(frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, f
         page_meta_at(metas, next).prev_free = capacity as u32;
     }
     let generation: usize = pool.runtime_next_generation;
-    pool.runtime_next_generation = generation + 1;
+    pool.runtime_next_generation = freelist_generation_after(generation);
     meta.occupied = true;
     meta.owner = owner;
     meta.map_refcount = 0;
@@ -2317,6 +2324,96 @@ private fn page_alloc_locked(frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, f
                                           generation);
         }
     }
+}
+
+// GitHub issue #1241: the page allocator's three generation counters (the
+// bootstrap core's, the runtime list's and the runs') share one budget rule:
+// each issues 1 ..= FREELIST_LAST_GENERATION once, then refuses before any
+// mutation. The refusal is OutOfMemory, as a RegionPool's exhausted budget is
+// Full at its callers: no caller has a different thing to do. The probe holds
+// the pool lock across the whole test, moving the two runtime counters to
+// their last value and putting them back, so nothing else can see that state
+// or be handed a generation the counters will issue again.
+private fn page_generation_exhaustion_locked(
+        frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, fso, fsn], pool: borrow &mut BootPagePool,
+        metas: borrow region(PageMeta)[mb, mn], extents: borrow region(PageExtent)[eb, en])
+        -> bool !{allocates, requires_mmu, unsafe} {
+    if (pool.runtime_applied == false) { return false; }
+    let saved_page: usize = pool.runtime_next_generation;
+    let saved_run: usize = pool.run_generation;
+    let free_before: usize = pool.runtime_free_count;
+    let head_before: usize = pool.runtime_free_head;
+    let mut ok: bool = true;
+
+    pool.runtime_next_generation = FREELIST_LAST_GENERATION;
+    match page_alloc_locked(frames, pool, metas, extents, PageOwnerTag::KernelStack) {
+        PageAllocResult::OutOfMemory => { ok = false; }
+        PageAllocResult::Allocated(page) => {
+            if (page.generation != FREELIST_LAST_GENERATION) { ok = false; }
+            page_free_locked(frames, pool, metas, extents, page);
+        }
+    }
+    if (pool.runtime_next_generation != 0) { ok = false; }
+    let free_exhausted: usize = pool.runtime_free_count;
+    let head_exhausted: usize = pool.runtime_free_head;
+    match page_alloc_locked(frames, pool, metas, extents, PageOwnerTag::KernelStack) {
+        PageAllocResult::OutOfMemory => {}
+        PageAllocResult::Allocated(page) => {
+            ok = false;
+            page_free_locked(frames, pool, metas, extents, page);
+        }
+    }
+    if (pool.runtime_free_count != free_exhausted ||
+        pool.runtime_free_head != head_exhausted) { ok = false; }
+
+    pool.run_generation = FREELIST_LAST_GENERATION;
+    match page_alloc_contiguous_locked(frames, pool, metas, extents, 1, PageOwnerTag::KernelStack) {
+        PageRunAllocResult::OutOfMemory => { ok = false; }
+        PageRunAllocResult::Allocated(run) => {
+            if (run.generation != FREELIST_LAST_GENERATION) { ok = false; }
+            page_run_free_locked(frames, pool, metas, extents, run);
+        }
+    }
+    if (pool.run_generation != 0) { ok = false; }
+    match page_alloc_contiguous_locked(frames, pool, metas, extents, 1, PageOwnerTag::KernelStack) {
+        PageRunAllocResult::OutOfMemory => {}
+        PageRunAllocResult::Allocated(run) => {
+            ok = false;
+            page_run_free_locked(frames, pool, metas, extents, run);
+        }
+    }
+
+    pool.runtime_next_generation = saved_page;
+    pool.run_generation = saved_run;
+    // A LIFO list gets the same page back on top of the same head.
+    if (pool.runtime_free_count != free_before ||
+        pool.runtime_free_head != head_before) { ok = false; }
+    return ok;
+}
+
+fn page_generation_exhaustion_probe() -> bool !{allocates, requires_mmu, unsafe} {
+    let guard = locked_cell_take(&boot_page_pool_cell);
+    let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
+    let result: bool = match place_borrow(guard, page_meta_store.metas) {
+        Place::Empty => { false }
+        Place::Full(metas) => {
+            let inner: bool = match place_borrow(guard, page_meta_store.extents) {
+                Place::Empty => { false }
+                Place::Full(extents) => {
+                    let framed: bool = match place_borrow(guard, page_meta_store.frames) {
+                        Place::Empty => { false }
+                        Place::Full(frames) => {
+                            page_generation_exhaustion_locked(frames, pool, metas, extents)
+                        }
+                    };
+                    framed
+                }
+            };
+            inner
+        }
+    };
+    locked_cell_give(&boot_page_pool_cell, guard);
+    return result;
 }
 
 // The page the free list chose, its permission taken out of its place

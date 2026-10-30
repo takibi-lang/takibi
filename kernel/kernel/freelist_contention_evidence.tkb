@@ -163,6 +163,9 @@ private fn freelist_probe_record_pop(result: FreelistPopResult,
             atomic_word_fetch_add(freelist_probe_empty_address(), 1);
             return false;
         }
+        // The probe's core is initialized each phase and issues far below
+        // the budget (#1241); a refusal is simply nothing taken.
+        FreelistPopResult::Exhausted => { return false; }
         FreelistPopResult::Popped(owner) => {
             let index: usize = freelist_owner_index(owner);
             if (index < FREELIST_CONTENTION_SLOTS) {

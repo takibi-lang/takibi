@@ -55,6 +55,7 @@ fn slotmap_init(map: &mut SlotMap(N)) {
 fn slotmap_insert(map: &mut SlotMap(N)) -> FreelistPopResult {
     match freelist_core_insert(&map.core) {
         FreelistPopResult::Empty => { return FreelistPopResult::Empty; }
+        FreelistPopResult::Exhausted => { return FreelistPopResult::Exhausted; }
         FreelistPopResult::Popped(owner) => {
             let index: usize = freelist_owner_index(owner);
             let generation: usize = freelist_owner_generation(owner);
@@ -110,8 +111,8 @@ fn slotmap_double_remove_count(map: &mut SlotMap(N)) -> usize {
 // currently hold `generation`? No ownership proof required or consumed.
 // Rejects generation == 0 unconditionally, matching every existing
 // used[]+generation[] call site's own "used[slot] != 0" guard exactly --
-// FreelistCore's own next_generation counter starts at 1 and is
-// monotonic, so 0 can never be a live occupant's real generation, only an
+// FreelistCore's own next_generation counter starts at 1, is monotonic
+// and refuses rather than wraps (issue #1241), so 0 can never be a live occupant's real generation, only an
 // unallocated slot's reset value or an uninitialized/garbage caller value.
 fn slotmap_matches(map: &mut SlotMap(N), index: usize, generation: usize) -> bool {
     if (generation == 0) { return false; }

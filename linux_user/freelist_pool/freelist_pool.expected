@@ -7,4 +7,8 @@ stale payloads (r1 sees b's old 200, r2 sees a's old 100, r3 sees a never-set sl
 payloads after this caller resets them: 111 222 333
 pool exhausted as expected
 bare FreelistCore double free aliases c's index: true
+lowering the counter refused: true
+last generation issued: true
+after last: exhausted
+free chain untouched: true
 done

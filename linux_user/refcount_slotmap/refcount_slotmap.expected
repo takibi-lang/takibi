@@ -10,4 +10,5 @@ release 2 of 2: freed
 matches after full release: false
 double release detected: true
 abandon on a retained slot refused: true
+refcount after last: exhausted
 done

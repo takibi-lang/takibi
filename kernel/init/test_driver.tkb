@@ -1350,6 +1350,11 @@ fn kernel_test_common_probes() !{unsafe} {
     } else {
         kernel_boot_log("page mapping refcount ceiling: failed\n");
     }
+    if (page_generation_exhaustion_probe()) {
+        kernel_boot_log("page generations: the last one is issued once, then alloc and run refuse before any mutation ok\n");
+    } else {
+        kernel_boot_log("page generations: failed\n");
+    }
     if (unified_fd_table_growth_probe()) {
         kernel_boot_log("process fd table: 40 descriptors past the old ceiling of 16, refusal follows this process's own RLIMIT_NOFILE ok\n");
     } else {

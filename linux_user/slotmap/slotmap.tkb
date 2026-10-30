@@ -18,6 +18,7 @@ fn app_main() {
 
     let a = match slotmap_insert(&pool) {
         FreelistPopResult::Empty => { uart_puts("a insert failed\n"); return; }
+        FreelistPopResult::Exhausted => { uart_puts("a insert failed\n"); return; }
         FreelistPopResult::Popped(o) => { o }
     };
     let b = match slotmap_insert(&pool) {
@@ -26,10 +27,21 @@ fn app_main() {
             slotmap_remove(&pool, a);
             return;
         }
+        FreelistPopResult::Exhausted => {
+            uart_puts("b insert failed\n");
+            slotmap_remove(&pool, a);
+            return;
+        }
         FreelistPopResult::Popped(o) => { o }
     };
     let c = match slotmap_insert(&pool) {
         FreelistPopResult::Empty => {
+            uart_puts("c insert failed\n");
+            slotmap_remove(&pool, a);
+            slotmap_remove(&pool, b);
+            return;
+        }
+        FreelistPopResult::Exhausted => {
             uart_puts("c insert failed\n");
             slotmap_remove(&pool, a);
             slotmap_remove(&pool, b);
@@ -106,6 +118,12 @@ fn app_main() {
             slotmap_remove(&pool, c);
             return;
         }
+        FreelistPopResult::Exhausted => {
+            uart_puts("d insert failed\n");
+            slotmap_remove(&pool, b);
+            slotmap_remove(&pool, c);
+            return;
+        }
         FreelistPopResult::Popped(o) => { o }
     };
     uart_puts("reused index == a's old index: ");
@@ -128,5 +146,25 @@ fn app_main() {
     uart_print(slotmap_live_count(&pool));
     uart_puts("\n");
 
+    // GitHub issue #1241: Exhausted passes through, leaving no occupant.
+    if (freelist_core_set_next_generation_for_test(&pool.core, 0xFFFFFFFFFFFFFFFF)) {
+        match slotmap_insert(&pool) {
+            FreelistPopResult::Empty => { uart_puts("last slotmap generation: empty\n"); }
+            FreelistPopResult::Exhausted => { uart_puts("last slotmap generation: refused\n"); }
+            FreelistPopResult::Popped(o) => { slotmap_remove(&pool, o); }
+        }
+        match slotmap_insert(&pool) {
+            FreelistPopResult::Empty => { uart_puts("slotmap after last: empty\n"); }
+            FreelistPopResult::Exhausted => {
+                uart_puts("slotmap after last: exhausted, live ");
+                uart_print(slotmap_live_count(&pool));
+                uart_puts("\n");
+            }
+            FreelistPopResult::Popped(o) => {
+                uart_puts("slotmap after last: issued again\n");
+                slotmap_remove(&pool, o);
+            }
+        }
+    }
     uart_puts("done\n");
 }
