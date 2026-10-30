@@ -9,6 +9,7 @@ Each sample below must fail with the diagnostic that names the flag, and
 must compile once the flag is given.
 """
 
+import re
 import subprocess
 import sys
 import tempfile
@@ -48,13 +49,18 @@ def main() -> int:
             source = Path(tmp) / "sample.tkb"
             source.write_text(src, encoding="ascii")
             out = Path(tmp) / "sample.o"
-            plain = subprocess.run([str(compiler), str(source), "-o", str(out)],
+            plain = subprocess.run([str(compiler), "--internal-allow-unused", str(source), "-o", str(out)],
                                    capture_output=True, text=True, check=False)
             cases.note()
             if plain.returncode == 0 or DIAGNOSTIC not in plain.stderr:
                 failures.append(f"{name}: without --regions, status "
                                 f"{plain.returncode}, stderr {plain.stderr.strip()!r}")
-            flagged = subprocess.run([str(compiler), "--regions", str(source), "-o", str(out)],
+            # The sample's function is its entry, so the unused-function
+            # check (on by default, #1027) runs and must skip the built-in
+            # region definitions it did not write.
+            entry = re.search(r"fn (\w+)", src)[1]
+            flagged = subprocess.run([str(compiler), "--external-entry", entry, "--regions",
+                                      str(source), "-o", str(out)],
                                      capture_output=True, text=True, check=False)
             cases.note()
             if flagged.returncode != 0:

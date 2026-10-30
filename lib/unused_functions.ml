@@ -100,6 +100,11 @@ let check ~external_entries ~check_files (prog : toplevel list) (types : program
        speculative copy emitted for another instantiation is not a source
        declaration the programmer can remove independently. *)
     not (String.contains f.name '$') &&
+    (* GitHub issue #1027 step 3: the compiler's own built-in definitions
+       ("<builtin region>") are no source a programmer can remove; with the
+       check on by default and no --check-unused-file, they must not be
+       candidates. *)
+    not (String.starts_with ~prefix:"<builtin" (Ast.source_file_of_loc f.def_loc)) &&
     (check_files = [] || StringSet.mem (def_file f) check_set) in
   entry_errors @ check_errors @ List.filter_map (fun f ->
     if not (is_candidate f) || StringSet.mem (key_of f) reachable
