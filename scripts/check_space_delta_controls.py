@@ -22,22 +22,20 @@ def exit_code(argv: list[str]) -> int | None:
 
 
 def main() -> int:
-    bad = []
-    if parse_args([]).base != "origin/main":
-        bad.append("no argument is not origin/main")
-    if parse_args(["abc123"]).base != "abc123":
-        bad.append("a ref is not taken as the base")
-    if exit_code(["--help"]) != 0:
-        bad.append("--help did not exit 0 before any build")
-    if exit_code(["--bogus"]) != 2:
-        bad.append("an unknown option was not refused")
+    claims = [
+        (parse_args([]).base == "origin/main", "no argument is not origin/main"),
+        (parse_args(["abc123"]).base == "abc123", "a ref is not taken as the base"),
+        (exit_code(["--help"]) == 0, "--help did not exit 0 before any build"),
+        (exit_code(["--bogus"]) == 2, "an unknown option was not refused"),
+    ]
+    bad = [why for held, why in claims if not held]
     for row in bad:
         print(f"ERROR space-delta controls: {row}", file=sys.stderr)
     if bad:
         return 1
     report_pass("space-delta controls",
                 "default and named bases are taken; --help and an unknown "
-                "option stop before any build", cases=4)
+                "option stop before any build", cases=len(claims))
     return 0
 
 
