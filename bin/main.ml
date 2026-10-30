@@ -48,6 +48,7 @@ let fact_files = [
   ("rawsites.tsv", "raw-authority site count per file (#739)");
   ("callgraph.tsv", "the resolved call graph (docs/CALL_GRAPH.md)");
   ("globals.tsv", "each mutable global's protection, then every use (docs/GLOBAL_PROTECTION.md)");
+  ("fields.tsv", "each struct field, with reads and writes of that field name (docs/GLOBAL_PROTECTION.md)");
   ("heldguards.tsv", "the guards held at each call");
   ("overflow.tsv", "each checked arithmetic site and its operand facts");
   ("rangeobl", "a directory: one SMT-LIB file per range obligation (docs/RANGE_OBLIGATIONS.md)");
@@ -433,6 +434,9 @@ let () =
       let out = open_out (fact "globals.tsv") in
       Global_protection.write_table out source_prog;
       Global_protection.write_uses out source_prog;
+      close_out out;
+      let out = open_out (fact "fields.tsv") in
+      Global_protection.write_fields out source_prog;
       close_out out
     end;
 

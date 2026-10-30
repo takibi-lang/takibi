@@ -160,10 +160,9 @@ struct WorkloadBusyPair {
     finish_requested: bool;
     // The restart demonstration, which runs once after the fairness
     // verdict. `restart_requested` is this file having told tag A to exit;
-    // the three `*_before` fields are what was true of the pair at that
+    // the two `*_before` fields are what was true of the pair at that
     // moment, and what B is checked against when A's replacement speaks.
     restart_requested: bool;
-    restart_a_pid_before: usize;
     restart_b_pid_before: usize;
     restart_b_rounds_before: usize;
     restart_report_state: WorkloadRestartReportState;
@@ -2344,7 +2343,6 @@ private fn workload_busy_restart_step(
     if (workload_busy_pair.restart_requested == false) {
         if (tag != WORKLOAD_BUSY_TAG_A) { return 0; }
         workload_busy_pair.restart_requested = true;
-        workload_busy_pair.restart_a_pid_before = workload_busy_pair.a_pid;
         workload_busy_pair.restart_b_pid_before = workload_busy_pair.b_pid;
         workload_busy_pair.restart_b_rounds_before =
             workload_busy_pair.b_rounds;

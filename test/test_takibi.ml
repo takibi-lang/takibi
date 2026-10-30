@@ -24150,6 +24150,33 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
        check "a used add stays an address" "w" "address" "used";
        check "a load is an atomic_load" "w" "atomic_load" "loads");
 
+  (* GitHub issue #1265: fields.tsv counts reads and writes by field name. *)
+  Alcotest.test_case "issue #1265: the fields table counts a field's reads and writes and marks hardware layouts" `Quick
+    (fun () ->
+       Compilation_state.reset ();
+       let lexbuf = Lexing.from_string
+         "struct S { only_set: usize; both: usize; addressed: usize; }
+          struct packed be W { wire: u8; }
+          fn f(p: *S, w: *W) -> usize {
+            p.only_set = 1;
+            w.wire = 1;
+            p.both = 2;
+            let q = &p.addressed;
+            return p.both;
+          }" in
+       Lexing.set_filename lexbuf "a.tkb";
+       let prog = Parser.program Lexer.read lexbuf in
+       let path = Filename.temp_file "takibi-fields-" ".tsv" in
+       let out = open_out path in
+       Global_protection.write_fields out prog;
+       close_out out;
+       let rows = In_channel.with_open_bin path In_channel.input_lines in
+       let has row = List.exists (fun r -> contains_substring r row) rows in
+       Alcotest.(check bool) "written, not read" true (has "S\tonly_set\tfalse\t0\t1");
+       Alcotest.(check bool) "read and written" true (has "S\tboth\tfalse\t1\t1");
+       Alcotest.(check bool) "an address is a read" true (has "S\taddressed\tfalse\t1\t0");
+       Alcotest.(check bool) "packed is hardware" true (has "W\twire\ttrue\t0\t1"));
+
   Alcotest.test_case "opaque handle pointers codegen without a concrete layout" `Quick
     (expect_codegen_ok
        "opaque struct DmaOwned;

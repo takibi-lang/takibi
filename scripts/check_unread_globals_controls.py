@@ -8,7 +8,8 @@ import pathlib
 import sys
 import tempfile
 
-from buildcheck_unread_globals import find_unread, find_unwritten, load, sets_by_debugger
+from buildcheck_unread_globals import (find_unread, find_unread_fields, find_unwritten,
+                                       load, load_fields, sets_by_debugger)
 from pass_line import report_pass
 
 USES = {
@@ -82,6 +83,13 @@ SETTER_SHAPES = {
 }
 
 
+FIELDS = ("file\tline\tstruct\tfield\thardware\treads\twrites\n"
+          "a\t1\tS\twrite_only\tfalse\t0\t2\n"
+          "a\t1\tS\tread_too\tfalse\t1\t2\n"
+          "a\t1\tS\tliteral_only\tfalse\t0\t0\n"
+          "a\t1\tRegs\tdoorbell\ttrue\t0\t2\n")
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         root = pathlib.Path(tmp)
@@ -94,6 +102,14 @@ def main() -> int:
                          "a\t2\tplain\tp\t-\tT\tnone\n"
                          "# uses\nfile\tline\tname\tkind\tfunction\n"
                          "a\t3\tplain\twrite\tf\n")
+        (root / "fields.tsv").write_text(FIELDS)
+        fields: dict = {}
+        load_fields(root / "fields.tsv", fields)
+        got_fields = find_unread_fields(fields)
+        if got_fields != ["a: S.write_only is never read"]:
+            print(f"ERROR unread-globals controls: fields got {got_fields}",
+                  file=sys.stderr)
+            return 1
         loaded: dict = {}
         loaded_uses: dict = collections.defaultdict(list)
         load(table, loaded, loaded_uses)

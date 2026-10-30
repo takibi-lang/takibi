@@ -89,6 +89,15 @@ pointer or slice they yield, so for one of those they count as a write, as does 
 named script has no assignment of the symbol, when the name is not a global, and
 when the program also writes it.
 
+The check refuses a struct field too, from `--facts fields.tsv`: one row per
+declared field (`file`, `line`, `struct`, `field`, `hardware`, `reads`, `writes`)
+with the expressions in the program that read and assign a field of that name. A
+field with writes and no reads is refused. The source tree has no receiver types
+at that stage, so same-named fields share their counts: it can miss a field, never
+refuse a read one. A `hardware` field (of an `io struct`, `io` typed, or in a packed struct) has its
+reader outside the program and is skipped. A field only ever set by a struct
+literal counts no write, so it is not judged.
+
 ## The ratchet
 
 Production means compiled into either kernel image, under `kernel/` and

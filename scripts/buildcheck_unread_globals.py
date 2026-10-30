@@ -24,6 +24,13 @@ symbol, declared in scripts/debugger_set_globals.tsv with a script that sets it
 (#1273, since any mention used to pass). A row is refused when its script has no assignment of
 the name, when the name is not a global, and when the program also writes it.
 
+GitHub issue #1265: the same for a struct field. Reads `fields.tsv` beside each
+table and refuses a field assigned somewhere with no read of that name anywhere.
+Counts are by field name, since the table has no receiver types, so a same-named
+field hides one: a miss, never a false refusal. A `hardware` field (an `io struct`
+register or a packed wire or descriptor layout) has its reader outside the
+program and is skipped.
+
 Usage: buildcheck_unread_globals.py QEMU.facts/globals.tsv RPI5.facts/globals.tsv
 """
 
@@ -122,22 +129,42 @@ def find_unread(globs: dict, uses: dict, root: pathlib.Path) -> list[str]:
     return unread
 
 
+def load_fields(path: pathlib.Path, fields: dict) -> None:
+    """Sum (reads, writes) per (file, struct, field) across the kernels."""
+    for line in path.read_text(encoding="utf-8").splitlines()[1:]:
+        file, _, struct, field, hardware, reads, writes = line.split("\t")
+        if hardware == "true":
+            continue
+        old = fields.get((file, struct, field), (0, 0))
+        fields[(file, struct, field)] = (old[0] + int(reads), old[1] + int(writes))
+
+
+def find_unread_fields(fields: dict) -> list[str]:
+    return [f"{file}: {struct}.{field} is never read"
+            for (file, struct, field), (reads, writes) in sorted(fields.items())
+            if writes and not reads]
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 3:
         print(__doc__, file=sys.stderr)
         return 2
     globs: dict = {}
     uses: dict = collections.defaultdict(list)
+    fields: dict = {}
     for table in argv[1:]:
         load(pathlib.Path(table), globs, uses)
-    unread = find_unread(globs, uses, ROOT) + find_unwritten(globs, uses, ROOT)
+        load_fields(pathlib.Path(table).with_name("fields.tsv"), fields)
+    unread = find_unread(globs, uses, ROOT) + find_unwritten(globs, uses, ROOT) \
+        + find_unread_fields(fields)
     for row in unread:
         print(f"ERROR unread-globals: {row}", file=sys.stderr)
     if unread:
         return 1
     report_pass("unread-globals",
                 f"{len(globs)} globals of both kernels each have a reader "
-                "and, where the table can tell, a writer",
+                "and, where the table can tell, a writer; "
+                f"{len(fields)} struct fields each written one has a reader",
                 globals=len(globs))
     return 0
 

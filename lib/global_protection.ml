@@ -281,3 +281,64 @@ let write_uses (out : out_channel) (prog : toplevel list) =
         stmts f.name params f.body
     | LetDef (_, _, Some init, _, _, _, _) -> expr "-" S.empty "read" init
     | _ -> ()) prog
+
+(* GitHub issue #1265: `--facts fields.tsv`, one row per field of a struct
+   declared in the program, with how many expressions anywhere read and write a
+   field OF THAT NAME. The source AST has no receiver types, so two structs'
+   same-named fields share their counts: scripts/buildcheck_unread_globals.py
+   can miss a write-only field, never refuse a read one. A write is the outermost
+   field of an assignment's target; everything else, `&x.f` and offsetof
+   included, is a read. The match below names every expression form so that a new
+   one cannot silently hide a reader. *)
+
+let fields_columns = [ "file"; "line"; "struct"; "field"; "hardware"; "reads"; "writes" ]
+
+let write_fields (out : out_channel) (prog : toplevel list) =
+  let reads = Hashtbl.create 256 and writes = Hashtbl.create 256 in
+  let bump table f =
+    Hashtbl.replace table f (1 + Option.value (Hashtbl.find_opt table f) ~default:0) in
+  let rec expr (e : expr) = match e.desc with
+    | FieldGet (b, f) -> bump reads f; expr b
+    | OffsetOf (_, f) -> bump reads f
+    | Assign ({ desc = FieldGet (b, f); _ }, rhs) ->
+        bump writes f; expr b; expr rhs
+    | Assign (lhs, rhs) -> expr lhs; expr rhs
+    | AddrOf a | Bnot a | Deref a | Cast (_, a) | Unsafe a | VariantCtor (_, _, a) -> expr a
+    | BinOp (_, a, b) | Index (a, b) -> expr a; expr b
+    | SliceOf (a, b, c) -> expr a; expr b; expr c
+    | Call (_, args) | StructLit args | TupleLit args -> List.iter expr args
+    | IntLit _ | BoolLit _ | StringLit _ | ByteSliceLit _ | Var _ | ViewLit _
+    | EnumVariant _ | SizeOf _ | AlignOf _ | ContainsStableOwner _ | EmbedFile _ -> ()
+  and stmts ss = List.iter stmt ss
+  and stmt (s : stmt) = match s.desc with
+    | Return (Some x) | Expr x | Yield x | StaticAssert (x, _) -> expr x
+    | Return None | Break | Continue -> ()
+    | Block b | UnsafeBlock b -> stmts b
+    | Let (_, _, _, init, _) -> Option.iter expr init
+    | LetTuple (_, init) -> expr init
+    | If (c, a, b) -> expr c; stmts a; stmts b
+    | While (c, b) -> expr c; stmts b
+    | For (_, _, lo, hi, b) -> expr lo; expr hi; stmts b
+    | ForEach (_, it, b) -> expr it; stmts b
+    | Match (subject, ms) | LetMatch (_, _, _, subject, ms) -> expr subject; arms ms
+  and arms ms = List.iter (function
+    | ArmVariant (_, _, _, body) | ArmWild body | ArmMiss body
+    | ArmIntLit (_, body) | ArmByteSliceLit (_, body) -> stmts body) ms in
+  List.iter (function
+    | FuncDef f -> stmts f.body
+    | LetDef (_, _, Some init, _, _, _, _) -> expr init
+    | _ -> ()) prog;
+  output_string out (String.concat "\t" fields_columns ^ "\n");
+  let row name fs packed loc =
+    List.iter (fun (f, ty) ->
+      let count table = Option.value (Hashtbl.find_opt table f) ~default:0 in
+      let hardware = packed || Io_struct_registry.is_io name
+                     || (match ty with TypeIo _ -> true | _ -> false) in
+      Printf.fprintf out "%s\t%d\t%s\t%s\t%b\t%d\t%d\n"
+        (Call_graph.relative (source_file_of_loc loc)) loc.Lexing.pos_lnum
+        name f hardware (count reads) (count writes)) fs in
+  List.iter (function
+    | StructDef (name, fs, packed, _, _, loc)
+    | OwnedStructDef (name, _, _, fs, packed, _, _, _, loc)
+    | GenericStructDef (name, _, fs, packed, _, _, loc) -> row name fs packed loc
+    | _ -> ()) prog
