@@ -597,20 +597,84 @@ fn kernel_log_tx_spun_total() -> usize {
 // ahead of everything already queued, which is the one failure a queue makes
 // easy and the one this kernel cannot have -- every view compares text.
 const KERNEL_LOG_TX_QUEUE_BYTES: usize = 512;
-private let mut kernel_log_tx_queue: [u8; KERNEL_LOG_TX_QUEUE_BYTES];
-private let mut kernel_log_tx_terminal: [bool; KERNEL_LOG_TX_QUEUE_BYTES];
-private let mut kernel_log_terminal_column: usize;
-private let mut kernel_log_tx_head: usize = 0;
-private let mut kernel_log_tx_tail: usize = 0;
-private let mut kernel_log_tx_count: usize = 0;
-// GitHub issue #611: the last byte any CPU put on the wire, from any stream
-// -- kernel log text or a user write. A shell on a peer wrote `... job
-// control turned off` and its newline in two records, core 0 started
+// GitHub issue #611: wire_last is the last byte any CPU put on the wire, from
+// any stream -- kernel log text or a user write. A shell on a peer wrote `...
+// job control turned off` and its newline in two records, core 0 started
 // `profile: begin` between them, and the host parser, which reads lines,
 // never saw the record. So a kernel line always starts at the beginning of a
 // wire line: its writer sends one newline of its own first when the wire is
 // mid-line (kernel_log_emit_line). The retained log never sees it.
-private let mut kernel_log_wire_last: u8 = 10;
+//
+// input_stopped is the XOFF this side last sent (kernel_log_terminal_flow_poll).
+//
+// All of it is reached only through a place guarded by the console lock. The
+// count stays one atomic word beside it for DDB, which takes no lock; only a
+// holder of the lock writes it.
+struct KernelLogTxState {
+    head: usize;
+    tail: usize;
+    column: usize;
+    wire_last: u8;
+    input_stopped: bool;
+    queue: [u8; KERNEL_LOG_TX_QUEUE_BYTES];
+    terminal: [bool; KERNEL_LOG_TX_QUEUE_BYTES];
+}
+private region let mut kernel_log_tx_state: [KernelLogTxState; 1];
+struct KernelLogTxStore {
+    private state: Place(exists c: addr. exists c__off: usize.
+                         region(KernelLogTxState)[c, 1])
+                   guarded_by(console_tx_lock);
+}
+private let mut kernel_log_tx_store: KernelLogTxStore;
+private let mut kernel_log_tx_count: AtomicWord;
+
+// The first writer claims the storage, whichever comes first: bytes spin to the
+// wire through here before any boot step has run. Until then a reader sees the
+// state of a wire at the start of a line.
+private fn kernel_log_tx_claim(guard: borrow ConsoleGuard[&console_tx_lock]) {
+    if (place_is_full(guard, kernel_log_tx_store.state)) { return; }
+    let RegionOf(KernelLogTxState)::Taken(claimed) = region_of(kernel_log_tx_state) else {
+        RegionOf(KernelLogTxState)::Gone => { return; }
+    };
+    region_at(claimed, 0).wire_last = 10;
+    match place_put(guard, kernel_log_tx_store.state, claimed) {
+        Place::Empty => {}
+        Place::Full(previous) => { region_release(previous); }
+    }
+}
+
+private fn kernel_log_wire_last(guard: borrow ConsoleGuard[&console_tx_lock]) -> u8 {
+    let answer: u8 = match place_borrow(guard, kernel_log_tx_store.state) {
+        Place::Empty => { 10 }
+        Place::Full(states) => { region_at(states, 0).wire_last }
+    };
+    return answer;
+}
+
+private fn kernel_log_wire_note(guard: borrow ConsoleGuard[&console_tx_lock], value: u8) {
+    kernel_log_tx_claim(guard);
+    match place_borrow(guard, kernel_log_tx_store.state) {
+        Place::Empty => {}
+        Place::Full(states) => { region_at(states, 0).wire_last = value; }
+    }
+}
+
+private fn kernel_log_terminal_column(guard: borrow ConsoleGuard[&console_tx_lock]) -> usize {
+    let answer: usize = match place_borrow(guard, kernel_log_tx_store.state) {
+        Place::Empty => { 0 }
+        Place::Full(states) => { region_at(states, 0).column }
+    };
+    return answer;
+}
+
+private fn kernel_log_terminal_column_set(
+        guard: borrow ConsoleGuard[&console_tx_lock], column: usize) {
+    kernel_log_tx_claim(guard);
+    match place_borrow(guard, kernel_log_tx_store.state) {
+        Place::Empty => {}
+        Place::Full(states) => { region_at(states, 0).column = column; }
+    }
+}
 
 // Whether a caller queues or spins: the queue is live when the platform has
 // armed its TX interrupt AND no terminal path owns the console.
@@ -777,108 +841,126 @@ fn kernel_log_tx_resume(previous: KernelLogTxStandDown, priority: usize) !{unsaf
     }
 }
 
-private fn kernel_log_tx_pending(guard: borrow ConsoleGuard[console_tx]) -> bool {
-    return kernel_log_tx_count != 0;
+private fn kernel_log_tx_pending(guard: borrow ConsoleGuard[&console_tx_lock]) -> bool {
+    return atomic_word_load(&kernel_log_tx_count) != 0;
 }
 
-private fn kernel_log_tx_full(guard: borrow ConsoleGuard[console_tx]) -> bool {
-    return kernel_log_tx_count >= KERNEL_LOG_TX_QUEUE_BYTES;
+private fn kernel_log_tx_full(guard: borrow ConsoleGuard[&console_tx_lock]) -> bool {
+    return atomic_word_load(&kernel_log_tx_count) >= KERNEL_LOG_TX_QUEUE_BYTES;
 }
 
 // Under the console lock (GitHub issue #663): the drain runs from the TX
 // handler on core 0 and producers run on any CPU, so producer and consumer
 // share the count. The guard parameter is what makes a call without the lock
 // unwritable. The lock masks interrupts, as the bare mask it replaces did.
-private fn kernel_log_tx_push(guard: borrow ConsoleGuard[console_tx],
-                              value: u8) -> bool {
-    if (kernel_log_tx_count >= KERNEL_LOG_TX_QUEUE_BYTES) { return false; }
-    let slot: usize = kernel_log_tx_tail;
-    if (slot >= KERNEL_LOG_TX_QUEUE_BYTES) { return false; }
-    let safe_slot: {0..<KERNEL_LOG_TX_QUEUE_BYTES as usize} = slot;
-    kernel_log_tx_queue[safe_slot] = value;
-    kernel_log_tx_terminal[safe_slot] = false;
+private fn kernel_log_tx_push(guard: borrow ConsoleGuard[&console_tx_lock],
+                              value: u8, terminal: bool) -> bool {
+    if (kernel_log_tx_full(guard)) { return false; }
+    kernel_log_tx_claim(guard);
     kernel_log_terminal_column_byte(guard, value);
-    kernel_log_wire_last = value;
-    kernel_log_tx_tail = slot + 1;
-    if (kernel_log_tx_tail >= KERNEL_LOG_TX_QUEUE_BYTES) {
-        kernel_log_tx_tail = 0;
+    let stored: bool = match place_borrow(guard, kernel_log_tx_store.state) {
+        Place::Empty => { false }
+        Place::Full(states) => {
+            let state = region_at(states, 0);
+            let slot: usize = state.tail;
+            let mut fits: bool = false;
+            if (slot < KERNEL_LOG_TX_QUEUE_BYTES) {
+                state.queue[slot] = value;
+                // Tags keep a signal flush from discarding queued kernel
+                // diagnostics.
+                state.terminal[slot] = terminal;
+                state.wire_last = value;
+                state.tail = (slot + 1) % KERNEL_LOG_TX_QUEUE_BYTES;
+                fits = true;
+            }
+            fits
+        }
+    };
+    if (stored) {
+        atomic_word_store(&kernel_log_tx_count, atomic_word_load(&kernel_log_tx_count) + 1);
     }
-    kernel_log_tx_count = kernel_log_tx_count + 1;
-    return true;
-}
-
-// Tags keep a signal flush from discarding queued kernel diagnostics.
-private fn kernel_log_tx_push_terminal(
-        guard: borrow ConsoleGuard[console_tx], value: u8) -> bool {
-    let slot: usize = kernel_log_tx_tail;
-    if (kernel_log_tx_push(guard, value) == false) { return false; }
-    if (slot < KERNEL_LOG_TX_QUEUE_BYTES) { kernel_log_tx_terminal[slot] = true; }
-    return true;
+    return stored;
 }
 
 private fn kernel_log_terminal_column_byte(
-        guard: borrow ConsoleGuard[console_tx], value: u8) {
-    if (value == 13) { kernel_log_terminal_column = 0; }
+        guard: borrow ConsoleGuard[&console_tx_lock], value: u8) {
+    let column: usize = kernel_log_terminal_column(guard);
+    if (value == 13) { kernel_log_terminal_column_set(guard, 0); }
     else if (value == 8) {
-        if (kernel_log_terminal_column != 0) {
-            kernel_log_terminal_column = kernel_log_terminal_column - 1;
-        }
+        if (column != 0) { kernel_log_terminal_column_set(guard, column - 1); }
     } else if (value == 9) {
-        kernel_log_terminal_column = (kernel_log_terminal_column + 8) & ~7;
+        kernel_log_terminal_column_set(guard, (column + 8) & ~7);
     } else if (value >= 32 && value != 127) {
-        kernel_log_terminal_column = (kernel_log_terminal_column + 1) % 65536;
+        kernel_log_terminal_column_set(guard, (column + 1) % 65536);
     }
 }
 
 fn uart_terminal_column() -> usize {
     let guard = console_lock();
-    let column: usize = kernel_log_terminal_column;
+    let column: usize = kernel_log_terminal_column(guard);
     console_unlock(guard);
     return column;
+}
+
+// Compacts the queue over its terminal-tagged bytes; answers how many stay.
+private fn kernel_log_tx_keep_kernel_bytes(state: borrow &mut KernelLogTxState,
+                                           count: usize) -> usize {
+    let head: usize = state.head;
+    let mut retained: usize = 0;
+    for offset: usize in 0..<KERNEL_LOG_TX_QUEUE_BYTES {
+        if (offset < count) {
+            let source: usize = (head + offset) % KERNEL_LOG_TX_QUEUE_BYTES;
+            if (source < KERNEL_LOG_TX_QUEUE_BYTES &&
+                state.terminal[source] == false) {
+                let target: usize = (head + retained) % KERNEL_LOG_TX_QUEUE_BYTES;
+                if (target < KERNEL_LOG_TX_QUEUE_BYTES) {
+                    state.queue[target] = state.queue[source];
+                    state.terminal[target] = false;
+                    retained = retained + 1;
+                }
+            }
+        }
+    }
+    state.tail = (head + retained) % KERNEL_LOG_TX_QUEUE_BYTES;
+    return retained;
 }
 
 // CPU 0, IRQs masked. Input signals flush terminal output, while kernel
 // records survive. All terminal producers share this queue and guard.
 fn uart_terminal_flush_output() {
     let guard = console_lock();
-    terminal_echo_reset();
-    let count: usize = kernel_log_tx_count;
-    let head: usize = kernel_log_tx_head;
-    let mut kept: usize = 0;
-    for offset: usize in 0..<KERNEL_LOG_TX_QUEUE_BYTES {
-        if (offset < count) {
-            let source: usize = (head + offset) % KERNEL_LOG_TX_QUEUE_BYTES;
-            if (source < KERNEL_LOG_TX_QUEUE_BYTES &&
-                kernel_log_tx_terminal[source] == false) {
-                let target: usize = (head + kept) % KERNEL_LOG_TX_QUEUE_BYTES;
-                if (target < KERNEL_LOG_TX_QUEUE_BYTES) {
-                    kernel_log_tx_queue[target] = kernel_log_tx_queue[source];
-                    kernel_log_tx_terminal[target] = false;
-                    kept = kept + 1;
-                }
-            }
-        }
-    }
-    kernel_log_tx_count = kept;
-    kernel_log_tx_tail = (head + kept) % KERNEL_LOG_TX_QUEUE_BYTES;
+    terminal_echo_reset(guard);
+    let count: usize = atomic_word_load(&kernel_log_tx_count);
+    let kept: usize = match place_borrow(guard, kernel_log_tx_store.state) {
+        Place::Empty => { 0 }
+        Place::Full(states) => { kernel_log_tx_keep_kernel_bytes(region_at(states, 0), count) }
+    };
+    atomic_word_store(&kernel_log_tx_count, kept);
     console_unlock(guard);
 }
 
 must_use variant KernelLogTxByte { Empty; Byte(u8); }
 
-private fn kernel_log_tx_pop(guard: borrow ConsoleGuard[console_tx])
+private fn kernel_log_tx_pop(guard: borrow ConsoleGuard[&console_tx_lock])
         -> KernelLogTxByte {
-    if (kernel_log_tx_count == 0) { return KernelLogTxByte::Empty; }
-    let slot: usize = kernel_log_tx_head;
-    if (slot >= KERNEL_LOG_TX_QUEUE_BYTES) { return KernelLogTxByte::Empty; }
-    let safe_slot: {0..<KERNEL_LOG_TX_QUEUE_BYTES as usize} = slot;
-    let value: u8 = kernel_log_tx_queue[safe_slot];
-    kernel_log_tx_head = slot + 1;
-    if (kernel_log_tx_head >= KERNEL_LOG_TX_QUEUE_BYTES) {
-        kernel_log_tx_head = 0;
-    }
-    kernel_log_tx_count = kernel_log_tx_count - 1;
-    return KernelLogTxByte::Byte(value);
+    if (atomic_word_load(&kernel_log_tx_count) == 0) { return KernelLogTxByte::Empty; }
+    let outcome: (u8, bool) = match place_borrow(guard, kernel_log_tx_store.state) {
+        Place::Empty => { (0, false) }
+        Place::Full(states) => {
+            let state = region_at(states, 0);
+            let slot: usize = state.head;
+            let mut taken: (u8, bool) = (0, false);
+            if (slot < KERNEL_LOG_TX_QUEUE_BYTES) {
+                state.head = (slot + 1) % KERNEL_LOG_TX_QUEUE_BYTES;
+                taken = (state.queue[slot], true);
+            }
+            taken
+        }
+    };
+    let (byte, found) = outcome;
+    if (found == false) { return KernelLogTxByte::Empty; }
+    atomic_word_store(&kernel_log_tx_count, atomic_word_load(&kernel_log_tx_count) - 1);
+    return KernelLogTxByte::Byte(byte);
 }
 
 // GitHub issue #454, and issue #470's rule about where a body belongs. What
@@ -898,12 +980,12 @@ private fn uart_tx_spin_store(c: u8) !{unsafe} {
     kernel_log_note_tx_spin(read_cntpct() - spin_from);
     uart_tx_store(c);
     let guard = console_lock();
-    kernel_log_wire_last = c;
+    kernel_log_wire_note(guard, c);
     console_unlock(guard);
 }
 
 // The same under a hold the caller already has, for a whole line.
-private fn uart_tx_spin_store_locked(guard: borrow ConsoleGuard[console_tx],
+private fn uart_tx_spin_store_locked(guard: borrow ConsoleGuard[&console_tx_lock],
                                      c: u8) !{unsafe} {
     let spin_from: i64 = read_cntpct();
     while (uart_tx_fifo_full()) { }
@@ -911,7 +993,7 @@ private fn uart_tx_spin_store_locked(guard: borrow ConsoleGuard[console_tx],
     uart_tx_store(c);
     kernel_log_note_tx_byte();
     kernel_log_terminal_column_byte(guard, c);
-    kernel_log_wire_last = c;
+    kernel_log_wire_note(guard, c);
 }
 
 // The RX handler, a terminal read and a termios change send UART input-flow
@@ -919,7 +1001,6 @@ private fn uart_tx_spin_store_locked(guard: borrow ConsoleGuard[console_tx],
 // (GitHub issue #830: no core polls for them). Readers on every CPU
 // publish their desired state atomically; coalescing to the latest state cannot leave
 // the sender stopped after the receive ring became empty.
-private let mut kernel_log_terminal_input_stopped: AtomicWord;
 
 fn kernel_log_terminal_flow_poll() !{logs, unsafe} {
     // The decision and the byte it sends are one section, so two callers
@@ -930,9 +1011,17 @@ fn kernel_log_terminal_flow_poll() !{logs, unsafe} {
     let guard = console_lock();
     let wanted: bool = terminal_input_flow_requested();
     let mut control: u8 = 0;
-    if (wanted != (atomic_word_load(&kernel_log_terminal_input_stopped) != 0)) {
-        atomic_word_store(&kernel_log_terminal_input_stopped, 0);
-        if (wanted) { atomic_word_store(&kernel_log_terminal_input_stopped, 1); }
+    kernel_log_tx_claim(guard);
+    let changed: bool = match place_borrow(guard, kernel_log_tx_store.state) {
+        Place::Empty => { false }
+        Place::Full(states) => {
+            let state = region_at(states, 0);
+            let differs: bool = wanted != state.input_stopped;
+            state.input_stopped = wanted;
+            differs
+        }
+    };
+    if (changed) {
         control = terminal_control_byte(8);
         if (wanted) { control = terminal_control_byte(9); }
     }
@@ -954,7 +1043,7 @@ fn uart_terminal_stop_output() {
 // The caller is the RX handler, on whichever core took it, with IRQs masked.
 fn uart_terminal_echo(operation: TerminalEchoOperation) {
     let guard = console_lock();
-    match terminal_echo_push(operation) {
+    match terminal_echo_push(guard, operation) {
         TerminalEchoPushResult::Queued => {
             match operation {
                 TerminalEchoOperation::Byte(value) => {
@@ -965,11 +1054,12 @@ fn uart_terminal_echo(operation: TerminalEchoOperation) {
                     kernel_log_terminal_column_byte(guard, value);
                 }
                 TerminalEchoOperation::Erase(columns) => {
-                    if (kernel_log_terminal_column >= columns) {
-                        kernel_log_terminal_column = kernel_log_terminal_column - columns;
-                    } else { kernel_log_terminal_column = 0; }
+                    let column: usize = kernel_log_terminal_column(guard);
+                    if (column >= columns) {
+                        kernel_log_terminal_column_set(guard, column - columns);
+                    } else { kernel_log_terminal_column_set(guard, 0); }
                 }
-                TerminalEchoOperation::Newline => { kernel_log_terminal_column = 0; }
+                TerminalEchoOperation::Newline => { kernel_log_terminal_column_set(guard, 0); }
             }
         }
         TerminalEchoPushResult::Full => { }
@@ -985,7 +1075,7 @@ fn uart_terminal_output_pending() -> bool {
 }
 
 private fn uart_terminal_output_pending_locked(
-        guard: borrow ConsoleGuard[console_tx]) -> bool {
+        guard: borrow ConsoleGuard[&console_tx_lock]) -> bool {
     return kernel_log_tx_pending(guard) || terminal_echo_pending();
 }
 
@@ -1004,7 +1094,7 @@ fn uart_terminal_resume_output() !{unsafe} {
 // function, and a console that could block on one could not report the
 // deadlock it is in.
 private fn uart_tx_drain_into_fifo(
-        guard: borrow ConsoleGuard[console_tx]) !{unsafe} {
+        guard: borrow ConsoleGuard[&console_tx_lock]) !{unsafe} {
     if (terminal_output_paused()) { return; }
     uart_tx_drain_into_fifo_force(guard);
 }
@@ -1039,20 +1129,20 @@ fn uart_tx_service() !{unsafe} {
 private let mut kernel_log_tx_writer_wake_owed: AtomicWord;
 
 private fn kernel_log_tx_writer_room_locked(
-        guard: borrow ConsoleGuard[console_tx]) -> bool {
+        guard: borrow ConsoleGuard[&console_tx_lock]) -> bool {
     return terminal_output_paused() == false && terminal_echo_pending() == false &&
-           kernel_log_tx_count <= KERNEL_LOG_TX_WRITER_LOW_WATER;
+           atomic_word_load(&kernel_log_tx_count) <= KERNEL_LOG_TX_WRITER_LOW_WATER;
 }
 
 // Fatal/DDB flushes must remain available even after a user sent XOFF.
 private fn uart_tx_drain_into_fifo_force(
-        guard: borrow ConsoleGuard[console_tx]) !{unsafe} {
+        guard: borrow ConsoleGuard[&console_tx_lock]) !{unsafe} {
     let room_before: bool = kernel_log_tx_writer_room_locked(guard);
     let mut draining: bool = true;
     while (draining && uart_terminal_output_pending_locked(guard) && uart_tx_fifo_full() == false) {
         match kernel_log_tx_pop(guard) {
             KernelLogTxByte::Empty => {
-                match terminal_echo_read() {
+                match terminal_echo_read(guard) {
                     TerminalEchoReadResult::Empty => { draining = false; }
                     TerminalEchoReadResult::Byte(value) => { uart_tx_store(value); }
                 }
@@ -1119,7 +1209,7 @@ private fn uart_wire_byte(c: u8) !{logs, unsafe} {
             uart_tx_drain_into_fifo(drain);
             console_unlock(drain);
         } else {
-            queued = kernel_log_tx_push(guard, c);
+            queued = kernel_log_tx_push(guard, c, false);
             uart_tx_drain_into_fifo(guard);
             let still_pending: bool = uart_terminal_output_pending_locked(guard);
             if (queued && still_pending) { uart_tx_irq_enable(); }
@@ -1151,7 +1241,7 @@ const KERNEL_LOG_TX_WRITER_LOW_WATER: usize = 256;
 
 // DDB captures these before the console queue is stood down and flushed.
 fn kernel_log_tx_queue_count() -> usize {
-    return kernel_log_tx_count;
+    return atomic_word_load(&kernel_log_tx_count);
 }
 
 // GitHub issue #1217: the three facts #1211's diagnosis had to piece
@@ -1188,13 +1278,13 @@ private let mut uart_user_write_sleeps: AtomicWord;
 // shared queue is live there is no queue to wait on and the bytes spin as they always have,
 // so the answer is the most one call takes.
 private fn uart_user_write_room_locked(
-        guard: borrow ConsoleGuard[console_tx]) -> usize {
+        guard: borrow ConsoleGuard[&console_tx_lock]) -> usize {
     if (terminal_output_paused()) { return 0; }
     if (terminal_echo_pending()) { return 0; }
     if (kernel_log_tx_is_live() == false) {
         return KERNEL_LOG_TX_QUEUE_BYTES;
     }
-    let count: usize = kernel_log_tx_count;
+    let count: usize = atomic_word_load(&kernel_log_tx_count);
     if (count > KERNEL_LOG_TX_WRITER_LOW_WATER) { return 0; }
     if (count >= KERNEL_LOG_TX_QUEUE_BYTES) { return 0; }
     return KERNEL_LOG_TX_QUEUE_BYTES - count;
@@ -1240,7 +1330,7 @@ fn kernel_log_ring_report() !{logs, unsafe} {
 // while the guard still serializes the IRQ mask. Before the queue is live,
 // the caller spins byte by byte through uart_putc, which takes the lock itself.
 private fn uart_user_write_locked(
-        guard: borrow ConsoleGuard[console_tx], bytes: borrow []const u8)
+        guard: borrow ConsoleGuard[&console_tx_lock], bytes: borrow []const u8)
         -> (usize, bool) !{unsafe} {
     if (terminal_output_paused()) { return (0, false); }
     if (terminal_echo_pending()) { return (0, false); }
@@ -1254,7 +1344,7 @@ private fn uart_user_write_locked(
                 } else {
                     let value: u8 = bytes[index];
                     kernel_log_note_tx_byte();
-                    if (kernel_log_tx_push_terminal(guard, value) == false) { room = false; }
+                    if (kernel_log_tx_push(guard, value, true) == false) { room = false; }
                     if (room) { taken = taken + 1; }
                 }
             }
@@ -1366,7 +1456,7 @@ private fn kernel_log_emit_line(core: {0..<KERNEL_MAX_CORES as usize}) !{unsafe}
     let length: usize = kernel_log_core_state[core].length;
     if (kernel_log_tx_is_live() == false || terminal_output_paused()) {
         let guard = console_lock();
-        if (kernel_log_wire_last != 10) { uart_tx_spin_store_locked(guard, 10); }
+        if (kernel_log_wire_last(guard) != 10) { uart_tx_spin_store_locked(guard, 10); }
         for index: usize in 0..<KERNEL_LOG_LINE_BYTES {
             if (index < length) {
                 uart_tx_spin_store_locked(guard, kernel_log_core_state[core].line[index]);
@@ -1379,10 +1469,10 @@ private fn kernel_log_emit_line(core: {0..<KERNEL_MAX_CORES as usize}) !{unsafe}
     let mut done: bool = false;
     while (done == false) {
         let guard = console_lock();
-        let count: usize = kernel_log_tx_count;
+        let count: usize = atomic_word_load(&kernel_log_tx_count);
         if (count == 0 || (count <= KERNEL_LOG_TX_QUEUE_BYTES &&
                            KERNEL_LOG_TX_QUEUE_BYTES - count >= required)) {
-            if (kernel_log_wire_last != 10) { kernel_log_emit_byte_locked(guard, 10); }
+            if (kernel_log_wire_last(guard) != 10) { kernel_log_emit_byte_locked(guard, 10); }
             for index: usize in 0..<KERNEL_LOG_LINE_BYTES {
                 if (index < length) {
                     kernel_log_emit_byte_locked(guard, kernel_log_core_state[core].line[index]);
@@ -1405,14 +1495,14 @@ private fn kernel_log_emit_line(core: {0..<KERNEL_MAX_CORES as usize}) !{unsafe}
 
 // One byte of a line into the queue, making room by waiting out the FIFO
 // when the queue is full -- only reached by a line longer than the queue.
-private fn kernel_log_emit_byte_locked(guard: borrow ConsoleGuard[console_tx],
+private fn kernel_log_emit_byte_locked(guard: borrow ConsoleGuard[&console_tx_lock],
                                        value: u8) !{unsafe} {
     while (kernel_log_tx_full(guard)) {
         while (uart_tx_fifo_full()) { }
         uart_tx_drain_into_fifo_force(guard);
     }
     kernel_log_note_tx_byte();
-    let queued: bool = kernel_log_tx_push(guard, value);
+    let queued: bool = kernel_log_tx_push(guard, value, false);
 }
 
 // GitHub issue #465: a peer that writes a retained line, on request.

@@ -2084,7 +2084,7 @@ kernelbuild-qemu: build
 # Console offsets come from LLVM, including the wrapper around atomic words.
 $(KERNEL_CONSOLE_LAYOUT): $(KERNEL_QEMU_MAIN_O) scripts/struct_layout_gdb.py
 	@mkdir -p $(dir $@)
-	python3 scripts/struct_layout_gdb.py $(KERNEL_QEMU_MAIN_O).facts/structs.tsv KernelLogCoreState AtomicWord > $@.tmp
+	python3 scripts/struct_layout_gdb.py $(KERNEL_QEMU_MAIN_O).facts/structs.tsv KernelLogCoreState AtomicWord KernelLogTxState TerminalEchoState > $@.tmp
 	mv $@.tmp $@
 
 # Churn debugger layouts are host-only and track the compiled source.

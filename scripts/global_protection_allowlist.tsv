@@ -85,11 +85,6 @@ kernel/drivers/net/virtio_net_tx_dma.tkb	virtio_pkt_rx_seen	unreviewed
 kernel/drivers/serial/pl011.tkb	uart	unreviewed
 kernel/drivers/serial/terminal.tkb	terminal_settings	unreviewed; 2026-10-06 candidate-context: one UART terminal / settings/literal-next under process-run lock; independent flow readers use AtomicWord
 kernel/drivers/serial/terminal.tkb	terminal_settings_initialized	unreviewed; 2026-10-06 candidate-context: one UART terminal / settings/literal-next under process-run lock; independent flow readers use AtomicWord
-kernel/drivers/serial/terminal_echo.tkb	terminal_echo_count	unreviewed; 2026-10-06 candidate-context: one terminal echo queue / console exclusion and IRQ masking at kernel call sites; non-preemptible holders
-kernel/drivers/serial/terminal_echo.tkb	terminal_echo_head	unreviewed; 2026-10-06 candidate-context: one terminal echo queue / console exclusion and IRQ masking at kernel call sites; non-preemptible holders
-kernel/drivers/serial/terminal_echo.tkb	terminal_echo_operations	unreviewed; 2026-10-06 candidate-context: one terminal echo queue / console exclusion and IRQ masking at kernel call sites; non-preemptible holders
-kernel/drivers/serial/terminal_echo.tkb	terminal_echo_phase	unreviewed; 2026-10-06 candidate-context: one terminal echo queue / console exclusion and IRQ masking at kernel call sites; non-preemptible holders
-kernel/drivers/serial/terminal_echo.tkb	terminal_echo_tail	unreviewed; 2026-10-06 candidate-context: one terminal echo queue / console exclusion and IRQ masking at kernel call sites; non-preemptible holders
 kernel/drivers/serial/uart_rx_ring.tkb	kernel_uart_rx_buf	unreviewed; 2026-10-06 candidate-context: one terminal RX queue / process-run lock at kernel callers; DDB quiescence; host-native fixture is serial
 kernel/drivers/serial/uart_rx_ring.tkb	kernel_uart_rx_canonical	unreviewed; 2026-10-06 candidate-context: one terminal RX queue / process-run lock at kernel callers; DDB quiescence; host-native fixture is serial
 kernel/drivers/serial/uart_rx_ring.tkb	kernel_uart_rx_columns	unreviewed; 2026-10-06 candidate-context: one terminal RX queue / process-run lock at kernel callers; DDB quiescence; host-native fixture is serial
@@ -305,18 +300,9 @@ kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_output_claimed	unreviewed
 kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_rings_claimed	unreviewed
 kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_rings_quiesced	unreviewed
 kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_tables_claimed	unreviewed
-kernel/printk/console_lock.tkb	console_measure	unreviewed; 2026-10-06 retain-owner: one physical output queue admission / IRQ-masking indexed mutex guard; measurement protected by same guard
-kernel/printk/console_lock.tkb	console_measure_enabled	unreviewed; 2026-10-06 retain-owner: one physical output queue admission / IRQ-masking indexed mutex guard; measurement protected by same guard
 kernel/printk/log.tkb	kernel_log_core_state	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
 kernel/printk/log.tkb	kernel_log_snapshots	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
 kernel/printk/log.tkb	kernel_log_storm_found	unreviewed
-kernel/printk/log.tkb	kernel_log_terminal_column	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
-kernel/printk/log.tkb	kernel_log_tx_count	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
-kernel/printk/log.tkb	kernel_log_tx_head	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
-kernel/printk/log.tkb	kernel_log_tx_queue	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
-kernel/printk/log.tkb	kernel_log_tx_tail	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
-kernel/printk/log.tkb	kernel_log_tx_terminal	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
-kernel/printk/log.tkb	kernel_log_wire_last	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
 kernel/printk/log_ring_trace.tkb	log_ring_trace_cpus	unreviewed
 kernel/printk/log_ring_trace.tkb	log_ring_trace_from	unreviewed
 kernel/printk/log_ring_trace.tkb	log_ring_trace_reader_begun	unreviewed

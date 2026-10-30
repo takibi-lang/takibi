@@ -117,6 +117,9 @@ by a source scan with different edges).
 
 ## Migration log (slice 3)
 
+Every figure is a count of allowlist rows, the trust ledger's number; the
+file's comment lines are not rows.
+
 - 2026-10-29: `kernel/kernel/stall_probe.tkb`'s 13 words (per-CPU notes,
   watched pids, the event ring and its cursor) become `AtomicWord`; the
   ring cursor is one `fetch_add`, so two cores no longer take one slot.
@@ -164,7 +167,7 @@ by a source scan with different edges).
   drop is taken by one swap or compare-and-swap, so two cores do not both spend
   it, and a data segment's index is stored plus 1, so the zeroed word is
   disarmed. `tcp_ack_each_stream_segment`, which nothing ever set, goes with
-  `tcp_split_request_segments` and its two branches. 361 -> 342 unprotected.
+  `tcp_split_request_segments` and its two branches. 361 -> 336 unprotected.
 - 2026-10-30: real kernel state, one word each, to `AtomicWord`. The ext2 fence
   and the owed undo count; the literal-next latch (one swap) and the terminal
   foreground session; the UART dropped count, whose saturation goes with a
@@ -174,5 +177,17 @@ by a source scan with different edges).
   `asid_ready` goes: its one caller runs once. Not touched, deliberately:
   `asid_bits` and `asid_last`, which `asid_init` writes in the MMU-off window,
   where the compiler refuses an atomic call. An atomic flag says the word is
-  safe to read; it does not protect what the flag describes. 342 -> 324
+  safe to read; it does not protect what the flag describes. 336 -> 318
   unprotected.
+- 2026-10-30: the console's transmit state behind the console guard, the first
+  migration here to a lock rather than a flag. The TX queue with its tags, head,
+  tail, terminal column, last wire byte and sent flow-control state, and the echo
+  ring with its head, tail and phase, are each one record in a `region` backing,
+  whose claim sits in a `Place` `guarded_by(console_tx_lock)`; the lock
+  measurement is a linear record in such a place, Full only while measuring. Every
+  access now takes a `ConsoleGuard[&console_tx_lock]`, which until now named no
+  particular lock. The two counts stay `AtomicWord` beside the records: DDB and
+  the pending hint read them without the lock, and only a holder writes them.
+  `kernel_log_terminal_input_stopped`, an `AtomicWord` since the previous entry,
+  moves into the record, since only holders touch it. 317 -> 303 unprotected (317
+  after the never-set flag #1270 removed).
