@@ -177,9 +177,11 @@ owners are TaskMutex, the spare stack stays masked). #980
    emulates cortex-a76, PAN is set per core and on every exception entry,
    a linear `UserAccessWindow` wraps each user access, and a range's base
    is refined to the user-window interval; `el1_read_user` is the
-   negative control), then the IOMMU (QEMU `smmuv3`, then BCM2712's
-   PCIe IOMMU for RP1), which turns the device-semantics claims of
-   `kernel/DEVICE_SEMANTICS_FILES` from trusted into enforced. Each step
+   negative control), then DMA confinement (RPi5: RP1 confined to one
+   arena by the PCIe inbound window, since the DTB gives GEM and xHCI no
+   IOMMU; then QEMU `smmuv3`),
+   which narrows the device-semantics claims of
+   `kernel/DEVICE_SEMANTICS_FILES` from trusted toward enforced. Each step
    has a negative control and an RPi5 measurement.
 
 ### Territory B: supporting the pillars, by priority
