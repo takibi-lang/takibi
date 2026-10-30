@@ -764,6 +764,30 @@
         "raw_cpu_id_calls": "preempt_off: cpu.tkb's seven raw reads become fallible preempt_off regions; the mint file adds its availability test (#638 stage 4)",
         "unprotected_globals": "per_cpu: irq_pmr_masked and irq_pmr_ready (#638 stage 4)"
       }
+    },
+    {
+      "date": "2026-10-30",
+      "head": "976489b3",
+      "counts": {
+        "raw_mint_files": 14,
+        "frame_lines": 12269,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 214,
+        "raw_deref_io": 7,
+        "raw_deref_builtin_region": 113,
+        "unsafe_blocks": 151,
+        "extern_fns": 61,
+        "invariant_stop_sites": 118,
+        "assembly_lines": 2503,
+        "per_cpu_ordinary_arrays": 71,
+        "per_cpu_stores": 7,
+        "raw_cpu_id_calls": 150,
+        "unprotected_globals": 426,
+        "frame_api_ratchet": 7
+      },
+      "changes": {
+        "frame_lines": "#1032 the static stacks' guard pages: the identity L3 fill becomes one helper for the text and stack blocks"
+      }
     }
   ]
 }
