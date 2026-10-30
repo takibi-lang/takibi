@@ -82,7 +82,6 @@ private let mut asid_bits: usize = ASID_BITS_FLOOR;
 // value TTBR0_EL1 holds before any address space exists, and treating it
 // as "no ASID" is what lets address_space.tkb test `asid != 0`.
 private let mut asid_last: usize = 255;
-private let mut asid_ready: bool = false;
 
 // GitHub issue #452: everything one assignment touches, in one struct
 // behind one lock.
@@ -125,8 +124,6 @@ private let mut asid_cell: LockedCell(AsidState);
 // mapped yet (see kernel/MEMORY_MAP.md's note on that window).
 fn asid_init() !{mmu_off, unsafe} {
     // No mutex_init for the cell's lock; see kernel/lib/mutex.tkb.
-    if (asid_ready) { return; }
-    asid_ready = true;
     asid_bits = mmu_asid_bits();
     // 1 << 16 is 65536 numbers, of which 65535 are assignable.
     asid_last = (1 << asid_bits) - 1;

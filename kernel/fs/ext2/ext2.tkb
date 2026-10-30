@@ -1377,7 +1377,7 @@ fn ext2_block_bitmap_snapshot(mount: Ext2Mount,
 // - THE FENCE IS ONE KERNEL-WIDE WORD, because the kernel mounts one
 //   filesystem. It is read and written by the ext2 mutators, which callers
 //   serialize under ext2_mutation_lock (the boot fixture runs alone on core 0).
-private let mut ext2_fenced: bool;
+private let mut ext2_fenced: AtomicWord;
 const EXT2_FENCE_PENDING_MAX: usize =
     EXT2_MAX_WRITE_ALLOCATIONS + EXT2_MAX_SINGLE_FILE_BLOCKS + 2;
 private let mut ext2_fence_pending: [usize; EXT2_FENCE_PENDING_MAX];
@@ -1391,7 +1391,7 @@ private fn ext2_fence_pending_add(block: usize) {
     }
 }
 
-fn ext2_is_fenced() -> bool { return ext2_fenced; }
+fn ext2_is_fenced() -> bool { return atomic_word_load(&ext2_fenced) != 0; }
 
 // Every mutating write goes through here, so a fenced mount refuses all of
 // them -- create, unlink, mkdir and rename included, which report their
@@ -1399,7 +1399,7 @@ fn ext2_is_fenced() -> bool { return ext2_fenced; }
 private fn ext2_block_write(mount: Ext2Mount, block: usize,
                             source: [u8; KERNEL_BLOCK_SIZE..])
         -> BlockIoResult !{unsafe} {
-    if (ext2_fenced) { return BlockIoResult::Invalid; }
+    if (atomic_word_load(&ext2_fenced) != 0) { return BlockIoResult::Invalid; }
     return block_write(mount.device, block, source);
 }
 
@@ -1642,7 +1642,7 @@ private fn ext2_settle_claim(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                              index: usize) !{unsafe} {
     if (ext2_bitmap_force_clear(slot, mount, inode_bitmap, index) == false ||
         ext2_recount(slot, mount) == false) {
-        ext2_fenced = true;
+        atomic_word_store(&ext2_fenced, 1);
         if (inode_bitmap == false) { ext2_fence_pending_add(index + 1); }
     }
 }
@@ -1660,10 +1660,11 @@ fn ext2_recover(mount: Ext2Mount) -> Ext2RecoverResult !{unsafe} {
 private inline fn ext2_recover_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount) -> Ext2RecoverResult !{unsafe} {
     // GitHub issue #1088: a release whose rollback failed finishes it first.
-    let owed: usize = ext2_undo_owed;
+    let owed: usize = atomic_word_load(&ext2_undo_owed);
     if (owed > 0) {
-        ext2_undo_owed = ext2_undo_replay(slot, mount, owed);
-        if (ext2_undo_owed != 0) { return Ext2RecoverResult::Failed; }
+        let remaining: usize = ext2_undo_replay(slot, mount, owed);
+        atomic_word_store(&ext2_undo_owed, remaining);
+        if (remaining != 0) { return Ext2RecoverResult::Failed; }
     }
     for pending: usize in 0..<EXT2_FENCE_PENDING_MAX {
         if (pending < ext2_fence_pending_count) {
@@ -1682,7 +1683,7 @@ private inline fn ext2_recover_with(slot: borrow Ext2Slot[0],
         Ext2FreeCountsResult::Counts(counts) => { }
     }
     ext2_fence_pending_count = 0;
-    ext2_fenced = false;
+    atomic_word_store(&ext2_fenced, 0);
     return Ext2RecoverResult::Recovered;
 }
 
@@ -1721,7 +1722,7 @@ struct Ext2UndoRow {
 
 private let mut ext2_undo_rows: [Ext2UndoRow; EXT2_UNDO_ROWS];
 // Rows a fenced mount still owes the disk; ext2_recover puts them back.
-private let mut ext2_undo_owed: usize;
+private let mut ext2_undo_owed: AtomicWord;
 
 // The rows this operation has written. It ends in ext2_undo_commit, or in
 // ext2_undo_abort, which puts them back.
@@ -1741,7 +1742,7 @@ private fn ext2_undo_begin() -> Ext2Undo[0] {
 private fn ext2_undo_save(slot: borrow Ext2Slot[0],
         undo: borrow mut Ext2Undo[0], block: usize, in_file: bool,
         offset: usize, length: usize) -> bool {
-    if (ext2_fenced) { return false; }
+    if (atomic_word_load(&ext2_fenced) != 0) { return false; }
     let row: usize = undo.count;
     if (row >= EXT2_UNDO_ROWS || length > EXT2_UNDO_BYTES ||
         offset > KERNEL_BLOCK_SIZE - length) {
@@ -1845,8 +1846,8 @@ private fn ext2_undo_abort(slot: borrow Ext2Slot[0], mount: Ext2Mount,
         undo: sink Ext2Undo[0]) -> bool !{unsafe} {
     let owed: usize = ext2_undo_replay(slot, mount, undo.count);
     if (owed == 0) { return true; }
-    ext2_undo_owed = owed;
-    ext2_fenced = true;
+    atomic_word_store(&ext2_undo_owed, owed);
+    atomic_word_store(&ext2_fenced, 1);
     return false;
 }
 
@@ -2033,7 +2034,7 @@ private fn ext2_release_commit(slot: borrow Ext2Slot[0], mount: Ext2Mount,
     }
     if (cleared == false) { return ext2_release_abort(slot, mount, undo); }
     ext2_undo_commit(undo);
-    if (ext2_recount(slot, mount) == false) { ext2_fenced = true; }
+    if (ext2_recount(slot, mount) == false) { atomic_word_store(&ext2_fenced, 1); }
     if (ext2_walk_map(slot, mount, map, Ext2WalkMode::Scrub)) { }
     return Ext2ReleaseResult::Committed;
 }
@@ -2586,10 +2587,10 @@ private fn ext2_write_abort(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                             allocations: sink Ext2WriteAllocations[0])
         -> Ext2ResizeResult !{unsafe} {
     match ext2_write_allocations_rollback(slot, mount, allocations) {
-        Ext2WriteFinishResult::Invalid => { ext2_fenced = true; }
+        Ext2WriteFinishResult::Invalid => { atomic_word_store(&ext2_fenced, 1); }
         Ext2WriteFinishResult::Finished => { }
     }
-    if (ext2_fenced) { return Ext2ResizeResult::Fenced; }
+    if (atomic_word_load(&ext2_fenced) != 0) { return Ext2ResizeResult::Fenced; }
     return Ext2ResizeResult::Invalid;
 }
 
@@ -2713,7 +2714,7 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                                     preserve_existing: bool,
                                     allocation_budget: usize)
         -> Ext2ResizeResult !{unsafe} {
-    if (ext2_fenced) { return Ext2ResizeResult::Fenced; }
+    if (atomic_word_load(&ext2_fenced) != 0) { return Ext2ResizeResult::Fenced; }
     if (source.len > EXT2_MAX_SINGLE_FILE_BLOCKS * KERNEL_BLOCK_SIZE) {
         return Ext2ResizeResult::Invalid;
     }
@@ -3048,7 +3049,7 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                 }
                 if (ext2_recount(slot, mount) == false) { settled = false; }
                 if (settled == false) {
-                    ext2_fenced = true;
+                    atomic_word_store(&ext2_fenced, 1);
                     for index: usize in 0..<EXT2_MAX_SINGLE_FILE_BLOCKS {
                         if (old_blocks[index] != 0 &&
                             ext2_block_replaced(index, offset, source.len,
@@ -3798,7 +3799,7 @@ private fn ext2_create_commit(slot: borrow Ext2Slot[0], mount: Ext2Mount,
     }
     ext2_undo_commit(undo);
     if ((recount || count > 0) && ext2_recount(slot, mount) == false) {
-        ext2_fenced = true;
+        atomic_word_store(&ext2_fenced, 1);
     }
     return Ext2ReleaseResult::Committed;
 }
@@ -4162,7 +4163,7 @@ private fn ext2_create_empty_file_in_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount, directory_inode: usize, name: borrow []const u8,
         permissions: usize)
         -> Ext2CreateEmptyResult !{unsafe} {
-    if (ext2_fenced) { return Ext2CreateEmptyResult::Invalid; }
+    if (atomic_word_load(&ext2_fenced) != 0) { return Ext2CreateEmptyResult::Invalid; }
     match ext2_lookup_directory_with(slot, mount, directory_inode, name) {
         Ext2LookupResult::Invalid => { return Ext2CreateEmptyResult::Invalid; }
         Ext2LookupResult::Found(existing) => {
@@ -4620,7 +4621,7 @@ fn ext2_truncate_regular_file(mount: Ext2Mount, inode_number: usize)
 private fn ext2_truncate_regular_file_with(slot: borrow Ext2Slot[0],
         mount: Ext2Mount, inode_number: usize)
         -> Ext2TruncateResult !{unsafe} {
-    if (ext2_fenced) { return Ext2TruncateResult::Invalid; }
+    if (atomic_word_load(&ext2_fenced) != 0) { return Ext2TruncateResult::Invalid; }
     if (inode_number < 2) { return Ext2TruncateResult::Invalid; }
     match ext2_read_inode(slot, mount, inode_number) {
         Ext2InodeResult::Invalid => { return Ext2TruncateResult::Invalid; }

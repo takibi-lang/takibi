@@ -20,7 +20,7 @@ variant TerminalEcho { None; Byte(u8); Control(u8); }
 
 private let mut terminal_settings: [u8; TERMINAL_TERMIOS_BYTES];
 private let mut terminal_settings_initialized: bool;
-private let mut terminal_literal_next: bool;
+private let mut terminal_literal_next: AtomicWord;
 // The run lock serializes writers. Independent TX readers use atomic
 // publication because they need only this one word, not a settings snapshot.
 private let mut terminal_output_stop_word: AtomicWord;
@@ -102,7 +102,7 @@ fn terminal_settings_apply(bytes: borrow [u8; TERMINAL_TERMIOS_BYTES..])
         terminal_settings[index] = bytes[index];
     }
     terminal_settings_initialized = true;
-    terminal_literal_next = false;
+    atomic_word_store(&terminal_literal_next, 0);
     if ((input & 0x400) == 0) { terminal_output_pause(false); }
     if ((input & 0x1000) == 0) {
         atomic_word_store(&terminal_input_stop_word, 0);
@@ -203,8 +203,7 @@ private fn terminal_input_signal(signum: usize, input: usize) -> TerminalInput {
 
 fn terminal_input_decode(received: u8) -> TerminalInput {
     terminal_initialize();
-    if (terminal_literal_next) {
-        terminal_literal_next = false;
+    if (atomic_word_swap(&terminal_literal_next, 0) != 0) {
         return TerminalInput::Byte(received);
     }
     let input: usize = terminal_word(
@@ -230,7 +229,7 @@ fn terminal_input_decode(received: u8) -> TerminalInput {
     if ((local & 2) == 0) { return TerminalInput::Byte(value); }
     if ((local & 0x8000) != 0) {
         if (terminal_control_matches(value, 15)) {
-            terminal_literal_next = true;
+            atomic_word_store(&terminal_literal_next, 1);
             return TerminalInput::LiteralNext;
         }
         if (terminal_control_matches(value, 14)) { return TerminalInput::WordErase; }
@@ -248,7 +247,7 @@ fn terminal_input_decode(received: u8) -> TerminalInput {
     return TerminalInput::Byte(value);
 }
 
-fn terminal_input_cancel_literal() { terminal_literal_next = false; }
+fn terminal_input_cancel_literal() { atomic_word_store(&terminal_literal_next, 0); }
 
 // Source and wire counts are separate: a staging-buffer boundary is not
 // evidence that the downstream UART queue is full. This pure encoder is

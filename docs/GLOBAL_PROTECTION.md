@@ -165,3 +165,14 @@ by a source scan with different edges).
   it, and a data segment's index is stored plus 1, so the zeroed word is
   disarmed. `tcp_ack_each_stream_segment`, which nothing ever set, goes with
   `tcp_split_request_segments` and its two branches. 361 -> 342 unprotected.
+- 2026-10-30: real kernel state, one word each, to `AtomicWord`. The ext2 fence
+  and the owed undo count; the literal-next latch (one swap) and the terminal
+  foreground session; the UART dropped count, whose saturation goes with a
+  word that cannot wrap in practice; the log's boot tick, frequency and sent
+  flow-control state; the process pool's ready flag; each driver's ready and
+  transmit-down flags (virtio-net, GEM, xHCI) and the xHCI write-command count.
+  `asid_ready` goes: its one caller runs once. Not touched, deliberately:
+  `asid_bits` and `asid_last`, which `asid_init` writes in the MMU-off window,
+  where the compiler refuses an atomic call. An atomic flag says the word is
+  safe to read; it does not protect what the flag describes. 342 -> 324
+  unprotected.

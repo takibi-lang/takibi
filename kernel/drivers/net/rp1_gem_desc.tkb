@@ -42,6 +42,7 @@
 // - A buffer whose transmit stays unconfirmed after a failed halt is parked
 //   Unconfirmed for the rest of the boot.
 
+use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/mutex.tkb";
 use "kernel/lib/task_mutex.tkb";
 use "kernel/drivers/dma_address.tkb";
@@ -90,7 +91,7 @@ private region let mut gem_tx_ring: [GemDesc; 4] align(64);
 private let mut gem_rx_seen_filled: bool = false;
 private let mut gem_tx_seen_used: bool = false;
 // Set by gem_tx_ring_mark_halted after gem_halt() confirmed the halt.
-private let mut gem_tx_halt_confirmed: bool = false;
+private let mut gem_tx_halt_confirmed: AtomicWord;
 
 fn gem_rx_ring_arm(s: borrow GemRxRing_Armed[b, o, 4, r]) {}
 fn gem_rx_ring_peek(s: borrow GemRxRing_Armed[b, o, 4, r], value: GemDesc)
@@ -138,13 +139,13 @@ fn gem_tx_ring_used(s: borrow GemTxRing_Sending[b, o, 4, r])
 fn gem_tx_ring_done(s: borrow GemTxRing_Sending[b, o, 4, r]) {}
 fn gem_tx_ring_halted(s: borrow GemTxRing_Sending[b, o, 4, r])
         -> GemTxRing_gem_tx_ring_halted_Raw {
-    if (gem_tx_halt_confirmed) { return GemTxRing_gem_tx_ring_halted_Raw::TxHalted; }
+    if (atomic_word_load(&gem_tx_halt_confirmed) != 0) { return GemTxRing_gem_tx_ring_halted_Raw::TxHalted; }
     return GemTxRing_gem_tx_ring_halted_Raw::TxRunning;
 }
 fn gem_tx_ring_reclaim(s: borrow GemTxRing_Sending[b, o, 4, r]) {}
 
 // Called by rp1_gem.tkb only when gem_halt() returned true.
-fn gem_tx_ring_mark_halted() { gem_tx_halt_confirmed = true; }
+fn gem_tx_ring_mark_halted() { atomic_word_store(&gem_tx_halt_confirmed, 1); }
 
 variant GemRxRingHeld {
     Ready(exists b: addr. exists o: usize. GemRxRing_Ready[b, o, 4]);
@@ -353,7 +354,7 @@ fn gem_pkt_sent(s: borrow GemPkt_TxPosted[b, o, 1, r]) -> GemPkt_gem_pkt_sent_Ra
 fn gem_pkt_done(s: borrow GemPkt_TxPosted[b, o, 1, r]) {}
 fn gem_pkt_kept(s: borrow GemPkt_TxPosted[b, o, 1, r]) {}
 fn gem_pkt_halted(s: borrow GemPkt_TxPosted[b, o, 1, r]) -> GemPkt_gem_pkt_halted_Raw {
-    if (gem_tx_halt_confirmed) { return GemPkt_gem_pkt_halted_Raw::PktHalted; }
+    if (atomic_word_load(&gem_tx_halt_confirmed) != 0) { return GemPkt_gem_pkt_halted_Raw::PktHalted; }
     return GemPkt_gem_pkt_halted_Raw::PktRunning;
 }
 fn gem_pkt_reclaim(s: borrow GemPkt_TxPosted[b, o, 1, r]) {}

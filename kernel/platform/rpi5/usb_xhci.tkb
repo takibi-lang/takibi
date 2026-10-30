@@ -44,6 +44,7 @@
 // says (CAPLENGTH, RTSOFF, DBOFF): device_map.tkb reads them at attach time,
 // checks each block inside the device window, and attaches one handle per
 // block (kernel/drivers/usb/xhci_regs.tkb, GitHub issues #804 and #806).
+use "kernel/lib/atomic_word.tkb";
 use "kernel/platform/rpi5/usb_xhci_dma.tkb";
 use "kernel/platform/rpi5/usb_xhci_rings.tkb";
 use "kernel/platform/rpi5/usb_xhci_bus.tkb";
@@ -209,10 +210,10 @@ fn xhci_cmd_advance() !{unsafe} {
 const MSC_MAX_TRANSFER_SECTORS: usize = 128;
 const MSC_SECTOR_SIZE: usize = 512;
 let mut msc_tag: u32 = 0;
-private let mut msc_write10_command_count: usize = 0;
+private let mut msc_write10_command_count: AtomicWord;
 
-let mut xhci_ready: bool = false;
-private let mut xhci_controller_unusable: bool = false;
+let mut xhci_ready: AtomicWord;
+private let mut xhci_controller_unusable: AtomicWord;
 
 // -- Media Access Interface (matches examples/common_stm32/sdmmc.tkb and
 // examples/common_rpi3/usb_msc.tkb) -----------------------------------
@@ -677,11 +678,11 @@ must_use variant MscTimeoutResult {
 // A failed halt/reset is conservatively treated as unproven quiescence, so
 // this boot must never reinitialize the controller.
 fn msc_abort_unobserved_transfer() -> MscTimeoutResult {
-    xhci_ready = false;
+    atomic_word_store(&xhci_ready, 0);
     if (xhci_halt_and_reset()) {
         return MscTimeoutResult::RestartRequired;
     }
-    xhci_controller_unusable = true;
+    atomic_word_store(&xhci_controller_unusable, 1);
     return MscTimeoutResult::ControllerUnusable;
 }
 
@@ -858,7 +859,7 @@ fn xhci_setup_rings_and_start() -> bool !{unsafe} {
     // wrong slot and timed out. Every buffer is re-zeroed as well --
     // stale Cycle bits in a No-Op-padded or wrapped ring would be read
     // as live TRBs by a freshly reset controller.
-    xhci_ready = false;
+    atomic_word_store(&xhci_ready, 0);
     xhci_evt_idx = 0;
     xhci_evt_cycle = 1;
     // 3, not 0: bring-up writes Enable Slot / Address Device / Configure
@@ -1274,7 +1275,7 @@ fn xhci_configure_endpoint(in_num: {1..<16 as usize},
 // sentence. Each now names itself, and the ones that received a controller
 // completion code, a transport status or a block size carry it.
 fn usb_disk_initialize_stages() -> UsbInitOutcome {
-    if (xhci_controller_unusable) {
+    if (atomic_word_load(&xhci_controller_unusable) != 0) {
         return UsbInitOutcome::Reset;
     }
     let max_ports: u32 = xhci_max_ports(boot_once_get(&rp1_xhci_caps));
@@ -1400,7 +1401,7 @@ fn usb_disk_initialize_stages() -> UsbInitOutcome {
         return UsbInitOutcome::UnsupportedBlockSize(block_size);
     }
 
-    xhci_ready = true;
+    atomic_word_store(&xhci_ready, 1);
     return UsbInitOutcome::Ok;
 }
 
@@ -1410,7 +1411,7 @@ fn usb_disk_initialize_stages() -> UsbInitOutcome {
 // consumes it, so the detail is written down at the one place that holds it
 // rather than recomputed by whoever wants to print it.
 private let mut xhci_init_description: UsbInitDescription;
-private let mut xhci_init_attempted: bool = false;
+private let mut xhci_init_attempted: AtomicWord;
 
 // NotRun is not a formality: xhci_init_description is BSS until the first
 // bring-up writes it, and its stage is a pointer. A caller that asks before
@@ -1422,7 +1423,7 @@ must_use variant UsbInitReportResult {
 }
 
 fn usb_disk_init_last_report() -> UsbInitReportResult {
-    if (xhci_init_attempted == false) {
+    if (atomic_word_load(&xhci_init_attempted) == 0) {
         return UsbInitReportResult::NotRun;
     }
     return UsbInitReportResult::Report(xhci_init_description);
@@ -1435,7 +1436,7 @@ fn disk_initialize() -> DiskIoResult {
     let mut description: UsbInitDescription =
         usb_init_outcome_describe(usb_disk_initialize_stages());
     xhci_init_description = description;
-    xhci_init_attempted = true;
+    atomic_word_store(&xhci_init_attempted, 1);
     if (description.failed) {
         return DiskIoResult::Err(-1);
     }
@@ -1443,18 +1444,18 @@ fn disk_initialize() -> DiskIoResult {
 }
 
 fn disk_status() -> DiskIoResult {
-    if (xhci_ready) {
+    if (atomic_word_load(&xhci_ready) != 0) {
         return DiskIoResult::Ok;
     }
     return DiskIoResult::Err(-1);
 }
 
 fn disk_reset_write10_command_count() {
-    msc_write10_command_count = 0;
+    atomic_word_store(&msc_write10_command_count, 0);
 }
 
 fn disk_write10_command_count() -> usize {
-    return msc_write10_command_count;
+    return atomic_word_load(&msc_write10_command_count);
 }
 
 // READ(10)/WRITE(10) share the same CDB shape: opcode | flags(0) |
@@ -1580,7 +1581,7 @@ fn disk_write_sectors(sector: u32, buf: []u8) -> DiskIoResult {
     }
     msc_cbw_header(transfer_len, false, 10);
     msc_scsi_lba_cdb(0x2A, sector, sectors);
-    msc_write10_command_count = msc_write10_command_count + 1;
+    atomic_word_fetch_add(&msc_write10_command_count, 1);
     match msc_run_command(transfer_len, false) {
         MscCommandResult::Ok => { return DiskIoResult::Ok; }
         MscCommandResult::CompletedError(_) => { }
@@ -1595,7 +1596,7 @@ fn disk_write_sectors(sector: u32, buf: []u8) -> DiskIoResult {
     // implied.
     msc_cbw_header(transfer_len, false, 10);
     msc_scsi_lba_cdb(0x2A, sector, sectors);
-    msc_write10_command_count = msc_write10_command_count + 1;
+    atomic_word_fetch_add(&msc_write10_command_count, 1);
     match msc_run_command(transfer_len, false) {
         MscCommandResult::Ok => { return DiskIoResult::Ok; }
         MscCommandResult::CompletedError(_) => {
