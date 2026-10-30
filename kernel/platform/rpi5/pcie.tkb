@@ -451,61 +451,39 @@ fn pcie2_mip0_inbound_setup() !{unsafe} {
 // PCIe2 register base (0x1000120000) every other function in this file
 // already uses.
 //
-// Unlike pcie2_mip0_inbound_setup's narrow 4KB MSI target, this maps PCI
-// address [0, 64MB) directly onto CPU/system address [0, 64MB) -- a
-// pass-through identity window, not a remap to one fixed peripheral.
-// Combined with RP1's own "PCIe Outbound direct mapped space" (RP1
-// Peripherals datasheet Table 1: RP1-internal 40-bit bus masters, i.e.
-// usbhost0/usbhost1 as DMA initiators, pass addresses 0x00.0000.0000-
-// 0x7F.FFFFFFFF straight through unmodified as the PCI address), this
-// means a genuine CPU physical RAM address examples/rp1_usb_smoke hands
-// the XHCI controller (its DCBAAP/CRCR/ERSTBA pointers) is usable
-// UNCHANGED as the DMA target -- no separate PCI-vs-CPU address
-// translation needed on the software side, only this ONE-TIME inbound
-// window setup. 64MB was chosen as comfortable headroom over every
-// buffer this milestone's own kernel image + globals need (all within a
-// few hundred KB of the kernel's own low load address), not a measured
-// minimum.
+// Unlike pcie2_mip0_inbound_setup's narrow 4KB MSI target, this window maps
+// the RP1 DMA arena (link.ld), the one region an RP1 bus master may reach. RP1's
+// 40-bit masters pass their addresses through unchanged as the PCI address (RP1
+// Peripherals datasheet Table 1, "PCIe Outbound direct mapped space").
 //
-// Size encoding (brcm_pcie_encode_ibar_size(), same Linux source): sizes
-// 64KB-64GB use log2(size)-15; 64GB = 2^36, encoding = 36-15 = 21 (0x15).
-// ACCESS_ENABLE is UBUS_BARn_CONFIG_REMAP_LO bit 0 -- confirmed by this
-// file's OWN pcie2_mip0_inbound_setup precedent (`| 1`), not a fresh
-// guess.
-//
-// THE PCI-SIDE BASE IS 0x10_00000000, *NOT* 0 -- this is the single most
-// important fact in this whole function, and getting it wrong is a real,
-// already-made mistake this comment exists to prevent repeating. An
-// earlier version mapped PCI [0, 64MB) -> CPU [0, 64MB) (a plain
-// identity window) on the assumption that RP1's own "PCIe Outbound
-// direct mapped space" (RP1 datasheet Table 1) means a bus master's
-// address passes through unchanged. It does pass through unchanged --
-// but PCI address 0 is NOT system RAM on this board. Raspberry Pi 5's
-// own device tree (bcm2712.dtsi, pcie2 node) states the real mapping
-// directly:
+// THE PCI-SIDE BASE IS 0x10_00000000, *NOT* 0. PCI address 0 is not system RAM
+// on this board. Raspberry Pi 5's device tree (bcm2712.dtsi, pcie2 node) gives
+// the mapping:
 //
 //   dma-ranges = <0x02000000 0x00 0x00000000  0x1f 0x00000000  0x00 0x00400000>,
 //                <0x43000000 0x10 0x00000000  0x00 0x00000000  0x10 0x00000000>;
 //
-// i.e. PCI [0, 4MB) maps to CPU 0x1F_00000000 (RP1's OWN peripheral
-// aperture, the same window examples/common_rpi5/uart.tkb reaches
-// rp1_uart0 through), and system RAM is reachable only at PCI
-// 0x10_00000000 + cpu_phys, for 64GB. So an endpoint DMA to PCI address
-// 0x208040 (a raw CPU physical address, as an earlier version of
-// examples/rp1_usb_smoke handed the XHCI controller) does not reach RAM
-// at all -- it lands back inside RP1's own peripheral registers.
-// Confirmed on real hardware: doing exactly that made every Command Ring
-// doorbell ring fault with USBSTS.HSE (Host System Error) + HCE, for ANY
-// command TRB type, with no Command Completion Event ever posted.
+// i.e. PCI [0, 4MB) maps to CPU 0x1F_00000000 (RP1's OWN peripheral aperture),
+// and system RAM is reachable only at PCI 0x10_00000000 + cpu_phys. An endpoint
+// DMA to a raw CPU physical address therefore lands back inside RP1's own
+// peripheral registers. Confirmed on real hardware: handing the XHCI controller
+// such an address made every Command Ring doorbell ring fault with USBSTS.HSE
+// (Host System Error) + HCE, for ANY command TRB type, with no Command Completion
+// Event ever posted.
 //
 // Callers must therefore add the boot-DTB-validated rp1_dma_pci_offset to
 // every CPU physical address they hand to an RP1 bus master as a DMA target.
+//
 // GitHub issue #1032 (B'): the board's DTB declares no IOMMU for GEM or xHCI
 // and no iommu-map on pcie2, so this window is the only confinement of their
-// DMA. It opens over the RP1 DMA arena (link.ld) rather than the 64 GiB the
-// device tree allows: the PCI-to-CPU offset stays 0x10_00000000, so bus
-// addresses are unchanged, but a bus master cannot reach kernel text, page
-// tables or stacks. Coarse: one arena shared by all RP1 masters.
+// DMA. It opens over the arena rather than the 64 GiB the device tree allows:
+// the PCI-to-CPU offset stays 0x10_00000000, so bus addresses are unchanged, but
+// a bus master cannot reach kernel text, page tables or stacks. Coarse: one arena
+// shared by all RP1 masters.
+//
+// Size encoding (brcm_pcie_encode_ibar_size(), same Linux source): sizes
+// 64KB-64GB use log2(size)-15. ACCESS_ENABLE is UBUS_BARn_CONFIG_REMAP_LO bit 0,
+// as in this file's pcie2_mip0_inbound_setup (`| 1`).
 // 256 KiB = 2^18, encoding 18 - 15 = 3.
 const RP1_DMA_ARENA_SIZE_ENCODING: u32 = 3;
 extern symbol rp1_dma_arena_start;
