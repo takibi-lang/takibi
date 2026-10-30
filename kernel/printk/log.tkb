@@ -1180,8 +1180,8 @@ fn kernel_log_tx_writer_low_water() -> usize {
 // to run slept. The waits are the deterministic count: on the board a
 // write larger than the queue must wait. Whether it sleeps depends on
 // whether another process happened to be ready at that moment.
-private let mut uart_user_write_waits: usize = 0;
-private let mut uart_user_write_sleeps: usize = 0;
+private let mut uart_user_write_waits: AtomicWord;
+private let mut uart_user_write_sleeps: AtomicWord;
 
 // Bytes a user write may queue now on any CPU; zero means wait. Before the
 // shared queue is live there is no queue to wait on and the bytes spin as they always have,
@@ -1288,29 +1288,19 @@ fn uart_user_write(bytes: borrow []const u8) -> usize !{logs, unsafe} {
 }
 
 fn uart_user_write_note_wait() {
-    let guard = console_lock();
-    uart_user_write_waits = uart_user_write_waits + 1;
-    console_unlock(guard);
+    atomic_word_fetch_add(&uart_user_write_waits, 1);
 }
 
 fn uart_user_write_wait_total() -> usize {
-    let guard = console_lock();
-    let total: usize = uart_user_write_waits;
-    console_unlock(guard);
-    return total;
+    return atomic_word_load(&uart_user_write_waits);
 }
 
 fn uart_user_write_note_sleep() {
-    let guard = console_lock();
-    uart_user_write_sleeps = uart_user_write_sleeps + 1;
-    console_unlock(guard);
+    atomic_word_fetch_add(&uart_user_write_sleeps, 1);
 }
 
 fn uart_user_write_sleep_total() -> usize {
-    let guard = console_lock();
-    let total: usize = uart_user_write_sleeps;
-    console_unlock(guard);
-    return total;
+    return atomic_word_load(&uart_user_write_sleeps);
 }
 
 // Everything queued reaches the wire before this returns. Called before the

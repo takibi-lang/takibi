@@ -92,7 +92,6 @@ kernel/drivers/serial/terminal.tkb	terminal_literal_next	unreviewed; 2026-10-06 
 kernel/drivers/serial/terminal.tkb	terminal_settings	unreviewed; 2026-10-06 candidate-context: one UART terminal / settings/literal-next under process-run lock; independent flow readers use AtomicWord
 kernel/drivers/serial/terminal.tkb	terminal_settings_initialized	unreviewed; 2026-10-06 candidate-context: one UART terminal / settings/literal-next under process-run lock; independent flow readers use AtomicWord
 kernel/drivers/serial/terminal_echo.tkb	terminal_echo_count	unreviewed; 2026-10-06 candidate-context: one terminal echo queue / console exclusion and IRQ masking at kernel call sites; non-preemptible holders
-kernel/drivers/serial/terminal_echo.tkb	terminal_echo_dropped	unreviewed; 2026-10-06 candidate-context: one terminal echo queue / console exclusion and IRQ masking at kernel call sites; non-preemptible holders
 kernel/drivers/serial/terminal_echo.tkb	terminal_echo_head	unreviewed; 2026-10-06 candidate-context: one terminal echo queue / console exclusion and IRQ masking at kernel call sites; non-preemptible holders
 kernel/drivers/serial/terminal_echo.tkb	terminal_echo_operations	unreviewed; 2026-10-06 candidate-context: one terminal echo queue / console exclusion and IRQ masking at kernel call sites; non-preemptible holders
 kernel/drivers/serial/terminal_echo.tkb	terminal_echo_phase	unreviewed; 2026-10-06 candidate-context: one terminal echo queue / console exclusion and IRQ masking at kernel call sites; non-preemptible holders
@@ -163,12 +162,7 @@ kernel/kernel/process.tkb	execution_state	unreviewed; 2026-10-06 retain-partitio
 kernel/kernel/process.tkb	kernel_activity	unreviewed; 2026-10-06 retain-partition: one execution/activity record per CPU / cpu_id selection and non-preemptible/IRQ entry protocol
 kernel/kernel/process.tkb	kernel_crash_trace	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	kernel_crash_trace_next	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	kernel_idle_starvation_reported	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	kernel_process_clone_rollover_busy_injections	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	kernel_process_core0_idle_seen	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	kernel_process_cpus_that_ran	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	kernel_process_exec_failure_reason	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	kernel_process_rollover_busy_injections	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	kernel_process_tick_wake_head	unreviewed
 kernel/kernel/process.tkb	kernel_process_tick_wake_tick_before	unreviewed
 kernel/kernel/process.tkb	kernel_process_tick_wake_tick_now	unreviewed
@@ -183,13 +177,10 @@ kernel/kernel/process.tkb	kernel_process_trace_omit_pid	unreviewed
 kernel/kernel/process.tkb	kernel_process_trace_omit_pid_set	unreviewed
 kernel/kernel/process.tkb	kernel_process_trace_probe_child_frame	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	kernel_process_trace_probe_parent_frame	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	scheduled_process_boot_handed_off	unreviewed
 kernel/kernel/process.tkb	scheduled_process_freed_site	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	scheduled_process_missing_site	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	scheduled_process_peer_dispatch_enabled	unreviewed; 2026-10-06 retain-authority: machine process namespace and scheduler / run guard; typed record makers; pooled records; bootstrap and assembly continuations
 kernel/kernel/process.tkb	scheduled_process_pool_ready	unreviewed; 2026-10-06 retain-authority: machine process namespace and scheduler / run guard; typed record makers; pooled records; bootstrap and assembly continuations
 kernel/kernel/process.tkb	scheduled_process_record_absent	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	scheduled_process_stack_deepest_reaped	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	spread_timer_child	unreviewed; 2026-10-06 retain-fixture: EL0 spread timer fixture / timer enter/left publication and fixture progress hooks
 kernel/kernel/process.tkb	spread_timer_parent	unreviewed; 2026-10-06 retain-fixture: EL0 spread timer fixture / timer enter/left publication and fixture progress hooks
 kernel/kernel/process.tkb	spread_timer_phase	unreviewed; 2026-10-06 retain-fixture: EL0 spread timer fixture / timer enter/left publication and fixture progress hooks
@@ -229,7 +220,6 @@ kernel/kernel/schedule_contention_evidence.tkb	schedule_probe_ready	unreviewed; 
 kernel/kernel/signal_contention_evidence.tkb	signal_probe_record	unreviewed; 2026-10-06 retain-fixture: named signal_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
 kernel/kernel/syscall.tkb	syscall_filesystem	unreviewed; 2026-10-06 retain-context: filesystem service and CPU-local action scratch / boot-published filesystem; non-preemptible local scratch; stable argv owner exchange
 kernel/kernel/syscall.tkb	syscall_scratch	unreviewed; 2026-10-06 retain-context: filesystem service and CPU-local action scratch / boot-published filesystem; non-preemptible local scratch; stable argv owner exchange
-kernel/kernel/syscall.tkb	syscall_syslog_peer_reported	unreviewed; 2026-10-06 retain-context: filesystem service and CPU-local action scratch / boot-published filesystem; non-preemptible local scratch; stable argv owner exchange
 kernel/kernel/syscall_test_evidence.tkb	syscall_test_evidence	unreviewed; 2026-10-06 retain-evidence: boot syscall evidence / accessor functions on existing dispatch/report paths
 kernel/kernel/syscall_test_lifecycle.tkb	syscall_connected_fixture_pending	unreviewed; 2026-10-06 candidate-fixture: bounded/persistent shell fixture / connected flag under run lock; remaining named fixture checkpoints/boot admission
 kernel/kernel/syscall_test_lifecycle.tkb	syscall_persistent_shell	unreviewed; 2026-10-06 candidate-fixture: bounded/persistent shell fixture / connected flag under run lock; remaining named fixture checkpoints/boot admission
@@ -275,7 +265,6 @@ kernel/kernel/workload_evidence.tkb	workload_settings_wake	unreviewed; 2026-10-0
 kernel/lib/diagnostic_ring.tkb	diagnostic_trace_records	unreviewed; 2026-10-06 retain-protocol: retained per-CPU diagnostic rings / typed publish_begin/commit; per-CPU sequence; debugger test activation
 kernel/lib/diagnostic_ring.tkb	diagnostic_trace_test_enabled	unreviewed; 2026-10-06 retain-protocol: retained per-CPU diagnostic rings / typed publish_begin/commit; per-CPU sequence; debugger test activation
 kernel/lib/occupancy.tkb	kernel_world_stop	unreviewed; 2026-10-06 retain-owner: machine WorldStop controller / linear complete/partial tokens and generation acknowledgements
-kernel/mm/address_space.tkb	address_space_backing_missing_count	unreviewed; 2026-10-06 retain-partition: backing allocator; CPU-active root; permanent root0 / pool pins; CPU-local hardware root; bootstrap mint and teardown run protocol
 kernel/mm/address_space.tkb	address_space_backing_root0	unreviewed; 2026-10-06 retain-partition: backing allocator; CPU-active root; permanent root0 / pool pins; CPU-local hardware root; bootstrap mint and teardown run protocol
 kernel/mm/process_image.tkb	process_image_root0_record	unreviewed
 kernel/mm/process_image.tkb	process_image_staging	unreviewed
@@ -366,8 +355,6 @@ kernel/printk/log.tkb	kernel_log_tx_queue	unreviewed; 2026-10-06 candidate-diagn
 kernel/printk/log.tkb	kernel_log_tx_tail	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
 kernel/printk/log.tkb	kernel_log_tx_terminal	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
 kernel/printk/log.tkb	kernel_log_wire_last	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
-kernel/printk/log.tkb	uart_user_write_sleeps	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
-kernel/printk/log.tkb	uart_user_write_waits	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
 kernel/printk/log_ring_trace.tkb	log_ring_trace_cpus	unreviewed
 kernel/printk/log_ring_trace.tkb	log_ring_trace_from	unreviewed
 kernel/printk/log_ring_trace.tkb	log_ring_trace_reader_begun	unreviewed

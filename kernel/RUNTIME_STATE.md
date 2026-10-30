@@ -383,7 +383,7 @@ image cannot be mounted (94f1c36).
 `kernel/printk/log.tkb`'s `uart_user_write_waits` and
 `uart_user_write_sleeps` (GitHub issue #544) count terminal writes that
 found no room in the transmit queue, and those of them that slept. They are
-updated on every CPU under the console guard.
+`AtomicWord`s, updated on every CPU.
 
 `kernel/kernel/workload_evidence.tkb` retains the peer-console parent PID,
 ordering step, actual first write count and completion flags. The process

@@ -15,10 +15,10 @@ private let mut terminal_echo_head: usize;
 private let mut terminal_echo_tail: usize;
 private let mut terminal_echo_count: usize;
 private let mut terminal_echo_phase: u8;
-private let mut terminal_echo_dropped: usize;
+private let mut terminal_echo_dropped: AtomicWord;
 
 fn terminal_echo_pending() -> bool { return terminal_echo_count != 0; }
-fn terminal_echo_drop_count() -> usize { return terminal_echo_dropped; }
+fn terminal_echo_drop_count() -> usize { return atomic_word_load(&terminal_echo_dropped); }
 
 fn terminal_echo_reset() {
     terminal_echo_head = 0;
@@ -28,9 +28,7 @@ fn terminal_echo_reset() {
 }
 
 private fn terminal_echo_full() -> TerminalEchoPushResult {
-    if (terminal_echo_dropped < 0xFFFFFFFFFFFFFFFF) {
-        terminal_echo_dropped = terminal_echo_dropped + 1;
-    }
+    atomic_word_fetch_add(&terminal_echo_dropped, 1);
     return TerminalEchoPushResult::Full;
 }
 

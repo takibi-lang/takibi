@@ -142,3 +142,12 @@ by a source scan with different edges).
   stale-root counts. The three per-core arrays among them become one word,
   so an increment takes no `cpu_id()` a preempted task could outlive.
   390 -> 374 unprotected.
+- 2026-10-30: thirteen more single words to `AtomicWord`: the scheduler's
+  dispatch gates (`scheduled_process_boot_handed_off`,
+  `scheduled_process_peer_dispatch_enabled`), the CPUs-that-ran mask and the
+  deepest reaped stack (each raised by compare-and-swap), the idle-starvation
+  and peer-syslog report-once flags (one swap, so one report), the core 0 idle
+  note, the debugger's two rollover injection counts (each taken by
+  compare-and-swap), the terminal-write wait and sleep counts (no longer taking
+  the console lock), the dropped-echo count, and the missing-backing count,
+  whose per-core array and `cpu_id()` go. 374 -> 361 unprotected.

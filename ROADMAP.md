@@ -168,7 +168,7 @@ owners are TaskMutex, the spare stack stays masked). #980
    or allow-listed with its reader named; the ratchet (slice 1, done
    2026-10-29: `--emit-globals` and `buildcheck_global_protection.py` in
    kernelbuild, docs/GLOBAL_PROTECTION.md) counted 475 of 712 production
-   globals outside that set (391 of 519 outside evidence/probe files), 428 since slices 3-4 (stall_probe, process.tkb counters and first-occurrence records, virtio_blk statistics and block counters to AtomicWord; the block fault scenario to a guarded Place), 418 since `BootOnce(T)` (#1013 done; the rpi5 and xHCI groups are #1246), 390 after them, 374 after the next diagnostic counters,
+   globals outside that set (391 of 519 outside evidence/probe files), 428 since slices 3-4 (stall_probe, process.tkb counters and first-occurrence records, virtio_blk statistics and block counters to AtomicWord; the block fault scenario to a guarded Place), 418 since `BootOnce(T)` (#1013 done; the rpi5 and xHCI groups are #1246), 390 after them, 374 after the next diagnostic counters, 361 after the scheduler gates and report-once flags,
    each listed; the migration follows the order the flip breaks things. #1032: WXN and PXN
    first (configuration; a B-sized slice; done 2026-10-29: the identity
    is split so only the text is executable, WXN is set, and two QEMU oops

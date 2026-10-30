@@ -78,7 +78,7 @@ class TakibiConsole(gdb.Command):
                               if length <= line_bytes else "unavailable: invalid length"))
             emit("terminal", output_paused=atomic("terminal_output_stop_word") != 0,
                  echo_count=word("terminal_echo_count"), echo_head=word("terminal_echo_head"),
-                 echo_tail=word("terminal_echo_tail"), echo_dropped=word("terminal_echo_dropped"),
+                 echo_tail=word("terminal_echo_tail"), echo_dropped=atomic("terminal_echo_dropped"),
                  tx_count=word("kernel_log_tx_count"), tx_head=word("kernel_log_tx_head"),
                  tx_tail=word("kernel_log_tx_tail"), tx_live=atomic("kernel_log_tx_armed") != 0 and atomic("kernel_console_owner") == 0,
                  console_owner=hex(atomic("kernel_console_owner")),

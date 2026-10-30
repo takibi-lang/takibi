@@ -120,8 +120,7 @@ const ADDRESS_SPACE_BACKING_CHUNK_PAGES: usize = 1;
 // A backing that is missing (allocation failed, or the handle is stale) has
 // nowhere to be reported from the thirty-odd accesses, so it is COUNTED.
 // Printed at the end of the boot suite; 0 on a healthy kernel.
-private let mut address_space_backing_missing_count:
-    [usize; KERNEL_MAX_CORES];
+private let mut address_space_backing_missing_count: AtomicWord;
 // GitHub issue #479: WHICH ADDRESS SPACE IS ACTIVE is a property of a
 // core, not of the kernel. Each core has its own TTBR0_EL1 and can be
 // running a different process, so two cores have two answers -- and one
@@ -214,22 +213,11 @@ fn address_space_probe_root_release(word: usize) !{unsafe} {
 }
 
 fn address_space_backing_missing_uses() -> usize {
-    let mut total: usize = 0;
-    for core: usize in 0..<KERNEL_MAX_CORES {
-        total = total + address_space_backing_missing_count[core];
-    }
-    return total;
+    return atomic_word_load(&address_space_backing_missing_count);
 }
 
 private fn address_space_backing_missing_note() {
-    let core: usize = cpu_id();
-    if (core >= KERNEL_MAX_CORES) {
-        address_space_backing_missing_count[0] =
-            address_space_backing_missing_count[0] + 1;
-        return;
-    }
-    address_space_backing_missing_count[core] =
-        address_space_backing_missing_count[core] + 1;
+    atomic_word_fetch_add(&address_space_backing_missing_count, 1);
 }
 
 // GitHub issue #492 counted lookups that named a backing slot with the

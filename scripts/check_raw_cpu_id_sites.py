@@ -63,7 +63,6 @@ LISTED = {
     "kernel/lib/diagnostic_ring.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/lib/occupancy.tkb": (6, FLIP, "not yet reviewed for migration"),
     "kernel/lib/peer_tick_window.tkb": (1, FLIP, "not yet reviewed for migration"),
-    "kernel/mm/address_space.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/mm/page.tkb": (1, FLIP, "#1079 page_reserve_cpu: read only under the page pool's IRQ-masking lock, and the kernel is not preemptible (KERNEL_PREEMPTIBLE == 0), so the CPU cannot change before the lock is given back; page_alloc has no CpuHere to take"),
     "kernel/platform/qemu/init.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/platform/rpi5/init.tkb": (1, FLIP, "not yet reviewed for migration"),

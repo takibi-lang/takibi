@@ -4619,15 +4619,14 @@ private fn syscall_syslog_with(slot: borrow SyscallSlot[0],
     // with any overwritten while it read counted on a line of its own.
     // core-role: peer_syslog view evidence: reported once from a read on any
     // peer
-    if (cpu_id() != 0 && syscall_syslog_peer_reported == false) {
-        syscall_syslog_peer_reported = true;
+    if (cpu_id() != 0 && atomic_word_swap(&syscall_syslog_peer_reported, 1) == 0) {
         kernel_boot_log(
             "workload: syslog read the retained log on a peer, every record whole or counted lost\n");
     }
     return SyscallAction::Resume(copied);
 }
 
-private let mut syscall_syslog_peer_reported: bool = false;
+private let mut syscall_syslog_peer_reported: AtomicWord;
 
 must_use variant KernelUartDeliveryResult { Consumed; RetryRead; }
 

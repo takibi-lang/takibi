@@ -728,10 +728,10 @@ private let mut scheduled_process_pool_ready: bool = false;
 // its idle loop. Keep that loop from starting an EL0 context until the
 // initial userspace image is ready; after the one-way publication, normal
 // affinity policy applies to every pooled process.
-private let mut scheduled_process_peer_dispatch_enabled: bool = false;
+private let mut scheduled_process_peer_dispatch_enabled: AtomicWord;
 // GitHub issue #831: main() has given its boot context back and PID 1 is
 // published; the boot core's idle loop may start it.
-private let mut scheduled_process_boot_handed_off: bool = false;
+private let mut scheduled_process_boot_handed_off: AtomicWord;
 
 // Reached only when a slot address names no live record. A real struct
 // rather than a null pointer so the impossible case is harmless instead of
@@ -846,7 +846,7 @@ private fn scheduled_process_spare_unlock(
 // to be taken while it still exists. Issues #376/#377 are about this
 // number specifically, so losing it to the storage change would be losing
 // the thing the storage change is measured against.
-private let mut scheduled_process_stack_deepest_reaped: usize = 0;
+private let mut scheduled_process_stack_deepest_reaped: AtomicWord;
 // GitHub issue #392: the pid namespace, monotonic within one run of the
 // process table. Reset by scheduled_process_table_init/_clear -- the two
 // points that already restart slot numbering -- so the first process
@@ -1030,10 +1030,10 @@ private let mut kernel_process_reap_unlinked_count: AtomicWord;
 //
 // Written under the process-run lock at the one place a CPU takes a process
 // for itself, and read once at the end of the boot suite.
-private let mut kernel_process_cpus_that_ran: usize = 0;
+private let mut kernel_process_cpus_that_ran: AtomicWord;
 
 fn kernel_process_cpus_that_ran_value() -> usize {
-    return kernel_process_cpus_that_ran;
+    return atomic_word_load(&kernel_process_cpus_that_ran);
 }
 
 fn kernel_process_reap_unlinked_count_value() -> usize {
@@ -4216,8 +4216,15 @@ fn scheduled_process_start(
     // for itself -- every scheduling path reaches Running through here, and
     // every caller holds the process-run lock -- so it is where "this core
     // has run something" is recorded.
-    kernel_process_cpus_that_ran =
-        kernel_process_cpus_that_ran | (1 << cpu_id());
+    let cpu_bit: usize = 1 << cpu_id();
+    let mut ran_seen: usize = atomic_word_load(&kernel_process_cpus_that_ran);
+    while ((ran_seen & cpu_bit) == 0) {
+        match atomic_word_compare_swap(&kernel_process_cpus_that_ran, ran_seen,
+                                       ran_seen | cpu_bit) {
+            CasResult::Swapped => { ran_seen = ran_seen | cpu_bit; }
+            CasResult::Observed(current) => { ran_seen = current; }
+        }
+    }
     process_state_start(&scheduled_process_record_owned(owner).state);
     let mut running:
         ScheduledProcessState[process, ProcessState::Running] =
@@ -4387,8 +4394,13 @@ fn scheduled_process_reap_teardown(
     // Read the watermark before the run is recycled -- see
     // scheduled_process_stack_deepest_reaped.
     let used: usize = kernel_stack_used_bytes(process_slot_of(owner.pool_index));
-    if (used > scheduled_process_stack_deepest_reaped) {
-        scheduled_process_stack_deepest_reaped = used;
+    let mut deepest_seen: usize = atomic_word_load(&scheduled_process_stack_deepest_reaped);
+    while (used > deepest_seen) {
+        match atomic_word_compare_swap(&scheduled_process_stack_deepest_reaped,
+                                       deepest_seen, used) {
+            CasResult::Swapped => { deepest_seen = used; }
+            CasResult::Observed(current) => { deepest_seen = current; }
+        }
     }
 }
 
@@ -5222,10 +5234,24 @@ private let mut kernel_process_trace_fail_after_exec: bool;
 // the next stable activation find the ASID counter exhausted and treat that
 // many world-stop attempts as Busy before stopping the world for real, which
 // is the answer another core's rollover gives. Normal boot leaves it zero.
-private let mut kernel_process_rollover_busy_injections: usize;
+private let mut kernel_process_rollover_busy_injections: AtomicWord;
 // The same for kernel_process_activate_current_root, the activation a fork
 // child makes before its first return to EL0 (GitHub issue #632).
-private let mut kernel_process_clone_rollover_busy_injections: usize;
+private let mut kernel_process_clone_rollover_busy_injections: AtomicWord;
+
+// One injected busy stop, taken by compare-and-swap so two cores retrying a
+// rollover cannot spend one injection twice. The debugger writes the count
+// while the machine is stopped (scripts/kernel_rollover_gdb_check.py).
+private fn kernel_process_rollover_injection_take(cell: *AtomicWord) -> bool !{unsafe} {
+    let mut seen: usize = atomic_word_load(cell);
+    while (seen != 0) {
+        match atomic_word_compare_swap(cell, seen, seen - 1) {
+            CasResult::Swapped => { return true; }
+            CasResult::Observed(current) => { seen = current; }
+        }
+    }
+    return false;
+}
 // The syscall path records its named committed-exec failure before it enters
 // the common fail-stop entry. The exhaustive enum makes adding a reason
 // without teaching the exception renderer about it a compile error.
@@ -5820,7 +5846,7 @@ fn kernel_process_boot_handoff() !{unsafe, changes_witness_ProcessCurrent} {
         process_run_unlock(removal_guard);
     }
     let open_guard = process_run_lock();
-    scheduled_process_boot_handed_off = true;
+    atomic_word_store(&scheduled_process_boot_handed_off, 1);
     process_run_unlock(open_guard);
 }
 
@@ -6043,11 +6069,11 @@ fn kernel_process_current_cpu_allows(
 // Written under the run lock, by core 0 only. Reported by the workload
 // evidence at a fixed point rather than here, where a line would land in the
 // middle of whatever the console is showing.
-private let mut kernel_process_core0_idle_seen: bool;
+private let mut kernel_process_core0_idle_seen: AtomicWord;
 
 fn kernel_process_core0_idle_was_seen(
         guard: borrow ProcessRunGuard[process_run]) -> bool {
-    return kernel_process_core0_idle_seen;
+    return atomic_word_load(&kernel_process_core0_idle_seen) != 0;
 }
 
 // GitHub issue #592: core 0's counterpart of kernel_process_migrate_current,
@@ -6085,7 +6111,7 @@ fn kernel_process_core0_leave_excluded(frame: borrow FrameRef[process, level])
     execution_state[execution_cpu_index()].current_live = false;
     execution_state[execution_cpu_index()].scheduler_enabled = false;
     execution_state[execution_cpu_index()].reschedule_pending = false;
-    kernel_process_core0_idle_seen = true;
+    atomic_word_store(&kernel_process_core0_idle_seen, 1);
     process_run_unlock(guard);
     return true;
 }
@@ -6611,7 +6637,7 @@ struct per_cpu IdleStarvation {
     private passes: usize;
 }
 private let mut kernel_idle_starvation: [IdleStarvation; KERNEL_MAX_CORES];
-private let mut kernel_idle_starvation_reported: bool = false;
+private let mut kernel_idle_starvation_reported: AtomicWord;
 
 private fn kernel_process_idle_starvation_note(
         guard: borrow ProcessRunGuard[process_run]) !{unsafe} {
@@ -6647,8 +6673,7 @@ private fn kernel_process_idle_starvation_note(
         kernel_idle_starvation[here].passes = passes;
     }
     if (passes == KERNEL_IDLE_STARVATION_PASSES &&
-        kernel_idle_starvation_reported == false) {
-        kernel_idle_starvation_reported = true;
+        atomic_word_swap(&kernel_idle_starvation_reported, 1) == 0) {
         kernel_boot_log("sched: STARVED cpu=");
         uart_put_udec(raw_cpu);
         kernel_boot_log(" idled beside Ready pid=");
@@ -6693,8 +6718,8 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
     // and that start opens dispatch on every core.
     // core-role: boot runs on core 0, and so does the first process it hands
     // to; every core dispatches from then on
-    let first_start: bool = scheduled_process_peer_dispatch_enabled == false;
-    if (first_start && (scheduled_process_boot_handed_off == false ||
+    let first_start: bool = atomic_word_load(&scheduled_process_peer_dispatch_enabled) == 0;
+    if (first_start && (atomic_word_load(&scheduled_process_boot_handed_off) == 0 ||
                         cpu_id() != 0)) {
         process_run_unlock(guard);
         return ProcessSecondaryStart::Idle;
@@ -6730,7 +6755,7 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
                             let (owner, ready) = resources;
                             let running = scheduled_process_start(owner, ready);
                             if (first_start) {
-                                scheduled_process_peer_dispatch_enabled = true;
+                                atomic_word_store(&scheduled_process_peer_dispatch_enabled, 1);
                             }
                             // GitHub issue #874: name the claim before the
                             // unlock, for a world stop in the window. One
@@ -6878,7 +6903,7 @@ fn kernel_process_activate_current_root(current_authority: borrow ProcessCurrent
     // A fork child makes this activation before its first return to EL0.
     // #584's long churn run fail-stopped here on a Partial stop at the first
     // ASID wrap after a DDB reading, on QEMU and RPi5, once exec no longer did.
-    if (kernel_process_clone_rollover_busy_injections != 0) {
+    if (atomic_word_load(&kernel_process_clone_rollover_busy_injections) != 0) {
         asid_force_rollover_needed();
     }
     let mut injected_busy: usize = 0;
@@ -6888,9 +6913,7 @@ fn kernel_process_activate_current_root(current_authority: borrow ProcessCurrent
             return CurrentRootActivationResult::Invalid;
         }
         AddressSpaceActivationPrepareResult::RolloverNeeded => {
-            if (kernel_process_clone_rollover_busy_injections != 0) {
-                kernel_process_clone_rollover_busy_injections =
-                    kernel_process_clone_rollover_busy_injections - 1;
+            if (kernel_process_rollover_injection_take(&kernel_process_clone_rollover_busy_injections)) {
                 injected_busy = injected_busy + 1;
                 kernel_process_rollover_backoff();
                 continue;
@@ -6967,7 +6990,7 @@ fn kernel_process_activate_current_root(current_authority: borrow ProcessCurrent
 fn kernel_process_activate_stable_root(root: AddressSpaceRoot) {
     let mut activating: bool = true;
     let mut injected_busy: usize = 0;
-    if (kernel_process_rollover_busy_injections != 0) {
+    if (atomic_word_load(&kernel_process_rollover_busy_injections) != 0) {
         asid_force_rollover_needed();
     }
     while (activating) {
@@ -6976,9 +6999,7 @@ fn kernel_process_activate_stable_root(root: AddressSpaceRoot) {
                 kernel_invariant_stop();
             }
             AddressSpaceActivationPrepareResult::RolloverNeeded => {
-                if (kernel_process_rollover_busy_injections != 0) {
-                    kernel_process_rollover_busy_injections =
-                        kernel_process_rollover_busy_injections - 1;
+                if (kernel_process_rollover_injection_take(&kernel_process_rollover_busy_injections)) {
                     injected_busy = injected_busy + 1;
                     kernel_process_rollover_backoff();
                     continue;
@@ -7548,7 +7569,7 @@ fn kernel_stack_overflow_bytes(slot: ProcessSlot)
 // The deepest any slot has been, which is the number that decides how big
 // a kernel stack has to be (issues #376/#377).
 fn kernel_stack_deepest_bytes() -> usize !{unsafe} {
-    let mut deepest: usize = scheduled_process_stack_deepest_reaped;
+    let mut deepest: usize = atomic_word_load(&scheduled_process_stack_deepest_reaped);
     let mut cursor = scheduled_process_first_slot();
     let mut walking: bool = true;
     while (walking) {
@@ -7740,7 +7761,7 @@ fn kernel_stack_watermark_report() !{unsafe} {
     // so there is nothing left to read its poison out of. What those
     // processes reached is in `deepest` above, taken at their reap.
     kernel_boot_log(" reaped-deepest=");
-    uart_put_udec(scheduled_process_stack_deepest_reaped);
+    uart_put_udec(atomic_word_load(&scheduled_process_stack_deepest_reaped));
     kernel_boot_log(" per-process=");
     let mut report_cursor = scheduled_process_first_slot();
     let mut reporting: bool = true;
@@ -10501,7 +10522,7 @@ private fn kernel_process_scheduler_probe_stack_arrive() -> bool {
 fn kernel_process_scheduler_probe() -> bool !{changes_witness_ProcessCurrent} {
     kernel_process_execution_reset();
     kernel_process_trace_enable();
-    if (scheduled_process_peer_dispatch_enabled) { return false; }
+    if (atomic_word_load(&scheduled_process_peer_dispatch_enabled) != 0) { return false; }
     let root_pid: usize = kernel_process_current_pid();
     let mut root_handle: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
     // The boot thread has no EL0 frame while the boot probes run (#831).
