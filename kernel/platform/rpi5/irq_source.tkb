@@ -58,7 +58,7 @@ private fn irq_source_code(id: u32) -> u32 {
     if (id == RPI5_GEM_GIC_INTID) { return IrqSource::Gem as u32; }
     if (id == RPI5_USB0_GIC_INTID) { return IrqSource::Usb as u32; }
     if (id == RPI5_UART0_GIC_INTID) { return IrqSource::Uart as u32; }
-    if (id == rpi5_timer_gic_intid) { return IrqSource::Timer as u32; }
+    if (id == boot_once_get(&rpi5_timer_gic_intid)) { return IrqSource::Timer as u32; }
     return IRQ_SOURCE_NONE;
 }
 

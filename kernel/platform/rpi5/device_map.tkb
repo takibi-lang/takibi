@@ -18,9 +18,24 @@ must_use variant Rpi5Attach {
     Refused;
 }
 
+// GitHub issue #1012: the board's known addresses, written before anything
+// reads them. A DTB reader that refuses leaves these in place: the windows
+// below still attach at them, which is the emergency path that lets main()
+// say why it is halting. Each reader overwrites its cell with the equal value
+// the DTB reported, so these cells take two writes (kernel/lib/boot_once.tkb).
+fn rpi5_boot_config_seed(phase: borrow BootPhase[boot]) {
+    boot_once_set(&rpi5_timer_gic_intid, phase, RPI5_TIMER_GIC_INTID);
+    boot_once_set(&rpi5_pcie2_base, phase, RPI5_PCIE2_BASE);
+    boot_once_set(&rpi5_pcie_rescal_base, phase, RPI5_PCIE_RESCAL_BASE);
+    boot_once_set(&rpi5_bcm_reset_base, phase, RPI5_BCM_RESET_BASE);
+    boot_once_set(&rpi5_mip0_target, phase, RPI5_MIP0_TARGET);
+    boot_once_set(&rpi5_pcie_outbound_cpu_base, phase, RPI5_PCIE_OUTBOUND_CPU_BASE);
+    boot_once_set(&rp1_dma_pci_offset, phase, RP1_DMA_PCI_OFFSET);
+}
+
 // The console's window before the DTB has been checked.
-fn rpi5_uart_attach_bootstrap() !{unsafe} {
-    match rpi5_uart_attach_window(RPI5_RP1_UART0_BASE, RPI5_RP1_UART0_WINDOW_BYTES) {
+fn rpi5_uart_attach_bootstrap(phase: borrow BootPhase[boot]) !{unsafe} {
+    match rpi5_uart_attach_window(phase, RPI5_RP1_UART0_BASE, RPI5_RP1_UART0_WINDOW_BYTES) {
         Rpi5Attach::Attached => {}
         Rpi5Attach::Refused => { kernel_invariant_stop(); }
     }
@@ -28,12 +43,12 @@ fn rpi5_uart_attach_bootstrap() !{unsafe} {
 
 // The one mint of the UART's registers: the constant above or a DTB reg
 // entry its reader has already compared with it.
-fn rpi5_uart_attach_window(base: usize, bytes: usize) -> Rpi5Attach !{unsafe} {
+fn rpi5_uart_attach_window(phase: borrow BootPhase[boot], base: usize, bytes: usize) -> Rpi5Attach !{unsafe} {
     let RegionBytes::Assumed(window) = region_bytes_assume(base, bytes) else {};
     match io_handle_attach(&uart, window) {
         IoAttach::TooSmall => { return Rpi5Attach::Refused; }
         IoAttach::Attached => {
-            rpi5_uart_base = base;
+            boot_once_set(&rpi5_uart_base, phase, base);
             return Rpi5Attach::Attached;
         }
     }
@@ -81,19 +96,19 @@ fn rpi5_gem_attach_bootstrap() !{unsafe} {
 // compared with them and checked for these sizes). Before pcie2_init.
 fn rpi5_pcie_windows_attach() !{unsafe} {
     let RegionBytes::Assumed(bridge) =
-        region_bytes_assume(rpi5_pcie2_base, 0x9310) else {};
+        region_bytes_assume(boot_once_get(&rpi5_pcie2_base), 0x9310) else {};
     match io_handle_attach(&pcie2, bridge) {
         IoAttach::Attached => {}
         IoAttach::TooSmall => { kernel_invariant_stop(); }
     }
     let RegionBytes::Assumed(rescal) =
-        region_bytes_assume(rpi5_pcie_rescal_base, 0x10) else {};
+        region_bytes_assume(boot_once_get(&rpi5_pcie_rescal_base), 0x10) else {};
     match io_handle_attach(&pcie_rescal, rescal) {
         IoAttach::Attached => {}
         IoAttach::TooSmall => { kernel_invariant_stop(); }
     }
     let RegionBytes::Assumed(reset) =
-        region_bytes_assume(rpi5_bcm_reset_base, 0x30) else {};
+        region_bytes_assume(boot_once_get(&rpi5_bcm_reset_base), 0x30) else {};
     match io_handle_attach(&bcm_reset, reset) {
         IoAttach::Attached => {}
         IoAttach::TooSmall => { kernel_invariant_stop(); }
@@ -121,7 +136,7 @@ fn rpi5_system_timer_attach(base: usize, bytes: usize) -> Rpi5Attach !{unsafe} {
 // and is aligned (xhci_place_blocks), and only then makes a window for each
 // block at the base the controller reported. A block outside the window is
 // the only refusal; it is named, with the offset read, before the stop.
-fn rpi5_xhci_attach_bootstrap() !{unsafe} {
+fn rpi5_xhci_attach_bootstrap(phase: borrow BootPhase[boot]) !{unsafe} {
     let RegionBytes::Assumed(cap_window) = region_bytes_assume(
         RP1_USBHOST0_BASE, sizeof(XhciCapabilityRegs)) else {};
     match io_handle_attach(&rp1_xhci_cap, cap_window) {
@@ -146,7 +161,7 @@ fn rpi5_xhci_attach_bootstrap() !{unsafe} {
             rpi5_xhci_refuse("dboff", offset);
         }
         XhciBlockPlacement::Placed(placed) => {
-            rp1_xhci_caps = placed;
+            boot_once_set(&rp1_xhci_caps, phase, placed);
             let RegionBytes::Assumed(op) = region_bytes_assume(
                 RP1_USBHOST0_BASE + (placed.caplength as usize),
                 sizeof(XhciOperationalRegs)) else {};
@@ -183,7 +198,7 @@ fn rpi5_xhci_refuse(register: *u8, offset: u32) {
 
 // The GIC-400's two windows and MIP0: the board's known addresses until the
 // DTB has been compared with them (gic_dtb.tkb, mip_dtb.tkb), then the DTB's.
-fn rpi5_gic_attach(dist_base: usize, dist_bytes: usize,
+fn rpi5_gic_attach(phase: borrow BootPhase[boot], dist_base: usize, dist_bytes: usize,
                    cpu_base: usize, cpu_bytes: usize) -> Rpi5Attach !{unsafe} {
     let RegionBytes::Assumed(dist) = region_bytes_assume(dist_base, dist_bytes) else {};
     match io_handle_attach(&gicd, dist) {
@@ -195,17 +210,17 @@ fn rpi5_gic_attach(dist_base: usize, dist_bytes: usize,
         IoAttach::TooSmall => { return Rpi5Attach::Refused; }
         IoAttach::Attached => {}
     }
-    rpi5_gicd_base = dist_base;
-    rpi5_gicc_base = cpu_base;
+    boot_once_set(&rpi5_gicd_base, phase, dist_base);
+    boot_once_set(&rpi5_gicc_base, phase, cpu_base);
     return Rpi5Attach::Attached;
 }
 
-fn rpi5_mip0_attach(base: usize, bytes: usize) -> Rpi5Attach !{unsafe} {
+fn rpi5_mip0_attach(phase: borrow BootPhase[boot], base: usize, bytes: usize) -> Rpi5Attach !{unsafe} {
     let RegionBytes::Assumed(window) = region_bytes_assume(base, bytes) else {};
     match io_handle_attach(&mip0, window) {
         IoAttach::TooSmall => { return Rpi5Attach::Refused; }
         IoAttach::Attached => {
-            rpi5_mip0_base = base;
+            boot_once_set(&rpi5_mip0_base, phase, base);
             return Rpi5Attach::Attached;
         }
     }
@@ -222,12 +237,12 @@ const RP1_MSIX_CFG_SET_BYTES: usize = 64 * 4;
 // Every RPi5 interrupt-path window at the board's known addresses, before
 // any DTB has been read. Halts if one cannot be attached: no interrupt
 // could be routed.
-fn rpi5_irq_windows_attach_bootstrap() !{unsafe} {
-    match rpi5_gic_attach(RPI5_GICD_BASE, 0x1000, RPI5_GICC_BASE, 0x2000) {
+fn rpi5_irq_windows_attach_bootstrap(phase: borrow BootPhase[boot]) !{unsafe} {
+    match rpi5_gic_attach(phase, RPI5_GICD_BASE, 0x1000, RPI5_GICC_BASE, 0x2000) {
         Rpi5Attach::Attached => {}
         Rpi5Attach::Refused => { kernel_invariant_stop(); }
     }
-    match rpi5_mip0_attach(RPI5_MIP0_BASE, 0xC0) {
+    match rpi5_mip0_attach(phase, RPI5_MIP0_BASE, 0xC0) {
         Rpi5Attach::Attached => {}
         Rpi5Attach::Refused => { kernel_invariant_stop(); }
     }

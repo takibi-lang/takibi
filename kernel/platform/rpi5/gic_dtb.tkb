@@ -4,15 +4,15 @@ must_use variant Rpi5GicDtbResult {
     Applied((usize, usize));
 }
 
-fn rpi5_gic_apply_boot_dtb() -> Rpi5GicDtbResult !{unsafe} {
+fn rpi5_gic_apply_boot_dtb(phase: borrow BootPhase[boot]) -> Rpi5GicDtbResult !{unsafe} {
     let dtb: usize = boot_dtb_address_read();
     match fdt_find_compatible_gicv2_regions(dtb, bs"arm,gic-400") {
         FdtGicV2RegionsResult::Invalid => {
-            rpi5_gic_dtb_status = 1;
+            boot_once_set(&rpi5_gic_dtb_status, phase, 1);
             return Rpi5GicDtbResult::Invalid;
         }
         FdtGicV2RegionsResult::NotFound => {
-            rpi5_gic_dtb_status = 2;
+            boot_once_set(&rpi5_gic_dtb_status, phase, 2);
             return Rpi5GicDtbResult::Missing;
         }
         FdtGicV2RegionsResult::Found(gic) => {
@@ -20,37 +20,37 @@ fn rpi5_gic_apply_boot_dtb() -> Rpi5GicDtbResult !{unsafe} {
                 gic.cpu_interface.base != RPI5_GICC_BASE ||
                 gic.distributor.size < 0x1000 ||
                 gic.cpu_interface.size < 0x2000) {
-                rpi5_gic_dtb_status = 1;
+                boot_once_set(&rpi5_gic_dtb_status, phase, 1);
                 return Rpi5GicDtbResult::Invalid;
             }
             match fdt_find_armv8_timer_interrupt(dtb) {
                 FdtGicInterruptResult::Invalid => {
-                    rpi5_gic_dtb_status = 1;
+                    boot_once_set(&rpi5_gic_dtb_status, phase, 1);
                     return Rpi5GicDtbResult::Invalid;
                 }
                 FdtGicInterruptResult::NotFound => {
-                    rpi5_gic_dtb_status = 2;
+                    boot_once_set(&rpi5_gic_dtb_status, phase, 2);
                     return Rpi5GicDtbResult::Missing;
                 }
                 FdtGicInterruptResult::Found(interrupt) => {
                     if (interrupt.intid !=
                             RPI5_TIMER_GIC_INTID as usize ||
                         (interrupt.flags & 0xF) != 8) {
-                        rpi5_gic_dtb_status = 1;
+                        boot_once_set(&rpi5_gic_dtb_status, phase, 1);
                         return Rpi5GicDtbResult::Invalid;
                     }
-                    match rpi5_gic_attach(gic.distributor.base, gic.distributor.size,
+                    match rpi5_gic_attach(phase, gic.distributor.base, gic.distributor.size,
                                           gic.cpu_interface.base, gic.cpu_interface.size) {
                         Rpi5Attach::Attached => {}
                         Rpi5Attach::Refused => {
-                            rpi5_gic_dtb_status = 1;
+                            boot_once_set(&rpi5_gic_dtb_status, phase, 1);
                             return Rpi5GicDtbResult::Invalid;
                         }
                     }
-                    rpi5_timer_gic_intid = interrupt.intid as u32;
-                    rpi5_gic_dtb_status = 3;
+                    boot_once_set(&rpi5_timer_gic_intid, phase, interrupt.intid as u32);
+                    boot_once_set(&rpi5_gic_dtb_status, phase, 3);
                     return Rpi5GicDtbResult::Applied((
-                        rpi5_gicd_base, rpi5_gicc_base));
+                        boot_once_get(&rpi5_gicd_base), boot_once_get(&rpi5_gicc_base)));
                 }
             }
         }
@@ -58,9 +58,9 @@ fn rpi5_gic_apply_boot_dtb() -> Rpi5GicDtbResult !{unsafe} {
 }
 
 fn rpi5_gic_boot_dtb_status() -> Rpi5GicDtbResult {
-    if (rpi5_gic_dtb_status == 3) {
-        return Rpi5GicDtbResult::Applied((rpi5_gicd_base, rpi5_gicc_base));
+    if (boot_once_get(&rpi5_gic_dtb_status) == 3) {
+        return Rpi5GicDtbResult::Applied((boot_once_get(&rpi5_gicd_base), boot_once_get(&rpi5_gicc_base)));
     }
-    if (rpi5_gic_dtb_status == 2) { return Rpi5GicDtbResult::Missing; }
+    if (boot_once_get(&rpi5_gic_dtb_status) == 2) { return Rpi5GicDtbResult::Missing; }
     return Rpi5GicDtbResult::Invalid;
 }

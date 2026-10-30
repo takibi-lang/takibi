@@ -143,8 +143,8 @@ fn rp1_vector_route(intid: u32, vector: u32, level_high: bool) {
     let entry: usize = (vector as usize) * 4;
     if (entry < 241) {
         rp1_msix.words[entry + 3] = 1; // mask while rewriting the entry
-        rp1_msix.words[entry] = rpi5_mip0_target as u32;
-        rp1_msix.words[entry + 1] = (rpi5_mip0_target >> 32) as u32;
+        rp1_msix.words[entry] = boot_once_get(&rpi5_mip0_target) as u32;
+        rp1_msix.words[entry + 1] = (boot_once_get(&rpi5_mip0_target) >> 32) as u32;
         rp1_msix.words[entry + 2] = vector;
         rp1_msix.words[entry + 3] = 0;
     }
@@ -184,7 +184,7 @@ fn rp1_vector_iack(vector: u32) {
 // stays masked (IMSC=0) until kernel/platform/rpi5/init.tkb's own
 // irq_uart_rx_unmask() call much later -- GIC-level routing being armed
 // early is harmless as long as the peripheral itself never asserts.
-fn platform_irq_init() {
+fn platform_irq_init(phase: borrow BootPhase[boot]) {
     gic_spi_priorities_init();
     platform_irq_cpu_interface_init();
     pcie2_mip0_inbound_setup();
@@ -196,7 +196,7 @@ fn platform_irq_init() {
     rp1_vector_route(RPI5_USB0_GIC_INTID, RP1_USB0_VECTOR, false);
     // The GEM handle is attached before its vector can be dispatched.
     rpi5_gem_attach_bootstrap();
-    rpi5_xhci_attach_bootstrap();
+    rpi5_xhci_attach_bootstrap(phase);
     rp1_vector_route(RPI5_GEM_GIC_INTID, RP1_GEM_VECTOR, true);
     // GitHub issue #830: from here the GEM SPI follows the rotating route.
     nic_irq_route(RPI5_GEM_GIC_INTID);

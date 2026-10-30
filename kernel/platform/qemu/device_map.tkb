@@ -226,8 +226,8 @@ fn qemu_boot_devices_apply_dtb(phase: borrow BootPhase[boot]) -> QemuBootDevices
                                     }
                                     boot_once_set(&qemu_uart_gic_intid, phase,
                                         interrupt.intid as u32);
-                                    qemu_timer_gic_intid =
-                                        timer.intid as u32;
+                                    boot_once_set(&qemu_timer_gic_intid, phase,
+                                        timer.intid as u32);
                                     match qemu_gic_attach(phase, gic.distributor.base, gic.distributor.size,
                                                           gic.cpu_interface.base, gic.cpu_interface.size) {
                                         QemuAttach::Attached => {}

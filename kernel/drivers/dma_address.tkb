@@ -29,7 +29,7 @@ fn virtio_span_address(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
 
 // A device span's RP1 bus address, for a GEM or xHCI descriptor or register.
 fn rp1_span_bus_address(span: borrow DmaDeviceSpan) -> usize !{unsafe} {
-    return unsafe { dma_span_address(span) } + rp1_dma_pci_offset;
+    return unsafe { dma_span_address(span) } + boot_once_get(&rp1_dma_pci_offset);
 }
 
 // A device span's CPU physical address, for a CPU-side cache operation on it.

@@ -5,8 +5,10 @@
 // same as RPi5's version.
 
 const QEMU_TIMER_GIC_INTID: u32 = 30;
-let mut qemu_timer_gic_intid: u32 = QEMU_TIMER_GIC_INTID;
+// GitHub issue #1012: written once from the boot DTB, read by every
+// interrupt afterwards (kernel/lib/boot_once.tkb).
+let mut qemu_timer_gic_intid: BootOnce(u32);
 
 fn gic_timer_ppi_enable() {
-    gic_intid_enable(qemu_timer_gic_intid);
+    gic_intid_enable(boot_once_get(&qemu_timer_gic_intid));
 }

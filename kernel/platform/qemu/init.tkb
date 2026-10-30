@@ -214,7 +214,7 @@ fn main() !{unsafe} {
             kernel_boot_log(" gicc_bytes=");
             uart_put_udec(boot_once_get(&qemu_gicc_base));
             kernel_boot_log(" timer_intid=");
-            uart_put_udec(qemu_timer_gic_intid as usize);
+            uart_put_udec(boot_once_get(&qemu_timer_gic_intid) as usize);
             kernel_boot_log("\n");
             kernel_boot_log("psci: source=dtb method=hvc applied_to_cpu_on=yes\n");
             kernel_boot_log("virtio: source=dtb net_base_bytes=");

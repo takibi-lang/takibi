@@ -28056,7 +28056,7 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
     struct QemuHvcCell { value: bool; }
     let mut qemu_psci_use_hvc: QemuHvcCell;
     fn boot_once_get(cell: &mut QemuHvcCell) -> bool { return (*cell).value; }
-    let mut rpi5_psci_use_hvc: bool;
+    let mut rpi5_psci_use_hvc: QemuHvcCell;
     let mut kernel_secondary_entry: usize;
     struct Record { value: usize; }
     struct ProcessSlot { word: usize; }

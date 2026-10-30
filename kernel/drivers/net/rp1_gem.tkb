@@ -159,12 +159,12 @@ let mut gem_tx_next: i32 = 0;
 // Set once a TX completion went unconfirmed: gem_halt() has stopped the MAC
 // (or failed to), so no later frame is submitted this boot.
 private let mut gem_tx_down: bool = false;
-let mut rp1_gem_base: usize = RP1_GEM_BASE;
-let mut rp1_clocks_base: usize = RP1_CLOCKS_BASE;
-let mut rp1_gpio_ctrl_base: usize = RP1_GPIO_CTRL_BASE;
-let mut rp1_gpio_rio_base: usize = RP1_GPIO_RIO_BASE;
-let mut rp1_gpio_pads_base: usize = RP1_GPIO_PADS_BASE;
-let mut rp1_gem_dtb_status: usize;
+let mut rp1_gem_base: BootOnce(usize);
+let mut rp1_clocks_base: BootOnce(usize);
+let mut rp1_gpio_ctrl_base: BootOnce(usize);
+let mut rp1_gpio_rio_base: BootOnce(usize);
+let mut rp1_gpio_pads_base: BootOnce(usize);
+let mut rp1_gem_dtb_status: BootOnce(usize);
 
 fn gem_mdio_wait() -> bool {
     for i: i32 in 0..<100000 {

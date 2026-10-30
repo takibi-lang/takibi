@@ -62,16 +62,10 @@ kernel/drivers/net/rp1_gem.tkb	gem_tx_down	unreviewed
 kernel/drivers/net/rp1_gem.tkb	gem_tx_next	unreviewed; 2026-10-06 review-device-layout: one GEM network controller / InitOnce; linear RX/TX capabilities; boot MMIO configuration; DMA publication
 kernel/drivers/net/rp1_gem.tkb	net_init_once	unreviewed; 2026-10-06 review-device-layout: one GEM network controller / InitOnce; linear RX/TX capabilities; boot MMIO configuration; DMA publication
 kernel/drivers/net/rp1_gem.tkb	rp1_clocks	unreviewed
-kernel/drivers/net/rp1_gem.tkb	rp1_clocks_base	unreviewed; 2026-10-06 review-device-layout: one GEM network controller / InitOnce; linear RX/TX capabilities; boot MMIO configuration; DMA publication
-kernel/drivers/net/rp1_gem.tkb	rp1_gem_base	unreviewed; 2026-10-06 review-device-layout: one GEM network controller / InitOnce; linear RX/TX capabilities; boot MMIO configuration; DMA publication
-kernel/drivers/net/rp1_gem.tkb	rp1_gem_dtb_status	unreviewed; 2026-10-06 review-device-layout: one GEM network controller / InitOnce; linear RX/TX capabilities; boot MMIO configuration; DMA publication
 kernel/drivers/net/rp1_gem.tkb	rp1_gem_net_ready	unreviewed; 2026-10-06 review-device-layout: one GEM network controller / InitOnce; linear RX/TX capabilities; boot MMIO configuration; DMA publication
 kernel/drivers/net/rp1_gem.tkb	rp1_gpio_ctrl	unreviewed
-kernel/drivers/net/rp1_gem.tkb	rp1_gpio_ctrl_base	unreviewed; 2026-10-06 review-device-layout: one GEM network controller / InitOnce; linear RX/TX capabilities; boot MMIO configuration; DMA publication
 kernel/drivers/net/rp1_gem.tkb	rp1_gpio_pads	unreviewed
-kernel/drivers/net/rp1_gem.tkb	rp1_gpio_pads_base	unreviewed; 2026-10-06 review-device-layout: one GEM network controller / InitOnce; linear RX/TX capabilities; boot MMIO configuration; DMA publication
 kernel/drivers/net/rp1_gem.tkb	rp1_gpio_rio	unreviewed
-kernel/drivers/net/rp1_gem.tkb	rp1_gpio_rio_base	unreviewed; 2026-10-06 review-device-layout: one GEM network controller / InitOnce; linear RX/TX capabilities; boot MMIO configuration; DMA publication
 kernel/drivers/net/rp1_gem_desc.tkb	gem_pkt_addr	unreviewed
 kernel/drivers/net/rp1_gem_desc.tkb	gem_pkt_rx_seen	unreviewed
 kernel/drivers/net/rp1_gem_desc.tkb	gem_pkt_tx_seen	unreviewed
@@ -323,40 +317,18 @@ kernel/net/tcp.tkb	tcp_retx_pass_busy	unreviewed
 kernel/net/tcp.tkb	tcp_retx_pass_hold_until_recovered	unreviewed
 kernel/net/tcp.tkb	tcp_retx_pass_sent	unreviewed
 kernel/net/tcp.tkb	tcp_split_request_segments	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
-kernel/platform/qemu/timer_irq.tkb	qemu_timer_gic_intid	unreviewed; 2026-10-06 candidate-device-config: platform UART/GIC/timer/PSCI configuration / boot DTB writes before IRQ/CPU enable; MMIO consumers and entry ABI
 kernel/platform/rpi5/intc.tkb	mip0	unreviewed
 kernel/platform/rpi5/intc.tkb	rp1_msix	unreviewed
 kernel/platform/rpi5/intc.tkb	rp1_msix_cfg_set	unreviewed
 kernel/platform/rpi5/pcie.tkb	bcm_reset	unreviewed
 kernel/platform/rpi5/pcie.tkb	pcie2	unreviewed
 kernel/platform/rpi5/pcie.tkb	pcie_rescal	unreviewed
-kernel/platform/rpi5/pcie.tkb	rp1_dma_pci_offset	unreviewed; 2026-10-06 candidate-device-config: RPi5 PCI root complex and RP1 address map / boot DTB discovery/validation before controller bring-up; DMA translation used later
-kernel/platform/rpi5/pcie.tkb	rpi5_bcm_reset_base	unreviewed; 2026-10-06 candidate-device-config: RPi5 PCI root complex and RP1 address map / boot DTB discovery/validation before controller bring-up; DMA translation used later
-kernel/platform/rpi5/pcie.tkb	rpi5_mip0_base	unreviewed; 2026-10-06 candidate-device-config: RPi5 PCI root complex and RP1 address map / boot DTB discovery/validation before controller bring-up; DMA translation used later
-kernel/platform/rpi5/pcie.tkb	rpi5_mip0_dtb_status	unreviewed; 2026-10-06 candidate-device-config: RPi5 PCI root complex and RP1 address map / boot DTB discovery/validation before controller bring-up; DMA translation used later
-kernel/platform/rpi5/pcie.tkb	rpi5_mip0_target	unreviewed; 2026-10-06 candidate-device-config: RPi5 PCI root complex and RP1 address map / boot DTB discovery/validation before controller bring-up; DMA translation used later
-kernel/platform/rpi5/pcie.tkb	rpi5_pcie2_base	unreviewed; 2026-10-06 candidate-device-config: RPi5 PCI root complex and RP1 address map / boot DTB discovery/validation before controller bring-up; DMA translation used later
-kernel/platform/rpi5/pcie.tkb	rpi5_pcie2_dtb_status	unreviewed; 2026-10-06 candidate-device-config: RPi5 PCI root complex and RP1 address map / boot DTB discovery/validation before controller bring-up; DMA translation used later
-kernel/platform/rpi5/pcie.tkb	rpi5_pcie_address_map_dtb_status	unreviewed; 2026-10-06 candidate-device-config: RPi5 PCI root complex and RP1 address map / boot DTB discovery/validation before controller bring-up; DMA translation used later
-kernel/platform/rpi5/pcie.tkb	rpi5_pcie_outbound_cpu_base	unreviewed; 2026-10-06 candidate-device-config: RPi5 PCI root complex and RP1 address map / boot DTB discovery/validation before controller bring-up; DMA translation used later
-kernel/platform/rpi5/pcie.tkb	rpi5_pcie_rescal_base	unreviewed; 2026-10-06 candidate-device-config: RPi5 PCI root complex and RP1 address map / boot DTB discovery/validation before controller bring-up; DMA translation used later
-kernel/platform/rpi5/pcie.tkb	rpi5_pcie_support_dtb_status	unreviewed; 2026-10-06 candidate-device-config: RPi5 PCI root complex and RP1 address map / boot DTB discovery/validation before controller bring-up; DMA translation used later
-kernel/platform/rpi5/psci_dtb.tkb	rpi5_psci_use_hvc	unreviewed; 2026-10-06 retain-singleton: boot PSCI transport / DTB selects SMC/HVC before CPU_ON
 kernel/platform/rpi5/system_timer_dtb.tkb	rpi5_system_timer	unreviewed
-kernel/platform/rpi5/timer_irq.tkb	rpi5_gic_dtb_status	unreviewed; 2026-10-06 candidate-device-config: platform UART/GIC/timer/PSCI configuration / boot DTB writes before IRQ/CPU enable; MMIO consumers and entry ABI
-kernel/platform/rpi5/timer_irq.tkb	rpi5_gicc_base	unreviewed; 2026-10-06 candidate-device-config: platform UART/GIC/timer/PSCI configuration / boot DTB writes before IRQ/CPU enable; MMIO consumers and entry ABI
-kernel/platform/rpi5/timer_irq.tkb	rpi5_gicd_base	unreviewed; 2026-10-06 candidate-device-config: platform UART/GIC/timer/PSCI configuration / boot DTB writes before IRQ/CPU enable; MMIO consumers and entry ABI
-kernel/platform/rpi5/timer_irq.tkb	rpi5_timer_gic_intid	unreviewed; 2026-10-06 candidate-device-config: platform UART/GIC/timer/PSCI configuration / boot DTB writes before IRQ/CPU enable; MMIO consumers and entry ABI
-kernel/platform/rpi5/uart.tkb	rpi5_uart_base	unreviewed; 2026-10-06 candidate-device-config: platform UART/GIC/timer/PSCI configuration / boot DTB writes before IRQ/CPU enable; MMIO consumers and entry ABI
-kernel/platform/rpi5/uart.tkb	rpi5_uart_dtb_status	unreviewed; 2026-10-06 candidate-device-config: platform UART/GIC/timer/PSCI configuration / boot DTB writes before IRQ/CPU enable; MMIO consumers and entry ABI
 kernel/platform/rpi5/usb_provision.tkb	usb_provision_batch	unreviewed; 2026-10-06 retain-boot: boot rootfs provisioning operation / immutable embedded image; bounded boot block/batch scratch; synchronous device access
 kernel/platform/rpi5/usb_provision.tkb	usb_provision_expanded	2026-10-30 #1218 retain-boot: one expanded chunk of the embedded image; written and read only by usb_provision_rootfs and its verify, synchronously on core 0 at boot
 kernel/platform/rpi5/usb_xhci.tkb	msc_tag	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
 kernel/platform/rpi5/usb_xhci.tkb	msc_write10_command_count	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	rp1_usbhost0_base	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	rp1_usbhost0_dtb_status	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
 kernel/platform/rpi5/usb_xhci.tkb	rp1_xhci_cap	unreviewed
-kernel/platform/rpi5/usb_xhci.tkb	rp1_xhci_caps	unreviewed
 kernel/platform/rpi5/usb_xhci.tkb	rp1_xhci_db	unreviewed
 kernel/platform/rpi5/usb_xhci.tkb	rp1_xhci_op	unreviewed
 kernel/platform/rpi5/usb_xhci.tkb	rp1_xhci_rt	unreviewed

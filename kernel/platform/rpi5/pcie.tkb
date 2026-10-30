@@ -111,17 +111,17 @@ let mut pcie2: IoHandle(Pcie2Regs);
 let mut pcie_rescal: IoHandle(PcieRescalRegs);
 let mut bcm_reset: IoHandle(BcmResetRegs);
 
-let mut rpi5_pcie2_base: usize = RPI5_PCIE2_BASE;
-let mut rpi5_pcie2_dtb_status: usize;
-let mut rpi5_pcie_rescal_base: usize = RPI5_PCIE_RESCAL_BASE;
-let mut rpi5_bcm_reset_base: usize = RPI5_BCM_RESET_BASE;
-let mut rpi5_pcie_support_dtb_status: usize;
-let mut rpi5_mip0_base: usize = RPI5_MIP0_BASE;
-let mut rpi5_mip0_target: usize = RPI5_MIP0_TARGET;
-let mut rpi5_mip0_dtb_status: usize;
-let mut rpi5_pcie_outbound_cpu_base: usize = RPI5_PCIE_OUTBOUND_CPU_BASE;
-let mut rp1_dma_pci_offset: usize = RP1_DMA_PCI_OFFSET;
-let mut rpi5_pcie_address_map_dtb_status: usize;
+let mut rpi5_pcie2_base: BootOnce(usize);
+let mut rpi5_pcie2_dtb_status: BootOnce(usize);
+let mut rpi5_pcie_rescal_base: BootOnce(usize);
+let mut rpi5_bcm_reset_base: BootOnce(usize);
+let mut rpi5_pcie_support_dtb_status: BootOnce(usize);
+let mut rpi5_mip0_base: BootOnce(usize);
+let mut rpi5_mip0_target: BootOnce(usize);
+let mut rpi5_mip0_dtb_status: BootOnce(usize);
+let mut rpi5_pcie_outbound_cpu_base: BootOnce(usize);
+let mut rp1_dma_pci_offset: BootOnce(usize);
+let mut rpi5_pcie_address_map_dtb_status: BootOnce(usize);
 
 // delay_us(us): busy-wait at least `us` microseconds, using CNTPCT_EL0's
 // free-running count and CNTFRQ_EL0's own frequency -- same technique
@@ -365,7 +365,7 @@ fn pcie2_misc_ctrl_setup() !{unsafe} {
 fn pcie2_outbound_window_setup() !{unsafe} {
     pcie2.win0_lo = 0;
     pcie2.win0_hi = 0;
-    let cpu_addr: usize = rpi5_pcie_outbound_cpu_base;
+    let cpu_addr: usize = boot_once_get(&rpi5_pcie_outbound_cpu_base);
     let win_size: usize = 0x100000000; // 4GB, matching Linux's own live window and the devicetree's `ranges`
 
     // WIN0_BASE_HI and WIN0_LIMIT_HI are SEPARATE registers for the
@@ -429,10 +429,10 @@ fn pcie2_rp1_endpoint_setup() {
 // add a general DMA window.
 fn pcie2_mip0_inbound_setup() !{unsafe} {
     // brcm_pcie_encode_ibar_size(4KB) = 0x1c.
-    pcie2.rc_bar1_lo = (rpi5_mip0_target as u32) | 0x1C;
-    pcie2.rc_bar1_hi = (rpi5_mip0_target >> 32) as u32;
-    pcie2.ubus_bar1_remap_lo = (rpi5_mip0_base as u32) | 1;
-    pcie2.ubus_bar1_remap_hi = (rpi5_mip0_base >> 32) as u32;
+    pcie2.rc_bar1_lo = (boot_once_get(&rpi5_mip0_target) as u32) | 0x1C;
+    pcie2.rc_bar1_hi = (boot_once_get(&rpi5_mip0_target) >> 32) as u32;
+    pcie2.ubus_bar1_remap_lo = (boot_once_get(&rpi5_mip0_base) as u32) | 1;
+    pcie2.ubus_bar1_remap_hi = (boot_once_get(&rpi5_mip0_base) >> 32) as u32;
 }
 
 // General inbound DMA window (GitHub issue #67 follow-up: RP1's XHCI USB

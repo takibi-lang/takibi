@@ -55,7 +55,7 @@ private fn irq_source_code(id: u32) -> u32 {
         return IrqSource::Net as u32;
     }
     if (id == boot_once_get(&qemu_uart_gic_intid)) { return IrqSource::Uart as u32; }
-    if (id == qemu_timer_gic_intid) { return IrqSource::Timer as u32; }
+    if (id == boot_once_get(&qemu_timer_gic_intid)) { return IrqSource::Timer as u32; }
     return IRQ_SOURCE_NONE;
 }
 

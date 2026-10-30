@@ -69,8 +69,8 @@ use "kernel/platform/rpi5/device_map.tkb";
 // The address the console is attached at, for the boot report; the
 // registers themselves are reached only through `uart`, which
 // kernel/platform/rpi5/device_map.tkb attaches.
-let mut rpi5_uart_base: usize = RPI5_RP1_UART0_BASE;
-let mut rpi5_uart_dtb_status: usize;
+let mut rpi5_uart_base: BootOnce(usize);
+let mut rpi5_uart_dtb_status: BootOnce(usize);
 fn uart_init() {
     uart_rx_handler = uart_rx_discard;
     uart.cr = 0; // disable UART before reconfiguring it
@@ -95,47 +95,48 @@ fn uart_init() {
 }
 
 fn platform_init(phase: borrow BootPhase[boot]) {
-    rpi5_uart_attach_bootstrap();
-    rpi5_irq_windows_attach_bootstrap();
-    match rpi5_gic_apply_boot_dtb() {
+    rpi5_boot_config_seed(phase);
+    rpi5_uart_attach_bootstrap(phase);
+    rpi5_irq_windows_attach_bootstrap(phase);
+    match rpi5_gic_apply_boot_dtb(phase) {
         Rpi5GicDtbResult::Invalid => { }
         Rpi5GicDtbResult::Missing => { }
         Rpi5GicDtbResult::Applied(regions) => {
             let (distributor, cpu_interface) = regions;
         }
     }
-    match rpi5_pcie2_apply_boot_dtb() {
+    match rpi5_pcie2_apply_boot_dtb(phase) {
         Rpi5PcieDtbResult::Invalid => { }
         Rpi5PcieDtbResult::Missing => { }
         Rpi5PcieDtbResult::Applied(base) => { }
     }
-    match rpi5_pcie_support_apply_boot_dtb() {
+    match rpi5_pcie_support_apply_boot_dtb(phase) {
         Rpi5PcieSupportDtbResult::Invalid => { }
         Rpi5PcieSupportDtbResult::Missing => { }
         Rpi5PcieSupportDtbResult::Applied(regions) => {
             let (rescal, reset) = regions;
         }
     }
-    match rpi5_pcie_address_map_apply_boot_dtb() {
+    match rpi5_pcie_address_map_apply_boot_dtb(phase) {
         Rpi5PcieAddressMapDtbResult::Invalid => { }
         Rpi5PcieAddressMapDtbResult::Missing => { }
         Rpi5PcieAddressMapDtbResult::Applied(addresses) => {
             let (outbound_cpu, dma_offset) = addresses;
         }
     }
-    match rpi5_gem_apply_boot_dtb() {
+    match rpi5_gem_apply_boot_dtb(phase) {
         Rpi5GemDtbResult::Invalid => { }
         Rpi5GemDtbResult::Missing => { }
         Rpi5GemDtbResult::Applied(regions) => {
             let (gem, clocks, gpio_ctrl, gpio_rio, gpio_pads) = regions;
         }
     }
-    match rpi5_usb_xhci_apply_boot_dtb() {
+    match rpi5_usb_xhci_apply_boot_dtb(phase) {
         Rpi5UsbXhciDtbResult::Invalid => { }
         Rpi5UsbXhciDtbResult::Missing => { }
         Rpi5UsbXhciDtbResult::Applied(base) => { }
     }
-    match rpi5_mip0_apply_boot_dtb() {
+    match rpi5_mip0_apply_boot_dtb(phase) {
         Rpi5MipDtbResult::Invalid => { }
         Rpi5MipDtbResult::Missing => { }
         Rpi5MipDtbResult::Applied(regions) => {
@@ -145,7 +146,7 @@ fn platform_init(phase: borrow BootPhase[boot]) {
     // Resolve the register window before the first UART access. Every result
     // is recorded for main() to report; invalid/missing DTBs retain only the
     // known diagnostic address and are halted there before normal boot.
-    match rpi5_rp1_uart_apply_boot_dtb() {
+    match rpi5_rp1_uart_apply_boot_dtb(phase) {
         Rpi5Rp1UartDtbResult::Invalid => { }
         Rpi5Rp1UartDtbResult::Missing => { }
         Rpi5Rp1UartDtbResult::Verified(base) => { }

@@ -123,3 +123,8 @@ by a source scan with different edges).
   guarded by `block_device_lock` (`composite`), so it cannot be reached
   without the device guard; the six per-slot counter arrays become
   `[AtomicWord; KERNEL_MAX_CORES]`. 439 -> 428 unprotected (708 globals).
+- 2026-10-30: BootOnce (#1013, #1246). The RPi5 boot-DTB configuration: PSCI
+  conduit, UART, GIC, timer INTID, PCIe, MIP0, RP1 GEM, clock and GPIO bases,
+  USB host base, each reader's status word, and the xHCI capability values;
+  QEMU's timer INTID. 418 -> 390 unprotected. The windows' `IoHandle`s stay
+  listed: a handle is reached by register syntax, not through `boot_once_get`.

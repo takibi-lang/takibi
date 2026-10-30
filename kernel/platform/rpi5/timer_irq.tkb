@@ -27,13 +27,13 @@
 
 const RPI5_GICD_BASE: usize = 0x107FFF9000;
 const RPI5_GICC_BASE: usize = 0x107FFFA000;
-let mut rpi5_gicd_base: usize = RPI5_GICD_BASE;
-let mut rpi5_gicc_base: usize = RPI5_GICC_BASE;
-let mut rpi5_gic_dtb_status: usize;
+let mut rpi5_gicd_base: BootOnce(usize);
+let mut rpi5_gicc_base: BootOnce(usize);
+let mut rpi5_gic_dtb_status: BootOnce(usize);
 
 const RPI5_TIMER_GIC_INTID: u32 = 30;
-let mut rpi5_timer_gic_intid: u32 = RPI5_TIMER_GIC_INTID;
+let mut rpi5_timer_gic_intid: BootOnce(u32);
 
 fn gic_timer_ppi_enable() {
-    gic_intid_enable(rpi5_timer_gic_intid);
+    gic_intid_enable(boot_once_get(&rpi5_timer_gic_intid));
 }

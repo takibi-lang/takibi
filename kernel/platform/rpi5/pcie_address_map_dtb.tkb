@@ -4,17 +4,17 @@ must_use variant Rpi5PcieAddressMapDtbResult {
     Applied((usize, usize));
 }
 
-fn rpi5_pcie_address_map_apply_boot_dtb()
+fn rpi5_pcie_address_map_apply_boot_dtb(phase: borrow BootPhase[boot])
         -> Rpi5PcieAddressMapDtbResult !{unsafe} {
     let dtb: usize = boot_dtb_address_read();
     match fdt_find_pcie_address_map(
             dtb, bs"brcm,bcm2712-pcie", RPI5_PCIE2_BASE) {
         FdtPcieAddressMapResult::Invalid => {
-            rpi5_pcie_address_map_dtb_status = 1;
+            boot_once_set(&rpi5_pcie_address_map_dtb_status, phase, 1);
             return Rpi5PcieAddressMapDtbResult::Invalid;
         }
         FdtPcieAddressMapResult::NotFound => {
-            rpi5_pcie_address_map_dtb_status = 2;
+            boot_once_set(&rpi5_pcie_address_map_dtb_status, phase, 2);
             return Rpi5PcieAddressMapDtbResult::Missing;
         }
         FdtPcieAddressMapResult::Found(address_map) => {
@@ -23,25 +23,25 @@ fn rpi5_pcie_address_map_apply_boot_dtb()
                 address_map.outbound_range_size !=
                     RPI5_PCIE_OUTBOUND_RANGE_SIZE ||
                 address_map.dma_pci_offset != RP1_DMA_PCI_OFFSET) {
-                rpi5_pcie_address_map_dtb_status = 1;
+                boot_once_set(&rpi5_pcie_address_map_dtb_status, phase, 1);
                 return Rpi5PcieAddressMapDtbResult::Invalid;
             }
-            rpi5_pcie_outbound_cpu_base = address_map.outbound_cpu_base;
-            rp1_dma_pci_offset = address_map.dma_pci_offset;
-            rpi5_pcie_address_map_dtb_status = 3;
+            boot_once_set(&rpi5_pcie_outbound_cpu_base, phase, address_map.outbound_cpu_base);
+            boot_once_set(&rp1_dma_pci_offset, phase, address_map.dma_pci_offset);
+            boot_once_set(&rpi5_pcie_address_map_dtb_status, phase, 3);
             return Rpi5PcieAddressMapDtbResult::Applied((
-                rpi5_pcie_outbound_cpu_base, rp1_dma_pci_offset));
+                boot_once_get(&rpi5_pcie_outbound_cpu_base), boot_once_get(&rp1_dma_pci_offset)));
         }
     }
 }
 
 fn rpi5_pcie_address_map_boot_dtb_status()
         -> Rpi5PcieAddressMapDtbResult {
-    if (rpi5_pcie_address_map_dtb_status == 3) {
+    if (boot_once_get(&rpi5_pcie_address_map_dtb_status) == 3) {
         return Rpi5PcieAddressMapDtbResult::Applied((
-            rpi5_pcie_outbound_cpu_base, rp1_dma_pci_offset));
+            boot_once_get(&rpi5_pcie_outbound_cpu_base), boot_once_get(&rp1_dma_pci_offset)));
     }
-    if (rpi5_pcie_address_map_dtb_status == 2) {
+    if (boot_once_get(&rpi5_pcie_address_map_dtb_status) == 2) {
         return Rpi5PcieAddressMapDtbResult::Missing;
     }
     return Rpi5PcieAddressMapDtbResult::Invalid;
