@@ -1,4 +1,5 @@
 ^process table:
+^pid mint:
 ^fd table:
 ^scheduler:
 ^process fanout:

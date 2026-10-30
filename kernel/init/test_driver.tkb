@@ -1264,6 +1264,18 @@ fn kernel_test_common_probes() !{unsafe} {
     } else {
         kernel_boot_log("process table: failed\n");
     }
+    // GitHub issue #1229: pids wrap inside pid_t and skip one in use.
+    let pid_wrap_ok: bool = scheduled_process_pid_wrap_probe();
+    kernel_process_execution_reset();
+    if (pid_wrap_ok) {
+        kernel_boot_log("pid mint: wraps past ");
+        uart_put_udec(PID_MAX);
+        kernel_boot_log(" to ");
+        uart_put_udec(PID_WRAP_FLOOR);
+        kernel_boot_log(" and skips a pid still in use\n");
+    } else {
+        kernel_boot_log("pid mint: wrap failed\n");
+    }
     if (process_address_space_probe()) {
         kernel_boot_log("address spaces: root0 retained roots=2 dynamic-l3 boundary+isolation cleanup\n");
     } else {

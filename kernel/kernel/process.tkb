@@ -877,12 +877,52 @@ private let mut scheduled_process_pid_cell: LockedCell(usize);
 //
 // The critical section is a read and an add, which is shorter than what it
 // replaces rather than longer.
+// GitHub issue #1229: pids stay inside pid_t. As Linux does with its default
+// pid_max, the mint counts up to PID_MAX and then wraps to PID_WRAP_FLOOR,
+// above the low numbers daemons started at boot hold (Linux's
+// RESERVED_PIDS); the caller skips a candidate still in use
+// (scheduled_process_pid_in_use_locked) and refuses the fork with EAGAIN
+// when every number in the range is taken.
+const PID_MAX: usize = 32768;
+const PID_WRAP_FLOOR: usize = 300;
+// One pass over every number the mint can hand out after a wrap.
+const PID_MINT_ATTEMPTS: usize = PID_MAX - PID_WRAP_FLOOR + 1;
+
 private fn scheduled_process_mint_pid() -> usize {
     let guard = locked_cell_take(&scheduled_process_pid_cell);
-    let pid: usize = locked_cell_load(guard, &scheduled_process_pid_cell) + 1;
+    let mut pid: usize = locked_cell_load(guard, &scheduled_process_pid_cell) + 1;
+    if (pid > PID_MAX) { pid = PID_WRAP_FLOOR; }
     locked_cell_store(guard, &scheduled_process_pid_cell, pid);
     locked_cell_give(&scheduled_process_pid_cell, guard);
     return pid;
+}
+
+// Whether a live or zombie process holds `pid`, as its pid or as the id of
+// the session it leads. Under the run lock the new record's own pid is
+// assigned in the same section, so two records can never both pass.
+private fn scheduled_process_pid_in_use_locked(
+        guard: borrow ProcessRunGuard[lock], pid: usize) -> bool !{unsafe} {
+    let mut cursor = scheduled_process_first_slot();
+    let mut walking: bool = true;
+    let mut used: bool = false;
+    while (walking) {
+        match cursor {
+            ProcessSlotCursor::Done => { walking = false; }
+            ProcessSlotCursor::At(slot) => {
+                let next = scheduled_process_next_slot(slot);
+                if (scheduled_process_record_state_locked(guard, slot) !=
+                        ProcessSlotState::Free) {
+                    if (scheduled_process_record_locked(guard, slot).pid == pid ||
+                        scheduled_process_record_locked(guard, slot).session_id == pid) {
+                        used = true;
+                        walking = false;
+                    }
+                }
+                cursor = next;
+            }
+        }
+    }
+    return used;
 }
 
 // The probe below mints thousands of pids and then puts the counter back.
@@ -3737,7 +3777,31 @@ private fn scheduled_process_alloc_finish(address: RegionHeld(ProcessRecord),
     // that can still refuse the slot. The boot thread takes no number
     // (scheduled_process_alloc_boot_thread), so PID 1 is the first process
     // minted after the last reset (GitHub issue #831).
-    scheduled_process_record_owned(creating).pid = scheduled_process_mint_pid();
+    // GitHub issue #1229: a candidate still held by a live or zombie
+    // process is skipped; the check and the assignment are one section of
+    // the run lock, so a concurrent fork cannot take the same number.
+    let mut minted: bool = false;
+    for attempt: usize in 0..<PID_MINT_ATTEMPTS {
+        if (minted == false) {
+            let candidate: usize = scheduled_process_mint_pid();
+            let pid_guard = process_run_lock();
+            if (scheduled_process_pid_in_use_locked(pid_guard, candidate) == false) {
+                scheduled_process_record_owned(creating).pid = candidate;
+                minted = true;
+            }
+            process_run_unlock(pid_guard);
+        }
+    }
+    if (minted == false) {
+        unified_fd_context_release(process_slot_address(slot));
+        process_image_record_release(process_slot_address(slot));
+        address_space_release_root(scheduled_process_address_space_root_owned(creating));
+        address_space_backing_release(scheduled_process_address_space_root_owned(creating));
+        let rollback_guard = process_run_lock();
+        scheduled_process_slot_remove(rollback_guard, slot);
+        process_run_unlock(rollback_guard);
+        { let mut __creating_result: ScheduledProcessAllocResult = ScheduledProcessAllocResult::Full; scheduled_process_owner_drop(creating); return __creating_result; }
+    }
     scheduled_process_record_owned(creating).session_id = 0;
     let counter_frequency: usize = read_cntfrq() as usize;
     let tick_divisor: usize = counter_frequency / 100;
@@ -4514,6 +4578,39 @@ private fn scheduled_process_probe_cycle_locked(
 // so an array of them is legal storage, unlike a linear owner such as
 // PageRunOwner or FreelistOwner.
 const PROCESS_TABLE_PROBE_COUNT: usize = 24;
+
+// GitHub issue #1229: the mint wraps from PID_MAX to PID_WRAP_FLOOR, and a
+// candidate a live process holds is skipped. Both probe records are given
+// back by scheduled_process_table_init. The counter is put back, as the
+// contention probe does, so no later pid moves.
+fn scheduled_process_pid_wrap_probe() -> bool !{unsafe} {
+    scheduled_process_table_init();
+    let saved: usize = scheduled_process_pid_counter();
+    let mut ok: bool = true;
+    scheduled_process_pid_counter_restore(PID_MAX);
+    if (scheduled_process_mint_pid() != PID_WRAP_FLOOR) { ok = false; }
+    match scheduled_process_alloc() {
+        ScheduledPooledProcessAllocResult::Full => { ok = false; }
+        ScheduledPooledProcessAllocResult::Allocated(pooled) => {
+            let mut held: ProcessHandle = scheduled_pooled_process_handle(pooled);
+            let held_pid: usize = scheduled_process_pid_of_handle(held);
+            if (held_pid <= PID_WRAP_FLOOR || held_pid >= PID_MAX) { ok = false; }
+            else {
+                scheduled_process_pid_counter_restore(held_pid - 1);
+                match scheduled_process_alloc() {
+                    ScheduledPooledProcessAllocResult::Full => { ok = false; }
+                    ScheduledPooledProcessAllocResult::Allocated(next_pooled) => {
+                        let mut next: ProcessHandle = scheduled_pooled_process_handle(next_pooled);
+                        if (scheduled_process_pid_of_handle(next) != held_pid + 1) { ok = false; }
+                    }
+                }
+            }
+        }
+    }
+    scheduled_process_pid_counter_restore(saved);
+    scheduled_process_table_init();
+    return ok;
+}
 
 fn scheduled_process_table_probe() -> bool !{unsafe} {
     scheduled_process_table_init();
