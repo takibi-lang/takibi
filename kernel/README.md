@@ -242,6 +242,11 @@ interface that Linux does not have lives under `/proc/takibi/`.** The rest
 of `/proc` stays Linux-shaped, so a Linux tool reading it is never surprised
 by a Takibi name, and a Takibi interface is never mistaken for a Linux one.
 
+- `/proc/takibi/security`: every security property this boot took degraded
+  through `security_floor` (`kernel/kernel/security_floor.tkb`), one
+  `NAME degraded` line each, or `none`. Today's one member is `tcp-isn-key`:
+  no `/chosen` `rng-seed` or `kaslr-seed` in the boot DTB, so the RFC 6528
+  ISN key (`kernel/net/tcp_isn.tkb`) comes from counter-timing jitter.
 - `/proc/takibi/profile`: the sampling profiler's control file
   (`kernel/kernel/profile_session.tkb`). Write `start [PERIOD] [SAMPLES]
   [DEPTH]` (decimal; defaults 240000 cycles, 2048 samples per core, 16

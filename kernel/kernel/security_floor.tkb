@@ -1,0 +1,92 @@
+// GitHub issue #1245: security_floor, the one named policy point for every
+// fallback that weakens a security property.
+//
+// Configuration A (today): the kernel boots and works without special
+// devices. A path that would need a missing device takes a weaker fallback
+// instead, but only by asking here first. Every property taken degraded is
+// recorded: one boot-log line when it is taken, and the list in
+// /proc/takibi/security (kernel/fs/procfs.tkb).
+//
+// Configuration B (later, not built today): SECURITY_FLOOR_STRICT = 1
+// makes security_floor_degrade answer Refused, so each caller's Degraded arm
+// is dead code and the compiler drops it; a caller then refuses the
+// feature instead. B is that one constant, not a second tree.
+//
+// Members: SecurityProperty below, one case per fallback. Adding a
+// fallback means adding a case, so the name list and the /proc text stay
+// exhaustive. First member: #1227's TCP initial-sequence-number key when
+// the boot DTB carries no /chosen seed.
+//
+// Current limitations (2026-10-30). Keep this list current as call sites
+// change.
+// - One word: at most 64 properties.
+// - Configuration B exists only as the constant: no build, lane or check
+//   compiles it yet (#1245).
+
+// 0 is configuration A, 1 is B (a const bool is not in the language).
+const SECURITY_FLOOR_STRICT: usize = 0;
+
+enum SecurityProperty: u32 {
+    TcpIsnKey = 0;
+}
+
+must_use variant SecurityFloor {
+    Degraded;
+    Refused;
+}
+
+// One bit per SecurityProperty value, set here and read by /proc from any
+// core.
+private let mut security_floor_degraded: AtomicWord;
+
+private fn security_floor_word() -> *AtomicWord {
+    return &security_floor_degraded;
+}
+
+// The name as /proc/takibi/security lists it.
+fn security_property_name(property: SecurityProperty) -> []const u8 {
+    match property {
+        SecurityProperty::TcpIsnKey => { return bs"tcp-isn-key"; }
+    }
+}
+
+// The same name for the boot log, which takes a terminated string.
+private fn security_property_log_name(property: SecurityProperty) -> *u8 {
+    match property {
+        SecurityProperty::TcpIsnKey => { return "tcp-isn-key" as *u8; }
+    }
+}
+
+private fn security_property_meaning(property: SecurityProperty) -> *u8 {
+    match property {
+        SecurityProperty::TcpIsnKey => {
+            return "no /chosen rng-seed or kaslr-seed in the boot DTB; TCP initial sequence numbers are keyed from counter-timing jitter" as *u8;
+        }
+    }
+}
+
+// Asks to take the degraded path for `property`. Degraded: the caller may,
+// and it is now recorded. Refused: the strict configuration forbids it.
+fn security_floor_degrade(property: SecurityProperty) -> SecurityFloor {
+    if (SECURITY_FLOOR_STRICT != 0) {
+        kernel_boot_log("security floor: refused ");
+        kernel_boot_log(security_property_log_name(property));
+        kernel_boot_log("\n");
+        return SecurityFloor::Refused;
+    }
+    let bit: usize = 1 << (property as u32 as usize);
+    let mut old: usize = atomic_word_load(security_floor_word());
+    while (atomic_word_compare_exchange(security_floor_word(), old, old | bit) == false) {
+        old = atomic_word_load(security_floor_word());
+    }
+    kernel_boot_log("WARNING security floor: degraded ");
+    kernel_boot_log(security_property_log_name(property));
+    kernel_boot_log(": ");
+    kernel_boot_log(security_property_meaning(property));
+    kernel_boot_log("\n");
+    return SecurityFloor::Degraded;
+}
+
+fn security_floor_is_degraded(property: SecurityProperty) -> bool {
+    return (atomic_word_load(security_floor_word()) & (1 << (property as u32 as usize))) != 0;
+}

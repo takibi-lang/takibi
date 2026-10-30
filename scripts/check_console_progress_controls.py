@@ -102,7 +102,7 @@ def pty_case(events, want_pass, ceiling=28.0, exit_delay=0.0):
             answer = (b"\n" + driver.HTTPD_REAP_BEGIN + b"\n1 /bin/httpd -f -p 8080 -h /\n" +
                       driver.HTTPD_REAP_END + b"\n # ")
         elif data == driver.COMMAND_LINE:
-            answer = driver.COMMAND_RESULT + b"\n"
+            answer = driver.COMMAND_OUTPUT
         else:
             answer = b"\nsystem stop: halt (all cores parked)\n"
         clock.events.append((clock.now + 0.1, lambda: queue.append(answer)))

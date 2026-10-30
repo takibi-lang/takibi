@@ -50,6 +50,12 @@ DISCONTIGUOUS_MEMORY_EXPECTED = (
     b"regions=2 reservations=0 allocator_pages=196048")
 DISCONTIGUOUS_PROBE_EXPECTED = (
     b"memory: physical hole excluded and both extent boundaries round-trip")
+# GitHub issue #1227/#1245: with a /chosen seed the ISN key comes from it and
+# security_floor stays empty; without one, both say the key is degraded.
+SEED_KEY_LINE = b"tcp isn: key from the boot DTB's /chosen seed"
+SEED_LIST_LINE = b"security floor: /proc lists none"
+NO_SEED_WARNING = b"WARNING security floor: degraded tcp-isn-key"
+NO_SEED_LIST_LINE = b"security floor: /proc lists tcp-isn-key degraded"
 
 
 def make_discontiguous(blob: bytes) -> bytes:
@@ -342,6 +348,46 @@ def main() -> int:
                   file=sys.stderr)
             return 1
     print("PASS kernel/qemu FDT negative control: patched tree reached the kernel and missing memory halted")
+
+    found, transcript = observe(low_memory_command, SEED_LIST_LINE,
+                                timing("seed"), "security list, seeded")
+    if not found or SEED_KEY_LINE not in transcript:
+        sys.stderr.buffer.write(transcript)
+        print("FAIL kernel/qemu ISN key: QEMU's /chosen seed not used",
+              file=sys.stderr)
+        return 1
+    print("PASS kernel/qemu ISN key: from the /chosen seed, nothing degraded")
+
+    with tempfile.TemporaryDirectory(prefix="takibi-fdt-seed-") as directory:
+        dtb = Path(directory) / "virt.dtb"
+        generated = subprocess.run([
+            QEMU,
+            "-machine", f"virt,dumpdtb={dtb}",
+            "-cpu", "cortex-a76",
+            "-smp", str(smp),
+            "-m", "128M",
+            "-display", "none",
+            "-monitor", "none",
+            "-serial", "none",
+        ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        blob = dtb.read_bytes() if generated.returncode == 0 else b""
+        if blob.count(b"rng-seed\0") != 1:
+            sys.stderr.buffer.write(generated.stdout)
+            print("FAIL kernel/qemu ISN key: QEMU's DTB has no one rng-seed",
+                  file=sys.stderr)
+            return 1
+        dtb.write_bytes(blob.replace(b"rng-seed\0", b"xng-seed\0")
+                        .replace(b"kaslr-seed\0", b"xaslr-seed\0"))
+        found, transcript = observe_patched_dtb(
+            low_memory_command, dtb, NO_SEED_LIST_LINE,
+            timing("no-seed"), "security list, no seed")
+        if (not found or NO_SEED_WARNING not in transcript or
+                SEED_KEY_LINE in transcript):
+            sys.stderr.buffer.write(transcript)
+            print("FAIL kernel/qemu ISN key: no degraded path without a seed",
+                  file=sys.stderr)
+            return 1
+    print("PASS kernel/qemu ISN key: no seed warns and /proc lists tcp-isn-key")
     return 0
 
 

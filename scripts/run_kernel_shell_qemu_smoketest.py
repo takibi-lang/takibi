@@ -37,7 +37,11 @@ HTTPD_REAP_END = b"__KERNELSH_HTTPD_REAP_END__"
 HTTPD_PROCESS = b"/bin/httpd -f -p 8080 -h"
 
 
-COMMAND_LINE = b"x=; echo " + typed_marker(COMMAND_RESULT) + b"\n"
+# GitHub issue #1245: the same command walks /proc/takibi through getdents and
+# reads security_floor's list through read: QEMU's DTB has a seed, so "none".
+COMMAND_LINE = (b"x=; ls -1 --color=never /proc/takibi; cat /proc/takibi/security; echo " +
+                typed_marker(COMMAND_RESULT) + b"\n")
+COMMAND_OUTPUT = b"\nprofile\nsecurity\nnone\n" + COMMAND_RESULT + b"\n"
 HTTPD_REAP_LINE = (b"echo " + typed_marker(HTTPD_REAP_BEGIN) + b"; ps; echo " +
                    typed_marker(HTTPD_REAP_END) + b"\n")
 
@@ -147,7 +151,7 @@ def verify_uart_transcript(pid, terminal_transcript, stop_marker, command):
         (LISTENER_MARKER, "persistent HTTPd listener readiness"),
         (b"ddb: interrupt-safe UART debugger", "DDB entry"),
         (b"ddb: continuing", "DDB continue output"),
-        (b"\n" + COMMAND_RESULT + b"\n", "post-resume shell output"),
+        (COMMAND_OUTPUT, "post-resume shell output"),
     )
     if command == INIT_EXIT:
         required += ((INIT_RESTART_MARKER, "PID 1 running the exec'd image"),)
@@ -290,7 +294,7 @@ def run_one(command, http_offset):
                         os.write(terminal, COMMAND_LINE)
                         command_sent = True
                     if (command_sent and not stop_sent and
-                            b"\n" + COMMAND_RESULT + b"\n" in normalized):
+                            COMMAND_OUTPUT in normalized):
                         startup_timing.record("command response", True, arrived_at)
                         os.write(terminal, stop_line)
                         stop_sent = True

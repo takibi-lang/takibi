@@ -1,0 +1,55 @@
+// SipHash-2-4 (Aumasson and Bernstein, 2012) of a 16-byte message given as
+// two little-endian 64-bit words, the one shape the kernel needs: GitHub
+// issue #1227's TCP initial sequence numbers (kernel/net/tcp_isn.tkb).
+// linux_user/siphash checks it against the reference vector.
+//
+// Current limitations (2026-10-30). Keep this list current as call sites
+// change.
+// - Fixed message length: 16 bytes only. A caller with another length needs
+//   its own final block; this file does not take one.
+// - The key's secrecy is the caller's. This file holds no state.
+
+struct SipHashState {
+    v0: u64;
+    v1: u64;
+    v2: u64;
+    v3: u64;
+}
+
+private fn siphash_rotl(x: u64, b: u64) -> u64 {
+    return (x << b) | (x >> (64 - b));
+}
+
+private fn siphash_round(s: SipHashState) -> SipHashState {
+    let mut v0: u64 = s.v0;
+    let mut v1: u64 = s.v1;
+    let mut v2: u64 = s.v2;
+    let mut v3: u64 = s.v3;
+    v0 = v0 + v1; v1 = siphash_rotl(v1, 13); v1 = v1 ^ v0; v0 = siphash_rotl(v0, 32);
+    v2 = v2 + v3; v3 = siphash_rotl(v3, 16); v3 = v3 ^ v2;
+    v0 = v0 + v3; v3 = siphash_rotl(v3, 21); v3 = v3 ^ v0;
+    v2 = v2 + v1; v1 = siphash_rotl(v1, 17); v1 = v1 ^ v2; v2 = siphash_rotl(v2, 32);
+    let mut out: SipHashState = { v0, v1, v2, v3 };
+    return out;
+}
+
+private fn siphash_compress(s: SipHashState, m: u64) -> SipHashState {
+    let mut mixed: SipHashState = { s.v0, s.v1, s.v2, s.v3 ^ m };
+    let mut r: SipHashState = siphash_round(siphash_round(mixed));
+    let mut out: SipHashState = { r.v0 ^ m, r.v1, r.v2, r.v3 };
+    return out;
+}
+
+// SipHash-2-4 of the two 64-bit words m0, m1 (a 16-byte message).
+fn siphash24_two_words(k0: u64, k1: u64, m0: u64, m1: u64) -> u64 {
+    let mut s: SipHashState = {
+        k0 ^ 0x736f6d6570736575, k1 ^ 0x646f72616e646f6d,
+        k0 ^ 0x6c7967656e657261, k1 ^ 0x7465646279746573
+    };
+    s = siphash_compress(s, m0);
+    s = siphash_compress(s, m1);
+    s = siphash_compress(s, (16 as u64) << 56);
+    let mut f: SipHashState = { s.v0, s.v1, s.v2 ^ 0xff, s.v3 };
+    f = siphash_round(siphash_round(siphash_round(siphash_round(f))));
+    return f.v0 ^ f.v1 ^ f.v2 ^ f.v3;
+}

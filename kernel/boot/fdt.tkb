@@ -2232,3 +2232,132 @@ fn fdt_memory_map_verify(map: FdtMemoryMap) -> bool !{unsafe} {
     let count: usize = fdt_memory_region_count(map);
     return count != 0 && fdt_memory_total_size(map) != 0;
 }
+
+// GitHub issue #1227: the boot seed the firmware or QEMU leaves in
+// /chosen -- `rng-seed` (any length, QEMU virt and the Pi firmware write 32
+// or 64 bytes), else `kaslr-seed` (8 bytes). Folded into two words: each
+// big-endian 8-byte chunk is xored into word (chunk index % 2) after a
+// rotation, so every seed byte reaches the key. A seed shorter than 8
+// bytes, or all zero, counts as missing.
+struct FdtBootSeed {
+    word0: usize;
+    word1: usize;
+}
+
+must_use variant FdtBootSeedResult {
+    Missing;
+    Found(FdtBootSeed);
+}
+
+private fn fdt_seed_fold(base: usize, total: usize, offset: usize,
+                         length: usize) -> FdtBootSeed !{unsafe} {
+    let mut word0: usize = 0;
+    let mut word1: usize = 0;
+    let mut chunk: usize = 0;
+    while (chunk < length / 8) {
+        let word: usize = fdt_read_be64(base, total, offset + chunk * 8);
+        if ((chunk & 1) == 0) {
+            word0 = ((word0 << 7) | (word0 >> 57)) ^ word;
+        } else {
+            word1 = ((word1 << 7) | (word1 >> 57)) ^ word;
+        }
+        chunk = chunk + 1;
+    }
+    let mut seed: FdtBootSeed = { word0, word1 };
+    return seed;
+}
+
+fn fdt_find_boot_seed(base: usize) -> FdtBootSeedResult !{unsafe} {
+    if (fdt_read_be32(base, FDT_HEADER_SIZE, 0) != FDT_MAGIC) {
+        return FdtBootSeedResult::Missing;
+    }
+    let total: usize = fdt_read_be32(base, FDT_HEADER_SIZE, 4);
+    if (total < FDT_HEADER_SIZE || total > FDT_MAX_SIZE) {
+        return FdtBootSeedResult::Missing;
+    }
+    let struct_offset: usize = fdt_read_be32(base, total, 8);
+    let strings_offset: usize = fdt_read_be32(base, total, 12);
+    let strings_size: usize = fdt_read_be32(base, total, 32);
+    let struct_size: usize = fdt_read_be32(base, total, 36);
+    if (fdt_range_valid(total, struct_offset, struct_size) == false ||
+        fdt_range_valid(total, strings_offset, strings_size) == false ||
+        (struct_offset & 3) != 0) {
+        return FdtBootSeedResult::Missing;
+    }
+    let struct_end: usize = struct_offset + struct_size;
+    let strings_end: usize = strings_offset + strings_size;
+    let mut cursor: usize = struct_offset;
+    let mut depth: usize = 0;
+    let mut chosen_depth: usize = 0;
+    let mut rng: FdtBootSeed = { 0, 0 };
+    let mut rng_found: bool = false;
+    let mut kaslr: FdtBootSeed = { 0, 0 };
+    let mut kaslr_found: bool = false;
+    while (cursor < struct_end) {
+        if (fdt_range_valid(struct_end, cursor, 4) == false) {
+            return FdtBootSeedResult::Missing;
+        }
+        let token: usize = fdt_read_be32(base, total, cursor);
+        cursor = cursor + 4;
+        if (token == FDT_BEGIN_NODE) {
+            let mut name_end: usize = cursor;
+            while (name_end < struct_end &&
+                   fdt_read_u8(base, total, name_end) != 0) {
+                name_end = name_end + 1;
+            }
+            if (name_end >= struct_end) { return FdtBootSeedResult::Missing; }
+            depth = depth + 1;
+            if (depth == 2 && chosen_depth == 0 &&
+                fdt_string_is(base, struct_end, cursor, bs"chosen")) {
+                chosen_depth = depth;
+            }
+            cursor = fdt_align4(name_end + 1);
+            if (cursor == 0 || cursor > struct_end) {
+                return FdtBootSeedResult::Missing;
+            }
+        } else if (token == FDT_END_NODE) {
+            if (depth == 0) { return FdtBootSeedResult::Missing; }
+            if (chosen_depth == depth) { chosen_depth = 0; }
+            depth = depth - 1;
+        } else if (token == FDT_PROP) {
+            if (fdt_range_valid(struct_end, cursor, 8) == false) {
+                return FdtBootSeedResult::Missing;
+            }
+            let length: usize = fdt_read_be32(base, total, cursor);
+            let name_relative: usize = fdt_read_be32(base, total, cursor + 4);
+            cursor = cursor + 8;
+            if (name_relative >= strings_size ||
+                fdt_range_valid(struct_end, cursor, length) == false) {
+                return FdtBootSeedResult::Missing;
+            }
+            let prop_name: usize = strings_offset + name_relative;
+            if (chosen_depth != 0 && chosen_depth == depth && length >= 8) {
+                if (fdt_string_is(base, strings_end, prop_name, bs"rng-seed")) {
+                    rng = fdt_seed_fold(base, total, cursor, length);
+                    rng_found = true;
+                } else if (fdt_string_is(base, strings_end, prop_name,
+                                         bs"kaslr-seed")) {
+                    kaslr = fdt_seed_fold(base, total, cursor, length);
+                    kaslr_found = true;
+                }
+            }
+            let next: usize = fdt_align4(cursor + length);
+            if (next == 0 || next > struct_end) {
+                return FdtBootSeedResult::Missing;
+            }
+            cursor = next;
+        } else if (token == FDT_NOP) {
+        } else if (token == FDT_END) {
+            if (rng_found && (rng.word0 | rng.word1) != 0) {
+                return FdtBootSeedResult::Found(rng);
+            }
+            if (kaslr_found && (kaslr.word0 | kaslr.word1) != 0) {
+                return FdtBootSeedResult::Found(kaslr);
+            }
+            return FdtBootSeedResult::Missing;
+        } else {
+            return FdtBootSeedResult::Missing;
+        }
+    }
+    return FdtBootSeedResult::Missing;
+}

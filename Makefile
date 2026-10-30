@@ -482,6 +482,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/kernel/schedule_contention_evidence.tkb \
 	kernel/kernel/signal_contention_evidence.tkb \
 	kernel/kernel/syscall.tkb \
+	kernel/kernel/security_floor.tkb \
 	kernel/kernel/syscall_test_evidence.tkb \
 	kernel/kernel/syscall_test_lifecycle.tkb \
 	kernel/kernel/syscall_unimplemented.tkb \
@@ -509,6 +510,8 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/net/icmp.tkb \
 	kernel/net/socket_capability.tkb \
 	kernel/net/tcp.tkb \
+	kernel/net/tcp_isn.tkb \
+	kernel/lib/siphash.tkb \
 	kernel/net/wire.tkb \
 	kernel/printk/console_lock.tkb \
 	kernel/printk/log.tkb \
@@ -598,7 +601,7 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              sizeof_offsetof int64 bitops indexed_view tcp_conn_view \
                              affine_escape_via_index align_ptr_proof linear_obligation tuple_pair region_proto region_inspection pool_space_replay \
                              field_lease match_int_lit record_loans \
-                             callstack ringbuf crc8 djb2 slice slice_from_field logical_eval foreach for loop fizzbuzz fibonacci \
+                             callstack ringbuf crc8 djb2 siphash slice slice_from_field logical_eval foreach for loop fizzbuzz fibonacci \
                              bubblesort lz4 inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring boot_once publish fdt number usb_config usb_init_report xhci_event_match xhci_regs uart_rx_ring pl011_rx block_cache gem_tx_wait virtio_net_tx virtio_net_reply generic_variant runtime_bounds pin_placement place_array protocol_ring protocol_tx protocol_txrx protocol_snapshot region_held region_table_retire header_overlay cache_geometry wait_status plain_variant variant_abi struct_array_arg struct_array_result preempt_region
 # GitHub issue #1035: linux_user/ext2_host is a driver program, not a
 # stdout-against-.expected test: scripts/ext2_host.py runs it (image on fd 3,
@@ -679,6 +682,21 @@ $(LINUX_USER_BUILD_DIR)/fdt_invalid_pcie_dma_ranges_fixture.dtb: scripts/make_fd
 $(LINUX_USER_BUILD_DIR)/fdt_invalid_virtio_fixture.dtb: scripts/make_fdt_fixture.py | $(LINUX_USER_BUILD_DIR)
 	python3 scripts/make_fdt_fixture.py $@ --invalid-virtio
 
+$(LINUX_USER_BUILD_DIR)/fdt_seed_rng_fixture.dtb: scripts/make_fdt_fixture.py | $(LINUX_USER_BUILD_DIR)
+	python3 scripts/make_fdt_fixture.py $@ --seed-rng
+
+$(LINUX_USER_BUILD_DIR)/fdt_seed_kaslr_fixture.dtb: scripts/make_fdt_fixture.py | $(LINUX_USER_BUILD_DIR)
+	python3 scripts/make_fdt_fixture.py $@ --seed-kaslr
+
+$(LINUX_USER_BUILD_DIR)/fdt_seed_zero_rng_fixture.dtb: scripts/make_fdt_fixture.py | $(LINUX_USER_BUILD_DIR)
+	python3 scripts/make_fdt_fixture.py $@ --seed-zero-rng
+
+$(LINUX_USER_BUILD_DIR)/fdt_seed_short_fixture.dtb: scripts/make_fdt_fixture.py | $(LINUX_USER_BUILD_DIR)
+	python3 scripts/make_fdt_fixture.py $@ --seed-short
+
+$(LINUX_USER_BUILD_DIR)/fdt_seed_nested_fixture.dtb: scripts/make_fdt_fixture.py | $(LINUX_USER_BUILD_DIR)
+	python3 scripts/make_fdt_fixture.py $@ --seed-nested
+
 $(LINUX_USER_BUILD_DIR)/fdt_psci_smc_fixture.dtb: scripts/make_fdt_fixture.py | $(LINUX_USER_BUILD_DIR)
 	python3 scripts/make_fdt_fixture.py $@ --psci-smc
 
@@ -688,8 +706,12 @@ $(LINUX_USER_BUILD_DIR)/fdt_psci_smc_fixture.dtb: scripts/make_fdt_fixture.py | 
 # delegates its unsigned decimals to it, so EVERY test here links the
 # kernel's formatter and this one just points at it deliberately.
 
-$(LINUX_USER_DIR)/fdt/fdt_exe.o: kernel/boot/fdt.tkb $(LINUX_USER_BUILD_DIR)/fdt_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_memory_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_reservation_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_tree_reservation_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_device_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_interrupt_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_missing_interrupt_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_gic_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_pcie_ranges_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_pcie_dma_ranges_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_virtio_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_psci_smc_fixture.dtb
+$(LINUX_USER_DIR)/fdt/fdt_exe.o: kernel/boot/fdt.tkb $(LINUX_USER_BUILD_DIR)/fdt_seed_rng_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_seed_kaslr_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_seed_zero_rng_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_seed_short_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_seed_nested_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_memory_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_reservation_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_tree_reservation_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_device_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_interrupt_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_missing_interrupt_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_gic_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_pcie_ranges_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_pcie_dma_ranges_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_virtio_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_psci_smc_fixture.dtb
 $(LINUX_USER_DIR)/fdt/fdt_exe.o: LINUX_USER_EXTRA_SRCS := kernel/boot/fdt.tkb
+
+# GitHub issue #1227: SipHash-2-4 against the reference vector.
+$(LINUX_USER_DIR)/siphash/siphash_exe.o: kernel/lib/siphash.tkb
+$(LINUX_USER_DIR)/siphash/siphash_exe.o: LINUX_USER_EXTRA_SRCS := kernel/lib/siphash.tkb
 
 # GitHub issue #338: the kernel's own USB configuration-descriptor parser,
 # compiled and run natively. The same source kernel/platform/rpi5/usb_xhci.tkb

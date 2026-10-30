@@ -176,9 +176,19 @@ SERVER_MAC = bytes([0x02, 0x00, 0x20, 0x00, 0x00, 0x02])  # kernel/net/netconfig
 SERVER_IP = bytes([192, 168, 20, 2])                      # kernel/net/netconfig.tkb's OUR_IP
 SERVER_PORT = 7                                           # kernel/net/tcp.tkb's TCP_ECHO_PORT
 HTTP_SERVER_PORT = 8080
-# kernel/net/wire.tkb's TCP_INITIAL_SEQ -- fixed, not randomized, so every
-# post-handshake sequence number below is known in advance.
-SERVER_ISN = 0x00001000
+# GitHub issue #1227: the server's initial sequence number is per
+# connection (RFC 6528, kernel/net/tcp_isn.tkb), so each handshake learns it
+# from the SYN-ACK, keyed by the client port, and the later checks of that
+# connection use it. Two handshakes must not share one.
+SERVER_ISNS = {}
+
+
+def server_isn(client_port: int) -> int:
+    return SERVER_ISNS[client_port]
+
+
+def seq_add(seq: int, n: int) -> int:
+    return (seq + n) & 0xFFFFFFFF
 
 BROADCAST_MAC = bytes([0xff] * 6)
 ARP_ETHERTYPE = bytes([0x08, 0x06])
@@ -399,7 +409,7 @@ def do_handshake(sock: socket.socket, client_port: int, client_isn: int) -> bool
         src_port == SERVER_PORT and dst_port == client_port and
         flags == (FLAG_SYN | FLAG_ACK) and
         ack == client_isn + 1 and
-        seq == SERVER_ISN and
+        seq not in SERVER_ISNS.values() and
         checksum_fold(checksum_add(ip)) == 0 and
         checksum_fold(checksum_add(pseudo + tcp)) == 0
     )
@@ -408,7 +418,8 @@ def do_handshake(sock: socket.socket, client_port: int, client_isn: int) -> bool
               (src_port, dst_port, seq, ack, flags))
         return False
 
-    ack_frame = build_tcp_frame(client_port, client_isn + 1, SERVER_ISN + 1, FLAG_ACK)
+    SERVER_ISNS[client_port] = seq
+    ack_frame = build_tcp_frame(client_port, client_isn + 1, seq_add(seq, 1), FLAG_ACK)
     silent_ok = expect_silence(sock, ack_frame)
     if not silent_ok:
         print("  server replied to the final ACK (should stay silent)")
@@ -427,7 +438,7 @@ def test_syn_bad_checksum_silent(sock: socket.socket) -> bool:
 
 def test_data_echo(sock: socket.socket) -> bool:
     seq = HANDSHAKE_CLIENT_ISN + 1
-    ack = SERVER_ISN + 1
+    ack = seq_add(server_isn(HANDSHAKE_CLIENT_PORT), 1)
     frame = build_tcp_frame(HANDSHAKE_CLIENT_PORT, seq, ack, FLAG_ACK | FLAG_PSH,
                             data=DATA_ECHO_PAYLOAD)
     reply = send_and_wait(sock, frame)
@@ -443,7 +454,7 @@ def test_data_echo(sock: socket.socket) -> bool:
     ok = (
         src_port == SERVER_PORT and dst_port == HANDSHAKE_CLIENT_PORT and
         flags == (FLAG_ACK | FLAG_PSH) and
-        rseq == SERVER_ISN + 1 and rack == seq + len(DATA_ECHO_PAYLOAD) and
+        rseq == ack and rack == seq + len(DATA_ECHO_PAYLOAD) and
         rdata == DATA_ECHO_PAYLOAD and
         checksum_fold(checksum_add(ip)) == 0 and
         checksum_fold(checksum_add(pseudo + tcp)) == 0
@@ -456,7 +467,7 @@ def test_data_echo(sock: socket.socket) -> bool:
 
 def test_close(sock: socket.socket) -> bool:
     client_seq = HANDSHAKE_CLIENT_ISN + 1 + len(DATA_ECHO_PAYLOAD)
-    server_seq = SERVER_ISN + 1 + len(DATA_ECHO_PAYLOAD)
+    server_seq = seq_add(server_isn(HANDSHAKE_CLIENT_PORT), 1 + len(DATA_ECHO_PAYLOAD))
 
     fin = build_tcp_frame(HANDSHAKE_CLIENT_PORT, client_seq, server_seq,
                           FLAG_FIN | FLAG_ACK)

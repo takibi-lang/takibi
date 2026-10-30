@@ -104,6 +104,9 @@ def main():
                                  "--invalid-pcie-dma-ranges")
     valid_modes = valid_modes + ("--invalid-virtio",)
     valid_modes = valid_modes + ("--psci-smc",)
+    valid_modes = valid_modes + ("--seed-rng", "--seed-kaslr",
+                                 "--seed-zero-rng", "--seed-short",
+                                 "--seed-nested")
     if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and
                                      sys.argv[2] not in valid_modes):
         print("usage: make_fdt_fixture.py OUTPUT "
@@ -111,7 +114,8 @@ def main():
               "--invalid-tree-reservation|--invalid-device|"
               "--invalid-interrupt|--missing-interrupt|--invalid-gic|"
               "--invalid-pcie-ranges|--invalid-pcie-dma-ranges|"
-              "--invalid-virtio|--psci-smc]",
+              "--invalid-virtio|--psci-smc|--seed-rng|--seed-kaslr|"
+              "--seed-zero-rng|--seed-short|--seed-nested]",
               file=sys.stderr)
         return 2
     mode = sys.argv[2] if len(sys.argv) == 3 else ""
@@ -120,6 +124,31 @@ def main():
     b.prop("#address-cells", b.cells(2))
     b.prop("#size-cells", b.cells(2))
     b.prop("interrupt-parent", b.cells(0x8003))
+
+    # GitHub issue #1227: the boot-seed shapes fdt_find_boot_seed reads. The
+    # plain fixture has no /chosen at all, which is the Missing case.
+    rng_seed = bytes(range(1, 33))
+    kaslr_seed = bytes(range(0x41, 0x49))
+    if mode == "--seed-nested":
+        # A node named chosen that is not the root's child does not count.
+        b.begin("soc")
+        b.begin("chosen")
+        b.prop("rng-seed", rng_seed)
+        b.end()
+        b.end()
+    elif mode.startswith("--seed-"):
+        b.begin("chosen")
+        if mode == "--seed-rng":
+            b.prop("kaslr-seed", kaslr_seed)
+            b.prop("rng-seed", rng_seed)
+        elif mode == "--seed-kaslr":
+            b.prop("kaslr-seed", kaslr_seed)
+        elif mode == "--seed-zero-rng":
+            b.prop("rng-seed", bytes(32))
+            b.prop("kaslr-seed", kaslr_seed)
+        elif mode == "--seed-short":
+            b.prop("rng-seed", bytes(range(1, 8)))
+        b.end()
 
     if mode != "--missing-interrupt":
         b.begin("psci")

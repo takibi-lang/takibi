@@ -53,10 +53,19 @@ FLAG_ACK = 0x10
 
 HANDSHAKE_CLIENT_PORT = 43210
 HANDSHAKE_CLIENT_ISN = 500
-# Matches tcp_echo_stm32.tkb's OUR_ISN -- fixed rather than randomized in
-# this bare-metal single-connection test-only responder, so the
-# post-handshake sequence number is always known in advance.
-SERVER_ISN = 0x00001000
+# GitHub issue #1227: the kernel's initial sequence number is per
+# connection (RFC 6528, kernel/net/tcp_isn.tkb), so do_handshake learns it
+# from the SYN-ACK, keyed by the client port, and later checks of that
+# connection use it. Two handshakes must not share one.
+SERVER_ISNS = {}
+
+
+def server_isn(client_port: int) -> int:
+    return SERVER_ISNS[client_port]
+
+
+def seq_add(seq: int, n: int) -> int:
+    return (seq + n) & 0xFFFFFFFF
 
 DATA_ECHO_PAYLOAD = b"Hello, TCP echo!"
 CONNECTED_RESPONSE_PAYLOAD = b"HTTP/1.0 200 OK\r\n\r\n"
@@ -212,7 +221,8 @@ def test_syn_with_options_accepted(client_mac: bytes) -> bool:
     tcp = reply[34:54]  # exactly 20 bytes -- see module comment on TX-side padding
     src_port, dst_port, seq, ack, _doff_res, flags = struct.unpack("!HHIIBB", tcp[0:14])
     ok = (src_port == SERVER_PORT and dst_port == client_port and
-          flags == (FLAG_SYN | FLAG_ACK) and ack == client_isn + 1 and seq == SERVER_ISN)
+          flags == (FLAG_SYN | FLAG_ACK) and ack == client_isn + 1 and
+          seq not in SERVER_ISNS.values())
     if not ok:
         print("  bad SYN-ACK for options-bearing SYN: src_port=%d dst_port=%d "
               "seq=%d ack=%d flags=0x%02x" % (src_port, dst_port, seq, ack, flags))
@@ -227,9 +237,8 @@ def test_syn_with_options_accepted(client_mac: bytes) -> bool:
 
 def do_handshake(sock: socket.socket, client_mac: bytes, client_port: int, client_isn: int) -> bool:
     """Performs SYN -> verify SYN-ACK -> ACK -> verify silence. Prints its
-    own diagnostics on failure; the server's ISN is always SERVER_ISN
-    (fixed, not randomized -- see its definition above), so callers don't
-    need it returned separately."""
+    own diagnostics on failure. The server's ISN is recorded in SERVER_ISNS
+    under client_port for the connection's later checks (#1227)."""
     syn = build_frame(client_mac, client_port, client_isn, 0, FLAG_SYN)
     reply = send_and_wait(sock, syn)
     if reply is None:
@@ -248,7 +257,7 @@ def do_handshake(sock: socket.socket, client_mac: bytes, client_port: int, clien
         src_port == SERVER_PORT and dst_port == client_port and
         flags == (FLAG_SYN | FLAG_ACK) and
         ack == client_isn + 1 and
-        seq == SERVER_ISN and
+        seq not in SERVER_ISNS.values() and
         checksum_fold(checksum_add(ip)) == 0 and
         checksum_fold(checksum_add(pseudo + tcp)) == 0
     )
@@ -257,7 +266,8 @@ def do_handshake(sock: socket.socket, client_mac: bytes, client_port: int, clien
               (src_port, dst_port, seq, ack, flags))
         return False
 
-    ack_frame = build_frame(client_mac, client_port, client_isn + 1, SERVER_ISN + 1, FLAG_ACK)
+    SERVER_ISNS[client_port] = seq
+    ack_frame = build_frame(client_mac, client_port, client_isn + 1, seq_add(seq, 1), FLAG_ACK)
     silent_ok = expect_silence(sock, ack_frame)
     if not silent_ok:
         print("  server replied to the final ACK (should stay silent)")
@@ -278,7 +288,7 @@ def test_data_echo(client_mac: bytes, expected_payload: bytes = DATA_ECHO_PAYLOA
     sock = new_sock()
 
     seq = HANDSHAKE_CLIENT_ISN + 1
-    ack = SERVER_ISN + 1
+    ack = seq_add(server_isn(HANDSHAKE_CLIENT_PORT), 1)
     frame = build_frame(client_mac, HANDSHAKE_CLIENT_PORT, seq, ack, FLAG_ACK | FLAG_PSH,
                          data=DATA_ECHO_PAYLOAD)
     reply = send_and_wait(sock, frame)
@@ -302,7 +312,7 @@ def test_data_echo(client_mac: bytes, expected_payload: bytes = DATA_ECHO_PAYLOA
         ethertype == bytes([0x08, 0x00]) and
         src_port == SERVER_PORT and dst_port == HANDSHAKE_CLIENT_PORT and
         flags == (FLAG_ACK | FLAG_PSH) and
-        rseq == SERVER_ISN + 1 and rack == seq + len(DATA_ECHO_PAYLOAD) and
+        rseq == ack and rack == seq + len(DATA_ECHO_PAYLOAD) and
         rdata == expected_payload and
         checksum_fold(checksum_add(ip)) == 0 and
         checksum_fold(checksum_add(pseudo + tcp)) == 0
@@ -319,7 +329,7 @@ def test_close(client_mac: bytes) -> bool:
     sock = new_sock()
 
     client_seq = HANDSHAKE_CLIENT_ISN + 1 + len(DATA_ECHO_PAYLOAD)
-    server_seq = SERVER_ISN + 1 + len(DATA_ECHO_PAYLOAD)
+    server_seq = seq_add(server_isn(HANDSHAKE_CLIENT_PORT), 1 + len(DATA_ECHO_PAYLOAD))
 
     fin = build_frame(client_mac, HANDSHAKE_CLIENT_PORT, client_seq, server_seq, FLAG_FIN | FLAG_ACK)
     reply = send_and_wait(sock, fin)
@@ -348,7 +358,7 @@ def test_close(client_mac: bytes) -> bool:
         sock.close()
         return False
 
-    final_ack = build_frame(client_mac, HANDSHAKE_CLIENT_PORT, client_seq + 1, server_seq + 1, FLAG_ACK)
+    final_ack = build_frame(client_mac, HANDSHAKE_CLIENT_PORT, client_seq + 1, seq_add(server_seq, 1), FLAG_ACK)
     silent_ok = expect_silence(sock, final_ack)
     sock.close()
     if not silent_ok:
@@ -401,11 +411,11 @@ def test_connected_large_response(client_mac: bytes) -> bool:
         sock.close()
         return False
     client_seq = HANDSHAKE_CLIENT_ISN + 1 + len(DATA_ECHO_PAYLOAD)
-    server_seq = SERVER_ISN + 1
+    server_seq = seq_add(server_isn(HANDSHAKE_CLIENT_PORT), 1)
     second_payload = b"second-B"
     second_response = b"conn-B\n!"
     second_client_seq = RECONNECT_CLIENT_ISN + 1 + len(second_payload)
-    second_server_seq = SERVER_ISN + 1
+    second_server_seq = seq_add(server_isn(RECONNECT_CLIENT_PORT), 1)
 
     second_req = build_frame(
         client_mac, RECONNECT_CLIENT_PORT, RECONNECT_CLIENT_ISN + 1,
@@ -478,7 +488,7 @@ def test_connected_large_response(client_mac: bytes) -> bool:
                 if (rseq == second_server_seq and
                     rack == second_client_seq and
                     payload == second_response):
-                    second_server_seq += payload_len
+                    second_server_seq = seq_add(second_server_seq, payload_len)
                     second_response_ok = True
                     sock.send(build_frame(
                         client_mac, RECONNECT_CLIENT_PORT,

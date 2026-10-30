@@ -9736,14 +9736,21 @@ private inline fn syscall_getdents64_current_with(slot: borrow SyscallSlot[0],
                 kernel_syscall_file_offset(x0);
             let mut written: usize = 0;
             if (inode_number == PROCFS_TAKIBI_INODE) {
-                // GitHub issue #497: /proc/takibi lists its one entry.
-                if (directory_offset != 0) { return SyscallAction::Resume(0); }
-                match syscall_procfs_fixed_dirent(range, x2, bs"profile",
-                                                  PROCFS_TAKIBI_PROFILE_INODE, 8, 1) {
+                // GitHub issue #497: /proc/takibi lists "profile", then
+                // (#1245) "security", one entry per call.
+                if (directory_offset > 1) { return SyscallAction::Resume(0); }
+                let mut entry_name: []const u8 = bs"profile";
+                let mut entry_inode: usize = PROCFS_TAKIBI_PROFILE_INODE;
+                if (directory_offset == 1) {
+                    entry_name = bs"security";
+                    entry_inode = PROCFS_TAKIBI_SECURITY_INODE;
+                }
+                match syscall_procfs_fixed_dirent(range, x2, entry_name,
+                                                  entry_inode, 8, directory_offset + 1) {
                     ProcfsDirentWrite::TooSmall => { return SyscallAction::Resume(LINUX_EINVAL); }
                     ProcfsDirentWrite::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                     ProcfsDirentWrite::Written(size) => {
-                        if (kernel_syscall_file_set_offset(x0, 1) == false) {
+                        if (kernel_syscall_file_set_offset(x0, directory_offset + 1) == false) {
                             return SyscallAction::Resume(LINUX_EBADF);
                         }
                         return SyscallAction::Resume(size);

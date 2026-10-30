@@ -1,0 +1,29 @@
+// GitHub issue #1227: kernel/lib/siphash.tkb against SipHash-2-4's reference
+// vector (key 00..0f, message 00..0f: 0x3f2acc7f57c29bdb, entry 16 of the
+// reference implementation's vectors_sip64), and that a change of one key or
+// message word changes the result. The verdict is byte arithmetic, the same
+// on the board.
+//
+// Expected output (linux_user/siphash/siphash.expected): the vector's high
+// and low halves, then "differs" for each of the three changed inputs.
+
+fn report_differs(value: u64, vector: u64) {
+    if (value != vector) {
+        uart_puts("differs\n");
+    } else {
+        uart_puts("same\n");
+    }
+}
+
+fn app_main() {
+    let k0: u64 = 0x0706050403020100;
+    let k1: u64 = 0x0f0e0d0c0b0a0908;
+    let vector: u64 = siphash24_two_words(k0, k1, k0, k1);
+    uart_print_hex((vector >> 32) as i32);
+    uart_puts(" ");
+    uart_print_hex((vector & 0xFFFFFFFF) as i32);
+    uart_puts("\n");
+    report_differs(siphash24_two_words(k0 ^ 1, k1, k0, k1), vector);
+    report_differs(siphash24_two_words(k0, k1, k0, k1 ^ 1), vector);
+    report_differs(siphash24_two_words(k0, k1, k1, k0), vector);
+}

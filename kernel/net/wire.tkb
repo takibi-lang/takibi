@@ -79,7 +79,6 @@ const TCP_FLAG_RST: u8 = 0x04;
 const TCP_FLAG_PSH: u8 = 0x08;
 const TCP_FLAG_ACK: u8 = 0x10;
 const PROTO_TCP: u8 = 6;
-const TCP_INITIAL_SEQ: u32 = 0x00001000;
 
 fn write_u16be(bytes: borrow [u8; 2..], value: i32) {
     bytes[0] = (value >> 8) as u8;

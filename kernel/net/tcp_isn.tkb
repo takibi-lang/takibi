@@ -1,0 +1,100 @@
+// GitHub issue #1227: per-connection TCP initial sequence numbers, RFC 6528.
+//
+//   ISN = M + F(local ip, local port, remote ip, remote port, key)
+//
+// F is SipHash-2-4 keyed with 128 bits taken once at boot, M is the
+// generic counter in about 4-microsecond ticks (RFC 793's clock rate). An
+// off-path host that does not know the key cannot predict the ISN of a
+// connection it is not part of, and a connection reopened on the same
+// 4-tuple starts further along the clock.
+//
+// The key comes from the boot DTB's /chosen rng-seed (else kaslr-seed),
+// which QEMU's virt machine and the Raspberry Pi firmware fill. Without
+// one, security_floor (kernel/kernel/security_floor.tkb) is asked for the
+// degraded path: the key is folded from counter-timing jitter, a loud
+// boot-log line says so, /proc/takibi/security lists it, and TCP keeps
+// working (maintainer decision A2, 2026-10-30). Trusted: that the seed the
+// firmware left is unpredictable; the jitter fallback is not claimed to be.
+//
+// Current limitations (2026-10-30). Keep this list current as call sites
+// change.
+// - The 4-tuple is IPv4 only, as the stack is.
+// - The degraded jitter key is predictable on an emulator; it exists so TCP
+//   keeps working (security_floor records it), not as a secure key.
+use "kernel/kernel/security_floor.tkb";
+use "kernel/lib/siphash.tkb";
+use "kernel/lib/boot_once.tkb";
+
+// Written once on the boot core before the network or any secondary
+// starts (tcp_isn_key_init's caller), read-only afterwards.
+private let mut tcp_isn_key0: BootOnce(u64);
+private let mut tcp_isn_key1: BootOnce(u64);
+
+// Counter-timing jitter for the degraded key: the low bits of many
+// back-to-back counter reads around uneven work, folded by SipHash so
+// every sample reaches both words. Weak, and said so in the boot log.
+private fn tcp_isn_jitter_word(salt: u64) -> u64 {
+    let mut acc: u64 = salt;
+    let mut i: u64 = 0;
+    while (i < 256) {
+        let before: u64 = read_cntpct() as u64;
+        let mut spin: u64 = (acc & 15) + 1;
+        while (spin != 0) { spin = spin - 1; }
+        let after: u64 = read_cntpct() as u64;
+        acc = siphash24_two_words(acc, i, before, after - before);
+        i = i + 1;
+    }
+    return acc;
+}
+
+// Boot core only, before net_init and the secondaries (#1227).
+fn tcp_isn_key_init(phase: borrow BootPhase[boot]) !{unsafe} {
+    match fdt_find_boot_seed(boot_dtb_address_read()) {
+        FdtBootSeedResult::Found(seed) => {
+            boot_once_set(&tcp_isn_key0, phase, seed.word0 as u64);
+            boot_once_set(&tcp_isn_key1, phase, seed.word1 as u64);
+            kernel_boot_log("tcp isn: key from the boot DTB's /chosen seed\n");
+        }
+        FdtBootSeedResult::Missing => {
+            match security_floor_degrade(SecurityProperty::TcpIsnKey) {
+                SecurityFloor::Degraded => {
+                    let word0: u64 = tcp_isn_jitter_word(0x1227);
+                    boot_once_set(&tcp_isn_key0, phase, word0);
+                    boot_once_set(&tcp_isn_key1, phase, tcp_isn_jitter_word(word0));
+                }
+                SecurityFloor::Refused => {
+                    // Strict configuration: no TCP key, so the stack keeps
+                    // the all-zero key only until #1245's strict build
+                    // refuses TCP itself; unreachable while A is built.
+                    boot_once_set(&tcp_isn_key0, phase, 0);
+                    boot_once_set(&tcp_isn_key1, phase, 0);
+                }
+            }
+        }
+    }
+}
+
+// The ISN of the connection (local ip:port, remote ip:port).
+fn tcp_isn_for(local_ip: u32, local_port: u16, remote_ip: u32,
+               remote_port: u16) -> u32 {
+    let m0: u64 = ((local_ip as u64) << 32) | (remote_ip as u64);
+    let m1: u64 = ((local_port as u64) << 16) | (remote_port as u64);
+    let f: u64 = siphash24_two_words(
+        boot_once_get(&tcp_isn_key0),
+        boot_once_get(&tcp_isn_key1), m0, m1);
+    // M: the counter in about 4 us ticks -- 256 counter ticks are 4.1 us
+    // at QEMU's 62.5 MHz and 4.7 us at RPi5's 54 MHz -- with no divide.
+    let m: u64 = (read_cntpct() as u64) >> 8;
+    return (f + m) as u32;
+}
+
+// The ISN of a received SYN's connection, from its IPv4 header: the source
+// is the remote end, the destination this host.
+fn tcp_isn_for_syn(ip: borrow [u8; 20..], local_port: u16, remote_port: u16)
+        -> u32 {
+    let remote: u32 = ((ip[12] as u32) << 24) | ((ip[13] as u32) << 16) |
+                      ((ip[14] as u32) << 8) | (ip[15] as u32);
+    let local: u32 = ((ip[16] as u32) << 24) | ((ip[17] as u32) << 16) |
+                     ((ip[18] as u32) << 8) | (ip[19] as u32);
+    return tcp_isn_for(local, local_port, remote, remote_port);
+}

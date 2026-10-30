@@ -106,3 +106,5 @@ exempt kernel/kernel/syscall_test_evidence.tkb  test counters, read by the boot 
 exempt kernel/kernel/syscall_test_lifecycle.tkb  test-driver lifecycle state, driven from core 0 only
 exempt kernel/printk/console_lock.tkb  the lock word serializes every transmit writer and protects the measurement counters and window flag, so no core count is assumed
 exempt kernel/kernel/syscall_unimplemented.tkb  every slot is claimed by an atomic compare-exchange and read by an atomic load, so no core count is assumed
+exempt kernel/kernel/security_floor.tkb  GitHub issue #1245: the degraded-property word is an AtomicWord set by compare-exchange, so no core count is assumed
+exempt kernel/net/tcp_isn.tkb  GitHub issue #1227: the ISN key words are BootOnce cells, written under the boot phase and only read afterwards, so no core count is assumed

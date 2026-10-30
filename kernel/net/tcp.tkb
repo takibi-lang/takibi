@@ -92,6 +92,7 @@ use "kernel/kernel/pool_lock_wait.tkb";
 use "kernel/net/checksum.tkb";
 use "kernel/net/arp.tkb";
 use "kernel/net/wire.tkb";
+use "kernel/net/tcp_isn.tkb";
 use "kernel/net/icmp.tkb";
 // GitHub issue #257 step 5: kernel/lib/slotmap.tkb and its freelist are
 // gone from this file -- a SlotMap(N) is exactly the compile-time ceiling
@@ -2843,7 +2844,8 @@ fn build_syn_ack(conn: borrow &mut TcpConnection,
     let client_port: u16 = tcp_hdr.src_port as u16;
     tcp_hdr.src_port = conn.local_port as u16be;
     tcp_hdr.dst_port = client_port as u16be;
-    tcp_hdr.seq = TCP_INITIAL_SEQ as u32be;
+    // GitHub issue #1227: the ISN the SYN handler chose, kept as snd_nxt - 1.
+    tcp_hdr.seq = (conn.snd_nxt - 1) as u32be;
     tcp_hdr.ack = conn.rcv_nxt as u32be;
     tcp_hdr.data_offset = (5 << 4) as u8; // 20-byte header, no options
     tcp_hdr.flags = TCP_FLAG_SYN | TCP_FLAG_ACK;
@@ -3111,7 +3113,8 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
                                                 ip[IP_SRC..<IP_DST]);
                                             conn.remote_port = header.src_port;
                                             conn.rcv_nxt = header.seq + 1;
-                                            conn.snd_nxt = TCP_INITIAL_SEQ + 1;
+                                            conn.snd_nxt = tcp_isn_for_syn(ip,
+                                                conn.local_port, header.src_port) + 1;
 
                                             build_syn_ack(conn, frame, header.ihl);
                                             plan = TcpRxPlan::Send(14 + (header.ihl as i32) + 20);
@@ -3324,7 +3327,8 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection_pool, conn
                                     conn.remote_port = header.src_port;
                                     conn.rcv_nxt = header.seq + 1;
                                     conn.snd_nxt =
-                                        TCP_INITIAL_SEQ + 1;
+                                        tcp_isn_for_syn(ip, conn.local_port,
+                                                        header.src_port) + 1;
                                     build_syn_ack(conn, frame, header.ihl);
                                     slice_copy(stream_frames[0..<54],
                                                frame[0..<54]);

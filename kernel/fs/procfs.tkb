@@ -1,5 +1,6 @@
 use "kernel/kernel/process.tkb";
 use "kernel/lib/byte_slice.tkb";
+use "kernel/kernel/security_floor.tkb";
 
 // Read-only Linux-shaped process diagnostics for the pinned BusyBox ps
 // applet. This is intentionally not a general virtual-filesystem registry.
@@ -10,9 +11,10 @@ use "kernel/lib/byte_slice.tkb";
 // interface that Linux does not have lives under /proc/takibi/, so the rest
 // of /proc stays Linux-shaped. /proc/takibi/profile is the first: the
 // sampling profiler's control file (kernel/kernel/profile_session.tkb), the
-// one writable node.
+// one writable node. /proc/takibi/security lists every security property
+// this boot took degraded through security_floor (GitHub issue #1245).
 
-enum ProcfsNodeKind: u8 { Root; ProcessDirectory; Stat; Cmdline; TakibiDirectory; TakibiProfile; }
+enum ProcfsNodeKind: u8 { Root; ProcessDirectory; Stat; Cmdline; TakibiDirectory; TakibiProfile; TakibiSecurity; }
 
 struct ProcfsNode {
     kind: ProcfsNodeKind;
@@ -26,6 +28,7 @@ must_use variant ProcfsPidResult { Invalid; Parsed(usize); }
 const PROCFS_ROOT_INODE: usize = 0xF0000000;
 const PROCFS_TAKIBI_INODE: usize = 0xF0000001;
 const PROCFS_TAKIBI_PROFILE_INODE: usize = 0xF0000002;
+const PROCFS_TAKIBI_SECURITY_INODE: usize = 0xF0000003;
 // The /proc root's getdents offset after "takibi" and before any pid; a
 // pid offset carries this bit too, so 0 still means "nothing yet".
 const PROCFS_ROOT_AFTER_TAKIBI: usize = 0x100000000;
@@ -89,6 +92,12 @@ fn procfs_lookup(path: []const u8) -> ProcfsLookupResult !{unsafe} {
             };
             return ProcfsLookupResult::Found(profile);
         }
+        bs"takibi/security" => {
+            let mut security: ProcfsNode = {
+                ProcfsNodeKind::TakibiSecurity, 0, PROCFS_TAKIBI_SECURITY_INODE
+            };
+            return ProcfsLookupResult::Found(security);
+        }
         _ => {}
     }
     let mut leaf: []const u8 = bs"";
@@ -138,6 +147,7 @@ fn procfs_lookup(path: []const u8) -> ProcfsLookupResult !{unsafe} {
 fn procfs_inode_is_ours(inode: usize) -> bool {
     return inode == PROCFS_ROOT_INODE || inode == PROCFS_TAKIBI_INODE ||
            inode == PROCFS_TAKIBI_PROFILE_INODE ||
+           inode == PROCFS_TAKIBI_SECURITY_INODE ||
            inode >= PROCFS_PID_INODE_BASE;
 }
 
@@ -150,6 +160,7 @@ fn procfs_inode_kind(inode: usize) -> ProcfsNodeKind {
     if (inode == PROCFS_ROOT_INODE) { return ProcfsNodeKind::Root; }
     if (inode == PROCFS_TAKIBI_INODE) { return ProcfsNodeKind::TakibiDirectory; }
     if (inode == PROCFS_TAKIBI_PROFILE_INODE) { return ProcfsNodeKind::TakibiProfile; }
+    if (inode == PROCFS_TAKIBI_SECURITY_INODE) { return ProcfsNodeKind::TakibiSecurity; }
     let suffix: usize = (inode - PROCFS_PID_INODE_BASE) % 4;
     if (suffix == 0) { return ProcfsNodeKind::ProcessDirectory; }
     if (suffix == 1) { return ProcfsNodeKind::Stat; }
@@ -305,6 +316,22 @@ private fn procfs_render_profile(output: borrow uninit [u8; 1024..]) -> usize
     return offset;
 }
 
+// /proc/takibi/security: one line per property this boot took degraded
+// (GitHub issue #1245), or "none".
+private fn procfs_render_security(output: borrow uninit [u8; 1024..]) -> usize
+        ensures init(output[0..<result]) {
+    // One property today: when more join SecurityProperty, each becomes a
+    // line here, so the list stays exhaustive (#1245).
+    if (security_floor_is_degraded(SecurityProperty::TcpIsnKey)) {
+        let mut offset: usize = procfs_put_text(output, 0,
+            security_property_name(SecurityProperty::TcpIsnKey));
+        offset = procfs_put_text(output, offset, bs" degraded\n");
+        return offset;
+    }
+    let offset: usize = procfs_put_text(output, 0, bs"none\n");
+    return offset;
+}
+
 // Renders a procfs file's text into output and answers its length. The
 // bytes before that length are initialized (GitHub issue #977); the rest
 // are left as they were.
@@ -313,6 +340,9 @@ fn procfs_render_file(inode: usize, output: borrow uninit [u8; 1024..])
         ensures init(output[0..<result]) {
     if (inode == PROCFS_TAKIBI_PROFILE_INODE) {
         return procfs_render_profile(output);
+    }
+    if (inode == PROCFS_TAKIBI_SECURITY_INODE) {
+        return procfs_render_security(output);
     }
     let pid: usize = procfs_inode_pid(inode);
     let snapshot: ProcessDiagnosticSnapshot =
@@ -405,5 +435,6 @@ fn procfs_write(inode: usize, bytes: []const u8) -> usize
 }
 
 // The fixed names a Takibi-owned procfs directory lists, by getdents
-// offset: /proc's own "takibi" entry, and /proc/takibi's "profile".
+// offset: /proc's own "takibi" entry, and /proc/takibi's "profile" and
+// "security".
 fn procfs_root_takibi_offset() -> usize { return PROCFS_ROOT_AFTER_TAKIBI; }

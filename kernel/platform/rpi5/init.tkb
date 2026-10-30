@@ -66,6 +66,8 @@ fn kernel_secondary_boot_cpu_on(start: CpuStart[&kernel_world_stop])
 // exist; the boot exchange in kernel_test_platform_network takes it from
 // the store like any other caller and puts it back.
 fn kernel_platform_net_link_up(phase: borrow BootPhase[boot]) {
+    // GitHub issue #1227: the ISN key, before any connection exists.
+    tcp_isn_key_init(phase);
     match net_init() {
         NetInitResult::Failed => {
             kernel_boot_log("rp1 gem: link failed\n");

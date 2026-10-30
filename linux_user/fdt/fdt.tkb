@@ -45,6 +45,16 @@ let fdt_invalid_virtio_fixture: [u8; 4152] =
     embed_file("linux_user/build/fdt_invalid_virtio_fixture.dtb");
 let fdt_psci_smc_fixture: [u8; 4156] =
     embed_file("linux_user/build/fdt_psci_smc_fixture.dtb");
+let fdt_seed_rng_fixture: [u8; 4256] =
+    embed_file("linux_user/build/fdt_seed_rng_fixture.dtb");
+let fdt_seed_kaslr_fixture: [u8; 4203] =
+    embed_file("linux_user/build/fdt_seed_kaslr_fixture.dtb");
+let fdt_seed_zero_rng_fixture: [u8; 4256] =
+    embed_file("linux_user/build/fdt_seed_zero_rng_fixture.dtb");
+let fdt_seed_short_fixture: [u8; 4201] =
+    embed_file("linux_user/build/fdt_seed_short_fixture.dtb");
+let fdt_seed_nested_fixture: [u8; 4237] =
+    embed_file("linux_user/build/fdt_seed_nested_fixture.dtb");
 
 // The existing printer is 32 bits wide and these are physical addresses on
 // a board whose peripherals live above 4 GiB, so print both halves.
@@ -72,6 +82,25 @@ fn report_region(result: FdtMemoryRegionResult) {
             uart_print_hex((region.size >> 32) as i32);
             uart_puts(" ");
             uart_print_hex((region.size & 0xFFFFFFFF) as i32);
+            uart_puts("\n");
+        }
+    }
+}
+
+// GitHub issue #1227: the words fdt_find_boot_seed folded, or Missing.
+fn report_seed(name: *u8, result: FdtBootSeedResult) {
+    uart_puts(name);
+    match result {
+        FdtBootSeedResult::Missing => { uart_puts(" missing\n"); }
+        FdtBootSeedResult::Found(seed) => {
+            uart_puts(" ");
+            uart_print_hex((seed.word0 >> 32) as i32);
+            uart_puts(" ");
+            uart_print_hex((seed.word0 & 0xFFFFFFFF) as i32);
+            uart_puts(" ");
+            uart_print_hex((seed.word1 >> 32) as i32);
+            uart_puts(" ");
+            uart_print_hex((seed.word1 & 0xFFFFFFFF) as i32);
             uart_puts("\n");
         }
     }
@@ -384,7 +413,20 @@ fn app_main() !{unsafe} {
         (fdt_invalid_tree_reservation_fixture as *u8) as usize;
     report_memory(fdt_detect_memory(invalid_tree_reservation_blob), invalid_tree_reservation_blob);
 
+    // GitHub issue #1227: /chosen seeds. The plain blob has no /chosen.
+    report_seed("seed none", fdt_find_boot_seed(blob));
+    report_seed("seed rng",
+        fdt_find_boot_seed((fdt_seed_rng_fixture as *u8) as usize));
+    report_seed("seed kaslr",
+        fdt_find_boot_seed((fdt_seed_kaslr_fixture as *u8) as usize));
+    report_seed("seed zero-rng",
+        fdt_find_boot_seed((fdt_seed_zero_rng_fixture as *u8) as usize));
+    report_seed("seed short",
+        fdt_find_boot_seed((fdt_seed_short_fixture as *u8) as usize));
+    report_seed("seed nested",
+        fdt_find_boot_seed((fdt_seed_nested_fixture as *u8) as usize));
     // One byte into the header the magic no longer matches, and every
     // reader refuses before it reads anything else.
     report_memory(fdt_detect_memory(blob + 1), blob + 1);
+    report_seed("seed bad magic", fdt_find_boot_seed(blob + 1));
 }

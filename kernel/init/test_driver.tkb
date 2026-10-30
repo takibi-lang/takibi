@@ -1237,6 +1237,22 @@ private fn kernel_record_existence_probe() -> bool {
         page_allocator_live_count() == pages;
 }
 
+// GitHub issue #1245: what /proc/takibi/security renders this boot, from the
+// renderer itself, so kernel/tests/check_fdt_multibank_qemu.py can compare a
+// boot with a /chosen seed against one without.
+private fn kernel_boot_report_security_list() !{unsafe} {
+    let mut text: [u8; 1024];
+    let total: usize = procfs_render_file(PROCFS_TAKIBI_SECURITY_INODE,
+                                          text as [u8; 1024..]);
+    if (total == 5 && text[0] == 110) {
+        kernel_boot_log("security floor: /proc lists none\n");
+    } else if (total == 21 && text[0] == 116) {
+        kernel_boot_log("security floor: /proc lists tcp-isn-key degraded\n");
+    } else {
+        kernel_boot_log("security floor: /proc list unexpected\n");
+    }
+}
+
 fn kernel_test_common_probes() !{unsafe} {
     if (kernel_syscall_filesystem_unconfigured_probe()) {
         kernel_boot_log("filesystem context: unconfigured entries refused\n");
@@ -1386,6 +1402,7 @@ fn kernel_test_common_probes() !{unsafe} {
     } else {
         kernel_boot_log("asid pool: failed\n");
     }
+    kernel_boot_report_security_list();
     // GitHub issue #837: both probes free connections, and a free walks the
     // stack-wide retransmit chain under a borrow of the network capability.
     // The link is up before these run (kernel_platform_net_link_up), so they

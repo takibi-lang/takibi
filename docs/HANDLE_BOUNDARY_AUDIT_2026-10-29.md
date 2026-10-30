@@ -188,7 +188,7 @@ Every connection uses `TCP_INITIAL_SEQ` (kernel/net/tcp.tkb:2835, 3101,
 3314). This is about RFC 6528 hardening against off-path injection, not
 about handles. It is listed only because the issue asks about predictable
 numbers. Recommendation: file it separately if the network stack is ever
-used outside the test network.
+used outside the test network. (Filed as #1227 and fixed: kernel/net/tcp_isn.tkb.)
 
 ## Recommendation for #709/#710
 
