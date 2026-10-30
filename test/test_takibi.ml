@@ -28053,7 +28053,9 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
   Alcotest.(check int) "production destruction contract extracted" 1 (List.length mutations);
   let harness = parse_here ({|
     let mut kernel_world_stop: WorldStop;
-    let mut qemu_psci_use_hvc: bool;
+    struct QemuHvcCell { value: bool; }
+    let mut qemu_psci_use_hvc: QemuHvcCell;
+    fn boot_once_get(cell: &mut QemuHvcCell) -> bool { return (*cell).value; }
     let mut rpi5_psci_use_hvc: bool;
     let mut kernel_secondary_entry: usize;
     struct Record { value: usize; }
