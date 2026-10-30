@@ -115,7 +115,8 @@ refuses any branch but `main`).
    and no process has its cwd or an open file inside it, and prints what it
    kept and why. Not after a land alone: a worker may land one slice and go
    on in the same worktree. The port block needs no step: the next
-   `qemu_session_claim_block` drops the row of a worktree that is gone.
+   `qemu_session_claim_block` drops the row of a worktree that is gone, and a
+   full registry takes over a block whose session has no lane running.
    Move the batch file's reviewed sections under a `reviewed` heading or
    start a new batch.
    If the landed branch closed an issue that belongs to a GitHub milestone

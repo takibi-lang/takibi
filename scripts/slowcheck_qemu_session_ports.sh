@@ -120,6 +120,117 @@ timeout 5 env TAKIBI_SESSION_REGISTRY="$killed" TAKIBI_SESSION=after-kill \
     bash -c ". '$helper'; qemu_session_port_offset" >/dev/null \
     && claim || fail "a killed holder left the registry lock stuck"
 
+# A full registry refuses no lane merely because idle sessions hold blocks, and
+# never hands out a block a running lane is using. A "lane" here is the real
+# entry point, qemu_session_shift_ports, in a shell that stays alive.
+# A root outside any checkout keeps the names these cases spell out, instead of
+# suffixing them with the worktree this check happens to run in.
+export QEMU_SESSION_REPO_ROOT="$tmp_dir"
+start_lane() { # registry session readyfile
+    env -u TAKIBI_QEMU_PORT_OFFSET TAKIBI_SESSION_REGISTRY="$1" TAKIBI_SESSION="$2" \
+        bash -c ". '$helper'
+                 PORT=20000
+                 qemu_session_shift_ports PORT
+                 echo \$PORT >'$3'
+                 exec sleep 60" &
+    lane_pid=$!
+    local tries=0
+    until [ -s "$3" ]; do
+        tries=$((tries + 1))
+        [ "$tries" -lt 100 ] || fail "lane $2 never got its ports"
+        sleep 0.1
+    done
+}
+finish_lane() {
+    kill -KILL "$1" 2>/dev/null || true
+    wait "$1" 2>/dev/null || true
+}
+one_lane() { # registry session: run a lane to completion, leaving its row idle
+    env -u TAKIBI_QEMU_PORT_OFFSET TAKIBI_SESSION_REGISTRY="$1" TAKIBI_SESSION="$2" \
+        bash -c ". '$helper'; PORT=20000; qemu_session_shift_ports PORT; echo \$PORT"
+}
+
+leased="$tmp_dir/leased"
+mkdir -p "$leased"
+start_lane "$leased" running-0 "$tmp_dir/running-0.port"
+running_pid=$lane_pid
+for index in $(seq 1 "$((blocks - 1))"); do one_lane "$leased" "idle-$index" >/dev/null; done
+[ "$(wc -l <"$leased/blocks")" = "$blocks" ] || fail "the lease registry did not fill"
+new_port="$(one_lane "$leased" newcomer)" \
+    && claim || fail "a full registry of idle sessions refused a lane"
+[ "$new_port" != "$(cat "$tmp_dir/running-0.port")" ] \
+    && grep -q " running-0$" "$leased/blocks" \
+    && [ "$(cut -d' ' -f1 "$leased/blocks" | sort -u | wc -l)" = "$blocks" ] \
+    && claim || fail "a reclaim took the running lane's block or broke exclusivity"
+
+# Two lanes running at once never share ports, however many claims went by:
+# take over every idle block in turn, each while the running lane still runs.
+for index in $(seq 1 "$((blocks * 2))"); do
+    port="$(one_lane "$leased" "churn-$index")" || fail "churn claim $index refused"
+    [ "$port" != "$(cat "$tmp_dir/running-0.port")" ] \
+        || fail "churn claim $index got the running lane's port"
+done
+claim
+
+# When every lane runs, the refusal is real, and it names who is running.
+busy="$tmp_dir/busy"
+mkdir -p "$busy"
+busy_pids=""
+for index in $(seq 1 "$blocks"); do
+    start_lane "$busy" "lane-$index" "$tmp_dir/busy-$index.port"
+    busy_pids="$busy_pids $lane_pid"
+done
+[ "$(cat "$tmp_dir"/busy-*.port | sort -u | wc -l)" = "$blocks" ] \
+    && claim || fail "running lanes share a port"
+if one_lane "$busy" overflow >"$tmp_dir/busy.log" 2>&1; then
+    fail "a lane took a block while every lane was running"
+fi
+grep -F "lane-$blocks" "$tmp_dir/busy.log" >/dev/null \
+    && claim || fail "the refusal does not name the running lanes"
+
+# A lane that dies for any reason leaves its block reclaimable: the kernel drops
+# the lease. Its child inheriting the descriptor keeps the block until it exits.
+first_busy="${busy_pids# }"; first_busy="${first_busy%% *}"
+finish_lane "$first_busy"
+after_death="$(one_lane "$busy" after-death)" \
+    && [ "$after_death" = "$(cat "$tmp_dir/busy-1.port")" ] \
+    && ! grep -q " lane-1$" "$busy/blocks" \
+    && claim || fail "a killed lane's block was not reclaimed ($after_death)"
+for pid in $busy_pids; do finish_lane "$pid"; done
+
+inherit="$tmp_dir/inherit"
+mkdir -p "$inherit"
+env -u TAKIBI_QEMU_PORT_OFFSET TAKIBI_SESSION_REGISTRY="$inherit" TAKIBI_SESSION=parent \
+    bash -c ". '$helper'; PORT=20000; qemu_session_shift_ports PORT
+             sleep 60 >/dev/null 2>&1 &
+             echo \$! >'$tmp_dir/child.pid'"
+held_pids=""
+for index in $(seq 1 "$((blocks - 1))"); do
+    start_lane "$inherit" "held-$index" "$tmp_dir/held-$index.port"
+    held_pids="$held_pids $lane_pid"
+done
+if one_lane "$inherit" orphan >/dev/null 2>&1; then
+    fail "a block was taken from a QEMU-like child that outlived its runner"
+fi
+claim
+kill -KILL "$(cat "$tmp_dir/child.pid")" 2>/dev/null || true
+sleep 0.2
+one_lane "$inherit" orphan >/dev/null && claim || fail "the child's exit did not free its block"
+for pid in $held_pids; do finish_lane "$pid"; done
+
+# A row with no lease file comes from a checkout older than the lease, whose
+# lane cannot be seen running: it stays, and the refusal says so.
+legacy="$tmp_dir/legacy"
+mkdir -p "$legacy"
+for index in $(seq 0 "$((blocks - 1))"); do echo "$index old-$index"; done >"$legacy/blocks"
+if one_lane "$legacy" newcomer >"$tmp_dir/legacy.log" 2>&1; then
+    fail "a block was taken from a row with no lease"
+fi
+grep -F "old-0" "$tmp_dir/legacy.log" >/dev/null \
+    && claim || fail "the refusal does not name the rows written before leases"
+finish_lane "$running_pid"
+unset QEMU_SESSION_REPO_ROOT
+
 # Exhaustion and corruption are refused by name rather than silently reused.
 full="$tmp_dir/full"
 mkdir -p "$full"
@@ -258,4 +369,4 @@ for failure in failures:
 sys.exit(1 if failures else 0)
 PY
 
-echo "PASS qemu-session-ports: $cases claims -- blocks are stable, exclusive, bounded, and survive a killed holder"
+echo "PASS qemu-session-ports: $cases claims -- blocks are stable, exclusive, bounded, reclaimed only from idle sessions, and survive a killed holder"

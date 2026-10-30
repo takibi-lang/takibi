@@ -25,6 +25,17 @@
 # including SIGINT; the lock is held only across the read-modify-write, never
 # across a QEMU run; and the file itself is replaced by rename(2), so a reader
 # sees either the whole previous content or the whole new content.
+#
+# A row says who last used a block, not who is using it. What says a block is
+# in use is a lease: a runner holds a shared flock on leases/<session> from
+# before its claim until it and every child that inherited the descriptor,
+# QEMU included, have exited. The kernel drops the lock however they die, so
+# the lease cannot go stale, and flock already is what this registry trusts
+# between containers. When every block has a row, a claim takes over the block
+# of a session whose lease is free: an idle worktree must not refuse every lane
+# (2026-10-30: over an hour of "all blocks are claimed" with no lane running).
+# A row with no lease file was written by a checkout older than the lease, whose
+# lane cannot be seen running, so it is never taken over.
 
 # One block is wide enough for every lane port, and the highest block must stay
 # below the ephemeral range. scripts/check_qemu_lane_ports.py enforces both
@@ -68,10 +79,13 @@ qemu_session_registry_dir() {
 # qemu_session_release_block (an agent's isolated worktree cleaned up by its
 # harness, a `git worktree remove` by hand) otherwise kept its block for
 # good, and the registry filled until every lane failed with "all blocks are
-# claimed" (2026-10-26). Rows of other containers are never touched.
+# claimed" (2026-10-26). Rows of other containers are not pruned, since this
+# repository cannot say whether their worktrees exist; only a free lease can
+# take their block.
 qemu_session_claim_block() {
     local session="$1" base="${2-}" live="${3-}"
     local dir registry lock tmp block line used name kept pruned
+    local running unleased idle_block idle_name
 
     dir="$(qemu_session_registry_dir)"
     registry="$dir/blocks"
@@ -105,7 +119,11 @@ qemu_session_claim_block() {
                     "$base-wt-"*)
                         case " $live " in
                             *" ${name#"$base-wt-"} "*) ;;
-                            *) pruned=1; continue ;;
+                            *)
+                                pruned=1
+                                rm -f "$dir/leases/$name"
+                                continue
+                                ;;
                         esac
                         ;;
                 esac
@@ -136,9 +154,45 @@ qemu_session_claim_block() {
             esac
         done
         if [ "$block" -ge "$QEMU_SESSION_PORT_BLOCKS" ]; then
-            echo "FAIL qemu-session-ports: all $QEMU_SESSION_PORT_BLOCKS port" \
-                 "blocks are claimed in $registry; remove a retired session" >&2
-            exit 1
+            # Every number is taken: look for one nobody is using. A runner
+            # takes its lease before it waits for this lock, so a free lease
+            # here means that session's next claim comes after this one and
+            # simply gets a block of its own.
+            running=""
+            unleased=""
+            idle_block=""
+            idle_name=""
+            while IFS= read -r line; do
+                [ -n "$line" ] || continue
+                name="${line#* }"
+                if [ ! -e "$dir/leases/$name" ]; then
+                    unleased="$unleased $name"
+                elif ( exec 7>"$dir/leases/$name" && flock -n -x 7 ); then
+                    idle_block="${line%% *}"
+                    idle_name="$name"
+                    break
+                else
+                    running="$running $name"
+                fi
+            done <<<"$kept"
+            if [ -z "$idle_block" ]; then
+                echo "FAIL qemu-session-ports: all $QEMU_SESSION_PORT_BLOCKS port" \
+                     "blocks are claimed in $registry." \
+                     "Running a lane:${running:- none}." \
+                     "Written before leases, so possibly running, removed by" \
+                     "scripts/prune_worktrees.py or a release:${unleased:- none}." >&2
+                exit 1
+            fi
+            block="$idle_block"
+            tmp="$registry.tmp.$$"
+            awk -v name="$idle_name" \
+                '{ line = $0; sub(/^[^ ]* /, "", line) } line != name' \
+                "$registry" >"$tmp"
+            mv "$tmp" "$registry"
+            if [ "${TAKIBI_QEMU_PORT_VERBOSE:-0}" = 1 ]; then
+                echo "[qemu-session-ports] $session took block $block from" \
+                     "idle session $idle_name" >&2
+            fi
         fi
 
         tmp="$registry.tmp.$$"
@@ -199,7 +253,38 @@ qemu_session_release_block() {
         awk -v name="$session" '{ line = $0; sub(/^[^ ]* /, "", line) } line != name' \
             "$registry" >"$registry.tmp.$$"
         mv "$registry.tmp.$$" "$registry"
+        rm -f "$dir/leases/$session"
     )
+}
+
+# Hold this session's lease for the rest of the calling shell and its children.
+# It must run in the runner's own shell, not a command substitution, and before
+# the claim: with the lease held first, a claim that sees it free has already
+# finished with the registry by the time this session reads it, so no order
+# leaves a running lane on a block someone else was just given. The descriptor
+# is deliberately inherited, so a QEMU that outlives its runner keeps its block.
+QEMU_SESSION_LEASE_FD=""
+qemu_session_take_lease() {
+    local session dir
+    [ -z "$QEMU_SESSION_LEASE_FD" ] || return 0
+    [ -z "${TAKIBI_QEMU_PORT_OFFSET:-}" ] || return 0
+    session="$(qemu_session_name)"
+    dir="$(qemu_session_registry_dir)"
+    [ -n "$session" ] && [ -d "$dir" ] || return 0
+    qemu_session_check_name "$session" || return 1
+    mkdir -p "$dir/leases" || return 1
+    exec {QEMU_SESSION_LEASE_FD}>"$dir/leases/$session" || return 1
+    flock -s "$QEMU_SESSION_LEASE_FD"
+}
+
+qemu_session_check_name() {
+    case "$1" in
+        *[!A-Za-z0-9._-]*)
+            echo "FAIL qemu-session-ports: the session name may contain only" \
+                 "letters, digits, dot, underscore and dash: '$1'" >&2
+            return 1
+            ;;
+    esac
 }
 
 # Echo the port offset for this session. Zero when nothing selects one, which
@@ -224,13 +309,7 @@ qemu_session_port_offset() {
         printf '0\n'
         return 0
     fi
-    case "$session" in
-        *[!A-Za-z0-9._-]*)
-            echo "FAIL qemu-session-ports: the session name may contain only" \
-                 "letters, digits, dot, underscore and dash: '$session'" >&2
-            return 1
-            ;;
-    esac
+    qemu_session_check_name "$session" || return 1
 
     block="$(qemu_session_claim_block "$session" "${TAKIBI_SESSION:-}" \
         "$(qemu_session_live_worktrees)")" || return 1
@@ -242,6 +321,7 @@ qemu_session_port_offset() {
 qemu_session_shift_ports() {
     local offset name current
 
+    qemu_session_take_lease || exit 1
     offset="$(qemu_session_port_offset)" || exit 1
     if [ "$offset" -eq 0 ]; then
         return 0

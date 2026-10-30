@@ -18,7 +18,8 @@ deleted, only when all of these hold:
 The worktree is unlocked first (agent worktrees are locked by the harness).
 Its QEMU port block needs no step here: qemu_session_claim_block in
 scripts/qemu_session_ports.sh drops a "<base>-wt-<name>" row whose worktree
-no longer exists on the next claim (9fd64f7f).
+no longer exists on the next claim (9fd64f7f), and a full registry takes over
+the block of a session with no lane running.
 
 Every worktree considered is printed as REMOVED or KEPT with the reason.
 """
