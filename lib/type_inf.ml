@@ -816,7 +816,45 @@ let struct_instance ty = match strip_singleton ty with
    every byte pattern is a valid value of the header: a `packed` struct with
    no declared alignment whose fields are integers (host or wire order),
    arrays of them, or such headers in turn. Returns the reason it is not. *)
-let rec overlay_invalid_reason (senv : senv) (ty : Ast.type_expr) : string option =
+(* GitHub issue #986 slice 2: the header overlay's length decision is a
+   memory-safety decision -- a slice shorter than the header lets a field
+   read or write past it -- so each accepted overlay writes an obligation:
+   the header's size, summed by z3 from the field types as written (an
+   independent recount, not const_type_size), exceeds the slice's proven
+   minimum length. `unsat` proves the slice covers the header. *)
+let rec overlay_size_smt (senv : senv) (ty : Ast.type_expr) : string option =
+  match ty with
+  | Ast.TypeI8 | Ast.TypeU8 -> Some "1"
+  | Ast.TypeI16 | Ast.TypeU16 | Ast.TypeU16Be -> Some "2"
+  | Ast.TypeI32 | Ast.TypeU32 | Ast.TypeU32Be -> Some "4"
+  | Ast.TypeI64 | Ast.TypeU64 -> Some "8"
+  | Ast.TypeArray (elem, n) ->
+      Option.map (fun e -> Printf.sprintf "(* %d %s)" n e) (overlay_size_smt senv elem)
+  | Ast.TypeNamed name ->
+      (match StringMap.find_opt name senv with
+       | Some (fields, true, None) ->
+           let parts = List.map (fun (_, fty) -> overlay_size_smt senv fty) fields in
+           if List.mem None parts then None
+           else Some ("(+ 0 " ^ String.concat " " (List.map Option.get parts) ^ ")")
+       | _ -> None)
+  | _ -> None
+
+and record_overlay_obligation (senv : senv) loc (ty : Ast.type_expr) (n : int) =
+  if !Range_obligation.enabled then
+    match overlay_size_smt senv ty with
+    | None -> ()
+    | Some size ->
+        let text = String.concat "\n" [
+          "; takibi-init-obligation v1";
+          "; rule: overlay";
+          Printf.sprintf "; claim: sizeof(%s) <= %d"
+            (match ty with Ast.TypeNamed name -> name | _ -> Ast.show_type_expr ty) n;
+          "(set-logic QF_LIA)";
+          Printf.sprintf "(assert (not (<= %s %d)))" size n;
+          "(check-sat)"; "" ] in
+        Range_obligation.record_text loc text
+
+and overlay_invalid_reason (senv : senv) (ty : Ast.type_expr) : string option =
   match ty with
   | Ast.TypeI8 | Ast.TypeI16 | Ast.TypeI32 | Ast.TypeI64
   | Ast.TypeU8 | Ast.TypeU16 | Ast.TypeU32 | Ast.TypeU64
@@ -1002,6 +1040,7 @@ let lookup loc name env = fst (lookup_binding loc name env)
 let strip_io t = match repr t with TIo inner -> inner | _ -> t
 
 let unify_at loc t1 t2 =
+  static_obligation_loc := loc;
   try unify t1 t2
   with Unify_error msg -> raise (TypeError (loc, msg))
 
@@ -4089,7 +4128,10 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                             (to_string src_ty) (to_string tgt) why))
                       | None -> ());
                      (match const_type_size senv ast_pointee with
-                      | Some sz when n > 0 && n >= sz -> ()
+                      | Some sz when n > 0 &&
+                                     (n >= sz || (!Range_obligation.fault_overlay_short
+                                                  && n = sz - 1)) ->
+                          record_overlay_obligation senv e.loc ast_pointee n
                       | Some sz ->
                           raise (TypeError (e.loc, Printf.sprintf
                             "cannot view %s as %s: proven minimum length %d \

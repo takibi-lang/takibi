@@ -107,7 +107,10 @@ Types") replace raw wire-header pointers in the network code. The compiler
 is trusted to decide that every byte pattern is a valid value of the header
 (packed, no declared alignment, unrefined integer and byte-array fields
 only) and that the slice's proven length covers it; the decision is
-`overlay_invalid_reason` and the length check in lib/type_inf.ml. The
+`overlay_invalid_reason` and the length check in lib/type_inf.ml. Since
+#986 slice 2 the length half is re-checked by z3 from an obligation that
+recounts the header's size from its field types (docs/RANGE_OBLIGATIONS.md),
+so it leaves the base; the valid-bit-pattern half stays. The
 older raw overlay, `bytes as *T`, and every other raw reinterpreting cast
 (`*u8 as *T`, a literal address `as *T`) need `unsafe` when `T` holds a
 field whose type claims more than its bytes -- refined, singleton, bool,

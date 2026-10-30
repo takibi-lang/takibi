@@ -340,6 +340,28 @@ fn planted798(s: borrow []const u8, i: usize) -> u8 {
     return s[i];
 }
 
+// GitHub issue #986 slice 2: a header one byte longer than the slice
+// (planted: the overlay accepts n = sizeof - 1), and a merge whose tail
+// offset is off by one (planted: the static arithmetic drops constants).
+struct packed Hdr986 { a: u32; b: u32; }
+
+fn overlay986(s: borrow [u8; 7..]) -> u32 {
+    let h = s as &Hdr986;
+    return h.a;
+}
+
+private region let mut arena986: [u8; 4];
+
+fn merge986() {
+    let RegionOf(u8)::Taken(r) = region_of(arena986) else {
+        RegionOf(u8)::Gone => { return; }
+    };
+    let (h, t) = region_split_static(r, 1);
+    let (t1, t2) = region_split_static(t, 1);
+    region_release(t1);
+    region_release(region_merge(h, t2));
+}
+
 fn main() -> i32 {
     return wrap(10, 50) as i32;
 }
@@ -366,7 +388,7 @@ def control(takibi: str) -> int:
         out_dir = tmp_path / "obligations"
         run = subprocess.run(
             [takibi, str(src), "-o", str(tmp_path / "control.o"),
-             "--internal-range-obligation-fault-control",
+             "--internal-range-obligation-fault-control", "--regions",
              "--emit-range-obligations", str(out_dir)],
             text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if run.returncode != 0:
@@ -428,9 +450,20 @@ def control(takibi: str) -> int:
         print("FAIL range-obligation control: #961's planted min/max range "
               "(#984) was not reported with a counterexample")
         return 1
+    # GitHub issue #986 slice 2: both planted decisions must be refuted.
+    overlay_planted = [f for f in failures
+                       if ": sat " in f and "rule: overlay" in f and "<= 7" in f]
+    region_planted = [f for f in failures
+                      if ": sat " in f and "rule: region" in f]
+    if len(overlay_planted) != 1 or len(region_planted) < 1:
+        print("\n".join(failures))
+        print("FAIL range-obligation control: #986 slice 2's planted overlay "
+              "length or region static identity was not refuted")
+        return 1
     failures = [f for f in failures
                 if f not in init_planted and f not in fact_planted
-                and f not in mm_planted]
+                and f not in mm_planted and f not in overlay_planted
+                and f not in region_planted]
     planted = [f for f in failures
                if ": sat " in f and "rule: sub" in f and "claim: {-60..<80 as usize}" in f
                and "counterexample" in f]

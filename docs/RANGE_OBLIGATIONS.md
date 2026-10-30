@@ -183,6 +183,30 @@ not to wrap, and requires `k = -1` for `m - 1`. On the QEMU kernel
 (2026-10-24): 85 no-wrap obligations out of 954; the init share of the cold
 budget is 1.06 s (21% of 5 s), and the whole check runs 2.6 s cold.
 
+## Region statics and header overlays (GitHub issue #986 slice 2)
+
+Two more memory-safety decisions write obligations in the init format
+(`; takibi-init-obligation v1`, so they count against the same 5 s cold
+budget):
+
+- `rule: region`. When `Types.unify_static`'s polynomial normal form says two
+  different static terms are equal -- the offset and count arithmetic that
+  makes a wrong-order `region_merge` or a count mismatch a type error -- the
+  terms as written become `(assert (not (= s1 s2)))` over integer atoms
+  (`x_p<id>` a rigid parameter, `x_v<id>` an unbound one), in QF_NIA. A
+  variable solved by linking, and two identical terms, write nothing: there
+  is no conclusion to check.
+- `rule: overlay`. An accepted header overlay (`bytes as &T`) writes the
+  header's size as z3 sums it from the field types as written (a recount,
+  not `const_type_size`) against the slice's proven minimum length:
+  `(assert (not (<= size n)))`.
+
+`make range-obligation-control` plants both: an off-by-one static identity
+(a merge whose tail starts one element late) and an overlay that accepts a
+slice one byte short, and requires z3 to refute each. On the QEMU kernel
+(2026-10-30): 1 region and 8 overlay obligations; the init share is
+3.41 s (68% of 5 s).
+
 ## Not covered
 
 - A wire-endian cast (`u16be <-> u16`) keeps the logical value's range and has

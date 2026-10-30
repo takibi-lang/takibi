@@ -184,6 +184,10 @@ let rec static_repr = function
       t'
   | t -> t
 
+(* GitHub issue #986 slice 2: where the static identity being decided was
+   asked for, for its obligation's site line (Type_inf.unify_at sets it). *)
+let static_obligation_loc = ref Lexing.dummy_pos
+
 let rec static_to_string t =
   match static_repr t with
   | SConst n -> string_of_int n
@@ -777,9 +781,54 @@ and static_of_poly (p, atoms) =
         if c > 0 then SAdd (acc, term m c) else SSub (acc, term m c))
         first rest
 
+(* GitHub issue #986 slice 2: the static arithmetic on region offsets and
+   counts is a memory-safety decision -- it is what makes a wrong-order
+   region_merge or a count mismatch a type error -- so when the normal form
+   says two different static terms are equal, that conclusion is written as
+   an obligation for z3, over the terms as written (not the normal form):
+   some integer values of their parameters make them differ. `unsat` proves
+   the identity. Integer, not machine, arithmetic: the statics are counts
+   and offsets, and an identity of integers holds at any width. *)
+and static_smt t =
+  match static_repr t with
+  | SConst n -> if n < 0 then Printf.sprintf "(- %d)" (-n) else string_of_int n
+  | SParam (id, _) -> Printf.sprintf "x_p%d" id
+  | SVar { contents = SUnbound id } -> Printf.sprintf "x_v%d" id
+  | SAdd (a, b) -> Printf.sprintf "(+ %s %s)" (static_smt a) (static_smt b)
+  | SSub (a, b) -> Printf.sprintf "(- %s %s)" (static_smt a) (static_smt b)
+  | SMul (a, b) -> Printf.sprintf "(* %s %s)" (static_smt a) (static_smt b)
+  | SGlobal _ | SEnum _ | SVar { contents = SLink _ } -> "0"
+
+and static_atoms t acc =
+  match static_repr t with
+  | SParam (id, _) -> Printf.sprintf "x_p%d" id :: acc
+  | SVar { contents = SUnbound id } -> Printf.sprintf "x_v%d" id :: acc
+  | SAdd (a, b) | SSub (a, b) | SMul (a, b) -> static_atoms a (static_atoms b acc)
+  | _ -> acc
+
+and record_static_identity s1 s2 =
+  if !Range_obligation.enabled && static_smt s1 <> static_smt s2 then begin
+    let atoms = List.sort_uniq compare (static_atoms s1 (static_atoms s2 [])) in
+    let b = Buffer.create 256 in
+    let line l = Buffer.add_string b l; Buffer.add_char b '\n' in
+    line "; takibi-init-obligation v1";
+    line "; rule: region";
+    line (Printf.sprintf "; claim: %s = %s" (static_to_string s1) (static_to_string s2));
+    line "(set-logic QF_NIA)";
+    List.iter (fun a -> line (Printf.sprintf "(declare-const %s Int)" a)) atoms;
+    line (Printf.sprintf "(assert (not (= %s %s)))" (static_smt s1) (static_smt s2));
+    line "(check-sat)";
+    Range_obligation.record_text !static_obligation_loc (Buffer.contents b)
+  end
+
 and unify_static_poly s1 s2 =
   let (p, atoms) = static_poly (SSub (s1, s2)) in
-  if p = [] then ()
+  (* Fault control only: an off-by-one identity (the terms differ by a
+     constant 1 alone) is taken as equal. *)
+  let p = match p with
+    | [ ([], (1 | -1)) ] when !Range_obligation.fault_static_constants -> []
+    | _ -> p in
+  if p = [] then record_static_identity s1 s2
   else
     let solvable = List.filter (fun (m, c) ->
       match m with

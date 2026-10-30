@@ -198,7 +198,9 @@ let () =
          Takibi.Range_obligation.fault_native_leaf := true;
          Takibi.Range_obligation.fault_native_init_leaf := true;
          Takibi.Range_obligation.fault_init_nowrap := true;
-         Takibi.Range_obligation.fault_index := true))
+         Takibi.Range_obligation.fault_index := true;
+         Takibi.Range_obligation.fault_static_constants := true;
+         Takibi.Range_obligation.fault_overlay_short := true))
       "plant known-unsound range rules (z3 check's failing control)";
   ] in
   (match Cli_flags.parse flags (Array.to_list Sys.argv |> List.tl) with

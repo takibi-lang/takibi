@@ -239,6 +239,15 @@ let fault_init_nowrap = ref false
    obligation refutes a wrong proof. *)
 let fault_index = ref false
 
+(* Fault controls only, same flag (GitHub issue #986 slice 2): the static
+   arithmetic of region offsets and counts takes two terms that differ by
+   a constant 1 alone as equal, so a merge of [b, o, k] with
+   [b, o + k + 1, m] is accepted; and the header overlay
+   accepts a slice one byte shorter than the header. The obligations each
+   decision writes must refute both. *)
+let fault_static_constants = ref false
+let fault_overlay_short = ref false
+
 (* GitHub issue #954: an obligation whose text another module built (an
    initialization coverage claim, Init_pred.obligation). It shares the
    directory, digest naming and site lines of the range obligations. *)
