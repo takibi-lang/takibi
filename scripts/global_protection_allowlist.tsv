@@ -133,7 +133,6 @@ kernel/init/test_driver.tkb	init_boot_fixture_pending	unreviewed; 2026-10-06 ret
 kernel/init/test_driver.tkb	init_boot_fixture_reported	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
 kernel/init/test_driver.tkb	init_boot_fixture_status	unreviewed
 kernel/init/test_driver.tkb	kernel_exec_reserve_undercount	unreviewed
-kernel/init/test_driver.tkb	kernel_init_socket_evidence	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
 kernel/init/test_driver.tkb	kernel_test_init_script	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
 kernel/init/test_driver.tkb	page_baseline	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
 kernel/init/test_driver.tkb	page_baseline_init_root	unreviewed

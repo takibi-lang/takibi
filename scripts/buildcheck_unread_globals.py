@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""A production global something only writes is a defect, not a counter.
+"""A production global something only writes is a defect, not a counter, and so
+is one nothing writes.
 
 GitHub issue #1263: #1259 deleted two counters nothing read and a survey found
 ten more, each paying for a store and a line of comment promising a reader
@@ -13,8 +14,17 @@ atomic case reads the use's source line. A use it cannot classify counts as a
 read: the check can miss a write-only global, never refuse a read one.
 
 A `dma_fixed` global is skipped: the compiler reaches it through its generated
-owner, so its name is never used. Readers the table cannot see: scripts/*.gdb reading by symbol (named in a gdb
-file).
+owner, so its name is never used. A reader the table cannot see: scripts/*.gdb
+reading by symbol (named in a gdb file).
+
+GitHub issue #1270: the converse. #1012 found two TCP words nothing ever set,
+with dead branches behind them. A scalar or single AtomicWord global with at
+least one use, none of which can write it, is refused: it should be a `let`, or
+gone with its branches. Only those types: an array or struct can be written
+through a pointer its plain read or cast yields, which the table cannot see. An
+`address` use writes unless every `&g` on its line is an atomic_word_load. A
+writer the table cannot see: a debugger or runner under scripts/ setting the
+symbol by name, so any file there naming the global counts.
 
 Usage: buildcheck_unread_globals.py QEMU.facts/globals.tsv RPI5.facts/globals.tsv
 """
@@ -30,6 +40,9 @@ from pass_line import report_pass
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUILTIN = "<builtin"
+SCALAR = re.compile(r"^(bool|[iu](8|16|32|64)|isize|usize|u16be|u32be|fn|AtomicWord|\*.*)$")
+# The allowlist names every unprotected global, so it says nothing about writers.
+NOT_A_WRITER = {"global_protection_allowlist.tsv"}
 ATOMIC_WRITE_ONLY = re.compile(
     r"^\s*atomic_word_(store|fetch_add|fetch_sub)\(&[^;]*\);\s*$")
 
@@ -46,7 +59,7 @@ def load(path: pathlib.Path, globs: dict, uses: dict) -> None:
         if in_uses:
             uses[row[2]].append((row[0], int(row[1]), row[3]))
         elif row[6] != "dma_fixed":
-            globs[row[2]] = row[0]
+            globs[row[2]] = (row[0], row[5])
 
 
 def is_write_only(use: tuple[str, int, str], root: pathlib.Path) -> bool:
@@ -59,11 +72,37 @@ def is_write_only(use: tuple[str, int, str], root: pathlib.Path) -> bool:
     return ATOMIC_WRITE_ONLY.match(source) is not None
 
 
+def may_write(use: tuple[str, int, str], name: str, root: pathlib.Path) -> bool:
+    file, line, kind = use
+    if kind == "write" or kind == "region":
+        return True
+    if kind != "address":
+        return False
+    source = (root / file).read_text(encoding="utf-8").splitlines()[line - 1]
+    addresses = len(re.findall(rf"&{re.escape(name)}\b", source))
+    loads = len(re.findall(rf"atomic_word_load\(&{re.escape(name)}\b", source))
+    return addresses == 0 or loads != addresses
+
+
+def find_unwritten(globs: dict, uses: dict, root: pathlib.Path) -> list[str]:
+    outside = "".join(path.read_text(encoding="utf-8", errors="replace")
+                      for path in sorted(root.glob("scripts/*"))
+                      if path.is_file() and path.name not in NOT_A_WRITER)
+    unwritten = []
+    for name, (file, kind) in sorted(globs.items()):
+        if file.startswith(BUILTIN) or not SCALAR.match(kind) or not uses[name]:
+            continue
+        if not any(may_write(use, name, root) for use in uses[name]) \
+                and not re.search(rf"\b{re.escape(name)}\b", outside):
+            unwritten.append(f"{file}: {name} is never written")
+    return unwritten
+
+
 def find_unread(globs: dict, uses: dict, root: pathlib.Path) -> list[str]:
     outside = "".join(path.read_text(encoding="utf-8")
                       for path in sorted(root.glob("scripts/*.gdb")))
     unread = []
-    for name, file in sorted(globs.items()):
+    for name, (file, _) in sorted(globs.items()):
         if file.startswith(BUILTIN):
             continue
         if all(is_write_only(use, root) for use in uses[name]) \
@@ -80,13 +119,14 @@ def main(argv: list[str]) -> int:
     uses: dict = collections.defaultdict(list)
     for table in argv[1:]:
         load(pathlib.Path(table), globs, uses)
-    unread = find_unread(globs, uses, ROOT)
+    unread = find_unread(globs, uses, ROOT) + find_unwritten(globs, uses, ROOT)
     for row in unread:
         print(f"ERROR unread-globals: {row}", file=sys.stderr)
     if unread:
         return 1
     report_pass("unread-globals",
-                f"{len(globs)} globals of both kernels each have a reader",
+                f"{len(globs)} globals of both kernels each have a reader "
+                "and, where the table can tell, a writer",
                 globals=len(globs))
     return 0
 

@@ -8,7 +8,7 @@ import pathlib
 import sys
 import tempfile
 
-from buildcheck_unread_globals import find_unread, load
+from buildcheck_unread_globals import find_unread, find_unwritten, load
 from pass_line import report_pass
 
 SOURCE = """\
@@ -27,9 +27,35 @@ USES = {
     "assigned": [("a.tkb", 1, "write")],
     "read_too": [("a.tkb", 1, "write"), ("a.tkb", 1, "read")],
 }
-GLOBALS = {name: "a.tkb" for name in USES}
-GLOBALS.update({"unused": "a.tkb", "claim": "<builtin region>"})
+GLOBALS = {name: ("a.tkb", "usize") for name in USES}
+GLOBALS.update({"unused": ("a.tkb", "usize"),
+                "claim": ("<builtin region>", "usize")})
 EXPECTED = ["assigned", "counted", "stored", "unused"]
+WRITTEN_SOURCE = """\
+let v = atomic_word_load(&only_loaded);
+atomic_word_store(&stored_word, 0);
+fill(&passed);
+"""
+WRITTEN_GLOBALS = {
+    "never_set": ("a.tkb", "bool"),
+    "only_loaded": ("a.tkb", "AtomicWord"),
+    "stored_word": ("a.tkb", "AtomicWord"),
+    "passed": ("a.tkb", "usize"),
+    "set_here": ("a.tkb", "usize"),
+    "set_by_runner": ("a.tkb", "bool"),
+    "array": ("a.tkb", "[u8;4]"),
+    "no_use": ("a.tkb", "usize"),
+}
+WRITTEN_USES = {
+    "never_set": [("a.tkb", 1, "read")],
+    "only_loaded": [("a.tkb", 1, "address")],
+    "stored_word": [("a.tkb", 2, "address")],
+    "passed": [("a.tkb", 3, "address")],
+    "set_here": [("a.tkb", 1, "read"), ("a.tkb", 1, "write")],
+    "set_by_runner": [("a.tkb", 1, "read")],
+    "array": [("a.tkb", 1, "cast")],
+}
+WRITTEN_EXPECTED = ["never_set", "only_loaded"]
 
 
 def main() -> int:
@@ -55,6 +81,15 @@ def main() -> int:
         uses = collections.defaultdict(list, USES)
         got = [row.split(": ")[1].split()[0]
                for row in find_unread(GLOBALS, uses, root)]
+        (root / "a.tkb").write_text(WRITTEN_SOURCE)
+        (root / "scripts/run.sh").write_text("set &set_by_runner = 1\n")
+        written = collections.defaultdict(list, WRITTEN_USES)
+        got_written = [row.split(": ")[1].split()[0]
+                       for row in find_unwritten(WRITTEN_GLOBALS, written, root)]
+    if got_written != WRITTEN_EXPECTED:
+        print(f"ERROR unread-globals controls: unwritten got {got_written}, "
+              f"expected {WRITTEN_EXPECTED}", file=sys.stderr)
+        return 1
     if got != EXPECTED:
         print(f"ERROR unread-globals controls: got {got}, expected {EXPECTED}",
               file=sys.stderr)
@@ -62,8 +97,9 @@ def main() -> int:
     report_pass("unread-globals controls",
                 f"{len(GLOBALS)} claims -- stores, whole-statement fetch_adds, "
                 "assignments and unused globals are refused; a used fetch_add, "
-                "a load, a real read, a gdb reader, a dma_fixed backing, a "
-                "builtin and the listed indirect call are not",
+                "a load, a real read, a gdb reader, a dma_fixed backing and "
+                "a builtin are not; a scalar or word nothing writes is refused, "
+                "a store, a passed address, a runner's set and an array are not",
                 cases=len(GLOBALS))
     return 0
 

@@ -81,6 +81,12 @@ say what a callee does, so an atomic use is classified from its source line, and
 an unclassifiable one counts as a read: it can miss a case, never refuse a
 real reader.
 
+The same check refuses the converse: a scalar or single `AtomicWord` global with
+uses, none of which can write it. An `address` use counts as a write unless it
+is an `atomic_word_load`, and a global named by any file under `scripts/` counts
+as set by a debugger or runner. An array or struct is not judged, because a
+plain read or cast of one can yield a pointer something writes through.
+
 ## The ratchet
 
 Production means compiled into either kernel image, under `kernel/` and

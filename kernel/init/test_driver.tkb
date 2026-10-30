@@ -122,7 +122,6 @@ fn exec_metadata_prefix(metadata: [u8; EXEC_METADATA_SIZE..],
     }
     return metadata[0..<EXEC_METADATA_SIZE];
 }
-let mut kernel_init_socket_evidence: bool;
 variant BootRootImageState { Unavailable; Ready(Ext2ExecImage); }
 // The plan borrows permanent rootfs_metadata, never a boot stack buffer.
 struct BootExecutionContext {
@@ -1100,7 +1099,7 @@ fn kernel_process_child_exec_reap() {
 }
 
 fn kernel_init_script_socket_evidence() {
-    if (kernel_init_socket_evidence || kernel_syscall_socket_evidence()) {
+    if (kernel_syscall_socket_evidence()) {
         kernel_boot_log("linux socket syscalls: two overlapping connections fd=5,6 independent ok port=8080\n");
     }
     // GitHub issue #740 step 2: a socket segment was queued for
