@@ -47,6 +47,10 @@ Read-only: no code changed.
 
 ### F1: nothing handle-shaped crosses outbound
 
+Since #1228 a build check keeps this finding true lexically:
+`scripts/check_handle_boundary.py` refuses a slot or generation word in the
+written value of any sink listed under Method.
+
 Each value written, by kind:
 
 - Descriptors: the `pipe2` fds (syscall.tkb:2840-2841) and every returned
