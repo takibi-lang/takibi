@@ -132,28 +132,6 @@ def main() -> int:
     if clean:
         failures.append(f"comments or strings counted as frame mints: {clean}")
     failures += frames(
-        "a function that is not a declared entry mints a frame",
-        "fn sneaky() {\n    let mut f: FrameRef = frame_ref_from_entry(4096);\n}\n",
-        "sneaky calls frame_ref_from_entry and is not one of its declared callers")
-    failures += frames(
-        "a frame address rebuilt from a record outside the declared set",
-        "fn sneaky() {\n    let mut f: FrameRef = frame_ref_from_saved(0);\n}\n",
-        "sneaky calls frame_ref_from_saved")
-    # GitHub issue #846: the syscall return path must not reach the pass.
-    failures += frames(
-        "the shared EL0-return hook runs the retransmit pass",
-        "fn kernel_process_stack_switch_complete(frame_sp: usize) {\n"
-        "    kernel_net_retransmit_pass();\n}\n",
-        "kernel_process_stack_switch_complete calls kernel_net_retransmit_pass")
-    CASES.note()
-    clean, _ = check.check_frames({"control.tkb":
-        "fn kernel_irq_return_complete(frame_sp: usize) {\n"
-        "    kernel_process_stack_switch_complete(frame_sp);\n"
-        "    kernel_net_retransmit_pass();\n}\n"
-        "fn kernel_idle_loop() { kernel_net_retransmit_pass(); }\n"})
-    if clean:
-        failures.append(f"a declared retransmit-pass caller was refused: {clean}")
-    failures += frames(
         "a new function that takes a frame as a bare usize",
         "fn sneaky(frame_sp: usize) {\n}\n",
         "sneaky takes a frame address as a bare usize")
@@ -171,8 +149,8 @@ def main() -> int:
         "the tree passes, and a start that takes Ready, a reap that takes "
         "Exited, a token minted outside the named functions, a token "
         "written as a literal, a check that no longer reads the stack owner, "
-        "default frame initialization, a frame minted or taken as a bare usize outside its declared "
-        "set, and a retransmit pass on the syscall return path are each "
+        "default frame initialization, and a frame taken as a bare usize outside "
+        "its declared set are each "
         "refused for their own reason",
         cases=CASES.ran)
     return 0

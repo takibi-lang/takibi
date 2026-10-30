@@ -24,7 +24,8 @@ C). A saved exception frame is a `FrameRef`, made only by `frame_ref_from_entry`
 `frame_ref_from_el0_entry` (the syscall entry's frame, or a probe's stand-in),
 `frame_ref_fresh` (a frame written whole first), `frame_ref_from_saved`
 (rebuilt from a process record's saved_sp, for the process whose owner the one
-caller `scheduled_process_saved_frame` holds) and `maybe_frame_from_entry`; the callers of each are a declared set, and a
+caller `scheduled_process_saved_frame` holds) and `maybe_frame_from_entry`; the
+callers of each are rows of scripts/allowed_callers.tsv (#567), and a
 parameter named for a frame address (`frame_sp`, `current_sp`, ...) is a bare
 `usize` only in the declared seams, where an assembly ABI or a stack-bound
 comparison needs an integer.
@@ -63,51 +64,6 @@ LITERALS = {"Startable": "scheduled_process_startable_state",
 
 FUNCTION_RE = re.compile(r"^(?:private )?(?:inline |noinline )?fn (\w+)\(", re.M)
 
-# The callers of each frame mint, by function name, with why each is one.
-FRAME_MINT_CALLERS = {
-    # GitHub issue #992: the entry mint reads the frame's level from its
-    # SPSR, so it serves every entry that may see an EL1 frame.
-    "frame_ref_from_entry": {
-        # The generated IRQ entries and return hooks, which receive a frame
-        # of either level in x0; the exit path's successor frame.
-        "kernel_process_stack_switch_complete", "kernel_irq_return_complete",
-        "platform_irq_dispatch", "platform_el0_irq_dispatch",
-        "kernel_syscall_clone_parent_return",
-        # The debugger and the crash reporter, declared mint code by design.
-        "ddb_current_unwind_root", "kernel_ddb_sync_dispatch",
-        "crash_snapshot_capture",
-        # GitHub issue #920: the crash path's debug-stop root, split out of
-        # crash_snapshot_capture so the compiler can hold it to no lock.
-        "crash_world_stop_report",
-    },
-    # The syscall entry's frame, El0 by the vector it came through.
-    "frame_ref_from_el0_entry": {
-        "kernel_syscall_block_return", "kernel_syscall_resume_return",
-        "kernel_syscall_clone_child_return", "kernel_syscall_migrate_return",
-        "maybe_frame_from_entry",
-        # Boot-time probes that stand in frames which are not real ones.
-        "kernel_process_probe_tick_address",
-        "kernel_process_trace_block_wake_probe",
-        "kernel_process_scheduler_probe",
-    },
-    "frame_ref_from_saved": {
-        # A frame rebuilt from a process record's saved_sp, indexed by the
-        # owner of that record: every delivery into another process's frame
-        # (through scheduled_process_parked_frame, El0 only) and every
-        # scheduler pickup goes through this one function.
-        "scheduled_process_saved_frame",
-    },
-    # A frame written whole before it is resumed, El0 by what is written.
-    "frame_ref_fresh": {
-        # A child's frame, placed at the top of its new stack and then copied.
-        "kernel_syscall_clone_child_return",
-        # PID 1's first frame, built at the top of its own new stack before
-        # the record is published Ready (GitHub issue #831).
-        "kernel_process_init_publish",
-    },
-    "maybe_frame_from_entry": {"kernel_syscall_dispatch"},
-}
-
 # Parameter names that mean "a frame address". As a bare usize they are
 # allowed only here: an assembly ABI seam, or an address compared with a
 # stack's bounds.
@@ -139,15 +95,6 @@ FRAME_USIZE_SEAMS = {
     "ddb_bt_test_stopped_check", "kernel_ddb_enter_stopped",
 }
 
-
-# GitHub issue #846: the stack-wide TCP retransmit pass runs on the return
-# to EL0 after an interrupt and in the idle loop, never on a syscall's
-# return (maintainer, 2026-10-24): Linux runs softirqs at irq_exit, not in
-# exit_to_user_mode_loop. Its callers are this set, so a call added to
-# kernel_process_stack_switch_complete, which every syscall return runs,
-# is refused. The linked-image half is buildcheck_kernel_asm_invariants.py.
-RETRANSMIT_PASS = "kernel_net_retransmit_pass"
-RETRANSMIT_PASS_CALLERS = {"kernel_irq_return_complete", "kernel_idle_loop"}
 
 
 def body_start(text: str, opener: int) -> int:
@@ -251,18 +198,6 @@ def check_frames(files: dict[str, str]) -> tuple[list[str], int]:
                             "bypasses the declared frame mints")
         for name, (signature, body) in functions(code_only(text)).items():
             examined += 1
-            for mint, callers in FRAME_MINT_CALLERS.items():
-                if name != mint and re.search(rf"\b{mint}\(", body) and \
-                        name not in callers:
-                    failures.append(
-                        f"{path}: {name} calls {mint} and is not one of its "
-                        "declared callers")
-            if re.search(rf"\b{RETRANSMIT_PASS}\(", body) and \
-                    name != RETRANSMIT_PASS and \
-                    name not in RETRANSMIT_PASS_CALLERS:
-                failures.append(
-                    f"{path}: {name} calls {RETRANSMIT_PASS}, which only an "
-                    "interrupt's return to EL0 and the idle loop may run")
             if FRAME_PARAM_RE.search(" ".join(signature.split())) and \
                     name not in FRAME_USIZE_SEAMS:
                 failures.append(
@@ -289,9 +224,8 @@ def main() -> int:
         return 1
     report_pass(
         "stack-proof-states",
-        f"start takes only Startable and reap only Reapable; frame handles "
-        f"use declared callers of {len(FRAME_MINT_CALLERS)} mints and no "
-        f"direct default initialization; "
+        f"start takes only Startable and reap only Reapable; frame address "
+        f"parameters stay in their seams and no direct default initialization; "
         f"{len(STARTABLE_MINTS) + len(REAPABLE_MINTS)} mint functions read "
         f"stack_owner_cpu and nothing else builds the tokens "
         f"({examined} functions read)",

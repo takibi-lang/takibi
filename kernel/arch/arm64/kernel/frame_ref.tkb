@@ -65,7 +65,7 @@ private fn frame_leveled(sp: usize, generation: usize @ process)
 }
 
 // The mints. Every FrameRef in the kernel comes from one of them, and
-// scripts/check_stack_proof_states.py holds their callers to a declared set.
+// scripts/allowed_callers.tsv holds their callers to a declared set.
 // Each takes the generation of the process the frame belongs to, which is
 // what supplies the process index, as current_process_new and
 // scheduled_process_owner_new do for theirs.
@@ -79,7 +79,7 @@ fn frame_ref_from_entry(sp: usize, generation: usize @ process)
 
 // The syscall entry's frame: an SVC is taken only through the lower-EL
 // synchronous vector, so the frame returns to EL0. Trusts that the caller is
-// that entry (check_stack_proof_states.py holds the callers).
+// that entry (scripts/allowed_callers.tsv holds the callers).
 fn frame_ref_from_el0_entry(sp: usize, generation: usize @ process)
         -> FrameRef[process, ExceptionLevel::El0] {
     let mut frame: FrameRef[process, ExceptionLevel::El0] = { sp };
