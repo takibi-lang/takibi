@@ -17,6 +17,7 @@ its status, so a moved layout is seen here and not first in a land; refresh
 with `scripts/buildcheck_kernel_memory_map.py --update`.
 """
 
+import argparse
 import subprocess
 import sys
 import tempfile
@@ -59,8 +60,16 @@ def symbols(elf):
     return table
 
 
+def parse_args(argv):
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("base", nargs="?", default="origin/main",
+                        help="base commit to compare against (default: %(default)s)")
+    return parser.parse_args(argv)
+
+
 def main():
-    base = sys.argv[1] if len(sys.argv) > 1 else "origin/main"
+    base = parse_args(sys.argv[1:]).base
     build(ROOT)
     with tempfile.TemporaryDirectory(prefix="takibi-space-base-") as tmp:
         tree = Path(tmp) / "base"
