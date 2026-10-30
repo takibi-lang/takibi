@@ -2,7 +2,7 @@
 
 # Compiler command line
 
-`takibi <file.tkb>... [flags]`: 22 flags, from the table in `bin/main.ml`. GitHub issue #1027 plans their consolidation.
+`takibi <file.tkb>... [flags]`: 23 flags, from the table in `bin/main.ml`. GitHub issue #1027 plans their consolidation.
 
 ## Target and output (5)
 
@@ -53,6 +53,7 @@
 | --- | --- | --- |
 | `--internal-tla-omit-cache` | `publish\|finish\|refresh` | with --generate tla, leave one cache step out (fault control) |
 | `--internal-trace-init-flow` | `<function>` | print a function's init state after each statement |
+| `--internal-region-table-last-generation` | `<n>` | retire a region table slot freed at generation n |
 | `--internal-range-obligation-fault-control` | - | plant known-unsound range rules (z3 check's failing control) |
 | `--internal-allow-unused` | - | accept a function nothing reachable uses (rejected by default) |
 
