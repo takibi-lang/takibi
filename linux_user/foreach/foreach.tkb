@@ -21,7 +21,7 @@
 // otherwise demand relational reasoning. Same algorithm, same result,
 // no bounds obligations at all.
 //
-// This whole file compiles under --forbid-trap (every linux_user test is built with --forbid-trap).
+// This whole file compiles with trap sites rejected (every linux_user test is built with trap sites rejected).
 //
 // QEMU expected output:
 //   copied=8 eq=yes eq2=no sum=548 ck=61162 part=4

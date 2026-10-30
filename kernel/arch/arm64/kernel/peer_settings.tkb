@@ -1,7 +1,7 @@
 /* GitHub issue #635: /bin/peer-settings. A terminal settings change must wake
  * a reader that is already asleep in a canonical read, with no further UART
  * byte to do it. A standalone static-PIE EL0 program, kept free of writable
- * globals and compiled with --forbid-trap.
+ * globals and compiled with trap sites rejected.
  *
  * The parent stays on CPU 0; the child, pinned to the secondary, reads the
  * terminal in canonical mode, where the bytes the driver types without a
@@ -47,7 +47,7 @@ private fn peer_settings_cpu(cpu_bytes: borrow [u8; 4..]) -> usize {
 }
 
 // One bit per CPU; a runtime shift would need a bound the compiler cannot see
-// under --forbid-trap.
+// under the trap-site rejection.
 private fn peer_settings_cpu_bit(cpu: usize) -> u8 {
     if (cpu == 0) { return 1; }
     if (cpu == 1) { return 2; }

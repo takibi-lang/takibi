@@ -21,7 +21,7 @@ module StringSet = Set.Make (String)
 
 (* What one expression site refers to. The target is passed beside it, not
    inside it, so a compile without --facts callgraph.tsv allocates nothing more
-   for --reject-unused-functions than it did before the traversal was
+   for the unused-function check than it did before the traversal was
    shared (#923's budget measures words). *)
 type reference =
   | Call      (* a resolved direct call; the target is its definition key *)
@@ -34,7 +34,7 @@ type reference =
    a monomorphized name is unique, and overload_key returns a unique name
    unchanged, so an instance's key is its own name. Before #987, looking
    every instance up by loc attributed all their calls to one instance, and
-   --reject-unused-functions reported a helper reached only through another
+   the unused-function check reported a helper reached only through another
    instance as unused. *)
 let definition_key (types : program_types) (f : func) =
   if String.contains f.name '$' then f.name
@@ -62,7 +62,7 @@ let iter_references (visit : string option -> reference -> string -> unit)
   let rec expr from (e : expr) =
     (* One key per expression: loc_key formats a string, and a second one
        per call would be the only allocation the shared walk added to
-       --reject-unused-functions. *)
+       the unused-function check. *)
     let key = loc_key e.loc in
     (match StringMap.find_opt key types.function_values with
      | Some target -> visit from Value target | None -> ());

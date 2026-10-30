@@ -619,13 +619,13 @@ Takibi does not currently establish all of the following:
   scheduler policy;
 - confidentiality properties such as clearing every byte before exposing a
   page to another protection domain;
-- absence of every architectural exception. `--forbid-trap` covers only the
+- absence of every architectural exception. The trap-site rejection covers only the
   compiler-recorded checks described above;
 - that the RPi5 stick receives exactly `kernel/build/user/ext2.img` (#1218).
   The kernel embeds an LZ4 container and expands it at boot
   (`kernel/lib/lz4.tkb`, `kernel/lib/lz4_image.tkb`). Bounds are checked:
   every read and write of the codec is against its borrowed regions, and a
-  malformed container ends in `Invalid`, under `--forbid-trap`. The bytes
+  malformed container ends in `Invalid`, under the trap-site rejection. The bytes
   are trusted to a host encoder and decoder (`scripts/lz4_image.py`, whose
   pack step decodes its own output and compares it with the image) and to
   `linux_user/lz4`, which checks the kernel decoder against the host
@@ -675,7 +675,7 @@ python3 scripts/measure_trusted_base.py --verbose
 ```
 
 The normal output is a concise inventory. The verbose form lists the exact
-depfile-derived `--forbid-trap` source union, any kernel `.tkb` file outside
+depfile-derived source union, any kernel `.tkb` file outside
 that union, and every unsafe block with its primary syntactic rationale.
 Assembly is split into production handwritten, generated, and fixture input;
 raw casts, MMIO, extern declarations, and DMA/cache operations are reported as

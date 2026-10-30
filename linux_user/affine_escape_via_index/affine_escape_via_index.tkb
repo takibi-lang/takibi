@@ -1,6 +1,6 @@
 // Proof-of-concept for GitHub issue #89's "escape" problem. Deliberately
 // small and possibly throwaway -- built to answer one question (does this
-// idiom actually compile clean under --forbid-trap, with the index
+// idiom actually compile clean under the trap-site rejection, with the index
 // genuinely escaping its acquiring function) before deciding whether to
 // roll it out to any real driver. See HISTORY.md's issue #89 entries.
 //

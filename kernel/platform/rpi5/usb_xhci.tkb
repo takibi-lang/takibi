@@ -98,7 +98,7 @@ const DEVICE_CTX_SIZE: usize = 2048; // 32 * 64
 // array-of-struct indexing (ring[idx].dwK) wherever the index is a
 // compile-time-refined loop counter, and with `*Trb` pointer indexing
 // (same trust level the raw pointer arithmetic already had, no new
-// --forbid-trap obligation) wherever the index is runtime producer/
+// trap-site obligation) wherever the index is runtime producer/
 // consumer state (xhci_cmd_enq, xhci_evt_idx, xhci_ep0_enq, ...).
 struct Trb {
     dw0: u32;
@@ -1177,7 +1177,7 @@ fn xhci_configure() -> XhciConfigureOutcome {
 
 // Split out of xhci_configure() above so in_num/out_num > 0 is a real
 // narrowing guard on this function's own parameters (matching
-// rp1_usb_smoke.tkb's own proven pattern) -- --forbid-trap otherwise
+// rp1_usb_smoke.tkb's own proven pattern) -- the trap-site rejection otherwise
 // rejects out_num*2-1 as a possible underflow.
 fn xhci_configure_endpoint(in_num: {1..<16 as usize},
                            out_num: {1..<16 as usize})

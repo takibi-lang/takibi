@@ -390,7 +390,7 @@ KERNEL_ASM_ENTRIES := main kernel_secondary_main \
 KERNEL_DEBUGGER_ENTRIES := kernel_process_trace_report page_owner_description
 # GitHub issue #786: every kernel link removes the sections nothing reaches
 # (the compiler emits one section per function and data object under
-# --function-sections). The roots are the entry symbol, the KEEP() sections
+# the default one section per function). The roots are the entry symbol, the KEEP() sections
 # of the linker scripts (.text.boot, .text.vectors), and what those reach
 # through relocations -- which covers KERNEL_ASM_ENTRIES, since assembly
 # names them in relocated instructions. The debugger entries are called by

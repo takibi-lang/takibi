@@ -8,7 +8,7 @@
 // bounded four-slot queue, including independent data and FIN retransmission.
 // This concrete bound removes the relational payload slice that the broader
 // prototype implementation needed to mark unsafe, keeping this path free
-// of unsafe blocks and clean under the kernel's --forbid-trap build.
+// of unsafe blocks and clean under the kernel's trap-rejecting build.
 //
 // Current limitations (2026-09-24, issues #295, #257 and #274). Keep this list
 // current as call sites change; a limitation that goes stale here is
@@ -2296,7 +2296,7 @@ fn pending_tcp_chain_probe_body(ready: borrow NetRxCanAcquire, owner_a: borrow T
 // Takes the entry itself rather than a pair of indices into nine arrays:
 // what used to need `conn * PENDING_TCP_MAX + slot` -- and a
 // refined slot type so every one of those accesses could prove in range
-// under --forbid-trap -- is now a struct the caller already has a pointer
+// under the trap-site rejection -- is now a struct the caller already has a pointer
 // to, and there is no index to bound.
 fn pending_tcp_ack_matches(frame: borrow [u8; 1514..], len: i32,
                            entry: borrow &mut RetxEntry) -> bool {

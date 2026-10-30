@@ -251,7 +251,7 @@ const POLLNVAL: usize = 0x0020;
 // Linux's own iovec-count cap (UIO_MAXIOV, include/uapi/linux/uio.h) --
 // keeps iovcnt*sizeof(Iovec) far below any real overflow risk even before
 // checked_mul_usize is applied, and keeps the per-iovec/pollfd validation
-// loop provably bounded for --forbid-trap. Checked as `>= IOV_MAX`
+// loop provably bounded for the trap-site rejection. Checked as `>= IOV_MAX`
 // (rejecting the boundary value itself, not just values above it) so the
 // accepted range narrows cleanly to the refined type `{0..<IOV_MAX}`
 // with no separate lower-bound proof needed.

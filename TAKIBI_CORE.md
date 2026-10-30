@@ -1333,7 +1333,7 @@ plumbing is #1054.
 
 Keep the parser/LLVM pipeline, ordinary type inference, arrays, dynamic
 slices, alignment, privacy, exhaustive matching, refinement intervals, and
-`--forbid-trap`. They are useful inputs or backends for the Core.
+the trap-site rejection. They are useful inputs or backends for the Core.
 
 Replace rather than preserve indefinitely:
 

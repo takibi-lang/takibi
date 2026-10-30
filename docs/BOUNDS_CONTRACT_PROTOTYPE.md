@@ -46,7 +46,7 @@ a user struct or a similarly named accessor cannot mint those facts.
 
 The source checker records successful slice-index evidence. LLVM load,
 indexed-store and indexed-address lowering consume it, retaining the trap
-when it is absent. The executable fixture is built with `--forbid-trap`.
+when it is absent. The executable fixture is built with trap sites rejected.
 Assertions about scalar order are erased; there is no hidden runtime witness.
 
 The compiler trusts its existing constant/static normalization, correct
@@ -168,14 +168,14 @@ The native executable reports these checked AMD64 layouts:
 | Place of that RegionSlot | 16 |
 
 The same complete native fixture also compiles to an AArch64 cortex-a53
-object with `--regions --forbid-trap`, in addition to focused compiler tests. Layout is not a measurement of a new
+object with `--regions`, in addition to focused compiler tests. Layout is not a measurement of a new
 physical-span mint or a migrated allocator.
 
 ## Before/after compiler evidence
 
 Twelve independent command-line probes were reproduced against baseline
 `132a74ec` and the prototype for AArch64 cortex-a53 with
-`--regions --forbid-trap`. Each rejection independently requires a nonzero
+`--regions`. Each rejection independently requires a nonzero
 exit status and its expected diagnostic, rather than a failed output search.
 The sources can be reconstructed from the maintained tests/fixture; local
 commands and full logs are in `.git/takibi-diagnostics/734/results.json`.
@@ -216,7 +216,7 @@ before the repair. Companion tests cover a loop and an early-return subslice
 endpoint; all require the necessary check after repair.
 
 Prevention is inferred by the checker and shared scan, with no caller
-annotation or new trusted mint. With `--forbid-trap`, the unsafe program is
+annotation or new trusted mint. With the trap-site rejection, the unsafe program is
 rejected at compilation; ordinary checked code retains its runtime guard.
 No multicore protocol or bounded model is implicated. Scanning nested
 index/slice bases also prevents those expression shapes hiding an escape.

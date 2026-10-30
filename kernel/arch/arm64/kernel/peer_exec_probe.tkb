@@ -1,6 +1,6 @@
 /* execve on a peer (GitHub issue #610): two static-PIE EL0 programs linked
  * from this one object, kept free of writable globals and compiled with
- * --forbid-trap. run once from init.sh.
+ * the trap-site rejection. run once from init.sh.
  *
  * /bin/peer-exec pins itself to CPU 0 and execs /bin/peer-exec-image. That
  * image asks the kernel (workload tag 18) where the exec committed. The

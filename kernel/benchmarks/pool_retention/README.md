@@ -57,7 +57,7 @@ python3 kernel/benchmarks/pool_retention/prepare.py /tmp/retain-rpi0 --retain 0 
 ```
 
 Each output must be a new directory. The copied kernel is built using the
-normal --regions --forbid-trap flags, DWARF, and the root's matching assembly
+normal --regions flags, DWARF, and the root's matching assembly
 objects/linker scripts. Both linked assembly-invariant and boot alignment
 checks must pass. No production target gains a retention option. Each output
 records source hashes, input commit, platform and retention in provenance.json.

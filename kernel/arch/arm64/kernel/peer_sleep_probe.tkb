@@ -1,6 +1,6 @@
 /* A peer sleeper wakes on time while core 0 is masked (GitHub issue #829).
  * A static-PIE EL0 program, kept free of writable globals and compiled with
- * --forbid-trap, run once from init.sh.
+ * the trap-site rejection, run once from init.sh.
  *
  * It forks. The child forks a competitor that spins on CPU 1 until the
  * experiment is over, then pins itself to CPU 1, registers with the kernel

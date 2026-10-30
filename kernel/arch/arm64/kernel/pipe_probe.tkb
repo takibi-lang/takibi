@@ -1,6 +1,6 @@
 /* pipe2(2) from EL0 (GitHub issue #1042): two static-PIE programs linked
  * from this one object, kept free of writable globals and compiled with
- * --forbid-trap, run from the shared ash transcript.
+ * the trap-site rejection, run from the shared ash transcript.
  *
  * /bin/pipe-probe checks, in order, and prints one line per group:
  *   - the refusals: an unknown flag is EINVAL, an unwritable array EFAULT;

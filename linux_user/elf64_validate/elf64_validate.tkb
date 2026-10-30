@@ -1,5 +1,5 @@
 // Focused malformed-ELF tests for the common and maintained kernel validators.
-// The fixture builds with --forbid-trap and performs no ELF loading.
+// The fixture builds with trap sites rejected and performs no ELF loading.
 
 use "linux_user/common/elf64_validate.tkb";
 use "kernel/fs/elf64.tkb";

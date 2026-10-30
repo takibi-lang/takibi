@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Every kernel file a target compiles is checked for unused functions, or named as exempt.
 
-GitHub issue #540. `--reject-unused-functions` reports a function nothing
+GitHub issue #540. The unused-function check reports a function nothing
 reads, but only in the files the Makefile passes to `--check-unused-file`.
 A hand-written list silently leaves a new file out, and a file left out is
 exactly where an accessor nobody calls goes unnoticed, which is what #540 was

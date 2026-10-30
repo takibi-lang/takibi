@@ -10,7 +10,7 @@ GitHub issue #645, part of `make modelcheck`. Two checks:
 2. The litmus tests must describe the instructions the compiler really
    emits. kernel/models/litmus/emitted_map.txt names, per litmus location,
    the Takibi functions and globals it stands for. This disassembles the
-   RPi5 kernel object (built with --function-sections, so each function is
+   RPi5 kernel object (built with one section per function, so each function is
    its own section and relocations name the globals), follows each global's
    address through registers and into the functions it calls, and requires
    every access of the thread's direction to use the litmus instruction's

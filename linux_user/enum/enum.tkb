@@ -6,7 +6,7 @@
 // Color is NON-EXHAUSTIVE (`_;`): `raw as Color` at line ~49 casts a u8
 // with no statically-known range (freshly loaded, not narrowed), so an
 // EXHAUSTIVE enum would need a runtime variant check there -- the one
-// residual --forbid-trap site this whole example suite used to carry
+// residual trap site this whole example suite used to carry
 // (see CLAUDE.md's P4 sections). Marking Color non-exhaustive is the
 // right fix, not a workaround: this demo's own cast site has no evidence
 // bounding raw to {0,1,2}, so the type-level choice that matches reality

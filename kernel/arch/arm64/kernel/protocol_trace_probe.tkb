@@ -1,6 +1,6 @@
 /* The window scripts/validate_protocol_trace.py replays against
  * StackOwnership.tla (GitHub issue #606). A static-PIE EL0 program, kept
- * free of writable globals and compiled with --forbid-trap, run once from
+ * free of writable globals and compiled with trap sites rejected, run once from
  * init.sh.
  *
  * It opens the kernel's protocol-trace window, then runs the lifecycle the

@@ -487,7 +487,7 @@ fn profile_session_control(text: []const u8)
 //   when the span is a new longest. Spans already open when the session
 //   starts are not counted.
 // - Return addresses come from the canonical frame records of the
-//   --frame-pointers contract; a chain that leaves the current process
+//   default frame-pointer contract; a chain that leaves the current process
 //   kernel stack ends the walk early, and a span opened on a non-process
 //   (boot) stack records no sites at all.
 const IRQSOFF_DEPTH: usize = 3;

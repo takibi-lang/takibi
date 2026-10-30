@@ -4634,7 +4634,7 @@ fn scheduled_process_table_probe() -> bool !{unsafe} {
 
     // Every live process's stack must be distinct, and must END exactly
     // where its run ends. Both loops bound by the same constant, not one
-    // loop bound by the other's variable, so --forbid-trap can prove both
+    // loop bound by the other's variable, so the trap-site rejection can prove both
     // `handles[i]`/`handles[j]` accesses in one pass (a variable inner
     // bound like `0..<i` does not carry a provable range here).
     //

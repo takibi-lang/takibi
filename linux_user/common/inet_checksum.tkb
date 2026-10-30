@@ -13,7 +13,7 @@
 // the length lives in the slice's own .len, so a caller with a
 // compile-time-proven view (a fixed-offset header field, or a runtime
 // span proven via the P4a same-base/interval rules) gets a fully
-// --forbid-trap-clean call; only a genuinely unbounded span falls back to
+// trap-free call; only a genuinely unbounded span falls back to
 // a runtime-checked subslice (one recorded trap site) at the CALL site,
 // not inside this function. `for b in data` replaces the old stride-2
 // index loop (data[i], data[i+1], guarded by i+1<len) with the hi/lo

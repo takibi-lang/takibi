@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Keep the kernel's declared assembly entry points equal to what assembly calls.
 
-GitHub issue #540. `--reject-unused-functions` sees only calls between Takibi
+GitHub issue #540. The unused-function check sees only calls between Takibi
 functions. A function that kernel assembly reaches by name -- `bl
 kernel_syscall_dispatch` in user_entry.S -- has no Takibi caller, so the
 Makefile declares it with `--external-entry`. A hand-written list drifts both

@@ -260,34 +260,34 @@ let global_const_defs : (string, Ast.type_expr * Ast.expr) Hashtbl.t = Hashtbl.c
 let global_literal_array_initializers : (string, Ast.expr list) Hashtbl.t =
   Hashtbl.create 16
 
-(* -- Trap-site accounting (--forbid-trap) --------------------------------- *)
+(* -- Trap-site accounting (rejected by default) --------------------------------- *)
 (* Every runtime trap check emitted by codegen (array/slice bounds, checked
    refined cast, exhaustive-enum cast, subslice, division/remainder) is
    recorded here with its source
-   location. bin/main.ml reads this after gen_program: under --forbid-trap a
+   location. bin/main.ml reads this after gen_program: under the trap-site rejection a
    non-empty list is a compile error listing every unproven site.
    Recording happens at IR-generation time, i.e. it reflects exactly what the
    type system could not prove. This is deliberately independent of whether
    LLVM's optimizer would later fold a particular check away (see
-   run_optimizations' correlated-propagation note): the --forbid-trap
+   run_optimizations' correlated-propagation note): the trap-site rejection
    guarantee must stay deterministic across LLVM versions and pass behavior,
    so "the optimizer happened to remove it" never counts as proof. *)
 let trap_sites : (Lexing.position * string) list ref = ref []
 let record_trap loc what = trap_sites := (loc, what) :: !trap_sites
 
-(* -- Stable frame chains (--frame-pointers) ---------------------------- *)
+(* -- Stable frame chains (the default) ---------------------------- *)
 (* This is an object-level code-generation contract, not a source-language
    property. The maintained kernel enables it so its debugger can consume
    AArch64's canonical [previous x29, saved x30] records without decoding
    LLVM prologues. Other targets keep LLVM's normal frame-pointer policy. *)
 let set_frame_pointers enabled = frame_pointers_enabled := enabled
 
-(* -- One section per object (--function-sections) ------------------------ *)
+(* -- One section per object (the default) ------------------------ *)
 (* GitHub issue #786: every defined function and global gets a section of its
    own, the -ffunction-sections / -fdata-sections equivalent, so the linker's
    --gc-sections removes whatever nothing reaches. Removing dead code is the
    linker's job; the compiler's whole-program analysis is for correctness
-   checks. A function goes to .text.takibi.<name> under --frame-pointers (the
+   checks. A function goes to .text.takibi.<name> with frame pointers kept (the
    kernel's generated-text range) and to .text.<name> otherwise; a global goes
    to .rodata./.bss./.data.<name> by its kind. An object that already names a
    section keeps it. Data objects use the same naming LLVM uses, so the name
@@ -593,7 +593,7 @@ let local_mem locals name = Hashtbl.mem locals.visible name
    (BinOp comparisons, Assign, Call arguments, Return, ...) is unaffected
    and still relies on it as before -- #311's own fix was deliberately
    scoped to Index/AssignIndex specifically (the one consumer that matters
-   for --forbid-trap soundness reporting), not a full replacement of this
+   for trap-site soundness reporting), not a full replacement of this
    mechanism. *)
 let narrowing_ctx : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 4
 
@@ -605,10 +605,10 @@ let narrowing_ctx : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 4
    OWN, separate re-derivation of narrowing (narrowing_ctx/locals, since
    gen_expr has no access to type_inf's resolved tyenv) never got the same
    extension -- so an Index/AssignIndex consuming that same variable right
-   after the guard still emitted (and, under --forbid-trap, still reported)
+   after the guard still emitted (and, under the trap-site rejection, still reported)
    an unnecessary residual bounds check. Not a soundness bug (the emitted
    check simply never fires, since the value really is in range) but a
-   real --forbid-trap-visible regression from what the type system already
+   real trap-site-visible regression from what the type system already
    proves. Same "written_names of the statements strictly after the one
    about to be processed" definition as type_inf.ml's ref; kept as a
    SEPARATE ref (not literally shared) because these are two independent
@@ -649,7 +649,7 @@ let pending_fallthrough_slice_endpoints : (string * string option) list ref = re
    Known conservative gap vs type_inf: refined GLOBALS and Mut-narrowed
    variables reached through arithmetic are not consulted here, so codegen
    may keep a check type_inf considered proven -- safe direction, shows up
-   as a --forbid-trap site; bind the value to an immutable local to fix. *)
+   as a trap site; bind the value to an immutable local to fix. *)
 (* GitHub issue #296 codegen sync: mirrors type_inf.ml's negate_cond
    exactly (same AST-level transform, no type-checking-specific state
    involved, so the logic is identical, not just similarly-shaped) --
@@ -3120,7 +3120,7 @@ let assert_trap_accounting_consistent () =
    hardcoded i32): comparing a usize-width idx_v against a hardcoded i32
    constant would be an LLVM type mismatch on a 64-bit target. *)
 (* GitHub issue #797: type_inf.ml's reason a range fact was missing at
-   this index, appended to the --forbid-trap report (same error). *)
+   this index, appended to the trap-site report (same error). *)
 let range_fact_reason idx_loc =
   match Hashtbl.find_opt Type_inf.range_fact_unavailable_at
           (!current_runtime_bounds_key, idx_loc) with
@@ -3138,7 +3138,7 @@ let emit_bounds_check ~idx_loc loc idx_ty idx_v n =
 (* Checked refined cast: `expr as {lo..<hi}` where the source type cannot
    prove the target range. Mirrors `int as ExhaustiveEnum` (switch + trap):
    the cast is the explicit, runtime-checked bridge from unproven integers
-   into a refined type, and under --forbid-trap it becomes a compile error
+   into a refined type, and under the trap-site rejection it becomes a compile error
    unless the source range is provable.
    Signed compare is correct here: every unproven source arrives either
    i32-widened (widen_load invariant) or as a genuine i64 (i64/u64/usize);
@@ -3171,7 +3171,7 @@ let emit_divisor_check loc operation divisor_ty divisor =
 
 (* LLVM signed division/remainder is also undefined for MIN / -1.  Keep this
    separate from the zero-divisor obligation: either operand fact can prove
-   this pair impossible, and --forbid-trap should identify the missing proof
+   this pair impossible, and the trap-site rejection should identify the missing proof
    precisely. *)
 let emit_signed_division_overflow_check loc operation lhs_ty lhs rhs =
   if not (Hashtbl.mem Type_inf.signed_division_overflow_proven_safe_at loc)
@@ -4246,7 +4246,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | TypeRefined (lo, hi, _) ->
            (* Checked refined cast. When the source's static range already
               proves the target range, this is a plain subtype coercion and
-              no check is emitted (so it stays legal under --forbid-trap).
+              no check is emitted (so it stays legal under the trap-site rejection).
               Everything else gets a runtime range check + trap -- previously
               this cast was silently unchecked, which let
               `arr[v as {0..<N}]` elide the bounds check for an arbitrary
@@ -4651,7 +4651,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                whose combination is actually bounded by a relation the
                type system doesn't track -- see CLAUDE.md's P4c section).
                No trap site recorded: this is a deliberate assertion, not
-               a residual gap --forbid-trap should report. *)
+               a residual gap the trap-site rejection should report. *)
             note_unsafe_use ()
           else begin
             (* Runtime-checked subslice (gradual form): one check, one

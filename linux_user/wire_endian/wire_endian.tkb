@@ -59,7 +59,7 @@ const TEST_MAGIC: u16be = 0x0abc;
 
 // Accepting the exact refined range `{20..<1501 as u16}` here proves that
 // `hdr.len as u16` below carries its proven range across the byte-swap
-// with no runtime check -- this whole example is built with --forbid-trap,
+// with no runtime check -- this whole example is built with trap sites rejected,
 // so if that proof were lost, the call below would fail to compile instead
 // of silently inserting a bounds check.
 fn requires_len(n: {20..<1501 as u16}) -> usize {

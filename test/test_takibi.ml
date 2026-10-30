@@ -160,7 +160,7 @@ let expect_codegen_ok src () =
   | exception Llvm_gen.Error msg -> Alcotest.failf "unexpected codegen Error: %s" msg
 
 (* Expect codegen to succeed AND to have recorded exactly [expected] runtime
-   trap sites (Llvm_gen.trap_sites -- the --forbid-trap accounting).
+   trap sites (Llvm_gen.trap_sites -- the trap-site accounting).
    gen_program resets the list at the start of each run, so this reads the
    sites of exactly this test's program, not accumulated state. *)
 let expect_trap_sites expected src () =
@@ -215,7 +215,7 @@ let contains_substring haystack needle =
   let rec scan i = i + n <= m && (String.sub haystack i n = needle || scan (i + 1)) in
   scan 0
 
-(* GitHub issue #797: expect exactly one trap site whose --forbid-trap
+(* GitHub issue #797: expect exactly one trap site whose trap-site
    report contains [needle] (the reason a range fact was unavailable). *)
 let expect_single_trap_reason needle src () =
   (match gen_codegen src with
@@ -3506,7 +3506,7 @@ let infer_tests = [
 
   (* GitHub issue #791: a literal divisor inside an argument checked against
      a refined parameter reached the divisor proof while its type was still
-     unresolved, so the literal 4 was not proved nonzero and --forbid-trap
+     unresolved, so the literal 4 was not proved nonzero and the trap-site rejection
      refused it.  The negative control keeps a zero-admitting divisor refused. *)
   Alcotest.test_case "literal divisor in a refined argument context is proved nonzero" `Quick
     (expect_trap_sites 0
@@ -14593,7 +14593,7 @@ let codegen_tests = [
         (contains_substring ir "noinline"));
 
   Alcotest.test_case
-    "--frame-pointers gives every generated function a stable frame contract"
+    "default frame pointers give every generated function a stable frame contract"
     `Quick
     (fun () ->
       Fun.protect
@@ -14615,7 +14615,7 @@ let codegen_tests = [
             (contains_substring ir "section \".text.takibi\"")));
 
   Alcotest.test_case
-    "--function-sections puts each function and data object in its own section"
+    "the default sections put each function and data object in its own section"
     `Quick
     (fun () ->
       Fun.protect
@@ -15871,7 +15871,7 @@ let codegen_tests = [
      re-derivation of narrowing (narrowing_ctx/locals -- gen_expr cannot
      see type_inf's resolved tyenv) was never extended to match, so an
      Index consuming the SAME narrowed variable right after the guard
-     kept an unnecessary residual bounds check under --forbid-trap. Found
+     kept an unnecessary residual bounds check under the trap-site rejection. Found
      while migrating kernel/lib/growable_pool.tkb off its #217 decay
      workaround -- the exact `if (index >= N) { return; } ...
      pool.field[index] ...` shape used throughout that file. Both
@@ -15965,7 +15965,7 @@ let codegen_tests = [
      (kernel/kernel/fd_table.tkb, 2026-08-15) -- a for-loop's hi_expr is a
      RUNTIME parameter with its own already-proven TRefinedInt, not a
      Const_env-recognized constant. Locks in the paired type_inf.ml/
-     llvm_gen.ml fix at the codegen/--forbid-trap level, matching how the
+     llvm_gen.ml fix at the codegen/trap-site level, matching how the
      #311 sync tests just above lock in the constant-bound case. *)
   Alcotest.test_case
     "for-loop counter over 0..<limit, where limit has its own proven \
@@ -15982,7 +15982,7 @@ let codegen_tests = [
 
   (* GitHub issue #313: locks in the paired type_inf.ml/llvm_gen.ml fix
      (narrow_from_cond reused for While, apply_narrowing/apply_narrowing_
-     mut mirrored in codegen) at the codegen/--forbid-trap level, matching
+     mut mirrored in codegen) at the codegen/trap-site level, matching
      the #311/#312 sync tests just above. `v` is never reassigned in the
      body, so the Index bounds check is elided both at the type level and
      in the generated IR. *)
@@ -16231,7 +16231,7 @@ let codegen_tests = [
           return 0;
         }");
 
-  (* GitHub issue #1011: the --forbid-trap report for an unproven index
+  (* GitHub issue #1011: the trap-site report for an unproven index
      into an immutable slice binding names the claim Init_flow failed and
      its path facts, worded like --internal-trace-init-flow (#976), and not the
      runtime order graph's reason (the second shape is one the graph had a
@@ -16350,7 +16350,7 @@ let codegen_tests = [
           return 0;
         }");
 
-  (* The --forbid-trap report says why the fact was missing. *)
+  (* The trap-site report says why the fact was missing. *)
   Alcotest.test_case
     "trap report names the facts left after a while body write (issues #797, #1011)"
     `Quick
@@ -16449,7 +16449,7 @@ let codegen_tests = [
           return 0;
         }");
 
-  (* -- --forbid-trap accounting (Llvm_gen.trap_sites) -------------------- *)
+  (* -- trap-site accounting (Llvm_gen.trap_sites) -------------------- *)
 
   Alcotest.test_case
     "every runtime-trap lowering records one site and emits one llvm.trap call"
@@ -16798,7 +16798,7 @@ let codegen_tests = [
 
   Alcotest.test_case
     "unproven usize array index records exactly one trap site (the \
-     residual bounds check --forbid-trap would reject)" `Quick
+     residual bounds check the trap-site rejection would reject)" `Quick
     (expect_trap_sites 1
        "let mut ftrap_buf_a: [u8; 8];
         fn ftrap_usize_index(v: usize) -> u8 {
@@ -16807,7 +16807,7 @@ let codegen_tests = [
 
   Alcotest.test_case
     "refined-typed index records zero trap sites (bounds check elided by \
-     the type, so the program is --forbid-trap clean)" `Quick
+     the type, so the program is trap-free)" `Quick
     (expect_trap_sites 0
        "let mut ftrap_buf_b: [u8; 8];
         fn ftrap_refined_index(v: {0..<8 as usize}) -> u8 {
@@ -16828,7 +16828,7 @@ let codegen_tests = [
 
   Alcotest.test_case
     "refined-to-wider-refined cast (across a base change too) is a provable \
-     subtype coercion: zero trap sites, stays legal under --forbid-trap" `Quick
+     subtype coercion: zero trap sites, stays legal under the trap-site rejection" `Quick
     (expect_trap_sites 0
        "let mut ftrap_buf_d: [u8; 8];
         fn ftrap_subtype_cast(v: {2..<5 as i32}) -> u8 {
@@ -16918,7 +16918,7 @@ let codegen_tests = [
   Alcotest.test_case
     "for-loop bound naming a global constant refines the counter: \
      `for i in 0..<SIZE` elides the check against [T; SIZE] \
-     (linux_user/const_global's residual sites under --forbid-trap)" `Quick
+     (linux_user/const_global's residual sites under the trap-site rejection)" `Quick
     (expect_trap_sites 0
        "const FTRAP_SIZE: usize = 4;
         let mut ftrap_ring: [i32; FTRAP_SIZE];
@@ -17369,7 +17369,7 @@ let codegen_tests = [
   (* "Proofs are only lost at mutation points, never at annotation": in the
      gradual-trap-elimination workflow, a weaker annotation on an IMMUTABLE
      let must not manufacture trap sites out of already-proven code (they
-     would resurface as --forbid-trap rejections at ship time with no real
+     would resurface as trap-site rejections at ship time with no real
      proof gap behind them). `let mut` keeps the declared (honestly weak)
      type, because reassignment can bring weaker values. *)
 
@@ -21338,8 +21338,8 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
      proof (a correlated-bounds case like tcp_echo's data-echo path or
      tcp_parse's checksum span, e.g. ftp4c_chained above) -- letting the
      programmer choose, per call site, between the DEFAULT (checked,
-     traps on violation, --forbid-trap rejects it) and an explicit,
-     visible unchecked assertion that --forbid-trap accepts. The type
+     traps on violation, the trap-site rejection rejects it) and an explicit,
+     visible unchecked assertion that the trap-site rejection accepts. The type
      computed is UNCHANGED either way (unsafe doesn't grant new static
      information, only skips verifying it) -- only whether llvm_gen emits
      the runtime check differs. *)
@@ -21347,7 +21347,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
   Alcotest.test_case
     "unsafe on a SLICE-base subslice (not just a raw pointer) skips the \
      runtime check entirely: the same correlated-bounds construction that \
-     recorded 1 trap site unwrapped now records zero, and --forbid-trap \
+     recorded 1 trap site unwrapped now records zero, and the trap-site rejection \
      accepts it" `Quick
     (expect_trap_sites 0
        "fn ftp4c1_checksum(s: []u8, sum_in: i32) -> i32 {
@@ -21549,7 +21549,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
   (* GitHub issue #961: Const_env.bound_value read a literal's 64-bit
      pattern natively, so 0xFFFFFFFFFFFFFFFF was -1 on every path that read
      a bare literal or const leaf. Each case below compiled under
-     --forbid-trap and wrote outside `words`. An unannotated counter took
+     the trap-site rejection and wrote outside `words`. An unannotated counter took
      {0..<-1}, an empty range that passed g while the u64 loop ran 2^64 - 1
      times; max(x & 3, 0xFFFFFFFFFFFFFFFF) on u64 was {0..<4} and stored
      at words[2^64 - 1]; a singleton literal discharged `where k < n`. *)
@@ -23417,7 +23417,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
             return offset;
         }");
 
-  (* GitHub issue #185: two --forbid-trap proof mechanisms recognized a
+  (* GitHub issue #185: two trap-site proof mechanisms recognized a
      bare integer literal but not a const reference, even though the
      const's value is exactly as statically known. Root cause traced to
      intlit_opt (type_inf.ml's central range-propagation helper, mirrored
@@ -24193,7 +24193,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
      ring-buffer idiom, `let mut head: io {0..<128 as usize};`) keeps its \
      proven range across a read into a local, so `buf[head]` proves clean \
      with zero trap sites -- regression for the real bug found while \
-     applying --forbid-trap to every example: an UNREFINED `io usize` \
+     applying the trap-site rejection to every example: an UNREFINED `io usize` \
      global has every WRITE site going through `% 128` (so the value is \
      always in range at runtime) but loses that invariant at every READ \
      site, since a bare usize global carries no memory of the range its \
@@ -24290,7 +24290,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
      -> fresh ()`), which unify() lets bind structurally to ANY target,
      including TRefinedInt, with no check on the literal's actual VALUE.
      A genuinely out-of-range literal therefore "proved" a range it did
-     not satisfy, and --forbid-trap then elided a real bounds check
+     not satisfy, and the trap-site rejection then elided a real bounds check
      downstream -- a true soundness hole (found while investigating issue
      #100, "Refinement type on struct field": struct field reads/writes
      already worked correctly, but this literal-value gap affected EVERY

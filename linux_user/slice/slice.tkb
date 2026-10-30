@@ -3,8 +3,8 @@
 // "at least N bytes"; []u8 means "length unknown" (minimum 0).
 //
 // Everything in this file is proven at the type level: zero runtime
-// bounds checks are generated, so it also compiles under --forbid-trap
-// (every linux_user test is built with --forbid-trap).
+// bounds checks are generated, so it also compiles with trap sites rejected
+// (every linux_user test is built with trap sites rejected).
 // The proof devices, in order of appearance:
 //   - [u8; 8..] parameter: the caller must prove at least 8 bytes;
 //     inside, `for i in 0..<8` / constant indices are within the minimum

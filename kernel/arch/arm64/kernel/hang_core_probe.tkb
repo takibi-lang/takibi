@@ -1,6 +1,6 @@
 /* Reboot while a peer core spins with IRQs masked (GitHub issue #980).
  * A static-PIE EL0 program, kept free of writable globals and compiled with
- * --forbid-trap. Only the shell image carries it, at /lib/hang-core (no ash
+ * the trap-site rejection. Only the shell image carries it, at /lib/hang-core (no ash
  * listing shows /lib), and only the PTY smoke test's restart run starts it.
  *
  * It pins itself to CPU 1, asks the kernel (workload tag 24, step 0) to make

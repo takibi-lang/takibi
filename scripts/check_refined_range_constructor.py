@@ -7,7 +7,7 @@ base)` in lib/type_inf.ml, `TypeRefined (...)` in lib/llvm_gen.ml), and each
 had to remember on its own that the machine operation wraps at the base's
 width. Unsigned Sub forgot: `{0..<100} - {20..<61}` on usize kept the range
 {-60..<80}, so `max(a - b, 0)` -- an unsigned compare that returns the
-wrapped value -- proved an out-of-bounds index under --forbid-trap.
+wrapped value -- proved an out-of-bounds index under the trap-site rejection.
 
 Every result range in those rules now goes through `refined_or_base`, which
 drops a range its base cannot hold (an unsigned base needs lo >= 0). This

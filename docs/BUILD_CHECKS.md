@@ -58,6 +58,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_ci_opam_deps.py` | every library the dune files name is provided by a package in dune-project's depends stanza or by the compiler |
 | `check_ci_opam_deps_controls.py` | Controls for the Dune project dependency link, including what it is allowed to read |
 | `check_compiler_sync_rules.py` | declared compiler counterpart changes stay synchronized |
+| `check_removed_flag_mentions.py` | current text names no compiler flag in its list of removed ones; HISTORY.md, DECISIONS.md, talks and dated documents are records (#1262) |
+| `check_removed_flag_mentions_controls.py` | Controls for the removed-flag scan: current text refused, records and the refusal test exempt |
 | `check_refined_range_constructor.py` | range-propagation and cast rules in type_inf.ml/llvm_gen.ml build a refined result only through the base-checked refined_or_base (#935), and each such call passes `~ob` so z3 re-checks it, or names why not in a `no-range-obligation:` comment (#952); a range-deriving helper (`min_max_range`, `refined_product_range`) is called only inside the marked rules (#984) |
 | `check_refined_range_constructor_controls.py` | Controls for the refined-range constructor check: issue #935's raw Sub constructor, a call without `~ob` and #984's min/max range derived outside the rules are refused |
 | `check_proof_fold_width.py` | outside const_env.ml, lib/ and bin/ fold a constant through the width-aware fold_at_base/fold_at_ty, never a raw `Const_env.folded_value`, unless a `fold-not-proof:` comment within four lines says why the fold proves nothing (#956); a raw `Ast.int_of_intlit` (and, in init_flow.ml, `Const_env.find`) only as init_flow's `leaf_const` argument or with that exemption (#983) |

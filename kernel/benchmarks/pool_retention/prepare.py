@@ -99,7 +99,7 @@ def main():
     if platform == 'qemu':
         sources += ['kernel/platform/qemu/memory.tkb']
     sources += ['kernel/drivers/net/'+('virtio_net' if platform == 'qemu' else 'rp1_gem')+'.tkb', 'kernel/drivers/block/virtio_blk.tkb', f'kernel/platform/{platform}/init.tkb']
-    subprocess.run([str(ROOT/'_build/default/bin/main.exe'), *sources, '--target', 'aarch64-none-elf', '--cpu', 'cortex-a53' if platform == 'qemu' else 'cortex-a76', '--regions', '--forbid-trap', '--frame-pointers', '-g', '-o', str(out/'main.o')], cwd=out, check=True)
+    subprocess.run([str(ROOT/'_build/default/bin/main.exe'), *sources, '--target', 'aarch64-none-elf', '--cpu', 'cortex-a53' if platform == 'qemu' else 'cortex-a76', '--regions', '-g', '-o', str(out/'main.o')], cwd=out, check=True)
     objects = [ROOT/f'kernel/build/{platform}/{name}.o' for name in ('entry', 'user_entry', 'fpsimd_probe', 'pmu')]
     subprocess.run(['ld.lld-19', '-T', str(ROOT/('kernel/arch/arm64/boot/link_qemu.ld' if platform == 'qemu' else 'kernel/arch/arm64/boot/link.ld')), *map(str, objects), str(out/'main.o'), '-o', str(out/'kernel.elf')], check=True)
     subprocess.run(['python3', str(ROOT/'scripts/buildcheck_kernel_asm_invariants.py'), str(out/'kernel.elf'), '1' if platform == 'qemu' else '2'], check=True)

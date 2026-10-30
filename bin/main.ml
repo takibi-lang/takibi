@@ -719,7 +719,7 @@ let () =
       (* GitHub issue #327 Stage 1: Type_inf.infer_program's Pass 3 keeps
          checking every function body even after one fails, so this can
          carry more than one error -- report every one of them (mirroring
-         --forbid-trap's own "report every site, not just the first"
+         the trap-site report's own "report every site, not just the first"
          pattern just below) instead of only the first. *)
       List.iter (fun (loc, msg) -> report_error loc msg) errors;
       Printf.eprintf "Error: %d function(s) failed to type-check (listed above)\n"

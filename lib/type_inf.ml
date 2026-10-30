@@ -205,7 +205,7 @@ let merge_overflow_audit_facts left right =
 (* First Value_facts consumer: type checking records a positive nonzero
    proof for each divisor expression it can settle.  Code generation reads
    this decision before its legacy fallback, allowing migration one proof
-   source at a time without changing permissive or --forbid-trap behavior. *)
+   source at a time without changing permissive or trap-rejecting behavior. *)
 let divisor_proven_nonzero_at : (Lexing.position, unit) Hashtbl.t =
   Hashtbl.create 64
 let signed_division_overflow_proven_safe_at :
@@ -217,7 +217,7 @@ let runtime_slice_index_proven_at : (string * Lexing.position, unit) Hashtbl.t =
 let active_runtime_bounds_key = ref ""
 (* GitHub issue #797: why an index's range fact was not available, keyed
    like the proof tables (bounds key, index location). llvm_gen.ml appends
-   it to the --forbid-trap trap-site report; it is part of that error, not
+   it to the trap-site report; it is part of that error, not
    a separate diagnostic. while_fact_drops lists, innermost-first, the
    names whose enclosing while-condition fact was dropped and the location
    of the top-level body statement that dropped it. *)
@@ -3204,7 +3204,7 @@ let guard_narrow_hints : (string, string) Hashtbl.t = Hashtbl.create 8
    AssignIndex's own index sub-expression specifically (not a general
    "annotate every use site" mechanism) per this issue's own
    investigation comment: it is the one consumer of narrowing_ctx that
-   matters for --forbid-trap soundness reporting, and the two files'
+   matters for trap-site soundness reporting, and the two files'
    independent re-derivation of narrowing has already caused two real,
    found gaps (issue #296, #311's own history).
 
@@ -3224,7 +3224,7 @@ let guard_narrow_hints : (string, string) Hashtbl.t = Hashtbl.create 8
    reference's own registered tyenv entry is its DECLARED type, e.g.
    plain usize, not a refined singleton reflecting the literal) --
    replacing that fast path with this table would regress existing
-   --forbid-trap-clean constant-indexed accesses (e.g. `tcp[TCP_FLAGS]`)
+   trap-free constant-indexed accesses (e.g. `tcp[TCP_FLAGS]`)
    into needing a runtime check. The separate #213 slice_index_ctx
    mechanism (llvm_gen.ml-only, no type_inf.ml counterpart) is also left
    completely untouched -- it answers a different question ("is this
@@ -3960,7 +3960,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
               bounded by k does not bound the logical value by k (swapping
               is not monotonic) -- so skip proving anything and keep the
               plain wire-order type instead of manufacturing a false proof
-              that --forbid-trap code could then trust to elide a real
+              that trap-rejecting code could then trust to elide a real
               check. *)
            if ct1 = TU16Be || ct1 = TU32Be then ct1 else
            (match fold_at_ty ct1 e2 with
@@ -4780,7 +4780,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  | _ ->
                      (* Runtime-checked subslice (gradual form): codegen
                         emits 0 <= lo && lo <= hi && hi <= s.len -> trap,
-                        recorded as a --forbid-trap site. The result minimum
+                        recorded as a trap site. The result minimum
                         keeps whatever the static ranges still guarantee
                         once the check has passed: len = hi - lo >=
                         min(hi) - max(lo). *)
@@ -7679,7 +7679,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
          Sync rule: llvm_gen.ml's own While codegen case now applies the
          same apply_narrowing/apply_narrowing_mut calls narrow_from_cond
          itself wraps, for the same reason #311/#312 needed the matching
-         update -- without it this would be a real --forbid-trap
+         update -- without it this would be a real trap-site
          regression risk (proving more here without codegen eliding the
          matching check). *)
       (* GitHub issue #770: the condition is assumed for the body up to

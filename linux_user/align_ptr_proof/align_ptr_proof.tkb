@@ -2,7 +2,7 @@
 // *align(N) T, the pointer analogue of a refined integer's
 // {lo..<hi as base}. Deliberately small and self-contained -- built to
 // answer one question (does the type actually work end-to-end: proof
-// sources, subtyping, pointer arithmetic, --forbid-trap) before deciding
+// sources, subtyping, pointer arithmetic, the trap-site rejection) before deciding
 // whether to retrofit any real driver onto it. See HISTORY.md's issue
 // #102 entry.
 //

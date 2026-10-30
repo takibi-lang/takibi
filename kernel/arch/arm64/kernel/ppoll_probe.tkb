@@ -1,5 +1,5 @@
 /* A ppoll on the terminal beside a runnable process. A static-PIE EL0
- * program, kept free of writable globals and compiled with --forbid-trap.
+ * program, kept free of writable globals and compiled with trap sites rejected.
  *
  * /bin/ppoll-probe forks. The child asks ppoll for fd 0 with no timeout and
  * no mask, the BusyBox shape, then reads the byte that made it readable. The

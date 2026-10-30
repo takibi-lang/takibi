@@ -34,7 +34,7 @@ fn parse_ipv4(pkt: borrow [u8; 20..], len: i32) {
     // 20) clamps the upper bound to what pkt can actually satisfy,
     // provably, no matter what garbage byte 0 turns out to hold --
     // closing the gap a plain runtime bounds check used to be the only
-    // answer for (this file is --forbid-trap clean, as every linux_user test is built with --forbid-trap).
+    // answer for (this file is trap-free, as every linux_user test is built with trap sites rejected).
     // The demo's own
     // packets always have the real IHL == 20 (no options), so clamping to
     // 20 (pkt's full size) never actually truncates anything here.

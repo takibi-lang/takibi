@@ -1,5 +1,5 @@
 /* Close-on-exec across execve: two static-PIE EL0 programs linked from this
- * one object, kept free of writable globals and compiled with --forbid-trap.
+ * one object, kept free of writable globals and compiled with trap sites rejected.
  *
  * /bin/cloexec opens /hello.txt and puts three copies of it at fixed
  * numbers. Descriptor 20 comes from F_DUPFD_CLOEXEC and 22 is flagged with

@@ -1,6 +1,6 @@
 /* sched_setaffinity and sched_getaffinity, the affinity ABI (GitHub issue
  * #9). A static-PIE EL0 program, kept free of writable globals and compiled
- * with --forbid-trap. The lines it prints are compared by the ash
+ * with the trap-site rejection. The lines it prints are compared by the ash
  * transcript, so they say only what holds on every platform: the online
  * set differs between two-vCPU QEMU and four-core RPi5.
  *

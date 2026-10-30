@@ -12,7 +12,7 @@
  * Both are leaf functions that never touch x29 or sp, so the values they
  * return are the CALLER's: x29 is the caller's canonical frame record
  * ([x29] = previous x29, [x29 + 8] = saved x30, under the kernel's
- * --frame-pointers contract), and sp is the caller's stack pointer, which
+ * default frame-pointer contract), and sp is the caller's stack pointer, which
  * bounds that walk to the current kernel stack.
  *
  * No return_address() helper: in a leaf .S, x30 is only the return into

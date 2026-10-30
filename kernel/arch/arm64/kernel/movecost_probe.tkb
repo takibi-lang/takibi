@@ -1,6 +1,6 @@
 /* What one move between cores costs (GitHub issue #503, the question #582
  * asked). A static-PIE EL0 program, kept free of writable globals and
- * compiled with --forbid-trap, run once from init.sh before the busy pair
+ * compiled with trap sites rejected, run once from init.sh before the busy pair
  * starts. It prints nothing unless it fails: the numbers are the kernel's
  * `profile: move-cost` records, which scripts/profile_kernel_workload.py
  * collects into an artifact.

@@ -263,7 +263,7 @@ currently-compiling program keeps compiling.
 
   - `linux_user/linear_obligation/` (positive): create + discharge across
     if/else, match, early return; runs under QEMU and prints proof of
-    execution. Compiles `--forbid-trap` clean.
+    execution. Compiles trap-free.
   - the retired `examples/linear_never_consumed/` (negative): mirror of
     affine_never_consumed; expects `linear value 'x' is never consumed`.
   - the retired `examples/linear_branch_missed/` (negative): consumed in the `if`
@@ -800,7 +800,7 @@ private linear struct SlotLease[n: usize] {
 `slot_lease` returns `SlotLease[n]`; read, write, and close take only
 `borrow SlotLease[n]`; `slot_unlease` takes `sink SlotLease[n]`. There is no
 loose `idx` argument after acquisition. The positive example compiles under
-`--forbid-trap`, while dedicated fixtures reject an out-of-range mint and two
+the trap-site rejection, while dedicated fixtures reject an out-of-range mint and two
 independently indexed leases where one static identity is required.
 
 The representation result is explicit: `SlotLease[n]` is a runtime
@@ -1062,7 +1062,7 @@ fixed bounds lowering to look through `T @ n`, preserving a refined base such
 as `{0..<2 as usize}` under the singleton equality.
 
 `linux_user/indexed_view` is the positive cross-target fixture. It interleaves
-two slot protocols and compiles under `--forbid-trap`;
+two slot protocols and compiles with trap sites rejected;
 `indexed_view_identity_wrong` explains in English why authority for slot 0
 cannot access slot 1. Explicit `forall`, existential packages around views,
 dynamic state dispatch, address/enum static sorts, propositions, and solver

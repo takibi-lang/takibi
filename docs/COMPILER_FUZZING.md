@@ -1,7 +1,7 @@
 # Native compiler soundness testing
 
 `make compiler-fuzz` generates small Takibi programs, compiles each with
-`--forbid-trap` for Linux/AMD64, links an independent C oracle, and executes
+the trap-site rejection for Linux/AMD64, links an independent C oracle, and executes
 every accepted program. `make linuxcheck`, and therefore `make cicheck` and
 `make allcheck`, includes this target. It requires the host `cc` command.
 

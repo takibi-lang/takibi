@@ -73,7 +73,7 @@ struct packed IcmpHdr {
 // hand-maintained literal -- GitHub issue #77's fix is what makes this
 // provable at all: these are exactly the packed-struct-field-offset shape
 // that fix targets, and each remains fully usable as a proven slice index
-// or subslice bound (verified per-consumer under --forbid-trap, not just
+// or subslice bound (verified per-consumer under the trap-site rejection, not just
 // "it type-checks" -- see HISTORY.md's issue #77 follow-up entry). The
 // last hand-maintained isize trio (ETH_MAC_LEN/ETH_DST_OFF/ETH_SRC_OFF)
 // existed only to feed net_echo's raw-pointer swap_mac loop; that
@@ -246,7 +246,7 @@ fn http_request_path_to_name83(req: borrow *u8, len: isize,
 // Slice signatures ([u8; 2..] / [u8; 4..]): the caller passes a view that
 // PROVES the field fits -- e.g. read_u16be(ip[2..<4]) on an ip view of
 // minimum length 20 is fully compile-time proven, so these bodies contain
-// zero bounds checks and stay --forbid-trap clean.
+// zero bounds checks and stay trap-free.
 fn read_u16be(s: borrow [u8; 2..]) -> i32 {
     return (s[0] as i32) * 256 + (s[1] as i32);
 }

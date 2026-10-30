@@ -50,7 +50,7 @@ private let mut slot_payload: [usize; POOL_COUNT];
 // with it. Narrow explicitly, matching this codebase's usual `if (v < N)`
 // idiom -- out of range never actually happens (every owner this file
 // ever holds came from freelist_core_insert on this exact pool), but
-// --forbid-trap needs the proof spelled out regardless.
+// the trap-site rejection needs the proof spelled out regardless.
 fn payload_set(owner: borrow FreelistOwner[allocation], value: usize) {
     let index: usize = freelist_owner_index(owner);
     if (index < POOL_COUNT) {

@@ -13,7 +13,7 @@
 // Also fixed alongside this feature: an out-of-range literal assigned to
 // a refined struct field (or any other refined-type target) used to be
 // silently accepted with no check at all -- a real soundness hole, since
-// --forbid-trap would then elide a genuinely-needed bounds check
+// the trap-site rejection would then elide a genuinely-needed bounds check
 // downstream. `slot.idx = 20;` for a `{0..<8 as usize}` field is now a
 // compile error; see test/test_takibi.ml's issue #100 tests for the
 // full set of call sites this covers (let, assign, call argument,

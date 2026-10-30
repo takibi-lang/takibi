@@ -7,7 +7,7 @@
 // when a later allocation reuses the same physical page index.
 //
 // This first working milestone deliberately uses ordinary checked indices
-// and is compiled without --forbid-trap.  The follow-up hardening commit adds
+// and predates the rejection of trap sites.  The follow-up hardening commit added
 // only the refinements reported by the compiler.
 
 use "linux_user/page_pool/page_pool_core.tkb";

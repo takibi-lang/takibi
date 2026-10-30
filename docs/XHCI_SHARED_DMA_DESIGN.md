@@ -11,7 +11,7 @@ requests are not required.
 ## Existing-language feasibility
 
 At compiler revision 0335d45d, four temporary CLI probes were compiled for
-AArch64 with --forbid-trap:
+AArch64 with the trap-site rejection:
 
 | Probe | Exit | Evidence |
 | --- | --- | --- |
@@ -173,7 +173,7 @@ that general nested region retention is missing. Rechecking after rebase to
         private memory: region(u8)[b, n];
     }
 
-The shape compiles for AArch64 with --regions and --forbid-trap. The offset
+The shape compiles for AArch64 with --regions. The offset
 parameter carries an arbitrary split subregion, not just an offset-zero
 allocation. No new storage exception or compiler feature is required.
 Maintained compiler tests and linux_user/region_proto exercise:

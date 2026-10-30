@@ -13,7 +13,7 @@ and an investigation into a timer that was working correctly.
 Nothing in the language could have caught it.  The two platform trees are
 never compiled together -- the Makefile builds the QEMU kernel from
 kernel/platform/qemu/ and the RPi5 kernel from kernel/platform/rpi5/, in
-separate compiler invocations -- so no type check, no `--forbid-trap` pass,
+separate compiler invocations -- so no type check, no trap-site pass,
 and no whole-program analysis ever sees both copies at once.  The
 duplication is structurally invisible to the compiler, which is why this is
 a build-time script instead.

@@ -38,5 +38,5 @@
   "qemu": "8.2.2 TCG, two Cortex-A53 vCPUs, 1 GiB",
   "rpi5": "four Cortex-A76 cores, 54 MHz Generic Timer",
   "c_compiler": "gcc-aarch64-linux-gnu 13.2.0",
-  "takibi": "OCaml 5.4.0, LLVM 19; --regions --forbid-trap --frame-pointers -g"
+  "takibi": "OCaml 5.4.0, LLVM 19; --regions -g; traps rejected and frame pointers kept by default"
 }

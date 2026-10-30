@@ -71,7 +71,7 @@ python3 scripts/measure_pool_replay.py --takibi /tmp/takibi-replay.txt \
 The generated Takibi specializations have a tracked hand-written template in
 `linux_user/pool_space_replay/region_replay.tkb.in`. Generated content includes
 only derived payload types and concrete template instantiations. The native
-fixture is part of `make linuxcheck`, uses `--forbid-trap`, and must return the
+fixture is part of `make linuxcheck`, uses the trap-site rejection, and must return the
 page-provider use count to zero after all 18 cases. The maintained capture
 controls require every sample, matching sizes/lifetimes, complete successful
 teardown, and consistent numeric accounting. External OS guests are an

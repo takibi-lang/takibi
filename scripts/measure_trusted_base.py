@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Inventory explicit trusted boundaries in the maintained kernel build.
 
-The source set comes from depfiles emitted by successful --forbid-trap builds.
+The source set comes from depfiles emitted by successful builds.
 This is an audit aid, not a proof: TRUSTED_BASE.md records the assumptions that
 cannot be counted.
 
@@ -347,7 +347,7 @@ def main() -> None:
     print("Takibi trusted-boundary inventory")
     print("=================================")
     print("Checked kernel source coverage")
-    print(f"  --forbid-trap union : {len(source_paths)} files, {count_lines(source_paths)} lines")
+    print(f"  source union      : {len(source_paths)} files, {count_lines(source_paths)} lines")
     for target, names in targets.items():
         print(f"  {target:19}: {len(names)} files")
     print(f"  outside that union  : {len(outside)} kernel .tkb files")
@@ -379,7 +379,7 @@ def main() -> None:
         print(f"  {category:24}: {len(paths)} files, {count_lines(paths)} lines")
 
     if args.verbose:
-        print("\nExact --forbid-trap source union")
+        print("\nExact source union")
         for name in source_names:
             print(f"  {name}")
         print("\nKernel .tkb files outside that union")

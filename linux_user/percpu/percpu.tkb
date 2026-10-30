@@ -4,19 +4,19 @@
 //
 // What this file proves at compile time: `cpu_id()`'s refined return
 // type, `{0..<1 as usize}`, is what lets `percpu[cpu_id()]` compile
-// clean under --forbid-trap with ZERO runtime bounds check -- the
+// clean under the trap-site rejection with ZERO runtime bounds check -- the
 // refined range exactly matches percpu's own declared size (NCPU),
 // so the array access is proven in range at every call site with no
 // annotation burden on the caller. The negative contrast -- the exact
 // same array access, but with cpu_id() returning plain `usize` instead --
 // is REJECTED under
-// --forbid-trap -- demonstrating this is the refined return type doing
+// the trap-site rejection -- demonstrating this is the refined return type doing
 // real work, not an accident of NCPU currently being 1.
 //
 // This also demonstrates why the RTOS design deliberately widens NCPU
 // (today: 1) instead of dropping cpu_id()'s refinement once real
 // multi-core hardware (GitHub issue #6, e.g. Raspberry Pi 3) exists:
-// `{0..<NCPU as usize}` stays --forbid-trap-clean for every existing
+// `{0..<NCPU as usize}` stays trap-free for every existing
 // percpu[cpu_id()] call site with NO code change there -- only
 // cpu_id()'s own body (today: always `return 0;`) needs to change to
 // read a real per-core ID register.

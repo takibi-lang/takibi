@@ -280,7 +280,7 @@ fn pool_contention_probe() -> bool !{unsafe} {
     }
     for i: usize in 0..<CONTENTION_FLOOR {
         // Indexed by the loop variable, not by `held`: `i` carries the
-        // proven range and `held` does not, which --forbid-trap says out
+        // proven range and `held` does not, which the trap-site rejection says out
         // loud. They are equal on every path that reaches the check below.
         floor[i] = contention_hold();
         if (region_held_address(floor[i]) != 0) { held = held + 1; }

@@ -52,7 +52,7 @@
 // Reported through counters and observers rather than a trap, matching
 // how this pool already reports double frees, foreign handles and
 // corrupted chains -- and keeping the suite free of trap sites under
-// --forbid-trap.
+// the trap-site rejection.
 
 // Enough for far more pools than any exerciser creates; a pool beyond it
 // is counted rather than silently skipped, so the checker never quietly

@@ -220,7 +220,7 @@ private fn freelist_core_insert_commit(
     if (head < N) {
         // GitHub issue #217: the begin step only produces Pending after
         // narrowing head to the array bound. Recheck at this function
-        // boundary so the proof remains local and --forbid-trap needs no
+        // boundary so the proof remains local and the trap-site rejection needs no
         // exception.
         core.free_head = core.next_free[head];
         let generation: usize = core.next_generation;

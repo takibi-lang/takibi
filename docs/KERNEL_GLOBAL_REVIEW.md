@@ -67,7 +67,7 @@ not establish type-level write-once publication.
 A minimal compiler probe declares two RegionPool(Item) fields in an ordinary
 Context and one private global context. Locking &context.first, allocating a
 slot, freeing it through the same guard and unlocking compiles under
---regions --forbid-trap. Replacing that free with a guard from
+--regions. Replacing that free with a guard from
 &context.second is rejected with:
 
 ```text

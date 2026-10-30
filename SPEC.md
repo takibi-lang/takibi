@@ -1020,7 +1020,7 @@ fn slot_unlease(lease: sink SlotLease[n]) {}
   between them.
 - Field projection substitutes actual static arguments for the declaration's
   formals. Thus `lease.idx` above retains both `{0..<4 as usize}` and the same
-  `n`, so indexing emits no bounds trap under `--forbid-trap`.
+  `n`, so indexing emits no bounds trap under the trap-site rejection.
 - `borrow Name[n]` is non-consuming and `sink Name[n]` is the designated
   terminal consumer. In Slice 1 both are runtime aggregate parameters passed
   by value; the mode changes ownership checking, not ABI representation.
@@ -2943,7 +2943,7 @@ field whose type claims more than its bytes (Unsafe Operations).
   "same-base" pattern `s[v..<v+k]` for the same variable `v` reused on
   both sides), no runtime check is generated and the result's minimum is
   the proven exact length. Otherwise a runtime check against the base's
-  actual length is generated (recorded as a `--forbid-trap` site).
+  actual length is generated (recorded as a trap site).
 - `unsafe { p[a..<b] }` on a raw pointer -- UNCHECKED slice construction:
   the length assertion has no compiler evidence behind it, so `unsafe`
   is mandatory. This is the standard way a driver turns a raw MMIO/DMA
@@ -4946,7 +4946,7 @@ moved across functions.
   divisor gets a zero trap guard. Signed division also guards the one
   overflowing operand pair, the signed minimum divided by `-1`.
   Signed remainder defines that pair's result as zero and lowers it without
-  invoking LLVM's undefined `srem` case. `--forbid-trap` therefore requires
+  invoking LLVM's undefined `srem` case. The trap-site rejection therefore requires
   both a nonzero-divisor proof and, for signed division, proof that either
   the dividend excludes its minimum or the divisor excludes `-1`. A refined
   interval wholly above or below zero, a nonzero representable constant,
@@ -5034,7 +5034,7 @@ moved across functions.
   narrower bounds, any source base), this is a **free coercion** -- no
   runtime check, even across a base change (e.g. bridging a proven
   `{0..<8 as u8}` into `{0..<8 as usize}` for indexing). Otherwise a
-  runtime range check is inserted (recorded as a `--forbid-trap` site).
+  runtime range check is inserted (recorded as a trap site).
   This cast is the deliberate bridge from unproven/differently-based
   integers into a refined type -- see "Array/Slice Indexing" below for
   why it's routinely needed at index sites.
@@ -5396,7 +5396,7 @@ permissive mode for early driver bring-up, where a trap firing is a
 The judgment is deliberately type-level, not post-optimizer: an
 optimizer pass happening to fold a check away at some LLVM version does
 not count as proof, so the guarantee stays deterministic across LLVM
-versions. `--forbid-trap` does **not** guarantee general memory safety
+versions. The trap-site rejection does **not** guarantee general memory safety
 -- raw-pointer operations (`p[i]`, pointer arithmetic, `*p`) have no
 bounds checks to begin with and are therefore invisible to it; that is
 what the slice type and refined integer types exist to move code away

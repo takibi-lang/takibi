@@ -979,7 +979,7 @@ private fn ddb_saved_context_valid(saved_sp: usize, stack_bottom: usize,
     return stack_top - saved_sp >= EXC_CONTEXT_SIZE;
 }
 
-// The compiler owns the record shape: --frame-pointers makes every Takibi
+// The compiler owns the record shape: the default frame pointers make every Takibi
 // function use AArch64's canonical [previous x29, saved x30] pair. This
 // walker owns only validation and policy. A future stopped-CPU capture can
 // supply another DdbUnwindRoot without changing the frame contract.

@@ -1,6 +1,6 @@
 /* GitHub issue #533: a bounded read-only filesystem workload admitted to
  * the secondary CPU. This is a standalone static-PIE EL0 program, kept free
- * of writable globals and compiled with --forbid-trap.
+ * of writable globals and compiled with trap sites rejected.
  *
  * The fixture contains exactly 96 KiB of 'Z'. Each attempt opens it afresh
  * and accepts all 96 chunks only when getcpu() brackets every read on the
@@ -199,7 +199,7 @@ fn core_read() {
 // the CPU when its turn comes, and this asks the scheduler to keep it
 // there. One bit per CPU, and KERNEL_MAX_CORES is four, so four answers
 // cover every mask this can need; a runtime shift would need a bound the
-// compiler cannot see under --forbid-trap.
+// compiler cannot see under the trap-site rejection.
 private fn peer_cpu_bit(cpu: usize) -> u8 {
     if (cpu == 0) { return 1; }
     if (cpu == 1) { return 2; }
