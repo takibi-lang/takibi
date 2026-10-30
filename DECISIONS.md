@@ -523,3 +523,10 @@ condition below applies, and reports the land afterwards.
 - #774: (A) a linear `IrqClaim[id]` from the IAR read, source clears return `IrqAcked[id]`, EOI takes only `IrqAcked`, the default arm proves `id` is no handled source; (a) the handled set is a const array per platform.
 - #926: (c) deferred and removed from ROADMAP.md (a 24-hour GICv3 build host is no longer a priority).
 - #901: (b) implement the ppoll sigmask as the first consumer of #1000's delivery chokepoint; (c) now: nfds > 0 with a non-NULL sigmask returns EINVAL (Partial in SYSCALLS.md) instead of spinning.
+
+## 2026-10-29 maintainer decisions, second batch
+- #1032 stack guard pages: D1 (a) static stacks first, then (c) process kernel stacks from an L3-mapped arena with permanent guards (#1226); D2 (i) unmap the bottom 4 KiB of the reserved half, keeping 12 KiB of poison for high-water evidence; D3 (i) as recorded.
+- #1218: (B) shrink the /pad filler first, then (C) embed the image LZ4-compressed (block format, zero-block elision in front) and expand at boot. The LZ4 codec lives in kernel/lib as a general compressor/decompressor over borrowed regions, reusable for a later zram-like feature. Network boot (#555) comes later.
+- #709/#710 (after the #1224 audit found no handle crossing the syscall boundary): #709 (a) at release the slot at the last generation retires instead of returning to Free, public API unchanged, with a test-only boundary injection; #710 (a) the insert outcome gains an `Exhausted` case, refused before any freelist mutation.
+- #755: (a) an immutable integer binding keeps one static for its lifetime; (d) versioned statics for mutable bindings is considered later if a consumer needs it.
+- #901: (c) now, (b) through #1000's chokepoint as tracked in #1225; no separate mask-restore path (a).
