@@ -128,7 +128,11 @@ region) are the only arrays `region_of`, `region_table_of` and
 a name in the program, so a claimed region is the only way to that storage.
 What stays trusted: `region_bytes_assume`, which mints a region over any
 address it is given (confined to the mint files above); the built-in region
-definitions the compiler generates; and references the name-based check
+definitions the compiler generates -- among them the permanent table's
+generation rule (#709): a slot freed in its last generation is retired, never
+handed out again, so a generation is never issued twice; `region_free` and
+`region_alloc` in lib/region_builtin.ml, checked at the boundary by
+linux_user/region_table_retire through a test-only flag, not proved; and references the name-based check
 cannot see -- symbol names inside inline assembly strings and linker-script
 symbol references -- which the check does not inspect.
 Shared-reference direct stores and writable field-address aliases are rejected,

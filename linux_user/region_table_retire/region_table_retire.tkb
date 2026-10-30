@@ -1,0 +1,63 @@
+// GitHub issue #709: a permanent region table's generation never wraps.
+// Built with --internal-region-table-last-generation 2, so the one slot is
+// handed out in generations 0, 1 and 2; freeing it in generation 2 retires
+// it. The table then answers Full, and every handle ever given out stays
+// Stale. Before #709 the third free bumped the generation to 3 and the slot
+// was handed out again; at the real bound, the largest usize, the bump
+// wrapped to 0 and the generation-0 handle was accepted again.
+
+struct Rec { key: usize; }
+
+private region let mut retire_arena: [Rec; 1];
+
+fn test_retire() {
+    let RegionTableOf(Rec)::Taken(table) = region_table_of(retire_arena) else {
+        RegionTableOf(Rec)::Gone => { uart_puts("FAIL table gone\n"); return; }
+    };
+    let mut handles: [RegionHandle(Rec); 3];
+    let mut round: usize = 0;
+    while (round < 3) {
+        match region_alloc(table) {
+            RegionAlloc(Rec)::Full => {
+                uart_puts("FAIL full before the last generation\n");
+                region_table_keep(table);
+                return;
+            }
+            RegionAlloc(Rec)::Allocated(slot) => {
+                region_slot_record(slot).key = round;
+                let mut h: RegionHandle(Rec) = region_give(table, slot);
+                handles[round] = h;
+                match region_take(table, h) {
+                    RegionTake(Rec)::Stale => { uart_puts("FAIL fresh handle stale\n"); }
+                    RegionTake(Rec)::Taken(out) => { region_free(table, out); }
+                }
+            }
+        }
+        round = round + 1;
+    }
+    uart_puts("retire: three generations handed out\n");
+    match region_alloc(table) {
+        RegionAlloc(Rec)::Full => { uart_puts("retire: the slot is retired\n"); }
+        RegionAlloc(Rec)::Allocated(again) => {
+            uart_puts("FAIL a retired slot was handed out again\n");
+            region_free(table, again);
+        }
+    }
+    let mut stale: usize = 0;
+    let mut i: usize = 0;
+    while (i < 3) {
+        match region_take(table, handles[i]) {
+            RegionTake(Rec)::Stale => { stale = stale + 1; }
+            RegionTake(Rec)::Taken(wrong) => { region_free(table, wrong); }
+        }
+        i = i + 1;
+    }
+    uart_puts("retire: stale handles ");
+    uart_print(stale);
+    uart_puts("\n");
+    region_table_keep(table);
+}
+
+fn app_main() {
+    test_retire();
+}

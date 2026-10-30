@@ -335,6 +335,12 @@ fn region_release(r: sink @R@[b, o, n]) { region_discharge(r); }
 // handle) or Out (its region is held by the program). Each slot has a
 // generation, bumped on free, so a stored handle to a freed slot is
 // refused. The state and generation words are a hidden array per table.
+//
+// GitHub issue #709: the generation never wraps. A slot freed at its last
+// generation becomes Retired instead of Free: region_alloc never hands it
+// out again, so no generation is issued twice and every handle to it
+// stays Stale. The free still succeeds and the region is still given up;
+// a table that retires every slot answers Full.
 linear struct @TBL@[base: addr, count: usize] {
     private address: usize;
     private length: usize;
@@ -384,6 +390,10 @@ must_use variant @TK@[b: addr] {
 const @T@__REGION_FREE: usize = 0;
 const @T@__REGION_LIVE: usize = 1;
 const @T@__REGION_OUT: usize = 2;
+const @T@__REGION_RETIRED: usize = 3;
+// The last generation a slot is handed out in (@LASTGEN@ is the largest
+// usize, lowered only by a test's --internal-region-table-last-generation).
+const @T@__REGION_LAST_GENERATION: usize = @LASTGEN@;
 
 private fn region_table_state(t: borrow @TBL@[b, n], slot: usize) -> *usize
         !{unsafe} {
@@ -459,11 +469,17 @@ fn region_table_unlock(t: sink @TBL@[b, n]) !{unsafe} {
     if (t.lock != 0) { unsafe { atomic_store_release(t.lock, 0); } }
 }
 
-// Free an Out slot: every handle to it becomes Stale.
+// Free an Out slot: every handle to it becomes Stale. At its last
+// generation the slot is retired rather than freed (#709).
 fn region_free(t: borrow @TBL@[b, n], s: sink @SL@[b, k]) !{unsafe} {
     let slot: usize = region_slot_of(t, s);
-    *region_table_state(t, slot) = @T@__REGION_FREE;
-    *region_table_generation(t, slot) = *region_table_generation(t, slot) + 1;
+    let generation: usize = *region_table_generation(t, slot);
+    if (generation >= @T@__REGION_LAST_GENERATION) {
+        *region_table_state(t, slot) = @T@__REGION_RETIRED;
+    } else {
+        *region_table_state(t, slot) = @T@__REGION_FREE;
+        *region_table_generation(t, slot) = generation + 1;
+    }
     region_slot_discharge(s);
 }
 
@@ -1474,9 +1490,18 @@ fn region_at(r: borrow @R@[b, o, n], i: usize @ k) -> *@T@ @ b !{unsafe}
 }
 |}
 
+(* GitHub issue #709: test-only. The last generation a permanent table
+   slot is handed out in; None is the largest usize. Set only by the
+   hidden --internal-region-table-last-generation flag, so a native test
+   can reach the boundary without a production counter-reset API. *)
+let table_last_generation : int option ref = ref None
+
 let instance ?(record = false) elem =
   (if record then template ^ region_at_record_source ^ record_access_source
    else template ^ region_at_primitive_source)
+  |> replace_all ~sub:"@LASTGEN@" ~by:(match !table_last_generation with
+       | Some n -> string_of_int n
+       | None -> "0xFFFFFFFFFFFFFFFF")
   |> replace_all ~sub:"@R@" ~by:("region__" ^ elem)
   |> replace_all ~sub:"@S@" ~by:("RegionSplit__" ^ elem)
   |> replace_all ~sub:"@BT@" ~by:("RegionTyped__" ^ elem)

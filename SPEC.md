@@ -4029,6 +4029,17 @@ slot given back twice, an element used after its slot was given back or
 freed, do not compile. A stored handle to a freed slot is refused at run
 time (`Stale`).
 
+A slot's generation never wraps (GitHub issue #709). Each slot is handed
+out in generations 0, 1, ... up to the largest `usize`; `region_free` of a
+slot in that last generation still succeeds and gives up the region, but
+retires the slot instead of freeing it. A retired slot is never handed out
+again (`region_alloc` skips it, and a table whose slots are all retired
+answers `Full`), so no generation of a slot is issued twice and every
+handle to it stays `Stale`. The API is unchanged: exhaustion costs one
+slot of capacity, not a new failure case, and on a 64-bit target the bound
+is not reached in practice. `linux_user/region_table_retire` reaches it with
+the test-only `--internal-region-table-last-generation`.
+
 A table used from several cores is taken under its lock instead:
 
 ```

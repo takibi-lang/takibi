@@ -163,6 +163,13 @@ let () =
     flag "--internal-trace-init-flow" Development ~arg:("<function>", "a function name")
       (Arg (fun f -> Takibi.Init_flow.trace_func := Some f))
       "print a function's init state after each statement";
+    (* GitHub issue #709: a permanent region table's last generation,
+       lowered so a native test reaches the boundary; never used in a real
+       build. *)
+    flag "--internal-region-table-last-generation" Development
+      ~arg:("<n>", "a generation")
+      (Arg (fun n -> Takibi.Region_builtin.table_last_generation := Some (int_of_string n)))
+      "retire a region table slot freed at generation n";
     (* GitHub issue #952: plants the unsound rules the z3 check must catch;
        never used in a real build. *)
     flag "--internal-range-obligation-fault-control" Development
