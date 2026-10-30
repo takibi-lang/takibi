@@ -1,0 +1,30 @@
+// Figure for docs/wont-compile/0009-interrupt-only-function-called-with-irqs-open.md
+digraph interrupt_only_function_called_with_irqs_open {
+  graph [bgcolor="#fffaf0", rankdir=TB, pad=0.35, nodesep=0.55, ranksep=0.9,
+         fontname="Helvetica", fontsize=15, fontcolor="#596078"];
+  node  [fontname="Helvetica", fontsize=15, shape=box, style="rounded,filled",
+         fillcolor="#ffffff", color="#17213f", fontcolor="#17213f",
+         penwidth=2, margin="0.26,0.18"];
+  edge  [fontname="Helvetica", fontsize=13, color="#17213f", penwidth=2,
+         fontcolor="#596078", arrowsize=0.9];
+
+  subgraph cluster_rejected {
+    label="Takibi: rejected at compile time, no mask at the call";
+    labelloc="t"; fontname="Helvetica"; fontsize=16; fontcolor="#c9360d";
+    color="#f05a24"; penwidth=2.5; style="rounded,dashed"; margin=18;
+
+    caller [label="console_flush()\nIRQs open, no masking guard",
+            fillcolor="#fff3df", color="#f05a24"];
+    callee [label="uart_tx_drain()\n!{interrupt}: runs masked",
+            fillcolor="#fff3df", color="#f05a24"];
+
+    { rank=same; caller; callee; }
+    caller -> callee;
+  }
+
+  board [label="On the board\l\lThe TX interrupt arrives halfway through the drain.\lThe handler finds the queue half moved,\lor spins on a lock its own CPU holds.\l",
+         fillcolor="#f1f2f6", color="#17213f", fontcolor="#17213f"];
+
+  callee -> board [label="  C: lockdep, at run time, if the path runs", style=dashed,
+                   color="#c9360d", fontcolor="#c9360d", penwidth=2.5];
+}

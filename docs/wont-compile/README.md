@@ -29,6 +29,7 @@ second specification.
 | [0006](0006-blocking-call-while-preemption-is-disabled.md) | A blocking call while preemption is disabled | Enforced |
 | [0007](0007-cpu-local-index-used-after-preemption-is-enabled.md) | A CPU-local index used after preemption is enabled again | Enforced |
 | [0008](0008-delivery-into-a-preempted-kernel-context.md) | A delivery written into a preempted kernel context | Enforced |
+| [0009](0009-interrupt-only-function-called-with-irqs-open.md) | An interrupt-only function called with IRQs open | Enforced |
 
 ## Conventions
 
