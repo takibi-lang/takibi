@@ -4,22 +4,9 @@
 // an unlocked terminal_echo_pending() is a hint that a locked path rechecks. Compact erasure operations keep a full canonical-line kill
 // bounded without making the receive interrupt wait on a paused transmitter.
 use "kernel/lib/execution_model.tkb";
+use "kernel/drivers/serial/terminal_echo_ring.tkb";
 use "kernel/printk/console_lock.tkb";
 
-const TERMINAL_ECHO_OPERATIONS: usize = 4096;
-variant TerminalEchoOperation { Byte(u8); Control(u8); Erase(usize); Newline; }
-must_use variant TerminalEchoPushResult { Queued; Full; }
-must_use variant TerminalEchoReadResult { Empty; Byte(u8); }
-
-// The ring, reached only through a place guarded by the console lock. The count
-// stays one atomic word beside it for the unlocked pending hint and DDB; only
-// a holder of the lock writes it.
-struct TerminalEchoState {
-    head: usize;
-    tail: usize;
-    phase: u8;
-    operations: [u32; TERMINAL_ECHO_OPERATIONS];
-}
 private region let mut terminal_echo_state: [TerminalEchoState; 1];
 struct TerminalEchoStore {
     private state: Place(exists c: addr. exists c__off: usize.
@@ -27,27 +14,18 @@ struct TerminalEchoStore {
                    guarded_by(console_tx_lock);
 }
 private let mut terminal_echo_store: TerminalEchoStore;
-private let mut terminal_echo_count: AtomicWord;
-private let mut terminal_echo_dropped: AtomicWord;
-
-fn terminal_echo_pending() -> bool { return atomic_word_load(&terminal_echo_count) != 0; }
-fn terminal_echo_drop_count() -> usize { return atomic_word_load(&terminal_echo_dropped); }
 
 fn terminal_echo_reset(guard: borrow ConsoleGuard[&console_tx_lock]) {
-    atomic_word_store(&terminal_echo_count, 0);
     match place_borrow(guard, terminal_echo_store.state) {
         Place::Empty => {}
-        Place::Full(states) => {
-            let state = region_at(states, 0);
-            state.head = 0;
-            state.tail = 0;
-            state.phase = 0;
-        }
+        Place::Full(states) => { terminal_echo_state_reset(region_at(states, 0)); }
     }
 }
 
 // The first push claims the storage: no boot step has to come first.
 private fn terminal_echo_claim(guard: borrow ConsoleGuard[&console_tx_lock]) {
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+        "terminal echo queue holders keep the console lock without preemption");
     if (place_is_full(guard, terminal_echo_store.state)) { return; }
     let RegionOf(TerminalEchoState)::Taken(claimed) = region_of(terminal_echo_state) else {
         RegionOf(TerminalEchoState)::Gone => { return; }
@@ -58,111 +36,28 @@ private fn terminal_echo_claim(guard: borrow ConsoleGuard[&console_tx_lock]) {
     }
 }
 
-private fn terminal_echo_full() -> TerminalEchoPushResult {
-    atomic_word_fetch_add(&terminal_echo_dropped, 1);
+fn terminal_echo_push(guard: borrow ConsoleGuard[&console_tx_lock],
+                      operation: TerminalEchoOperation) -> TerminalEchoPushResult {
+    terminal_echo_claim(guard);
+    let queued: bool = match place_borrow(guard, terminal_echo_store.state) {
+        Place::Empty => { false }
+        Place::Full(states) => {
+            let mut stored: bool = true;
+            match terminal_echo_state_push(region_at(states, 0), operation) {
+                TerminalEchoPushResult::Queued => {}
+                TerminalEchoPushResult::Full => { stored = false; }
+            }
+            stored
+        }
+    };
+    if (queued) { return TerminalEchoPushResult::Queued; }
     return TerminalEchoPushResult::Full;
 }
 
-fn terminal_echo_push(guard: borrow ConsoleGuard[&console_tx_lock],
-                      operation: TerminalEchoOperation) -> TerminalEchoPushResult {
-    static_assert(KERNEL_PREEMPTIBLE == 0,
-        "terminal echo queue holders keep the console lock without preemption");
-    // The two low bits encode the byte-expansion shape; the remaining
-    // bits carry a byte or an erasure count, never an address or ownership.
-    let mut encoded: u32 = 0;
-    match operation {
-        TerminalEchoOperation::Byte(value) => { encoded = (value as u32) << 2; }
-        TerminalEchoOperation::Control(value) => {
-            encoded = ((value as u32) << 2) | 1;
-        }
-        TerminalEchoOperation::Erase(columns) => {
-            if (columns == 0) { return TerminalEchoPushResult::Queued; }
-            if (columns > 32768) { return terminal_echo_full(); }
-            encoded = ((columns as u32) << 2) | 2;
-        }
-        TerminalEchoOperation::Newline => { encoded = 3; }
-    }
-    if (atomic_word_load(&terminal_echo_count) >= TERMINAL_ECHO_OPERATIONS) {
-        return terminal_echo_full();
-    }
-    terminal_echo_claim(guard);
-    let stored: bool = match place_borrow(guard, terminal_echo_store.state) {
-        Place::Empty => { false }
-        Place::Full(states) => {
-            let state = region_at(states, 0);
-            let tail: usize = state.tail;
-            let mut fits: bool = false;
-            if (tail < TERMINAL_ECHO_OPERATIONS) {
-                state.operations[tail] = encoded;
-                state.tail = (tail + 1) % TERMINAL_ECHO_OPERATIONS;
-                fits = true;
-            }
-            fits
-        }
-    };
-    if (stored == false) { return terminal_echo_full(); }
-    atomic_word_store(&terminal_echo_count, atomic_word_load(&terminal_echo_count) + 1);
-    return TerminalEchoPushResult::Queued;
-}
-
-// One byte of the operation at the head, in the state the caller holds. The
-// second result says the operation is finished and leaves the ring.
-private fn terminal_echo_expand(state: borrow &mut TerminalEchoState,
-                                head: {0..<TERMINAL_ECHO_OPERATIONS as usize})
-        -> (u8, bool) {
-    let operation: u32 = state.operations[head];
-    let parameter: u32 = operation >> 2;
-    let phase: u8 = state.phase;
-    match operation & 3 {
-        0 => { return (parameter as u8, true); }
-        1 => {
-            if (phase == 0) {
-                state.phase = 1;
-                return (94, false);
-            }
-            return (parameter as u8, true);
-        }
-        2 => {
-            if (phase == 0) {
-                state.phase = 1;
-                return (8, false);
-            }
-            if (phase == 1) {
-                state.phase = 2;
-                return (32, false);
-            }
-            state.phase = 0;
-            if (parameter <= 1) { return (8, true); }
-            state.operations[head] = ((parameter - 1) << 2) | 2;
-            return (8, false);
-        }
-        _ => {
-            if (phase == 0) {
-                state.phase = 1;
-                return (13, false);
-            }
-            return (10, true);
-        }
-    }
-}
-
-private fn terminal_echo_take(state: borrow &mut TerminalEchoState) -> (u8, bool) {
-    let head: usize = state.head;
-    if (head >= TERMINAL_ECHO_OPERATIONS) { return (0, false); }
-    let (value, retired) = terminal_echo_expand(state, head);
-    if (retired) {
-        state.head = (head + 1) % TERMINAL_ECHO_OPERATIONS;
-        state.phase = 0;
-        atomic_word_store(&terminal_echo_count, atomic_word_load(&terminal_echo_count) - 1);
-    }
-    return (value, true);
-}
-
 fn terminal_echo_read(guard: borrow ConsoleGuard[&console_tx_lock]) -> TerminalEchoReadResult {
-    if (atomic_word_load(&terminal_echo_count) == 0) { return TerminalEchoReadResult::Empty; }
     let outcome: (u8, bool) = match place_borrow(guard, terminal_echo_store.state) {
         Place::Empty => { (0, false) }
-        Place::Full(states) => { terminal_echo_take(region_at(states, 0)) }
+        Place::Full(states) => { terminal_echo_state_read(region_at(states, 0)) }
     };
     let (byte, found) = outcome;
     if (found == false) { return TerminalEchoReadResult::Empty; }

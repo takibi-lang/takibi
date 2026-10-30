@@ -439,6 +439,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/drivers/serial/uart_rx_ring.tkb \
 	kernel/drivers/serial/terminal.tkb \
 	kernel/drivers/serial/terminal_echo.tkb \
+	kernel/drivers/serial/terminal_echo_ring.tkb \
 	kernel/drivers/serial/terminal_io.tkb \
 	kernel/fs/elf64.tkb \
 	kernel/fs/ext2/ext2.tkb \
@@ -739,7 +740,7 @@ $(LINUX_USER_DIR)/xhci_regs/xhci_regs_exe.o: LINUX_USER_EXTRA_SRCS := kernel/dri
 # GitHub issue #543: the kernel's own UART receive ring, driven past full.
 # Filling a 4096-byte ring over a real UART on every boot would cost the
 # boot what this costs nothing, and the capacity and drop rule are byte work.
-$(LINUX_USER_DIR)/uart_rx_ring/uart_rx_ring_exe.o: kernel/drivers/serial/uart_rx_ring.tkb kernel/drivers/serial/terminal.tkb kernel/drivers/serial/terminal_echo.tkb kernel/lib/execution_model.tkb $(LINUX_USER_DIR)/uart_rx_ring/terminal_policy.tkb
+$(LINUX_USER_DIR)/uart_rx_ring/uart_rx_ring_exe.o: kernel/drivers/serial/uart_rx_ring.tkb kernel/drivers/serial/terminal.tkb kernel/drivers/serial/terminal_echo_ring.tkb kernel/lib/execution_model.tkb $(LINUX_USER_DIR)/uart_rx_ring/terminal_policy.tkb
 $(LINUX_USER_DIR)/uart_rx_ring/uart_rx_ring_exe.o: LINUX_USER_EXTRA_SRCS := kernel/drivers/serial/uart_rx_ring.tkb $(LINUX_USER_DIR)/uart_rx_ring/terminal_policy.tkb
 
 # GitHub issue #868: the PL011 RX drain against a scripted FIFO. QEMU's

@@ -1,6 +1,14 @@
 // Exercise the production termios policy and compact echo queue natively.
 use "kernel/drivers/serial/terminal.tkb";
-use "kernel/drivers/serial/terminal_echo.tkb";
+use "kernel/drivers/serial/terminal_echo_ring.tkb";
+
+private let mut policy_echo: TerminalEchoState;
+
+private fn policy_echo_read() -> TerminalEchoReadResult {
+    let (byte, found) = terminal_echo_state_read(&policy_echo);
+    if (found == false) { return TerminalEchoReadResult::Empty; }
+    return TerminalEchoReadResult::Byte(byte);
+}
 
 private fn policy_word(bytes: borrow [u8; 36..], field: {0..<4 as usize}, word: usize) {
     for byte: usize in 0..<4 { bytes[field * 4 + byte] = (word >> (byte * 8)) as u8; }
@@ -149,20 +157,20 @@ fn check_terminal_policy() {
         TerminalEncodeResult::Encoded(counts) => { encoding = false; }
     }
     check("ONLCR never splits CRLF at odd room or staging boundaries", encoding);
-    terminal_echo_reset();
+    terminal_echo_state_reset(&policy_echo);
     let mut compact: bool = true;
     for index: usize in 0..<4094 {
-        match terminal_echo_push(TerminalEchoOperation::Byte(65)) {
+        match terminal_echo_state_push(&policy_echo, TerminalEchoOperation::Byte(65)) {
             TerminalEchoPushResult::Queued => { }
             TerminalEchoPushResult::Full => { compact = false; }
         }
     }
-    match terminal_echo_push(TerminalEchoOperation::Erase(32752)) {
+    match terminal_echo_state_push(&policy_echo, TerminalEchoOperation::Erase(32752)) {
         TerminalEchoPushResult::Queued => { }
         TerminalEchoPushResult::Full => { compact = false; }
     }
     for index: usize in 0..<4094 {
-        match terminal_echo_read() {
+        match policy_echo_read() {
             TerminalEchoReadResult::Byte(value) => { if (value != 65) { compact = false; } }
             TerminalEchoReadResult::Empty => { compact = false; }
         }
@@ -170,7 +178,7 @@ fn check_terminal_policy() {
     for index: usize in 0..<98256 {
         let mut expected: u8 = 8;
         if (index % 3 == 1) { expected = 32; }
-        match terminal_echo_read() {
+        match policy_echo_read() {
             TerminalEchoReadResult::Byte(value) => { if (value != expected) { compact = false; } }
             TerminalEchoReadResult::Empty => { compact = false; }
         }
@@ -179,15 +187,15 @@ fn check_terminal_policy() {
           compact && terminal_echo_pending() == false && terminal_echo_drop_count() == 0);
     let mut bounded: bool = true;
     for index: usize in 0..<4096 {
-        match terminal_echo_push(TerminalEchoOperation::Byte(65)) {
+        match terminal_echo_state_push(&policy_echo, TerminalEchoOperation::Byte(65)) {
             TerminalEchoPushResult::Queued => { }
             TerminalEchoPushResult::Full => { bounded = false; }
         }
     }
-    match terminal_echo_push(TerminalEchoOperation::Control(67)) {
+    match terminal_echo_state_push(&policy_echo, TerminalEchoOperation::Control(67)) {
         TerminalEchoPushResult::Queued => { bounded = false; }
         TerminalEchoPushResult::Full => { }
     }
     check("an echo operation beyond capacity is counted and never blocks", bounded && terminal_echo_drop_count() == 1);
-    terminal_echo_reset();
+    terminal_echo_state_reset(&policy_echo);
 }
