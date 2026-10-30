@@ -534,3 +534,11 @@ condition below applies, and reports the land afterwards.
 ## 2026-10-30 maintainer decisions, third batch
 - #779: (c) for now: line alignment is decided at each device-protocol P_init from the concrete b and o after monomorphization; (a), a visible `region line(T)` kind, remains the growth path if #1006 wants it spelled (issue #779 comment).
 - #774: (A) with the handled set as a per-platform `enum IrqSource` instead of a const array: the IAR id is converted with the checked `match id as IrqSource { ... miss => ... }` (#608), claims are per-variant (`IrqClaim[Pmu]`), source clears take only their own claim and return `IrqAcked`, EOI takes only `IrqAcked`, `miss` consumes the claim through `irq_unclaimed`. Disequality facts are implemented when a consumer first needs them (issue filed 2026-10-30).
+
+## 2026-10-30 maintainer decisions, fourth batch
+- External code: never commit external software source (for example parts of the Linux kernel) to this repository; licensing becomes hard to handle. A reference copy, when needed, lives outside the repository under ~/.takibi-sessions/ so it can be grepped.
+- #1027 step 3: (a) non-production compiles (overlays, race windows, fixtures, linux_user and test controls) pass `--internal-allow-unused`; check_kernel_compile_flags.py refuses any opt-out in production kernel recipes and KERNEL_*_COMPILE_FLAGS and allows it elsewhere only through a listed exemption with a reason. The COMPILER_OUTPUT_EXCEPTION.md wording change ("--facts and --generate options") and the trap diagnostic wording are accepted.
+- #638 stage 4: nmi functions may also call `!{interrupt}` functions (IRQs are masked there).
+- #1013: (2) the phase still ends at CPU_ON; `boot_once_get`'s first-slice check is "this cell has been written" (one written word per cell, value stays the first field). Second group: tcp.tkb's our_mac.
+- #1032 IOMMU: confirm on the board whether pcie2/RP1 is behind an IOMMU; if not, try (B') confining RP1's DMA to one DMA arena through the BCM2712 PCIe inbound window.
+- #1227: (A) the boot key comes from the device tree's /chosen/rng-seed (or kaslr-seed); the fallback when it is missing is pending.
