@@ -839,6 +839,30 @@
         "invariant_stop_sites": "#1013 boot_once_unwritten_stop: a read of a BootOnce cell before its boot write stops with a named line",
         "unprotected_globals": "BootOnce (#1013): seven QEMU and TCP boot-configuration globals"
       }
+    },
+    {
+      "date": "2026-10-30",
+      "head": "be1d8334",
+      "counts": {
+        "raw_mint_files": 14,
+        "frame_lines": 12287,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 214,
+        "raw_deref_io": 7,
+        "raw_deref_builtin_region": 113,
+        "unsafe_blocks": 151,
+        "extern_fns": 61,
+        "invariant_stop_sites": 119,
+        "assembly_lines": 2503,
+        "per_cpu_ordinary_arrays": 71,
+        "per_cpu_stores": 7,
+        "raw_cpu_id_calls": 150,
+        "unprotected_globals": 418,
+        "frame_api_ratchet": 7
+      },
+      "changes": {
+        "frame_lines": "#1032 one comment line in dma_address.tkb"
+      }
     }
   ]
 }
