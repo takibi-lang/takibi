@@ -21,7 +21,7 @@ File extension: `.tkb`. Compiler invocation: `takibi <file1.tkb>
 concatenated (flat global namespace) before compilation -- there is no
 module/import system beyond `use` (see "Known Limitations" below).
 
-`--reject-unused-functions` fails the build for a function that nothing
+By default the build fails for a function that nothing
 reachable calls or takes the value of. Reachability starts at each
 `--external-entry` (a function called from outside Takibi, such as
 assembly), at `!{interrupt}` and `!{exception}` roots, at vector-table and
@@ -131,8 +131,8 @@ turn as many potential traps as possible into compile-time errors instead:
   check. This is correct, not a compiler weakness.
 - `{lo..<hi as base}` means "range and representation are known" -- if the
   compiler can prove the access is in range, no check is generated at all.
-- `--forbid-trap` (see below) turns "no proof exists" into a compile
-  error, for code that is meant to ship.
+- By default (see "Trap sites" below) "no proof exists" is a compile
+  error; `--allow-trap` is the bring-up exception.
 
 ## Types
 
@@ -4546,10 +4546,10 @@ Generated code rule (GitHub issue #786). Every function the compiler derives
 2. internal linkage, and `inline` (LLVM `alwaysinline`) when it is small
    (address arithmetic, an index check), so it does not survive as a
    function of its own in the image;
-3. removable by the linker when still unreferenced: under
-   `--function-sections` every defined function and data object is in a
-   section of its own (`.text.takibi.<name>` with `--frame-pointers`,
-   `.text.<name>` without; `.rodata.`/`.data.`/`.bss.<name>` by kind), and
+3. removable by the linker when still unreferenced: by default (without
+   `--no-function-sections`) every defined function and data object is in a
+   section of its own (`.text.takibi.<name>` with frame pointers, the
+   default, `.text.<name>` under `--no-frame-pointers`; `.rodata.`/`.data.`/`.bss.<name>` by kind), and
    the kernel links with `--gc-sections`.
 A generator that cannot meet all three is not accepted. Protocol code is
 internal; its element accessors (`_read`, `_write`), device spans (`_span`,
@@ -5365,9 +5365,9 @@ mutable global, is an error; an existing file this compilation does not
 read is skipped. A duplicate or empty-reason entry is an error. The rule
 does not check that an assertion is correct.
 
-## --forbid-trap
+## Trap sites
 
-`takibi ... --forbid-trap` rejects compilation if **any** runtime trap
+By default `takibi` rejects compilation if **any** runtime trap
 check remains anywhere in the generated code (array bounds checks,
 division/remainder zero checks, signed-division overflow checks, checked
 refined casts, exhaustive-enum casts), listing every unproven site with its
@@ -5391,6 +5391,12 @@ bounds checks to begin with and are therefore invisible to it; that is
 what the slice type and refined integer types exist to move code away
 from.
 
+
+`--allow-trap` accepts the remaining sites, for bring-up only. The other
+strict defaults have opt-outs of the same kind (GitHub issue #1027):
+`--no-frame-pointers`, `--no-function-sections` and
+`--internal-allow-unused`. None appears in a kernel recipe
+(`scripts/check_kernel_compile_flags.py`).
 ## Known Limitations (Language-Level)
 
 This is the canonical, current-behavior list of language-level known

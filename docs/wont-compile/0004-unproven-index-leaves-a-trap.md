@@ -4,10 +4,9 @@
 | --- | --- |
 | Status | Enforced |
 | Compared against | GCC array-bounds diagnostics, Rust indexing, unconditional_panic, get_unchecked (2026-10-04) |
-| Check | `--forbid-trap`, over the codegen trap-site accounting (`lib/llvm_gen.ml`) |
+| Check | trap sites rejected by default (`--allow-trap` opts out), over the codegen trap-site accounting (`lib/llvm_gen.ml`) |
 | Test case | `every runtime-trap lowering records one site and emits one llvm.trap call` |
 | Introduced | 2026-07-04, commit `feea9a74` ("Introduce --forbid-trap option") |
-| Compile with | `--forbid-trap` |
 | Specified in | [`TRUSTED_BASE.md`](../../TRUSTED_BASE.md) |
 
 ![One array access, three outcomes: no check in C, a check that panics in
@@ -76,7 +75,7 @@ An index that is *not* proved still gets a check, because the alternative is
 silent corruption. That is the default, and by itself it only moves Takibi
 into Rust's position.
 
-`--forbid-trap` is what closes it. Under that flag every remaining trap site
+The trap-site rejection, on by default, is what closes it. Every remaining trap site
 is a compile error, naming each access that still needs a check. The
 diagnostic reports both the site and the total, because one unproved access
 in a kernel is not a warning about code quality -- it is a trap instruction
@@ -102,11 +101,11 @@ fn store(index: usize, value: u32) {
 
 ```text
 array bounds check remains: index type usize cannot prove range {0..<64}
-Error: --forbid-trap: 1 runtime trap site(s) remain (listed above)
+Error: 1 runtime trap site(s) remain (listed above); --allow-trap accepts them for bring-up
 ```
 
-Without `--forbid-trap` this program compiles, and the binary contains the
-check and the trap. That is the outcome the flag exists to refuse, and it is
+With `--allow-trap` this program compiles, and the binary contains the
+check and the trap. That is the outcome the default exists to refuse, and it is
 the outcome the compared Rust indexing APIs do not themselves forbid.
 
 ## Code that does compile
@@ -126,7 +125,7 @@ everything inward of that carries the proof in its types.
 
 ## Limits of this entry
 
-`--forbid-trap` accounts for the trap sites this compiler lowers: array and
+The rejection accounts for the trap sites this compiler lowers: array and
 subslice bounds, refined casts, exhaustive enum casts. It is a statement about
 what the compiler emitted, not a proof that the hardware, the linker script,
 or the assembly outside the language model cannot fault.

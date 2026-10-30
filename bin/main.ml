@@ -83,18 +83,18 @@ let () =
   let target_triple = ref "" in
   let target_cpu = ref "" in
   let debug_info = ref false in
-  let forbid_trap = ref false in
+  let forbid_trap = ref true in
   let forbid_unsafe = ref false in
   let confine_raw_authority = ref false in
   let raw_mint_files = ref [] in
   let execution_model_file = ref "" in
   let device_semantics_files = ref [] in
   let regions = ref false in
-  let reject_unused_functions = ref false in
+  let reject_unused_functions = ref true in
   let external_entries = ref [] in
   let check_unused_files = ref [] in
-  let frame_pointers = ref false in
-  let function_sections = ref false in
+  let frame_pointers = ref true in
+  let function_sections = ref true in
   let show_version = ref false in
   let facts_dir = ref "" in
   let generate = ref None in
@@ -102,6 +102,7 @@ let () =
   let set r = Cli_flags.Arg (fun v -> r := v) in
   let add r = Cli_flags.Arg (fun v -> r := v :: !r) in
   let on r = Cli_flags.No_arg (fun () -> r := true) in
+  let off r = Cli_flags.No_arg (fun () -> r := false) in
   let path = ("<path>", "a path") in
   let dir = ("<dir>", "a directory") in
   let open Cli_flags in
@@ -114,12 +115,16 @@ let () =
       "LLVM target CPU";
     flag "-g" Target_output (on debug_info) "emit DWARF debug information";
     flag "--version" Target_output (on show_version) "print the compiler version and exit";
-    flag "--frame-pointers" Codegen (on frame_pointers)
-      "keep AArch64 frame-pointer chains (the kernel debugger walks them)";
-    flag "--function-sections" Codegen (on function_sections)
-      "one section per function and global, for the linker's --gc-sections";
-    flag "--forbid-trap" Policy (on forbid_trap)
-      "reject any compiler-inserted trap site";
+    (* GitHub issue #1027 step 3: what the maintained kernel always
+       passes is the default; each opt-out only loosens, and
+       scripts/check_kernel_compile_flags.py refuses one in a kernel
+       recipe. *)
+    flag "--no-frame-pointers" Codegen (off frame_pointers)
+      "drop the frame-pointer chains kept by default (the kernel debugger walks them)";
+    flag "--no-function-sections" Codegen (off function_sections)
+      "one text section instead of one per function and global (the default, for --gc-sections)";
+    flag "--allow-trap" Policy (off forbid_trap)
+      "accept compiler-inserted trap sites (rejected by default; bring-up only)";
     flag "--forbid-unsafe" Policy (on forbid_unsafe)
       "reject a reachable unsafe effect";
     flag "--confine-raw-authority" Policy (on confine_raw_authority)
@@ -131,8 +136,6 @@ let () =
     flag "--device-semantics-file" Policy ~arg:path (add device_semantics_files)
       "a file allowed to declare device semantics (repeatable)";
     flag "--regions" Policy (on regions) "enable the region built-ins";
-    flag "--reject-unused-functions" Policy (on reject_unused_functions)
-      "reject a function nothing reachable uses";
     flag "--external-entry" Policy ~arg:("<function>", "a function name") (add external_entries)
       "a function called from outside Takibi (repeatable)";
     flag "--check-unused-file" Policy ~arg:("<path>", "a source path") (add check_unused_files)
@@ -175,6 +178,8 @@ let () =
          Takibi.Range_obligation.fault_overlay_short := true;
          Takibi.Range_obligation.fault_type_size := true))
       "plant known-unsound range rules (z3 check's failing control)";
+    flag "--internal-allow-unused" Development (off reject_unused_functions)
+      "accept a function nothing reachable uses (rejected by default)";
   ] in
   (match Cli_flags.parse flags (Array.to_list Sys.argv |> List.tl) with
    | Ok files -> input_files := files
@@ -666,7 +671,7 @@ let () =
       exit 1
     end;
 
-    (* --forbid-trap: reject the program if any runtime trap check remains.
+    (* Trap sites are rejected by default (--allow-trap opts out): reject the program if any runtime trap check remains.
        The judgment is what the type system could prove at IR-generation
        time -- deliberately NOT whether LLVM's optimizer would fold a given
        check away later (see Llvm_gen.trap_sites' comment). Every unproven
@@ -680,7 +685,7 @@ let () =
           (Trap_diagnostics.instantiation_note group)
       ) groups;
       Printf.eprintf
-        "Error: --forbid-trap: %d runtime trap site(s) remain (listed above)\n"
+        "Error: %d runtime trap site(s) remain (listed above); --allow-trap accepts them for bring-up\n"
         (List.length sites);
       exit 1
     end;

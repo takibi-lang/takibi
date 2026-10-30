@@ -262,7 +262,7 @@ let expect_aarch64_debug_object src () =
       if not (Sys.file_exists compiler) then
         Alcotest.failf "cannot find test compiler at %s" compiler;
       let args = [| compiler; source; "-g"; "--target"; "aarch64-none-elf";
-                     "-o"; object_file |] in
+                     "--internal-allow-unused"; "-o"; object_file |] in
       let (stdout, stdin, stderr) =
         Unix.open_process_args_full compiler args (Unix.environment ())
       in
@@ -19532,7 +19532,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
           let out = read_all stdout and err = read_all stderr in
           Unix.close_process_full (stdout, stdin, stderr), out ^ err in
         let emit () =
-          let status, output = run [source; "--facts"; report ^ ".facts";
+          let status, output = run [source; "--facts"; report ^ ".facts"; "--internal-allow-unused";
             "-o"; object_file] in
           if status <> Unix.WEXITED 0 then Alcotest.failf "report CLI failed: %s" output;
           let ic = open_in (Filename.concat (report ^ ".facts") "heldguards.tsv") in
@@ -19573,6 +19573,42 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
         Alcotest.(check bool) "missing path exits nonzero" true (status <> Unix.WEXITED 0);
         Alcotest.(check bool) "missing path names the expected diagnostic" true
           (contains_substring output "--facts requires a directory")));
+
+  (* GitHub issue #1027 step 3: the strict settings are the defaults and
+     each opt-out only loosens. A program with an unproven index and an
+     unused function is refused with no flag, and each refusal is lifted by
+     its own opt-out alone. *)
+  Alcotest.test_case "strict defaults: traps and unused functions refused, opt-outs loosen" `Quick
+    (fun () ->
+      let source = Filename.temp_file "takibi-defaults" ".tkb" in
+      let object_file = Filename.temp_file "takibi-defaults" ".o" in
+      let oc = open_out source in
+      output_string oc "fn pick(s: []u8, i: usize) -> u8 { return s[i]; }\n\
+                        fn main() -> u8 { return 0; }\n\
+                        fn stale() {}\n";
+      close_out oc;
+      let compiler = takibi_cli_path () in
+      let run args =
+        let stdout, stdin, stderr = Unix.open_process_args_full compiler
+          (Array.of_list (compiler :: source :: "-o" :: object_file :: args))
+          (Unix.environment ()) in
+        close_out_noerr stdin;
+        let out = read_all stdout and err = read_all stderr in
+        Unix.close_process_full (stdout, stdin, stderr) = Unix.WEXITED 0, out ^ err in
+      let ok, output = run ["--external-entry"; "main"; "--external-entry"; "pick"] in
+      Alcotest.(check bool) "refused by default" false ok;
+      Alcotest.(check bool) "names the unused function" true
+        (contains_substring output "unused function 'stale'");
+      let ok, output = run ["--external-entry"; "main"; "--external-entry"; "pick"; "--internal-allow-unused"] in
+      Alcotest.(check bool) "still refused for the trap" false ok;
+      Alcotest.(check bool) "names the opt-out" true
+        (contains_substring output "--allow-trap accepts them");
+      let ok, output = run ["--external-entry"; "main"; "--external-entry"; "pick"; "--internal-allow-unused"; "--allow-trap"] in
+      Alcotest.(check bool) ("both opt-outs accept: " ^ output) true ok;
+      let ok, output = run ["--forbid-trap"] in
+      Alcotest.(check bool) "a removed flag is an error" false ok;
+      Alcotest.(check bool) "unknown flag" true
+        (contains_substring output "unknown flag '--forbid-trap'"));
 
   Alcotest.test_case "held guard report is opt-in" `Quick
     (fun () ->
@@ -26096,7 +26132,7 @@ let raw_authority_policy_tests = [
 
   (* GitHub issue #796: the device-semantics and unused-check lists are
      ratchets too; a stale entry fails. *)
-  Alcotest.test_case "--check-unused-file requires --reject-unused-functions" `Quick
+  Alcotest.test_case "--check-unused-file conflicts with --internal-allow-unused" `Quick
     (fun () ->
       Alcotest.(check bool) "rejected without the flag" true
         (Option.is_some (Unused_functions.flag_error ~reject:false ~check_files:["a.tkb"]));

@@ -778,7 +778,7 @@ def build_mutant(work):
                     "linux_user/ext2_host/host_support.tkb",
                     "linux_user/ext2_host/ram_disk.tkb",
                     "linux_user/ext2_host/ext2_host.tkb",
-                    "--target", "x86_64-pc-linux-gnu", "-o", obj, "--forbid-trap"],
+                    "--internal-allow-unused", "-o", obj],
                    cwd=root, check=True, capture_output=True)
     stubs = os.path.join(work, "stubs.o")
     subprocess.run(["llvm-mc-19", "--triple=x86_64-pc-linux-gnu", "--filetype=obj",

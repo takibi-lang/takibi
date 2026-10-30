@@ -62,6 +62,7 @@ def compile_sample(takibi: pathlib.Path, source: str, flags: list[str],
     path.write_text(source, encoding="utf-8")
     result = subprocess.run(
         [str(takibi), str(path), "--target", TARGET,
+         "--internal-allow-unused",
          "-o", str(workdir / f"sample{index}.o")] + flags,
         capture_output=True, text=True, check=False)
     return result.returncode, result.stdout + result.stderr

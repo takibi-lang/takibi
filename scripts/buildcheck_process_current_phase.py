@@ -72,7 +72,7 @@ private fn current_phase_control(
     failures = run_overlay_cases(
         repo, 'takibi-current-phase-', cases,
         lambda case: (process, source + case[1]),
-        lambda overlay: [str(compiler), *args.sources, *kernel_compile_flags(),
+        lambda overlay: [str(compiler), *args.sources, *kernel_compile_flags(), '--internal-allow-unused',
                          '-o', str(overlay / 'check.o')],
         judge)
     ran = CaseCount()

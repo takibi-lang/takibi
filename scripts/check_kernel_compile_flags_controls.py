@@ -2,7 +2,8 @@
 """Controls for check_kernel_compile_flags.py (GitHub issue #781): a kernel
 compile that bypasses KERNEL_COMPILE_FLAGS, one that respells a shared flag
 beside it, a flags variable that respells one, and a kernel-compiling script
-that spells its own flags are each refused; the EL0 define and a prerequisite
+that spells its own flags, and an opt-out of a strict default (#1027) in
+a kernel recipe, flags variable or unlisted script are each refused; the EL0 define and a prerequisite
 line are not invocations; the real Makefile and scripts are accepted."""
 
 import sys
@@ -15,7 +16,7 @@ from pass_line import report_pass  # noqa: E402
 
 BYPASS = ("\nplanted.o: kernel/kernel/main.tkb\n"
           "\t$(TAKIBI) $(KERNEL_QEMU_MAIN_TKB) --target $(QEMU_TARGET) "
-          "--cpu $(QEMU_CPU) --forbid-trap -o $@\n")
+          "--cpu $(QEMU_CPU) -o $@\n")
 RESPELL = ("\nplanted.o: kernel/kernel/main.tkb\n"
            "\t$(TAKIBI) $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_QEMU_COMPILE_FLAGS) "
            "--device-semantics-file kernel/x.tkb -o $@\n")
@@ -24,6 +25,10 @@ PATH_BYPASS = ("\nplanted.o:\n\tcd _build/x && $(abspath $(TAKIBI)) "
 FLAGS_VAR = "\nKERNEL_PLANTED_FLAGS := $(KERNEL_QEMU_COMPILE_FLAGS) --regions\n"
 EL0 = ("\ndefine KERNEL_PLANTED_EL0\n\t$(TAKIBI) $< --target $(RPI5_TARGET) -o $@\nendef\n")
 PREREQ = "\nplanted.o: $(KERNEL_QEMU_MAIN_TKB) $(TAKIBI)\n"
+OPT_OUT = ("\nplanted.o: kernel/kernel/main.tkb\n"
+           "\t$(TAKIBI) $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_QEMU_COMPILE_FLAGS) "
+           "--allow-trap -o $@\n")
+OPT_OUT_VAR = "\nKERNEL_PLANTED_FLAGS := $(KERNEL_QEMU_COMPILE_FLAGS) --no-frame-pointers\n"
 
 
 def main():
@@ -32,7 +37,9 @@ def main():
     scripts = {n: (check.ROOT / n).read_text(encoding="ascii") for n in names}
     one = names[0] if names else None
     spelled = {**scripts, one: scripts[one].replace(
-        "*kernel_compile_flags(),", '"--regions", "--forbid-trap",')} if one else scripts
+        "*kernel_compile_flags(),", '"--regions",')} if one else scripts
+    unlisted = {**scripts, "scripts/planted_kernel_check.py":
+                "kernel_compile_flags(); ['--internal-allow-unused']"}
     exempt_el0 = makefile + EL0.replace("KERNEL_PLANTED_EL0", "KERNEL_EL0_COMPILE")
     cases = {
         "a kernel compile without the shared flags is refused": (True, makefile + BYPASS, scripts),
@@ -41,6 +48,9 @@ def main():
         "a flags variable respelling a shared flag is refused": (True, makefile + FLAGS_VAR, scripts),
         "an unlisted define compiling for a kernel target is refused": (True, makefile + EL0, scripts),
         "a script spelling its own flags is refused": (True, makefile, spelled),
+        "an opt-out in a kernel compile is refused": (True, makefile + OPT_OUT, scripts),
+        "an opt-out in a kernel flags variable is refused": (True, makefile + OPT_OUT_VAR, scripts),
+        "an opt-out in an unlisted kernel script is refused": (True, makefile, unlisted),
         "the EL0 define is exempt": (False, exempt_el0, scripts),
         "a prerequisite line is not an invocation": (False, makefile + PREREQ, scripts),
         "the real Makefile and scripts are accepted": (False, makefile, scripts),
@@ -59,8 +69,8 @@ def main():
         print("FAIL kernel-compile-flags-controls")
         return 1
     report_pass("kernel-compile-flags-controls",
-                "bypass, respelling, flags-variable, unlisted define and "
-                "script cases refused; EL0 define, prerequisites and the real "
+                "bypass, respelling, flags-variable, unlisted define, "
+                "script and opt-out cases refused; EL0 define, prerequisites and the real "
                 "tree accepted", cases=len(cases))
     return 0
 

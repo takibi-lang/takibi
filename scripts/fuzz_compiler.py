@@ -143,8 +143,8 @@ def evaluate(compiler: Path, source: str, harness: str, directory: Path,
     tkb.write_text(source)
     c.write_text(harness)
     try:
-        result = command([str(compiler), str(tkb), "--target", "x86_64-pc-linux-gnu",
-                          "--forbid-trap", "-o", str(obj)], timeout)
+        result = command([str(compiler), str(tkb), "--internal-allow-unused",
+                          "-o", str(obj)], timeout)
         output = result.stdout + result.stderr
         (directory / "compile.log").write_text(output)
         if result.returncode:

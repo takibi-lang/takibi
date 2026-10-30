@@ -175,10 +175,9 @@ coverage:
 ## Repo-wide (kernel/, linux_user/, the compiler itself).
 .PHONY: unused-function-control
 unused-function-control: build
-	@$(NICE_HEAVY) $(TAKIBI) test/fixtures/unused_function_positive.tkb --target $(LINUX_AMD64_TARGET) \
-		--forbid-trap --reject-unused-functions --external-entry main -o /tmp/takibi-unused-positive.o
+	@$(NICE_HEAVY) $(TAKIBI) test/fixtures/unused_function_positive.tkb \
+		--external-entry main -o /tmp/takibi-unused-positive.o
 	@status=0; output=`$(NICE_HEAVY) $(TAKIBI) test/fixtures/unused_function_negative.tkb \
-		--target $(LINUX_AMD64_TARGET) --forbid-trap --reject-unused-functions \
 		--external-entry main -o /tmp/takibi-unused-negative.o 2>&1` || status=$$?; \
 	if [ $$status -eq 0 ]; then echo "FAIL unused-function-control: negative build succeeded" >&2; exit 1; fi; \
 	case "$$output" in *"unused function 'stale_helper': no reachable caller or declared entry point"*) ;; \
@@ -190,10 +189,10 @@ unused-function-control: build
 ## flag and is refused with it, naming the function.
 .PHONY: forbid-unsafe-control
 forbid-unsafe-control: build
-	@$(NICE_HEAVY) $(TAKIBI) test/fixtures/forbid_unsafe_negative.tkb --target $(LINUX_AMD64_TARGET) \
-		-o /tmp/takibi-forbid-unsafe-positive.o
+	@$(NICE_HEAVY) $(TAKIBI) test/fixtures/forbid_unsafe_negative.tkb \
+		--internal-allow-unused -o /tmp/takibi-forbid-unsafe-positive.o
 	@status=0; output=`$(NICE_HEAVY) $(TAKIBI) test/fixtures/forbid_unsafe_negative.tkb \
-		--target $(LINUX_AMD64_TARGET) --forbid-unsafe \
+		--forbid-unsafe --internal-allow-unused \
 		-o /tmp/takibi-forbid-unsafe-negative.o 2>&1` || status=$$?; \
 	if [ $$status -eq 0 ]; then echo "FAIL forbid-unsafe-control: negative build succeeded" >&2; exit 1; fi; \
 	case "$$output" in *"--forbid-unsafe: function 'raw_byte' has a reachable unsafe effect"*) ;; \
@@ -212,11 +211,10 @@ POOL_CONTROL_SRCS = $(LINUX_USER_DIR)/common_linux/uart.tkb \
 	$(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
 pool-liveness-control: build
 	@$(NICE_HEAVY) $(TAKIBI) $(POOL_CONTROL_SRCS) test/fixtures/pool_liveness_positive.tkb \
-		--target $(LINUX_AMD64_TARGET) --forbid-trap -o /tmp/takibi-pool-positive.o
+		--internal-allow-unused -o /tmp/takibi-pool-positive.o
 	@status=0; output=`$(NICE_HEAVY) $(TAKIBI) $(POOL_CONTROL_SRCS) \
 		test/fixtures/pool_liveness_negative.tkb \
-		--target $(LINUX_AMD64_TARGET) --forbid-trap \
-		-o /tmp/takibi-pool-negative.o 2>&1` || status=$$?; \
+		--internal-allow-unused -o /tmp/takibi-pool-negative.o 2>&1` || status=$$?; \
 	if [ $$status -eq 0 ]; then echo "FAIL pool-liveness-control: a payload pointer escaped its proof and the build succeeded" >&2; exit 1; fi; \
 	case "$$output" in *"authority-derived pointer 'payload' cannot be returned"*) ;; \
 	*) echo "FAIL pool-liveness-control: expected diagnostic not found" >&2; echo "$$output" >&2; exit 1;; esac; \
@@ -347,7 +345,7 @@ prune-worktrees:
 # section comment above "-- This file covers kernel/ + the compiler only").
 LINUX_AMD64_TARGET      := x86_64-pc-linux-gnu
 LINUX_USER_DIR           := linux_user
-LINUX_UNUSED_CHECK       := --reject-unused-functions --external-entry main
+LINUX_UNUSED_CHECK       := --external-entry main
 # GitHub issue #540: a function nothing reads is a build error. Assembly
 # reaches KERNEL_ASM_ENTRIES by name, which the compiler cannot see;
 # scripts/check_kernel_asm_entries.py keeps that list equal to the set the
@@ -566,7 +564,7 @@ KERNEL_UNUSED_CHECKED_RPI5 := \
 	kernel/platform/rpi5/usb_xhci_rings.tkb \
 	kernel/platform/rpi5/usb_xhci_bus.tkb \
 	kernel/drivers/dma_address.tkb
-KERNEL_UNUSED_CHECK      := --reject-unused-functions \
+KERNEL_UNUSED_CHECK      := \
 	$(foreach entry,$(KERNEL_ASM_ENTRIES) $(KERNEL_DEBUGGER_ENTRIES),--external-entry $(entry)) \
 	$(foreach file,$(KERNEL_UNUSED_CHECKED),--check-unused-file $(file))
 KERNEL_UNUSED_CHECK_QEMU := $(KERNEL_UNUSED_CHECK) \
@@ -785,7 +783,7 @@ $(LINUX_USER_DIR)/locked_cell/locked_cell_exe.o: LINUX_USER_EXTRA_SRCS := kernel
 # #242 entry for why that copy-vs-use distinction mattered here (two real
 # double frees were only found via a multi-hour real-hardware boot-log
 # bisection with no fast test catching them first). No override of the
-# default %_exe.o pattern rule needed (--forbid-trap included) -- only an
+# default %_exe.o pattern rule needed (trap sites rejected by default) -- only an
 # extra prerequisite on the kernel/lib/ files each one `use`s, since the
 # default pattern rule doesn't know about a `use` outside a test's own
 # directory.
@@ -873,7 +871,7 @@ $(LINUX_USER_DIR)/pool_space_replay/pool_space_replay_exe.o: LINUX_USER_EXTRA_SR
 $(LINUX_USER_DIR)/pool_space_replay/pool_space_replay_exe.o: $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb linux_user/intrusive_pool/intrusive_pool_lib.tkb kernel/lib/freelist.tkb kernel/lib/slotmap.tkb
 
 $(LINUX_USER_DIR)/%_exe.o: $(LINUX_USER_DIR)/%.tkb $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(COMMON_LINUX_PRINT_BASE) $(TAKIBI)
-	$(NICE_HEAVY) $(TAKIBI) $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(LINUX_USER_EXTRA_SRCS) $< --target $(LINUX_AMD64_TARGET) -o $@ --forbid-trap $(LINUX_USER_EXTRA_FLAGS) $(LINUX_UNUSED_CHECK) --check-unused-file $<
+	$(NICE_HEAVY) $(TAKIBI) $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(LINUX_USER_EXTRA_SRCS) $< -o $@ $(LINUX_USER_EXTRA_FLAGS) $(LINUX_UNUSED_CHECK) --check-unused-file $<
 
 $(LINUX_USER_DIR)/%.exe: $(LINUX_USER_DIR)/%_exe.o $(COMMON_LINUX_STARTUP_O) $(COMMON_LINUX_SYSCALL_O)
 	$(LLD) -static -nostdlib -e _start $^ -o $@
@@ -1533,7 +1531,7 @@ $(KERNEL_RPI5_CACHE_GEOMETRY_O): $(KERNEL_CACHE_GEOMETRY_S) | $(KERNEL_BUILD_DIR
 KERNEL_RAW_DEREF_DEPS := Makefile scripts/measure_trusted_base.py scripts/raw_deref_budget.tsv
 
 define KERNEL_EL0_COMPILE
-	$(NICE_HEAVY) $(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions $(foreach entry,$(1),--external-entry $(entry)) --facts $@.facts -o $@
+	$(NICE_HEAVY) $(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --no-frame-pointers --no-function-sections $(foreach entry,$(1),--external-entry $(entry)) --facts $@.facts -o $@
 	python3 scripts/measure_trusted_base.py --check-raw-deref el0 $@.facts/rawderef.tsv $@.facts/deps.d
 endef
 
@@ -2005,11 +2003,11 @@ $(KERNEL_QEMU_NET_WAKE_CONTROL_O): $(KERNEL_QEMU_MAIN_O) $(KERNEL_PROCESS_TKB) $
 
 $(KERNEL_QEMU_BUILD_DIR)/race-%-armed-main.o: $(KERNEL_QEMU_MAIN_O) scripts/build_qemu_race_window.py | $(KERNEL_QEMU_BUILD_DIR)
 	python3 scripts/build_qemu_race_window.py . _build/qemu-race-window-$*-armed $*
-	cd _build/qemu-race-window-$*-armed && $(NICE_HEAVY) $(abspath $(TAKIBI)) kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb kernel/platform/qemu/usb_disk_absent.tkb kernel/platform/qemu/mmu_layout.tkb kernel/boot/fdt.tkb kernel/platform/qemu/memory.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/block/virtio_blk.tkb kernel/platform/qemu/init.tkb $(KERNEL_QEMU_COMPILE_FLAGS) -o $(abspath $@)
+	cd _build/qemu-race-window-$*-armed && $(NICE_HEAVY) $(abspath $(TAKIBI)) kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb kernel/platform/qemu/usb_disk_absent.tkb kernel/platform/qemu/mmu_layout.tkb kernel/boot/fdt.tkb kernel/platform/qemu/memory.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/block/virtio_blk.tkb kernel/platform/qemu/init.tkb $(KERNEL_QEMU_COMPILE_FLAGS) --internal-allow-unused -o $(abspath $@)
 
 $(KERNEL_QEMU_BUILD_DIR)/race-%-reverted-main.o: $(KERNEL_QEMU_MAIN_O) scripts/build_qemu_race_window.py | $(KERNEL_QEMU_BUILD_DIR)
 	python3 scripts/build_qemu_race_window.py . _build/qemu-race-window-$*-reverted $* --revert
-	cd _build/qemu-race-window-$*-reverted && $(NICE_HEAVY) $(abspath $(TAKIBI)) kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb kernel/platform/qemu/usb_disk_absent.tkb kernel/platform/qemu/mmu_layout.tkb kernel/boot/fdt.tkb kernel/platform/qemu/memory.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/block/virtio_blk.tkb kernel/platform/qemu/init.tkb $(KERNEL_QEMU_COMPILE_FLAGS) -o $(abspath $@)
+	cd _build/qemu-race-window-$*-reverted && $(NICE_HEAVY) $(abspath $(TAKIBI)) kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb kernel/platform/qemu/usb_disk_absent.tkb kernel/platform/qemu/mmu_layout.tkb kernel/boot/fdt.tkb kernel/platform/qemu/memory.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/block/virtio_blk.tkb kernel/platform/qemu/init.tkb $(KERNEL_QEMU_COMPILE_FLAGS) --internal-allow-unused -o $(abspath $@)
 
 $(KERNEL_QEMU_BUILD_DIR)/kernel-race-%.elf: $(KERNEL_QEMU_BUILD_DIR)/race-%-main.o $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_LINK_LD)
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $< -o $@
@@ -3097,7 +3095,7 @@ KERNEL_DEVICE_SEMANTICS := $(foreach f,$(KERNEL_DEVICE_SEMANTICS_FILES),--device
 # scripts/check_kernel_compile_flags.py refuses a kernel invocation that
 # names a kernel target without these. Per-image options (raw confinement,
 # unused checks, emit modes, -g) stay at the call site.
-KERNEL_COMPILE_FLAGS := --frame-pointers --function-sections --forbid-trap --regions $(KERNEL_DEVICE_SEMANTICS)
+KERNEL_COMPILE_FLAGS := --regions $(KERNEL_DEVICE_SEMANTICS)
 KERNEL_QEMU_COMPILE_FLAGS := --target $(QEMU_TARGET) --cpu $(QEMU_CPU) $(KERNEL_COMPILE_FLAGS)
 KERNEL_RPI5_COMPILE_FLAGS := --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(KERNEL_COMPILE_FLAGS)
 ## rpi5-jtag-stub: the SD card's kernel_2712.img, a DTB-capturing spin stub
@@ -3116,7 +3114,7 @@ $(KERNEL_BUILD_DIR)/jtag_stub.img: $(KERNEL_BUILD_DIR)/jtag_stub.elf
 	$(LLVM_OBJCOPY) -O binary $< $@
 
 kernel/build/qemu/main.o kernel/build/rpi5/main.o: kernel/RAW_MINT_FILES kernel/DEVICE_SEMANTICS_FILES kernel/EXECUTION_MODEL
-KERNEL_DMA_FLAGS := $(KERNEL_QEMU_COMPILE_FLAGS) $(KERNEL_EXECUTION_MODEL) --reject-unused-functions --external-entry main --check-unused-file kernel/tests/qemu/dma/virtio_blk_fixture.tkb
+KERNEL_DMA_FLAGS := $(KERNEL_QEMU_COMPILE_FLAGS) $(KERNEL_EXECUTION_MODEL) --external-entry main --check-unused-file kernel/tests/qemu/dma/virtio_blk_fixture.tkb
 KERNEL_DMA_ELF := $(KERNEL_QEMU_BUILD_DIR)/kernel-dma-fixture-positive.elf
 .PHONY: _kernelbuild-dma-qemu kernelbuild-dma-qemu kernelcheck-dma-qemu
 # Positive has no planted mutation; the four named controls change one real
@@ -3139,7 +3137,7 @@ KERNEL_INVARIANT_ELF := $(KERNEL_QEMU_BUILD_DIR)/kernel-invariant-fixture.elf
 .PHONY: kernelbuild-invariant-qemu _kernelbuild-invariant-qemu kernelcheck-invariant-qemu
 $(KERNEL_QEMU_BUILD_DIR)/invariant-fixture.o: $(KERNEL_QEMU_MAIN_O) scripts/build_qemu_invariant_fixture.py scripts/build_qemu_dma_fixture.py kernel/tests/qemu/invariant_stop/fixture.tkb Makefile
 	python3 scripts/build_qemu_invariant_fixture.py . _build/qemu-invariant-fixture
-	cd _build/qemu-invariant-fixture && $(NICE_HEAVY) $(abspath $(TAKIBI)) $(KERNEL_DMA_SRCS) $(KERNEL_QEMU_COMPILE_FLAGS) --reject-unused-functions --external-entry main --check-unused-file kernel/tests/qemu/invariant_stop/fixture.tkb --facts $(abspath $@).facts -o $(abspath $@)
+	cd _build/qemu-invariant-fixture && $(NICE_HEAVY) $(abspath $(TAKIBI)) $(KERNEL_DMA_SRCS) $(KERNEL_QEMU_COMPILE_FLAGS) --external-entry main --check-unused-file kernel/tests/qemu/invariant_stop/fixture.tkb --facts $(abspath $@).facts -o $(abspath $@)
 	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.facts/deps.d
 	python3 scripts/measure_trusted_base.py --check-raw-deref qemu $@.facts/rawderef.tsv $@.facts/deps.d
 $(KERNEL_INVARIANT_ELF): $(KERNEL_QEMU_BUILD_DIR)/invariant-fixture.o $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_LINK_LD)
@@ -3156,7 +3154,7 @@ kernelcheck-invariant-qemu: kernelbuild-invariant-qemu
 # are built with the maintained kernels; their board execution is on demand.
 KERNEL_GEM_TX_MODES := confirmed-ready confirmed-reply unconfirmed-ready unconfirmed-reply irq-primary irq-wrong-enable
 KERNEL_GEM_TX_SRCS := $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $(KERNEL_RPI5_MAIN_TKB)
-KERNEL_GEM_TX_FLAGS := $(KERNEL_RPI5_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_EXECUTION_MODEL) --reject-unused-functions --external-entry main
+KERNEL_GEM_TX_FLAGS := $(KERNEL_RPI5_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_EXECUTION_MODEL) --external-entry main
 KERNEL_GEM_TX_ELFS := $(foreach mode,$(KERNEL_GEM_TX_MODES),$(KERNEL_BUILD_DIR)/kernel-gem-tx-fixture-$(mode).elf)
 .PHONY: _kernelbuild-gem-tx-rpi5 kernelbuild-gem-tx-rpi5
 $(KERNEL_BUILD_DIR)/gem-tx-fixture-%.o: $(KERNEL_RPI5_MAIN_O) scripts/build_rpi5_gem_tx_fixture.py kernel/tests/rpi5/gem_tx/fixture.tkb kernel/tests/rpi5/gem_tx/irq_fixture.tkb Makefile

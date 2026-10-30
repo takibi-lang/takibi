@@ -11,7 +11,8 @@ that a required larger design will immediately replace.
 
 ## No production traps
 
-New `.tkb` code starts with refinement types and `--forbid-trap`. Remaining
+New `.tkb` code starts with refinement types, and trap sites are rejected by
+default (`--allow-trap` is the bring-up exception). Remaining
 bounds checks mean the types or local narrowing are not yet sufficient.
 
 - Use refined parameters and bounds such as `{0..<MAX as usize}` and literal
@@ -134,6 +135,6 @@ not reveal. Before the first kernel build:
 ## Diagnostics and verification
 
 Treat compiler-detected invalid or dangerously ambiguous code as an error, not
-a warning-based migration. Run the relevant build with `--forbid-trap`, use
+a warning-based migration. Run the relevant build without `--allow-trap`, use
 `add-takibi-test` when adding coverage, and run `make allbuild` before the first
 commit of a compiler-affecting change.

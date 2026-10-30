@@ -4,7 +4,7 @@ The standalone Unix-like kernel is the primary product surface. New kernel
 features, fixes, fixtures, and target code belong here.
 
 Use the `write-takibi` skill before adding or substantially changing `.tkb`
-code. New code starts with refinement types and `--forbid-trap`; do not use raw
+code. New code starts with refinement types, trap sites rejected (the default); do not use raw
 pointers or `unsafe` merely to evade a checked access. Fallible operations use
 closed variants rather than integer or boolean sentinels, and must-check
 results use `must_use variant`.

@@ -349,7 +349,8 @@ answer is a verdict rather than a question.
 
 ## Takibi implementation summary
 
-New maintained `.tkb` work starts with refinement types and `--forbid-trap`.
+New maintained `.tkb` work starts with refinement types, and trap sites are
+rejected by default.
 Use refined bounds or explicit local narrowing for checked indexing; a
 remaining bounds check means the proof is incomplete. A genuinely unknown
 hardware or protocol bring-up may use the explicit baseline-then-harden

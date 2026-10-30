@@ -31,7 +31,7 @@ Refined integers carry a half-open interval and a concrete representation
 type. The checker proves only the interval facts supported by its documented
 flow and arithmetic rules. Proven array and slice indices need no runtime
 bounds check. An unrefined or insufficiently narrowed index generates a check
-in permissive builds and is rejected under `--forbid-trap`.
+under `--allow-trap` and is rejected by default.
 
 Slices carry a pointer and a minimum length. Checked indexing and subslicing
 use that length evidence. Conversion to a raw pointer discards the length and
@@ -63,7 +63,7 @@ of the declared cases, not correctness of the code inside each arm.
 
 ## Build policy flags
 
-`--forbid-trap` rejects a compilation when the compiler would otherwise emit
+By default the compiler rejects a compilation when it would otherwise emit
 one of its recorded runtime trap checks, including unproved checked indexing,
 checked refined casts, and exhaustive-enum casts. The decision is made from
 type-checker/code-generator evidence rather than optimizer output. Success

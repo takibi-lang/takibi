@@ -30,8 +30,8 @@ if [ -n "${DEBUG_RETURN_ABI_COUNTERFACTUAL:-}" ]; then
 fi
 FLAVOR="${DEBUG_RETURN_ABI_FLAVOR:-production}"
 case "$FLAVOR" in
-    production) FLAGS=(--frame-pointers --forbid-trap) ;;
-    debug) FLAGS=(--frame-pointers --forbid-trap -g) ;;
+    production) FLAGS=(--no-function-sections --internal-allow-unused) ;;
+    debug) FLAGS=(--no-function-sections --internal-allow-unused -g) ;;
     *) echo "error: DEBUG_RETURN_ABI_FLAVOR must be production or debug" >&2; exit 2 ;;
 esac
 LABEL="kernel/qemu debug-return-abi ($FLAVOR${DEBUG_RETURN_ABI_LABEL:+, $DEBUG_RETURN_ABI_LABEL})"

@@ -18,21 +18,20 @@
 
 | Flag | Argument | Meaning |
 | --- | --- | --- |
-| `--frame-pointers` | - | keep AArch64 frame-pointer chains (the kernel debugger walks them) |
-| `--function-sections` | - | one section per function and global, for the linker's --gc-sections |
+| `--no-frame-pointers` | - | drop the frame-pointer chains kept by default (the kernel debugger walks them) |
+| `--no-function-sections` | - | one text section instead of one per function and global (the default, for --gc-sections) |
 
-## Policy gates (10)
+## Policy gates (9)
 
 | Flag | Argument | Meaning |
 | --- | --- | --- |
-| `--forbid-trap` | - | reject any compiler-inserted trap site |
+| `--allow-trap` | - | accept compiler-inserted trap sites (rejected by default; bring-up only) |
 | `--forbid-unsafe` | - | reject a reachable unsafe effect |
 | `--confine-raw-authority` | - | only the --raw-mint-file files may mint raw authority |
 | `--raw-mint-file` | `<path>` | a file allowed to mint raw authority (repeatable) |
 | `--require-execution-model` | `<path>` | check the execution-model declarations in this file |
 | `--device-semantics-file` | `<path>` | a file allowed to declare device semantics (repeatable) |
 | `--regions` | - | enable the region built-ins |
-| `--reject-unused-functions` | - | reject a function nothing reachable uses |
 | `--external-entry` | `<function>` | a function called from outside Takibi (repeatable) |
 | `--check-unused-file` | `<path>` | restrict the unused-function check to this file (repeatable) |
 
@@ -48,13 +47,14 @@
 | --- | --- | --- |
 | `--generate` | `effects\|words\|cli\|tla <dir>\|protocol-source <dir>` | print EFFECTS.md, WORDS.md or CLI.md, or write each protocol's TLA+ model or generated source into <dir>, and exit |
 
-## Compiler development (3)
+## Compiler development (4)
 
 | Flag | Argument | Meaning |
 | --- | --- | --- |
 | `--internal-tla-omit-cache` | `publish\|finish\|refresh` | with --generate tla, leave one cache step out (fault control) |
 | `--internal-trace-init-flow` | `<function>` | print a function's init state after each statement |
 | `--internal-range-obligation-fault-control` | - | plant known-unsound range rules (z3 check's failing control) |
+| `--internal-allow-unused` | - | accept a function nothing reachable uses (rejected by default) |
 
 ## Fact files (12)
 

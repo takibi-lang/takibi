@@ -80,7 +80,7 @@ def main():
     artifacts.mkdir(parents=True, exist_ok=True)
     real = artifacts / "facts" / "debug-metadata.json"
     subprocess.run([str(TAKIBI), str(FIXTURE), "--target", "aarch64-none-elf",
-                    "--cpu", "cortex-a53", "--frame-pointers", "--forbid-trap",
+                    "--cpu", "cortex-a53", "--no-function-sections", "--internal-allow-unused",
                     "--facts", str(artifacts / "facts"),
                     "-o", str(artifacts / "fixture.o")], check=True, timeout=60)
     wrong = artifacts / "regressed-metadata.json"

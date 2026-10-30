@@ -39,7 +39,7 @@ and the development container verifies the response with real `curl`.
   address space. The generic timer preempts EL0
   round-robin once more than one slot is runnable; a UART RX wait demonstrates
   a typed Blocked-to-Ready transition.
-- Kernel Takibi sources build with `--forbid-trap`; fallible internal
+- Kernel Takibi sources build with trap sites rejected (the default); fallible internal
   operations return variants and convert to Linux `-errno` only at the syscall
   boundary.
 
@@ -263,7 +263,7 @@ by a Takibi name, and a Takibi interface is never mistaken for a Linux one.
 
 ## Make targets
 
-Every kernel object is compiled with `--function-sections` and every kernel
+Every kernel object is compiled with one section per function (the default) and every kernel
 link uses `--gc-sections`, so the linker removes what nothing reaches. The
 roots are `_start`, the `KEEP()` sections of the linker scripts
 (`.text.boot`, `.text.vectors`), what they reach through relocations, and
@@ -615,7 +615,7 @@ not.
 
 `kernelbuild-rpi5` does not require a board. It generates the ext2 root
 fixture, obtains the pinned Alpine packages, compiles all Takibi
-code under `--forbid-trap`, assembles the minimal AArch64 files, and links the
+code with trap sites rejected, assembles the minimal AArch64 files, and links the
 ELF, then runs `scripts/buildcheck_kernel_asm_invariants.py` against the linked
 `kernel.elf` -- a static, hardware-free disassembly check verifying the
 kernel identity's UXN/PXN permission bits, SCTLR_EL1.WXN, and the EL0 `eret` path's
@@ -1245,7 +1245,7 @@ the focused QEMU GDB runners. On RPi5, use the repository's
 and target-selection sequence is in `scripts/rpi5_jtag_load.sh`. Stock host
 GDB is not an AArch64 substitute in this environment; use `gdb-multiarch`.
 
-The kernel build enables the compiler's `--frame-pointers` contract. Every compiler-generated AArch64 function has the canonical `[previous x29,
+The kernel build keeps the compiler's default frame-pointer contract. Every compiler-generated AArch64 function has the canonical `[previous x29,
 saved x30]` frame record and is emitted in `.text.takibi`. Linker-owned bounds
 around that section distinguish those records from hand-written assembly
 without relying on object filenames. Boot entry is an explicit assembly

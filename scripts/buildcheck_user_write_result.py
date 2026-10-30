@@ -69,7 +69,7 @@ private fn user_write_control(range: borrow UserWriteRange[process], source: []u
     failures = run_overlay_cases(
         repo, "takibi-user-write-result-", cases,
         lambda case: (edited, source + case[1]),
-        lambda overlay: [str(compiler), *args.sources, *kernel_compile_flags(),
+        lambda overlay: [str(compiler), *args.sources, *kernel_compile_flags(), "--internal-allow-unused",
                          "-o", str(overlay / "check.o")],
         judge)
     ran = CaseCount()

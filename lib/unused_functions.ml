@@ -105,9 +105,9 @@ let check ~external_entries ~check_files (prog : toplevel list) (types : program
     if not (is_candidate f) || StringSet.mem (key_of f) reachable
     then None else Some (Unused f)) definitions
 
-(* GitHub issue #796: --check-unused-file without --reject-unused-functions
+(* GitHub issue #796: --check-unused-file under --internal-allow-unused
    would be silently ignored; suspicious input is an error, never a warning. *)
 let flag_error ~reject ~check_files =
   if check_files <> [] && not reject then
-    Some "--check-unused-file requires --reject-unused-functions"
+    Some "--check-unused-file conflicts with --internal-allow-unused"
   else None

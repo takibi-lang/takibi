@@ -14,7 +14,12 @@ KERNEL_QEMU_COMPILE_FLAGS / KERNEL_RPI5_COMPILE_FLAGS. This check refuses:
   how a second, drifting copy starts;
 - a script the Makefile runs with $(KERNELBUILD_CHECK_ARGS) (it compiles
   kernel sources) that does not take its flags from
-  scripts/kernel_compile_flags.py, or spells a shared flag or the target.
+  scripts/kernel_compile_flags.py, or spells a shared flag or the target;
+- GitHub issue #1027 step 3: an opt-out of a strict default (OPT_OUTS) in a
+  kernel compile, a KERNEL_*_FLAGS variable or a kernel-compiling script.
+  The defaults are what the kernel always passed, so an opt-out there is
+  a loosened kernel. OPT_OUT_EXEMPT names the compiles that are not the
+  production kernel and loosen on purpose, each with its reason.
 
 EXEMPT_DEFINES names the one invocation that compiles for a kernel target
 but is not a kernel compile, and why.
@@ -30,9 +35,20 @@ from pass_line import report_pass  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 PLATFORM_VARS = ("$(KERNEL_QEMU_COMPILE_FLAGS)", "$(KERNEL_RPI5_COMPILE_FLAGS)")
-SHARED_FLAGS = ("--target", "--cpu", "--frame-pointers", "--function-sections",
-                "--forbid-trap", "--regions", "--device-semantics-file",
+SHARED_FLAGS = ("--target", "--cpu", "--regions", "--device-semantics-file",
                 "$(KERNEL_DEVICE_SEMANTICS)")
+OPT_OUTS = ("--allow-trap", "--no-frame-pointers", "--no-function-sections",
+            "--internal-allow-unused")
+OPT_OUT_EXEMPT = {
+    # A marker in the Makefile invocation, or a script path: why it loosens.
+    "KERNEL_EL0_COMPILE": "EL0 payloads are embedded as data and keep their "
+                          "single text section and no frame chains, as before #1027",
+    "_build/qemu-race-window-": "the race-window overlay moves or removes a "
+                                "caller, so its kernel is not checked for unused functions",
+    "scripts/buildcheck_backing_exists.py": "overlay cases add functions nothing calls",
+    "scripts/buildcheck_process_current_phase.py": "overlay cases add functions nothing calls",
+    "scripts/buildcheck_user_write_result.py": "overlay cases add functions nothing calls",
+}
 EXEMPT_DEFINES = {
     # EL0 user payloads: separate programs linked into the image as data,
     # not kernel sources; they take no kernel regions or device semantics.
@@ -40,7 +56,7 @@ EXEMPT_DEFINES = {
 }
 KERNEL_MARK = re.compile(r"\$\((QEMU|RPI5)_TARGET\)|\$\(KERNEL_\w+_(TKB|SRCS)\)"
                          r"|\$<|(^|[\s/])kernel/\S+\.tkb")
-SCRIPT_FORBIDDEN = ('"--forbid-trap"', "'--forbid-trap'", '"--regions"', "'--regions'",
+SCRIPT_FORBIDDEN = ('"--regions"', "'--regions'",
                     "--device-semantics-file", "aarch64-none-elf")
 
 
@@ -90,20 +106,35 @@ def makefile_problems(text):
         if re.match(r"KERNEL_\w+_FLAGS\s*:?=", line) and any(v in line for v in PLATFORM_VARS):
             examined += 1
             problems += respelled_problems(number, line)
+            problems += opt_out_problems(f"Makefile:{number}", line)
             continue
-        if not is_invocation(line) or "LINUX_AMD64_TARGET" in line:
+        # A linux_user compile names a $(LINUX_*) variable (the host target
+        # is the default, so it no longer names LINUX_AMD64_TARGET, #1027).
+        if not is_invocation(line) or "$(LINUX_" in line:
             continue
         uses = any(v in line for v in shared)
         if not uses and not KERNEL_MARK.search(line):
             continue
         if define in EXEMPT_DEFINES:
+            if define not in OPT_OUT_EXEMPT:
+                problems += opt_out_problems(f"Makefile:{number}", line)
             continue
         examined += 1
         if not uses:
             problems.append(f"Makefile:{number}: kernel compile without "
                             "$(KERNEL_QEMU_COMPILE_FLAGS) or $(KERNEL_RPI5_COMPILE_FLAGS)")
         problems += respelled_problems(number, line)
+        if not any(marker in line for marker in OPT_OUT_EXEMPT):
+            problems += opt_out_problems(f"Makefile:{number}", line)
     return problems, examined
+
+
+def opt_out_problems(where, line):
+    found = [f for f in OPT_OUTS if re.search(re.escape(f) + r"(?=[\s'\",]|$)", line)]
+    if not found:
+        return []
+    return [f"{where}: kernel compile opts out of a strict default "
+            f"({', '.join(found)}); only OPT_OUT_EXEMPT compiles may"]
 
 
 def respelled_problems(number, line):
@@ -126,6 +157,8 @@ def script_problems(name, text):
     for literal in SCRIPT_FORBIDDEN:
         if literal in text:
             problems.append(f"{name}: spells {literal}; take it from kernel_compile_flags()")
+    if name not in OPT_OUT_EXEMPT:
+        problems += opt_out_problems(name, text)
     return problems
 
 
