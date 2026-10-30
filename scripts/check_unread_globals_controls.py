@@ -8,7 +8,7 @@ import pathlib
 import sys
 import tempfile
 
-from buildcheck_unread_globals import find_unread, find_unwritten, load
+from buildcheck_unread_globals import find_unread, find_unwritten, load, sets_by_debugger
 from pass_line import report_pass
 
 SOURCE = """\
@@ -43,6 +43,7 @@ WRITTEN_GLOBALS = {
     "passed": ("a.tkb", "usize"),
     "set_here": ("a.tkb", "usize"),
     "set_by_runner": ("a.tkb", "bool"),
+    "only_mentioned": ("a.tkb", "bool"),
     "array": ("a.tkb", "[u8;4]"),
     "no_use": ("a.tkb", "usize"),
 }
@@ -53,9 +54,28 @@ WRITTEN_USES = {
     "passed": [("a.tkb", 3, "address")],
     "set_here": [("a.tkb", 1, "read"), ("a.tkb", 1, "write")],
     "set_by_runner": [("a.tkb", 1, "read")],
+    "only_mentioned": [("a.tkb", 1, "read")],
     "array": [("a.tkb", 1, "cast")],
 }
-WRITTEN_EXPECTED = ["never_set", "only_loaded"]
+WRITTEN_EXPECTED = ["never_set", "only_loaded", "only_mentioned"]
+DECLARATIONS = "name\tsetter\nset_by_runner\tscripts/run.sh\n"
+# One bad row each: not a global, a global the program writes, a script that
+# only mentions the name, and a script that does not exist.
+BAD_DECLARATIONS = {
+    "ghost\tscripts/run.sh\n": "ghost is not a global",
+    "set_here\tscripts/run.sh\n": "set_here is written by the program",
+    "only_mentioned\tscripts/run.sh\n": "does not set only_mentioned",
+    "never_set\tscripts/absent.sh\n": "does not set never_set",
+}
+# Each setter shape a runner in scripts/ uses, and a shape that is not one.
+SETTER_SHAPES = {
+    "set *(char *)&flag = 1": True,
+    "set var *(char *)&flag = 1": True,
+    "    flag 1 \\": True,
+    'args.elf, "flag", "1"],': True,
+    "awk '$3 == \"flag\" { print $1 }'": False,
+    "# flag is set by the lane": False,
+}
 
 
 def main() -> int:
@@ -82,10 +102,23 @@ def main() -> int:
         got = [row.split(": ")[1].split()[0]
                for row in find_unread(GLOBALS, uses, root)]
         (root / "a.tkb").write_text(WRITTEN_SOURCE)
-        (root / "scripts/run.sh").write_text("set &set_by_runner = 1\n")
+        (root / "scripts/run.sh").write_text(
+            "set &set_by_runner = 1\nawk only_mentioned\n")
+        (root / "scripts/debugger_set_globals.tsv").write_text(DECLARATIONS)
         written = collections.defaultdict(list, WRITTEN_USES)
         got_written = [row.split(": ")[1].split()[0]
                        for row in find_unwritten(WRITTEN_GLOBALS, written, root)]
+        for bad, expected in BAD_DECLARATIONS.items():
+            (root / "scripts/debugger_set_globals.tsv").write_text(DECLARATIONS + bad)
+            rows = find_unwritten(WRITTEN_GLOBALS, written, root)
+            if not any(expected in row for row in rows):
+                print(f"ERROR unread-globals controls: {bad.strip()} not refused: {rows}",
+                      file=sys.stderr)
+                return 1
+    for line, expected in SETTER_SHAPES.items():
+        if sets_by_debugger(line, "flag") != expected:
+            print(f"ERROR unread-globals controls: setter shape {line!r}", file=sys.stderr)
+            return 1
     if got_written != WRITTEN_EXPECTED:
         print(f"ERROR unread-globals controls: unwritten got {got_written}, "
               f"expected {WRITTEN_EXPECTED}", file=sys.stderr)
@@ -99,8 +132,10 @@ def main() -> int:
                 "assignments and unused globals are refused; a used fetch_add, "
                 "a load, a real read, a gdb reader, a dma_fixed backing and "
                 "a builtin are not; a scalar or word nothing writes is refused, "
-                "a store, a passed address, a runner's set and an array are not",
-                cases=len(GLOBALS))
+                "a store, a passed address, a declared debugger set and an array "
+                f"are not; {len(BAD_DECLARATIONS)} bad declarations and "
+                f"{len(SETTER_SHAPES)} setter shapes judged",
+                cases=len(GLOBALS) + len(BAD_DECLARATIONS) + len(SETTER_SHAPES))
     return 0
 
 

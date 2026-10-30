@@ -23,8 +23,10 @@ least one use, none of which can write it, is refused: it should be a `let`, or
 gone with its branches. Only those types: an array or struct can be written
 through a pointer its plain read or cast yields, which the table cannot see. An
 `address` use writes unless every `&g` on its line is an atomic_word_load. A
-writer the table cannot see: a debugger or runner under scripts/ setting the
-symbol by name, so any file there naming the global counts.
+writer the table cannot see: a debugger setting the symbol, declared in
+scripts/debugger_set_globals.tsv with a script that sets it (#1273, since any
+mention used to pass). A row is refused when its script has no assignment of
+the name, when the name is not a global, and when the program also writes it.
 
 Usage: buildcheck_unread_globals.py QEMU.facts/globals.tsv RPI5.facts/globals.tsv
 """
@@ -41,8 +43,7 @@ from pass_line import report_pass
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUILTIN = "<builtin"
 SCALAR = re.compile(r"^(bool|[iu](8|16|32|64)|isize|usize|u16be|u32be|fn|AtomicWord|\*.*)$")
-# The allowlist names every unprotected global, so it says nothing about writers.
-NOT_A_WRITER = {"global_protection_allowlist.tsv"}
+DEBUGGER_SET = "scripts/debugger_set_globals.tsv"
 ATOMIC_WRITE_ONLY = re.compile(
     r"^\s*atomic_word_(store|fetch_add|fetch_sub)\(&[^;]*\);\s*$")
 
@@ -84,16 +85,38 @@ def may_write(use: tuple[str, int, str], name: str, root: pathlib.Path) -> bool:
     return addresses == 0 or loads != addresses
 
 
+def sets_by_debugger(script: str, name: str) -> bool:
+    """`set *(char *)&g = 1` in gdb, or the `g 1` and "g", "1" of a JTAG poke."""
+    word = re.escape(name)
+    return re.search(rf"&{word}\s*=\s*\d|\b{word}\s+\d\b|\"{word}\",\s*\"\d\"",
+                     script) is not None
+
+
+def declared_debugger_set(globs: dict, uses: dict, root: pathlib.Path) -> tuple[set, list]:
+    declared = set()
+    errors = []
+    rows = (root / DEBUGGER_SET).read_text(encoding="utf-8").splitlines()[1:]
+    for row in rows:
+        name, setter = row.split("\t")
+        declared.add(name)
+        if name not in globs:
+            errors.append(f"{DEBUGGER_SET}: {name} is not a global")
+        elif any(may_write(use, name, root) for use in uses[name]):
+            errors.append(f"{DEBUGGER_SET}: {name} is written by the program")
+        path = root / setter
+        if not path.is_file() or not sets_by_debugger(
+                path.read_text(encoding="utf-8", errors="replace"), name):
+            errors.append(f"{DEBUGGER_SET}: {setter} does not set {name}")
+    return declared, errors
+
+
 def find_unwritten(globs: dict, uses: dict, root: pathlib.Path) -> list[str]:
-    outside = "".join(path.read_text(encoding="utf-8", errors="replace")
-                      for path in sorted(root.glob("scripts/*"))
-                      if path.is_file() and path.name not in NOT_A_WRITER)
-    unwritten = []
+    declared, unwritten = declared_debugger_set(globs, uses, root)
     for name, (file, kind) in sorted(globs.items()):
         if file.startswith(BUILTIN) or not SCALAR.match(kind) or not uses[name]:
             continue
-        if not any(may_write(use, name, root) for use in uses[name]) \
-                and not re.search(rf"\b{re.escape(name)}\b", outside):
+        if name not in declared \
+                and not any(may_write(use, name, root) for use in uses[name]):
             unwritten.append(f"{file}: {name} is never written")
     return unwritten
 

@@ -2257,7 +2257,7 @@ $(MODEL_MAP_STAMP): $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_DIR)/mo
 ## a stale row there, fails the build.
 GLOBAL_PROTECTION_TABLES = $(KERNEL_QEMU_MAIN_O).facts/globals.tsv $(KERNEL_RPI5_MAIN_O).facts/globals.tsv
 GLOBAL_PROTECTION_STAMP  = $(KERNEL_DIR)/build/global_protection.ok
-$(GLOBAL_PROTECTION_STAMP): $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O) scripts/buildcheck_global_protection.py scripts/buildcheck_unread_globals.py scripts/global_protection_allowlist.tsv
+$(GLOBAL_PROTECTION_STAMP): $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O) scripts/buildcheck_global_protection.py scripts/buildcheck_unread_globals.py scripts/global_protection_allowlist.tsv scripts/debugger_set_globals.tsv
 	python3 scripts/buildcheck_global_protection.py $(GLOBAL_PROTECTION_TABLES)
 	python3 scripts/buildcheck_unread_globals.py $(GLOBAL_PROTECTION_TABLES)
 	@touch $@

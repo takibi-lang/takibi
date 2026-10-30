@@ -83,8 +83,10 @@ real reader.
 
 The same check refuses the converse: a scalar or single `AtomicWord` global with
 uses, none of which can write it. An `address` use counts as a write unless it
-is an `atomic_word_load`, and a global named by any file under `scripts/` counts
-as set by a debugger or runner. An array or struct is not judged, because a
+is an `atomic_word_load`. A flag a debugger sets is declared in
+`scripts/debugger_set_globals.tsv` (`name`, `setter`): a row is refused when the
+named script has no assignment of the symbol, when the name is not a global, and
+when the program also writes it. An array or struct is not judged, because a
 plain read or cast of one can yield a pointer something writes through.
 
 ## The ratchet
