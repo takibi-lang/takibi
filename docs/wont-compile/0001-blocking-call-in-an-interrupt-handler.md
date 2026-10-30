@@ -161,7 +161,7 @@ leaf, and the checker can see that.
 `!{interrupt}` roots in the maintained kernel include
 `kernel/arch/arm64/kernel/timer.tkb` (`timer_irq_handler`) and
 `kernel/drivers/net/rp1_gem.tkb` (`gem_irq_handler`). The whole kernel is built
-under `--forbid-trap`, so these are not demonstration programs.
+with trap sites rejected, so these are not demonstration programs.
 
 ## Limits of this entry
 

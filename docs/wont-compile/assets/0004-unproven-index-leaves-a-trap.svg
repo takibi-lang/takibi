@@ -50,17 +50,18 @@
 <!-- tkb -->
 <g id="node4" class="node">
 <title>tkb</title>
-<path fill="#fff3df" stroke="#f05a24" stroke-width="2" d="M673,-275.5C673,-275.5 482,-275.5 482,-275.5 476,-275.5 470,-269.5 470,-263.5 470,-263.5 470,-177.5 470,-177.5 470,-171.5 476,-165.5 482,-165.5 482,-165.5 673,-165.5 673,-165.5 679,-165.5 685,-171.5 685,-177.5 685,-177.5 685,-263.5 685,-263.5 685,-269.5 679,-275.5 673,-275.5"/>
-<text text-anchor="start" x="487" y="-251.5" font-family="Helvetica, Arial, Liberation Sans, sans-serif" font-size="15.00" fill="#17213f">Takibi, &#45;&#45;forbid&#45;trap</text>
-<text text-anchor="start" x="487" y="-216.5" font-family="Helvetica, Arial, Liberation Sans, sans-serif" font-size="15.00" fill="#17213f">The build stops, naming</text>
-<text text-anchor="start" x="487" y="-199.5" font-family="Helvetica, Arial, Liberation Sans, sans-serif" font-size="15.00" fill="#17213f">the access that still</text>
-<text text-anchor="start" x="487" y="-182.5" font-family="Helvetica, Arial, Liberation Sans, sans-serif" font-size="15.00" fill="#17213f">needs a check.</text>
+<path fill="#fff3df" stroke="#f05a24" stroke-width="2" d="M673,-284C673,-284 482,-284 482,-284 476,-284 470,-278 470,-272 470,-272 470,-169 470,-169 470,-163 476,-157 482,-157 482,-157 673,-157 673,-157 679,-157 685,-163 685,-169 685,-169 685,-272 685,-272 685,-278 679,-284 673,-284"/>
+<text text-anchor="start" x="487" y="-260" font-family="Helvetica, Arial, Liberation Sans, sans-serif" font-size="15.00" fill="#17213f">Takibi, by default</text>
+<text text-anchor="start" x="487" y="-225" font-family="Helvetica, Arial, Liberation Sans, sans-serif" font-size="15.00" fill="#17213f">The build stops, naming</text>
+<text text-anchor="start" x="487" y="-208" font-family="Helvetica, Arial, Liberation Sans, sans-serif" font-size="15.00" fill="#17213f">the access that still</text>
+<text text-anchor="start" x="487" y="-191" font-family="Helvetica, Arial, Liberation Sans, sans-serif" font-size="15.00" fill="#17213f">needs a check. Only</text>
+<text text-anchor="start" x="487" y="-174" font-family="Helvetica, Arial, Liberation Sans, sans-serif" font-size="15.00" fill="#17213f">&#45;&#45;allow&#45;trap opts out.</text>
 </g>
 <!-- access&#45;&gt;tkb -->
 <g id="edge3" class="edge">
 <title>access&#45;&gt;tkb</title>
-<path fill="none" stroke="#c9360d" stroke-width="2.5" d="M386.81,-334.87C413.05,-319.27 446.71,-299.26 478.43,-280.4"/>
-<polygon fill="#c9360d" stroke="#c9360d" stroke-width="2.5" points="480.32,-282.94 486.44,-275.64 477.1,-277.53 480.32,-282.94"/>
+<path fill="none" stroke="#c9360d" stroke-width="2.5" d="M386.81,-334.87C409.14,-321.6 436.84,-305.13 464.15,-288.89"/>
+<polygon fill="#c9360d" stroke="#c9360d" stroke-width="2.5" points="466.09,-291.4 472.22,-284.1 462.87,-285.99 466.09,-291.4"/>
 </g>
 <!-- proved -->
 <g id="node5" class="node">
@@ -73,8 +74,8 @@
 <!-- tkb&#45;&gt;proved -->
 <g id="edge4" class="edge">
 <title>tkb&#45;&gt;proved</title>
-<path fill="none" stroke="#c9360d" stroke-width="2.5" d="M577.5,-165.08C577.5,-145.02 577.5,-122.3 577.5,-102.22"/>
-<polygon fill="#c9360d" stroke="#c9360d" stroke-width="2.5" points="580.65,-102.2 577.5,-93.2 574.35,-102.2 580.65,-102.2"/>
+<path fill="none" stroke="#c9360d" stroke-width="2.5" d="M577.5,-156.92C577.5,-139.09 577.5,-119.8 577.5,-102.46"/>
+<polygon fill="#c9360d" stroke="#c9360d" stroke-width="2.5" points="580.65,-102.05 577.5,-93.05 574.35,-102.05 580.65,-102.05"/>
 <text text-anchor="middle" x="619.5" y="-121.6" font-family="Helvetica, Arial, Liberation Sans, sans-serif" font-size="13.00" fill="#c9360d"> &#160;the repair &#160;</text>
 </g>
 </g>

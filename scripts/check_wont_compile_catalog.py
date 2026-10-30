@@ -27,6 +27,7 @@ Usage: check_wont_compile_catalog.py [repo_root]
 
 from __future__ import annotations
 
+import html
 import pathlib
 import datetime
 import re
@@ -55,10 +56,13 @@ INDEX_ROW = re.compile(
 REQUIRED_FIELDS = ("Status", "Check", "Test case", "Introduced", "Compared against")
 STATUS = re.compile(r"^(Enforced|Partial|Withdrawn|Superseded by \d{4})$")
 
-# Some defects are only defects under a compiler flag: an unproven index is a
-# runtime check until `--forbid-trap` refuses to ship one. An entry says so in
-# an optional `Compile with` row, and its samples are compiled that way.
+# Some defects are only defects under a compiler flag: a build that opts out of
+# a default rejection accepts what the entry shows. An entry says so in an
+# optional `Compile with` row, and its samples are compiled that way.
 FLAGS_FIELD = "Compile with"
+
+CLI_TABLE = "CLI.md"
+FLAG_NAME = re.compile(r"(?<![-\w])--[a-z][a-z-]*")
 
 REJECTED_HEADING = "## Code that does not compile"
 ACCEPTED_HEADING = "## Code that does compile"
@@ -361,6 +365,38 @@ def check_figures(entries: list[Entry], catalog: pathlib.Path,
     return counted
 
 
+def check_flag_names(entries: list[Entry], root: pathlib.Path,
+                     errors: list[str]) -> None:
+    """Prose and figures name only flags the compiler still has.
+
+    A figure is drawn once and read for years, and no build step compiles
+    its words: removing a flag leaves it naming one that is now an error. The
+    Introduced row is exempt, because it quotes a past commit's subject.
+    """
+    table = root / CLI_TABLE
+    if not table.exists():
+        errors.append(f"{CLI_TABLE} is missing, so flag names cannot be checked")
+        return
+    known = set(FLAG_NAME.findall(table.read_text(encoding="utf-8")))
+
+    catalog = root / CATALOG
+    paths = [catalog / "README.md"]
+    for entry in entries:
+        stem = f"{entry.number}-{entry.slug}"
+        paths += [entry.path, catalog / "assets" / f"{stem}.dot",
+                  catalog / "assets" / f"{stem}.svg"]
+    for path in paths:
+        if not path.exists():
+            continue  # check_figures reports a missing figure.
+        text = html.unescape(path.read_text(encoding="utf-8"))
+        text = "".join(line for line in text.splitlines(keepends=True)
+                       if not line.startswith("| Introduced |"))
+        for flag in sorted(set(FLAG_NAME.findall(text)) - known):
+            errors.append(
+                f"{path.relative_to(catalog)}: names {flag}, which is not in "
+                f"{CLI_TABLE}; the compiler would reject it as unknown")
+
+
 def check_index(entries: list[Entry], catalog: pathlib.Path,
                 errors: list[str]) -> None:
     """The index lists every entry, with the status the entry itself states.
@@ -407,6 +443,7 @@ def main(root: pathlib.Path) -> int:
     check_test_cases(entries, root / TEST_FILE, errors)
     figures = check_figures(entries, catalog, errors)
     check_index(entries, catalog, errors)
+    check_flag_names(entries, root, errors)
 
     for error in errors:
         print(f"ERROR wont-compile-catalog: {error}", file=sys.stderr)

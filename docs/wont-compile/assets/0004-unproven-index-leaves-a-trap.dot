@@ -18,7 +18,7 @@ digraph unproven_index_leaves_a_trap {
 
   c     [label="C\l\lNo check is emitted.\lThe write lands outside\lthe table, silently.\l"];
   rust  [label="Rust\l\lA check is emitted.\lIt panics, and on bare\lmetal a panic is the\lend of the core.\l"];
-  tkb   [label="Takibi, --forbid-trap\l\lThe build stops, naming\lthe access that still\lneeds a check.\l",
+  tkb   [label="Takibi, by default\l\lThe build stops, naming\lthe access that still\lneeds a check. Only\l--allow-trap opts out.\l",
          fillcolor="#fff3df", color="#f05a24"];
 
   proved [label="fn store(index: {0..<64 as usize}, value: u32)\l\lNo check is emitted, and there is nothing left to trap.\lThe caller carries the proof instead.\l",

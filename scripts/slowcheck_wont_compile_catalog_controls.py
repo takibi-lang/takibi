@@ -123,13 +123,13 @@ sys.exit(1)
 STUB_NEEDS_FLAG = """#!/usr/bin/env python3
 import pathlib, sys
 source = pathlib.Path(sys.argv[1]).read_text()
-if "bad_widget" in source and "--forbid-trap" in sys.argv:
+if "bad_widget" in source and "--widget-flag" in sys.argv:
     print("the widget is not proven bad_widget -> widget", file=sys.stderr)
     sys.exit(1)
 sys.exit(0)
 """
 
-FLAG_ROW = "| Compile with | `--forbid-trap` |\n"
+FLAG_ROW = "| Compile with | `--widget-flag` |\n"
 
 
 def build_root(tmp: pathlib.Path) -> pathlib.Path:
@@ -144,6 +144,7 @@ def build_root(tmp: pathlib.Path) -> pathlib.Path:
     (catalog / "0007-an-unproven-widget.dot").write_text("digraph w {}\n")
     (catalog / "0007-an-unproven-widget.svg").write_text("<svg></svg>\n")
     (root / "test" / "test_takibi.ml").write_text(SUITE)
+    (root / "CLI.md").write_text("| `--widget-flag` | - | a flag |\n")
     return root
 
 
@@ -316,6 +317,12 @@ def main() -> int:
                              run_catalog(root))
         dot.write_text(good)
 
+        figure = assets / "0007-an-unproven-widget.svg"
+        figure.write_text("<text>&#45;&#45;removed&#45;flag</text>\n")
+        controls.expect_fail("a figure naming a flag the compiler lost",
+                             run_catalog(root), "names --removed-flag")
+        figure.write_text("<svg></svg>\n")
+
         (assets / "0009-orphan.dot").write_text("digraph o {}\n")
         controls.expect_fail("a figure no entry claims", run_catalog(root),
                              "no entry claims this figure")
@@ -364,7 +371,7 @@ def main() -> int:
         entry.write_text(original.replace(
             "| Check | type error, widget checker |\n",
             "| Check | type error, widget checker |\n"
-            "| Compile with | --forbid-trap |\n"))
+            "| Compile with | --widget-flag |\n"))
         controls.expect_fail("an unbackticked flag list", run_catalog(root),
                              "is not backticked")
         restore()
