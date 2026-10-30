@@ -222,6 +222,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_instr_names_in_table.py` | no instruction builtin name appears as a string literal in `lib/*.ml` or `bin/*.ml` outside `lib/instr_spec.ml`, whose rows every reader goes through (#1005, #1213) |
 | `check_terminal_by_object.py` | no kernel/kernel `.tkb` compares a descriptor (`fd`, `*_fd`) with 0, 1 or 2: the terminal is recognized by the descriptor's object, so a dup of it behaves as it does (#902, #1222); a line with a reason says `fd-number-ok:` |
 | `check_mpidr_reads.py` | MPIDR_EL1 is read only by the platform's `cpu_id()` and boot code; a snapshot that stored raw MPIDR named every RPi5 core core 0 (#830) |
+| `check_irq_eoi.py` | GICC_EOIR is written only by `irq_eoi` (which takes a source clear's `IrqAcked`) and the GIC's SGI paths; a dispatcher that EOIs directly could end an IRQ whose source was never cleared, the #497 PMU storm (#774) |
 | `check_invariant_stop_controls.py` | Explicit kernel stop call-site resolution against exact ELF; wrong identity, origin, unsupported instruction and truncated RAM refusal |
 | `check_symbolize_ddb_controls.py` | Exact-capture PID/ELF registration, PIE and fixed executable PCs, verified entry/bias consistency, archived identities, segment and malformed-user-boundary refusal |
 | `check_qemu_lane_ports.py` | QEMU lanes do not claim conflicting protocol ports, and every lane fits the per-session port block |

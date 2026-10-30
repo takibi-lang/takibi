@@ -45,6 +45,14 @@ PLATFORM_ROOT = pathlib.Path("kernel/platform")
 # name -> why this identical pair is not a finding.  Adding a name here is a
 # claim; removing the duplication is better.
 ALLOWED = {
+    "irq_eoi":
+        "GitHub issue #774: mints or takes the private IrqAcked view, which only its declaring file, the platform irq_source.tkb, may mint (see ALLOWED_RUNS)",
+    "irq_pmu_clear":
+        "GitHub issue #774: mints or takes the private IrqAcked view, which only its declaring file, the platform irq_source.tkb, may mint (see ALLOWED_RUNS)",
+    "irq_timer_clear":
+        "GitHub issue #774: mints or takes the private IrqAcked view, which only its declaring file, the platform irq_source.tkb, may mint (see ALLOWED_RUNS)",
+    "irq_unclaimed":
+        "GitHub issue #774: mints or takes the private IrqAcked view, which only its declaring file, the platform irq_source.tkb, may mint (see ALLOWED_RUNS)",
     "platform_shutdown":
         "empty HAL slot -- a platform may need to do something here",
     "uart_rx_discard":
@@ -92,6 +100,13 @@ MIN_SIGNIFICANT_RUN = 8
 # with. Unlike ALLOWED, every entry here is also a piece of work -- these are
 # extractable, and the reason says so.
 ALLOWED_RUNS = {
+    ("irq_source.tkb", "return IrqUartServed::Plain(view IrqAcked);"):
+        "GitHub issue #774: the timer, PMU and unclaimed clears and irq_eoi "
+        "mint or take the private IrqAcked view, which only the file that "
+        "declares it may mint; the platform-specific clears (NIC, USB, UART) "
+        "must mint it too, so the declaration and every clear share one "
+        "file per platform. A shared copy would need a public mint, which "
+        "lets a dispatcher end an interrupt without its source's clear.",
 }
 
 

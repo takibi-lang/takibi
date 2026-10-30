@@ -28,6 +28,7 @@ use "kernel/kernel/nic_irq_affinity.tkb";
 use "kernel/kernel/uart_irq_affinity.tkb";
 use "kernel/arch/arm64/kernel/gicv2.tkb";
 use "kernel/platform/qemu/irq_source.tkb";
+use "kernel/arch/arm64/kernel/irq_finish.tkb";
 
 let mut qemu_uart_gic_intid: u32 = 33; // bootstrap route until DTB comparison
 // The PMU overflow PPI. QEMU's `virt` machine wires each CPU's
@@ -106,52 +107,19 @@ fn platform_irq_dispatch_ordinary(frame: sink FrameRef[process, level],
         // GitHub issue #497: a PMU overflow, on any core. The tick path
         // handles nothing else and would leave this level-triggered line
         // asserted -- a storm of millions per second, seen on the first
-        // four-core RPi5 session. Core 0 once had its own copy of this
-        // branch (GitHub issue #775).
+        // four-core RPi5 session (core 0 once had its own copy, #775).
         IrqTaken::Pmu(claim) => {
-            irq_eoi(irq_pmu_clear(claim, frame), iar);
-            workload_profile_irq_exit();
-            return frame_any(frame);
+            let acked: IrqAcked = irq_pmu_clear(claim, frame);
+            return irq_finish(acked, frame, iar);
         }
         // GitHub issue #830: the NIC's SPI rotates through the online cores.
         IrqTaken::Net(claim) => {
-            irq_eoi(irq_net_clear(claim, id), iar);
-            workload_profile_irq_exit();
-            return frame_any(frame);
+            return irq_finish(irq_net_clear(claim, id), frame, iar);
         }
-        // GitHub issue #830 (UART slice): the route is rewritten after the
-        // EOI, and a BREAK enters DDB on this core after it.
         IrqTaken::Uart(claim) => {
-            match irq_uart_clear(claim) {
-                IrqUartServed::Plain(acked) => {
-                    irq_eoi(acked, iar);
-                    uart_irq_after_eoi(id);
-                }
-                IrqUartServed::Break(acked) => {
-                    irq_eoi(acked, iar);
-                    uart_irq_after_eoi(id);
-                    kernel_ddb_enter(frame_ref_address(frame), 1, id as usize);
-                }
-            }
-            return frame_any(frame);
+            return irq_uart_finish(irq_uart_clear(claim), frame, iar, id);
         }
-        // GitHub issue #932: one timer-tick entry for every core. GICC_IAR
-        // was read on this core: acknowledging is its own job on its own
-        // banked interface. GitHub issue #830: the DDB lane's hung-core
-        // scenario polls first (a no-op unless a debugger armed it).
-        IrqTaken::Timer(claim) => {
-            uart_irq_hang_poll();
-            let acked: IrqAcked = irq_timer_clear(claim);
-            let switch: TimerSwitch = kernel_tick(frame);
-            irq_eoi(acked, iar);
-            workload_profile_irq_exit();
-            return kernel_timer_tick_leave(switch);
-        }
-        IrqTaken::Unclaimed(stray) => {
-            uart_irq_hang_poll();
-            irq_eoi(irq_unclaimed(stray), iar);
-            workload_profile_irq_exit();
-            return frame_any(frame);
-        }
+        IrqTaken::Timer(claim) => { return irq_timer_finish(claim, frame, iar); }
+        IrqTaken::Unclaimed(stray) => { return irq_unclaimed_finish(stray, frame, iar); }
     }
 }
