@@ -227,6 +227,9 @@ parameter value, or top-level declaration name.
 
 - `let x = e` / `let x: T = e` -- immutable binding (initializer
   required, no reassignment, `&x` is a compile error).
+  An immutable binding is a value with no address, so an array field of a
+  by-value record bound this way (or returned by a call) cannot be indexed,
+  sliced, or decayed: use `let mut`. Its scalar fields can be read.
 - `let mut x = e` / `let mut x: T = e` -- mutable binding (reassignment
   allowed).
 - At **global** scope: `const NAME: IntType = INTEGER_LITERAL;` declares

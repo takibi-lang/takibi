@@ -516,6 +516,10 @@ let rec is_integer_ty t =
 let place_static_identities : static_term StringMap.t ref = ref StringMap.empty
 let global_address_names : StringSet.t ref = ref StringSet.empty
 let locally_bound_names : StringSet.t ref = ref StringSet.empty
+(* Names a `LetMatch` (let-match, let-else) bound in the current function.
+   Its binder is immutable afterwards but codegen stores it in a stack slot,
+   so unlike another immutable binding it has an address (#1279). *)
+let let_match_bound_names : StringSet.t ref = ref StringSet.empty
 let active_readonly_borrows : StringSet.t ref = ref StringSet.empty
 let function_param_modes : Ast.type_expr option list StringMap.t ref =
   ref StringMap.empty
@@ -6747,6 +6751,37 @@ and infer_addrof_wrapped senv eenv tyenv fenv (e : Ast.expr) (inner : Ast.expr)
    messages can never drift between the two call sites -- the only actual
    difference between them is the one `match ... with TArray -> TPtr ...`
    step at the very end. *)
+(* An array field is used through the address of the record holding it; a
+   record that is only an SSA value has none, and codegen could not lower the
+   use. That is a call's result and an immutable local binding by value, at
+   any depth of by-value fields. A let-match binder has a stack slot. A parameter holding an array is its caller's
+   copy and has an address; so does an immutable global. Scalar fields of such
+   a value are extracted, so only array fields are refused (the same reason
+   an immutable `let` of an unindexed struct is refused at the binding). *)
+and check_array_field_base_has_address ~fname senv eenv tyenv fenv
+    (base : Ast.expr) base_ty : unit =
+  match strip_singleton base_ty with
+  | TStruct _ | TIndexedStruct _ ->
+      (match base.desc with
+       | Ast.Call _ ->
+           raise (TypeError (base.loc, Printf.sprintf
+             "cannot use array field '.%s' of a call's result: it is a \
+              temporary with no address; bind it with `let mut` first" fname))
+       | Ast.Var name
+         when StringSet.mem name !locally_bound_names
+              && not (StringSet.mem name !let_match_bound_names)
+              && (match StringMap.find_opt name tyenv with
+                  | Some (_, false) -> true
+                  | _ -> false) ->
+           raise (TypeError (base.loc, Printf.sprintf
+             "cannot use array field '.%s' of immutable binding '%s': it has \
+              no address; use `let mut %s`" fname name name))
+       | Ast.FieldGet (parent, _) | Ast.Cast (_, parent) ->
+           check_array_field_base_has_address ~fname senv eenv tyenv fenv
+             parent (infer_expr senv eenv tyenv fenv parent)
+       | _ -> ())
+  | _ -> ()
+
 and infer_field_access ?(slice_source = false) ~decay senv eenv tyenv fenv
     (loc : Ast.loc)
     (base_expr : Ast.expr) (fname : string) : ty =
@@ -6803,6 +6838,11 @@ and infer_field_access ?(slice_source = false) ~decay senv eenv tyenv fenv
              | t -> t in
            let raw = if Hashtbl.mem stored_owner_fields (sname, fname)
              then open_field raw else raw in
+           (match raw with
+            | TArray _ ->
+                check_array_field_base_has_address ~fname
+                  senv eenv tyenv fenv base_expr bt
+            | _ -> ());
            if not decay then raw
            else (match raw with
              | TArray (inner, _) ->
@@ -8184,6 +8224,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                           "variant payload binding '%s' shadows an existing value; choose a fresh arm-local name"
                           name));
                       let payload_ty = open_payload schema in
+                      locally_bound_names := StringSet.add name !locally_bound_names;
                       let env = StringMap.add name (payload_ty, is_mutable) tyenv in
                       (* The binder is arm-local, unlike ordinary `let`
                          entries accumulated in the function-wide raw-local
@@ -8341,6 +8382,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       value_static_identities := StringMap.remove name !value_static_identities;
       invalidate_place_binding name;
       locally_bound_names := StringSet.add name !locally_bound_names;  (* issue #214 *)
+      let_match_bound_names := StringSet.add name !let_match_bound_names;
       let ty = of_ast_opt ty_opt in
       let tyenv' = StringMap.add name (ty, true) tyenv in
       let raw_locals' = StringMap.add name ty raw_locals in
@@ -8562,6 +8604,7 @@ let infer_func ~key senv eenv fenv genv (fdef : Ast.func) : func_info =
     (* GitHub issue #214: reset per function, then seed with this
        function's own parameter names -- see locally_bound_names' own
        comment. *)
+    let_match_bound_names := StringSet.empty;
     locally_bound_names := StringSet.empty;
     active_binding_exclusions := IntMap.empty;
     List.iter (fun (name, _) ->
@@ -9240,6 +9283,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         Hashtbl.replace private_functions name (Ast.source_file_of_loc def_loc)
     | _ -> ()
   ) prog;
+  let_match_bound_names := StringSet.empty;
   locally_bound_names := StringSet.empty;
   opaque_struct_names_all := opaque_names;
   Hashtbl.reset private_opaque_types;

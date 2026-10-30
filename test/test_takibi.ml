@@ -497,6 +497,16 @@ let expect_multi_type_error fragments src () =
         (List.length fragments) msg
 
 (* Positive programs must survive inference and LLVM generation. *)
+(* #1279: records holding an array, and makers of by-value results. *)
+let no_address_array_field_prelude =
+  "struct P { a: [u8; 4]; b: u8; }
+   private linear struct L[n: usize] { private a: [u8; 4]; private b: u8; }
+   struct N[n: usize] { s: P; }
+   fn mkp(g: *P) -> P { let mut p: P = *g; return p; }
+   fn mkl(o: L[1]) -> L[1] { return o; }
+   fn fin(l: sink L[1]) {}
+   "
+
 let expect_ok src () =
   match gen_codegen src with
   | _ -> ()
@@ -6075,6 +6085,50 @@ fn stored_release(holder: sink StoredHolder[k]) { stored_drop(holder.token); }
     (expect_type_error "singleton value cannot live behind a pointer or inside array/slice storage"
       "fn isa_bad() { let mut xs: [usize @ 0; 2]; }");
 
+  Alcotest.test_case "#1279: index array field of immutable linear let" `Quick
+    (expect_type_error "of immutable binding 'l'"
+      (no_address_array_field_prelude ^ "fn r(o: L[1]) -> u8 { let l: L[1] = mkl(o); let v: u8 = l.a[1]; fin(l); return v; }"));
+  Alcotest.test_case "#1279: slice array field of immutable linear let" `Quick
+    (expect_type_error "of immutable binding 'l'"
+      (no_address_array_field_prelude ^ "fn r(o: L[1]) -> usize { let l: L[1] = mkl(o); let s = l.a[0..<2]; let n: usize = s.len; fin(l); return n; }"));
+  Alcotest.test_case "#1279: decay array field of immutable linear let" `Quick
+    (expect_type_error "of immutable binding 'l'"
+      (no_address_array_field_prelude ^ "fn r(o: L[1]) { let l: L[1] = mkl(o); let s: *u8 = l.a; fin(l); }"));
+  Alcotest.test_case "#1279: array field under a nested field of an immutable let" `Quick
+    (expect_type_error "of immutable binding 'q'"
+      (no_address_array_field_prelude ^ "fn r(g: *N[1]) -> u8 { let q: N[1] = *g; return q.s.a[1]; }"));
+  Alcotest.test_case "#1279: array field of a tuple binding" `Quick
+    (expect_type_error "of immutable binding 'l'"
+      (no_address_array_field_prelude ^ "fn t(o: L[1]) -> (L[1], u8) { return (o, 1); } fn r(o: L[1]) -> u8 { let (l, b) = t(o); let v: u8 = l.a[1]; fin(l); return v; }"));
+  Alcotest.test_case "#1279: array field of a for-in element" `Quick
+    (expect_type_error "of immutable binding 'p'"
+      (no_address_array_field_prelude ^ "fn r(s: []P) -> u8 { for p in s { return p.a[1]; } return 0; }"));
+  Alcotest.test_case "#1279: array field of a match payload binding" `Quick
+    (expect_type_error "of immutable binding 'p'"
+      (no_address_array_field_prelude ^ "variant W { A(P); B; } fn r(v: W) -> u8 { match v { W::A(p) => { return p.a[1]; } W::B => { return 0; } } }"));
+  Alcotest.test_case "#1279: a mutable match payload binding still indexes" `Quick
+    (expect_ok (no_address_array_field_prelude ^ "variant W { A(P); B; } fn r(v: W) -> u8 { match v { W::A(mut p) => { return p.a[1]; } W::B => { return 0; } } }"));
+  Alcotest.test_case "#1279: index array field of a call result" `Quick
+    (expect_type_error "of a call's result"
+      (no_address_array_field_prelude ^ "fn r(g: *P) -> u8 { return mkp(g).a[1]; }"));
+  Alcotest.test_case "#1279: slice array field of a call result" `Quick
+    (expect_type_error "of a call's result"
+      (no_address_array_field_prelude ^ "fn r(g: *P) -> usize { let s = mkp(g).a[0..<2]; return s.len; }"));
+  Alcotest.test_case "#1279: decay array field of a call result" `Quick
+    (expect_type_error "of a call's result"
+      (no_address_array_field_prelude ^ "fn r(g: *P) -> *u8 { return mkp(g).a; }"));
+  Alcotest.test_case "#1279: a mutable binding still indexes" `Quick
+    (expect_ok (no_address_array_field_prelude ^ "fn r(o: L[1]) -> u8 { let mut l: L[1] = mkl(o); let v: u8 = l.a[1]; fin(l); return v; }"));
+  Alcotest.test_case "#1279: a parameter still indexes" `Quick
+    (expect_ok (no_address_array_field_prelude ^ "fn r(l: L[1]) -> u8 { let v: u8 = l.a[1]; fin(l); return v; }"));
+  Alcotest.test_case "#1279: a scalar field of an immutable binding still reads" `Quick
+    (expect_ok (no_address_array_field_prelude ^ "fn r(o: L[1]) -> u8 { let l: L[1] = mkl(o); let v: u8 = l.b; fin(l); return v; }"));
+  Alcotest.test_case "#1279: an immutable binding shadowed by let mut still indexes" `Quick
+    (expect_ok (no_address_array_field_prelude ^ "fn r(o: L[1], o2: L[1]) -> u8 { let l: L[1] = mkl(o); fin(l); let mut l: L[1] = mkl(o2); let v: u8 = l.a[1]; fin(l); return v; }"));
+  Alcotest.test_case "#1279: a let-else binder still indexes" `Quick
+    (expect_ok (no_address_array_field_prelude ^ "variant W { A(P); B; } fn w(g: *P) -> W { return W::A(mkp(g)); } fn r(g: *P) -> u8 { let W::A(p) = w(g) else { W::B => { return 0; } }; return p.a[1]; }"));
+  Alcotest.test_case "#1279: a global still indexes" `Quick
+    (expect_ok (no_address_array_field_prelude ^ "let mut h: P; fn r() -> u8 { return h.a[1]; }"));
   Alcotest.test_case "Slice 1: immutable indexed owner fields cannot be assigned" `Quick
     (expect_type_error "cannot assign a field of immutable indexed owner 'x'"
       "linear struct InfImmutableField[n: usize] { idx: usize @ n; value: i32; }
