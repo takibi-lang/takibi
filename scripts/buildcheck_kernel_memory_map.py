@@ -463,6 +463,20 @@ def page_span(start, end, label):
     return (end - start) // PAGE_SIZE
 
 
+def fdt_expected_pages(qemu_start):
+    return {
+        "MULTIBANK_EXPECTED":
+            page_span(qemu_start, QEMU_RAM_END, "QEMU multi-bank RAM"),
+        "LOW_MEMORY_EXPECTED":
+            page_span(qemu_start, QEMU_LOW_RAM_END, "QEMU low RAM"),
+        "DISCONTIGUOUS_MEMORY_EXPECTED":
+            page_span(qemu_start, QEMU_HOLE_FIRST_END,
+                      "QEMU first discontiguous extent") +
+            page_span(QEMU_HOLE_SECOND_START, QEMU_RAM_END,
+                      "QEMU second discontiguous extent"),
+    }
+
+
 def check_allocator_expectations(problems, include_debug) -> int:
     """Compare the documented page counts, and return how many were read."""
     symbols = {name: nm_symbols(elf) for name, elf in ELFS.items()}
@@ -489,18 +503,7 @@ def check_allocator_expectations(problems, include_debug) -> int:
                 f"linked layout requires {actual}")
 
     fdt_path = REPO / "kernel/tests/check_fdt_multibank_qemu.py"
-    fdt_expected = {
-        "MULTIBANK_EXPECTED":
-            page_span(starts["QEMU"], QEMU_RAM_END, "QEMU multi-bank RAM"),
-        "LOW_MEMORY_EXPECTED":
-            page_span(starts["QEMU"], QEMU_LOW_RAM_END, "QEMU low RAM"),
-        "DISCONTIGUOUS_MEMORY_EXPECTED":
-            page_span(starts["QEMU"], QEMU_HOLE_FIRST_END,
-                      "QEMU first discontiguous extent") +
-            page_span(QEMU_HOLE_SECOND_START, QEMU_RAM_END,
-                      "QEMU second discontiguous extent"),
-    }
-    for name, actual in fdt_expected.items():
+    for name, actual in fdt_expected_pages(starts["QEMU"]).items():
         compared += 1
         documented = expected_python_pages(fdt_path, name)
         if documented != actual:
@@ -512,6 +515,33 @@ def check_allocator_expectations(problems, include_debug) -> int:
         render_qemu_boot_expected(QEMU_DEBUG_ELF)
         compared += 1
     return compared
+
+
+def update_allocator_expectations():
+    """Rewrite the page counts the check compares; returns how many moved."""
+    starts = {name: nm_symbols(elf)["usable_ram_start"]
+              for name, elf in ELFS.items()}
+    moved = 0
+    boot = REPO / "kernel/tests/rpi5/views/boot.expected"
+    pages = page_span(starts["RPi5"], RPI5_MANAGED_RAM_END, "RPi5 managed RAM")
+    text = boot.read_text()
+    new = re.sub(r"^(memory: .* allocator_pages=)\d+$",
+                 lambda m: f"{m.group(1)}{pages}", text, flags=re.MULTILINE)
+    if new != text:
+        boot.write_text(new)
+        moved += 1
+    path = REPO / "kernel/tests/check_fdt_multibank_qemu.py"
+    text = path.read_text()
+    for name, pages in fdt_expected_pages(starts["QEMU"]).items():
+        new = re.sub(
+            rf"(^{re.escape(name)}\s*=\s*\(.*?allocator_pages=)\d+",
+            lambda m, p=pages: f"{m.group(1)}{p}", text,
+            count=1, flags=re.MULTILINE | re.DOTALL)
+        if new != text:
+            moved += 1
+        text = new
+    path.write_text(text)
+    return moved
 
 
 def main():
@@ -534,6 +564,10 @@ def main():
         else:
             print("kernel/memory-map: ELF rows refreshed from the current build")
         text = updated
+        # The messages below promise --update refreshes these too; on #1013
+        # it did not, and the three FDT rows would have been hand-edited.
+        moved = update_allocator_expectations()
+        print(f"kernel/memory-map: {moved} allocator page count(s) refreshed")
     problems = []
     check_elf_symbols(text, problems)
     check_elf_offsets(text, problems)
