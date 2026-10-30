@@ -1746,6 +1746,36 @@ private fn tcp_drop_data_segment_claim(index: usize) -> bool {
     }
 }
 
+// The one-shot drops other than the data segment's, each taken by one sender.
+fn tcp_fixture_fin_claim() -> bool {
+    return atomic_word_swap(&tcp_drop_next_fin, 0) != 0;
+}
+
+fn tcp_fixture_syn_ack_claim() -> bool {
+    return atomic_word_swap(&tcp_drop_next_syn_ack, 0) != 0;
+}
+
+// A segment index no connection reaches, so the contention probe's armed data
+// claim cannot drop a real segment. The probe runs before any fixture arms a
+// drop, and leaves all three disarmed.
+const TCP_FIXTURE_PROBE_SEGMENT: usize = 0xFFFFFFFF;
+
+fn tcp_fixture_data_claim() -> bool {
+    return tcp_drop_data_segment_claim(TCP_FIXTURE_PROBE_SEGMENT);
+}
+
+fn tcp_fixture_claims_arm() {
+    atomic_word_store(&tcp_drop_data_segment_index, TCP_FIXTURE_PROBE_SEGMENT + 1);
+    atomic_word_store(&tcp_drop_next_fin, 1);
+    atomic_word_store(&tcp_drop_next_syn_ack, 1);
+}
+
+fn tcp_fixture_claims_disarm() {
+    atomic_word_store(&tcp_drop_data_segment_index, 0);
+    atomic_word_store(&tcp_drop_next_fin, 0);
+    atomic_word_store(&tcp_drop_next_syn_ack, 0);
+}
+
 // GitHub issue #846: after the armed drop fires, drop data segment `index`
 // of whichever connection sends one next.
 fn kernel_tcp_inject_drop_data_segment_again(index: usize) {
@@ -3304,7 +3334,7 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection_pool, conn
                                     build_syn_ack(conn, frame, header.ihl);
                                     slice_copy(stream_frames[0..<54],
                                                frame[0..<54]);
-                                    if (atomic_word_swap(&tcp_drop_next_syn_ack, 0) != 0) {
+                                    if (tcp_fixture_syn_ack_claim()) {
                                         atomic_word_store(&tcp_injected_syn_pending, 1);
                                         plan = TcpRxPlan::ProtocolDrop;
                                     } else {
@@ -4050,7 +4080,7 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection_pool, con
     tcp_hdr.urgent = 0;
     fix_tcp_checksum(ip, tcp);
     conn.snd_nxt = conn.snd_nxt + 1;
-    if (atomic_word_swap(&tcp_drop_next_fin, 0) != 0) {
+    if (tcp_fixture_fin_claim()) {
         let fin_entry: usize = pending_tcp_record(ready,
                 owner, PendingTcpKind::Fin, frame, 54, NET_KEPT_NONE);
         // GitHub issue #295: same reasoning as the Data-segment send site

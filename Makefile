@@ -489,6 +489,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/kernel/syscall_unimplemented.tkb \
 	kernel/kernel/wait_status.tkb \
 	kernel/kernel/tcp_connection_contention_evidence.tkb \
+	kernel/kernel/tcp_fixture_claim_contention_evidence.tkb \
 	kernel/kernel/workload_evidence.tkb \
 	kernel/lib/peer_tick_window.tkb \
 	kernel/lib/peer_round.tkb \

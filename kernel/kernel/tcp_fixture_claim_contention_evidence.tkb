@@ -1,0 +1,140 @@
+// Every-online-core evidence for the TCP fixture's one-shot drop claims
+// (kernel/net/tcp.tkb): an armed drop is taken by one sender however many
+// cores reach it together. A first phase runs the check-then-clear those
+// claims replaced from the same rendezvous, where every online core takes the
+// one shot, so a count of one below says the rendezvous can tell them apart.
+//
+// Current limitations (2026-10-30): the participants are the online prefix
+// (kernel_online_core_count) at the start of the probe, and each round's
+// overlap is whatever the barrier's release gives. Only the unlocked phase is
+// deterministic; the claim rounds are sampled evidence.
+use "kernel/lib/peer_round.tkb";
+use "kernel/lib/execution_model.tkb";
+
+const TCP_CLAIM_PROBE_ROUNDS: usize = 64;
+
+private let mut tcp_claim_probe_armed: AtomicWord;
+private let mut tcp_claim_probe_sequence: AtomicWord;
+private let mut tcp_claim_probe_round: PeerRound;
+// Per core: the last sequence it served, and whether it is inside the run.
+private let mut tcp_claim_probe_served: PeerTally;
+private let mut tcp_claim_probe_naive_word: AtomicWord;
+private let mut tcp_claim_probe_naive_wins: AtomicWord;
+private let mut tcp_claim_probe_data_wins: AtomicWord;
+private let mut tcp_claim_probe_fin_wins: AtomicWord;
+private let mut tcp_claim_probe_syn_ack_wins: AtomicWord;
+
+// Armed for `cpu` only while it still has work (GitHub issue #860).
+fn tcp_fixture_claim_contention_is_armed(cpu: usize) -> bool !{unsafe} {
+    return atomic_word_load(&tcp_claim_probe_armed) == 1 &&
+           peer_tally_count(&tcp_claim_probe_served, cpu) !=
+               atomic_word_load(&tcp_claim_probe_sequence);
+}
+
+private fn tcp_claim_probe_meet(cpu: usize, online: usize, sequence: usize)
+        -> bool !{unsafe} {
+    return peer_round_meet(&tcp_claim_probe_round, cpu, online, sequence,
+                           &tcp_claim_probe_armed);
+}
+
+// The run every online core makes, core 0 arming before it arrives: nobody
+// claims until core 0 has published the round, and nobody re-arms until every
+// core has finished claiming.
+private fn tcp_claim_probe_run(cpu: usize, online: usize) -> bool !{unsafe} {
+    // core-role: core 0 is the probe's primary, which arms what the peers claim.
+    if (cpu == 0) { atomic_word_store(&tcp_claim_probe_naive_word, 1); }
+    if (tcp_claim_probe_meet(cpu, online, 1) == false) { return false; }
+    let saw_armed: bool = atomic_word_load(&tcp_claim_probe_naive_word) != 0;
+    if (tcp_claim_probe_meet(cpu, online, 2) == false) { return false; }
+    if (saw_armed) {
+        atomic_word_store(&tcp_claim_probe_naive_word, 0);
+        atomic_word_fetch_add(&tcp_claim_probe_naive_wins, 1);
+    }
+    if (tcp_claim_probe_meet(cpu, online, 3) == false) { return false; }
+    for round: usize in 0..<TCP_CLAIM_PROBE_ROUNDS {
+        // core-role: core 0 is the probe's primary, which arms what the peers claim.
+        if (cpu == 0) { tcp_fixture_claims_arm(); }
+        if (tcp_claim_probe_meet(cpu, online, 4 + round * 2) == false) {
+            return false;
+        }
+        if (tcp_fixture_data_claim()) {
+            atomic_word_fetch_add(&tcp_claim_probe_data_wins, 1);
+        }
+        if (tcp_fixture_fin_claim()) {
+            atomic_word_fetch_add(&tcp_claim_probe_fin_wins, 1);
+        }
+        if (tcp_fixture_syn_ack_claim()) {
+            atomic_word_fetch_add(&tcp_claim_probe_syn_ack_wins, 1);
+        }
+        if (tcp_claim_probe_meet(cpu, online, 5 + round * 2) == false) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Every online peer runs this from its idle loop while the probe is armed.
+fn tcp_fixture_claim_contention_secondary_run(cpu: usize) !{unsafe} {
+    if (peer_tally_is_peer(&tcp_claim_probe_served, cpu) == false) { return; }
+    let sequence: usize = atomic_word_load(&tcp_claim_probe_sequence);
+    if (peer_tally_count(&tcp_claim_probe_served, cpu) == sequence) { return; }
+    peer_tally_set(&tcp_claim_probe_served, cpu, sequence);
+    peer_tally_enter(&tcp_claim_probe_served, cpu);
+    tcp_claim_probe_run(cpu, peer_tally_online(&tcp_claim_probe_served));
+    peer_tally_leave(&tcp_claim_probe_served, cpu);
+}
+
+private fn tcp_claim_probe_abandon(stage: *u8) -> bool !{unsafe} {
+    atomic_word_store(&tcp_claim_probe_armed, 0);
+    // A claim left armed would drop a real segment of a later fixture.
+    tcp_fixture_claims_disarm();
+    kernel_boot_log("tcp fixture claim contention stage: ");
+    kernel_boot_log(stage);
+    kernel_boot_log("\n");
+    return false;
+}
+
+fn tcp_fixture_claim_contention_probe() -> bool !{unsafe} {
+    static_assert(KERNEL_ACTIVE_CORES >= 2,
+                  "tcp fixture claim evidence requires one peer");
+    let online: usize = kernel_online_core_count();
+    peer_round_reset(&tcp_claim_probe_round);
+    peer_tally_reset(&tcp_claim_probe_served, online);
+    atomic_word_store(&tcp_claim_probe_naive_wins, 0);
+    atomic_word_store(&tcp_claim_probe_data_wins, 0);
+    atomic_word_store(&tcp_claim_probe_fin_wins, 0);
+    atomic_word_store(&tcp_claim_probe_syn_ack_wins, 0);
+    atomic_word_fetch_add(&tcp_claim_probe_sequence, 1);
+    atomic_word_store(&tcp_claim_probe_armed, 1);
+    if (online < 2 || tcp_claim_probe_run(0, online) == false) {
+        return tcp_claim_probe_abandon("secondary-never-arrived" as *u8);
+    }
+    if (peer_tally_peers_left(&tcp_claim_probe_served,
+                              PeerTickPolicy::Arrival) == false) {
+        return tcp_claim_probe_abandon("secondary-never-left" as *u8);
+    }
+    atomic_word_store(&tcp_claim_probe_armed, 0);
+    let naive: usize = atomic_word_load(&tcp_claim_probe_naive_wins);
+    let data: usize = atomic_word_load(&tcp_claim_probe_data_wins);
+    let fin: usize = atomic_word_load(&tcp_claim_probe_fin_wins);
+    let syn_ack: usize = atomic_word_load(&tcp_claim_probe_syn_ack_wins);
+    // The count line is in a view shared by targets whose core counts may
+    // differ, so the expected unlocked result is named, not numbered.
+    kernel_boot_log("tcp fixture claim contention counts: unlocked=");
+    if (naive == online) {
+        kernel_boot_log("every-online-core");
+    } else {
+        uart_put_udec(naive);
+        kernel_boot_log(" of ");
+        uart_put_udec(online);
+    }
+    kernel_boot_log(" data=");
+    uart_put_udec(data);
+    kernel_boot_log(" fin=");
+    uart_put_udec(fin);
+    kernel_boot_log(" syn-ack=");
+    uart_put_udec(syn_ack);
+    kernel_boot_log("\n");
+    return naive == online && data == TCP_CLAIM_PROBE_ROUNDS &&
+           fin == TCP_CLAIM_PROBE_ROUNDS && syn_ack == TCP_CLAIM_PROBE_ROUNDS;
+}

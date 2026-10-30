@@ -242,6 +242,9 @@ fn kernel_idle_loop() !{unsafe} {
                 if (tcp_connection_contention_is_armed(core_id)) {
                     tcp_connection_contention_secondary_run(core_id);
                 }
+                if (tcp_fixture_claim_contention_is_armed(core_id)) {
+                    tcp_fixture_claim_contention_secondary_run(core_id);
+                }
                 if (console_contention_is_armed(core_id)) {
                     console_contention_secondary_run(core_id);
                 }

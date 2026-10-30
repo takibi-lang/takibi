@@ -92,7 +92,8 @@ text = uart.read_text(errors='replace').replace('\r', '')
 names = ('console contention', 'schedule contention',
          'pid contention', 'fd refcount contention', 'asid contention',
          'page contention', 'freelist contention', 'pool contention',
-         'occupancy drain', 'network init contention', 'tcp owner contention',
+         'occupancy drain', 'network init contention',
+         'tcp fixture claim contention', 'tcp owner contention',
          'pool walk', 'ext2 mutation contention', 'signal contention',
          'world stop from a peer', 'world stop')
 lines = text.splitlines()
@@ -116,6 +117,7 @@ if 'ext2 mutation contention stage: peer-never-asked-unheld' not in lines:
 for line in ('world stop stage: secondary-never-acknowledged',
              'console contention stage: secondary-never-ready',
              'network init contention stage: secondary-never-arrived',
+             'tcp fixture claim contention stage: secondary-never-arrived',
              'tcp owner contention stage: secondary-never-finished',
              'signal contention stage: secondary-missed-round',
              'world stop from a peer stage: secondary-never-finished'):

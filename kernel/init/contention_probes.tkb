@@ -29,6 +29,7 @@ use "kernel/kernel/occupancy_drain_evidence.tkb";
 use "kernel/kernel/pool_walk_contention_evidence.tkb";
 use "kernel/kernel/init_once_contention_evidence.tkb";
 use "kernel/kernel/tcp_connection_contention_evidence.tkb";
+use "kernel/kernel/tcp_fixture_claim_contention_evidence.tkb";
 use "kernel/net/socket_capability.tkb";
 use "kernel/kernel/ext2_mutation_contention_evidence.tkb";
 use "kernel/kernel/signal_contention_evidence.tkb";
@@ -165,6 +166,11 @@ private fn contention_probes_run() !{unsafe} {
         kernel_boot_log("network init contention: unlocked check-set minted on every online core, typed one-shot gate admitted one initializer ok\n");
     } else {
         kernel_boot_log("network init contention: failed\n");
+    }
+    if (tcp_fixture_claim_contention_probe()) {
+        kernel_boot_log("tcp fixture claim contention: unlocked check-clear taken on every online core, each armed drop claimed once per round ok\n");
+    } else {
+        kernel_boot_log("tcp fixture claim contention: failed\n");
     }
     // GitHub issue #837: these three free TCP connections, and a free
     // walks the stack-wide retransmit chain, which takes a borrow of the

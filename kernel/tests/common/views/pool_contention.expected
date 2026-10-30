@@ -23,6 +23,8 @@ stopped root publication: consecutive stop captures retain usable roots ok
 stopped pool inspection: VM, image, FD context and descriptor metadata refused while their guards were held ok
 network init contention counts: unlocked=every-online-core locked=1
 network init contention: unlocked check-set minted on every online core, typed one-shot gate admitted one initializer ok
+tcp fixture claim contention counts: unlocked=every-online-core data=64 fin=64 syn-ack=64
+tcp fixture claim contention: unlocked check-clear taken on every online core, each armed drop claimed once per round ok
 tcp owner contention counts: busy=every-peer advanced=every-peer
 tcp owner contention: every peer excluded while held and each completed one state transition after release ok
 tcp pin cost evidence: 7 samples of 4096 operations and checksums consumed ok

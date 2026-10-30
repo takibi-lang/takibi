@@ -19,6 +19,8 @@
 ^stopped pool inspection:
 ^network init contention counts:
 ^network init contention:
+^tcp fixture claim contention counts:
+^tcp fixture claim contention:
 ^tcp owner contention counts:
 ^tcp owner contention:
 ^tcp pin cost evidence:
