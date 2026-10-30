@@ -6356,6 +6356,9 @@ private fn kernel_process_spread_timer_enter(frame: borrow FrameRef[process, lev
 
 private fn kernel_process_spread_timer_left(
         guard: borrow ProcessRunGuard[&scheduled_process_run_lock], outgoing: ProcessHandle) {
+    // Every context switch comes here holding the run lock: a dormant fixture
+    // must not copy its record in and out of the place (#680's contention count).
+    if (atomic_word_load(&spread_timer_active) == 0) { return; }
     let left: bool = match place_borrow(guard, spread_timer_store.record) {
         Place::Empty => { false }
         Place::Full(record) => {
