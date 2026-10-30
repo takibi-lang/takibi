@@ -3,7 +3,7 @@
   "event": "incremental",
   "decision": "measured",
   "source_sha256": "99fd9231be18c7bd4d6e079222a5262b2517d6fdfb3ba3a67d26369822056222",
-  "workload": "#1012: thirteen scheduler gates, report-once flags and counters to AtomicWord, one per-core array becomes one word. Measured with scripts/space_delta.py origin/main: text 755576 -> 755784 B qemu, 4121016 -> 4121072 B rpi5; data and BSS totals unchanged on both; usable_ram_start 0x40228000 -> 0x40230000 qemu (-8 pages), rpi5 unchanged. Previous: #1262 and #1263: scripts/space_delta.py on the two linked production kernels against origin/main; #1262 changes comments only, #1263 deletes write-only globals and one TcpConnection field. No allocation workload changes.",
+  "workload": "Re-recorded by hand as scripts/checkpoint_rebase.py does, after a rebase onto 74beeb52: this branch's review, rebound to the merged sources (upstream's record was 2026-10-30 incremental/reuse). #1012: thirteen scheduler gates, report-once flags and counters to AtomicWord, one per-core array becomes one word. Measured with scripts/space_delta.py origin/main: text 755576 -> 755784 B qemu, 4121016 -> 4121072 B rpi5; data and BSS totals unchanged on both; usable_ram_start 0x40228000 -> 0x40230000 qemu (-8 pages), rpi5 unchanged. Previous: #1262 and #1263: scripts/space_delta.py on the two linked production kernels against origin/main; #1262 changes comments only, #1263 deletes write-only globals and one TcpConnection field. No allocation workload changes.",
   "evidence": [
     "docs/AGGREGATE_MERGE_SPACE_2026-10-23.md",
     "docs/IRQ_PRIORITY_MASK_SPACE_2026-10-23.md",
