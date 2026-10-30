@@ -48,6 +48,14 @@ SECTIONS {
         . += 4096;
         kernel_identity_l3_table = .;
         . += 4096;
+        /* GitHub issue #1032 point 5: up to two more L3 pages for the 2 MiB
+           blocks the .stack block lies in, so the bottom page of every
+           stack run's reserved half can be left unmapped as a guard
+           (mmu_init_kernel_identity_tables). Two because .stack is under
+           2 MiB long (asserted below) and may straddle one boundary; a
+           block that is also the text block uses the text's L3 page. */
+        kernel_identity_stack_l3_tables = .;
+        . += 2 * 4096;
         . = ALIGN(16);
         __bss_end = .;
     }
@@ -173,3 +181,15 @@ ASSERT(kernel_text_start % 0x200000 == 0,
        "kernel text must start 2 MiB-aligned for the identity L3 split")
 ASSERT(kernel_text_end - kernel_text_start <= 0x200000,
        "kernel text must fit in one 2 MiB block for the identity L3 split")
+
+/* GitHub issue #1032 point 5: the stack guards. Every stack in .stack is
+   one 0x8000 run (reserved lower half, live upper half), and the guard is
+   the lowest 4 KiB page of each run, so the block must be whole runs. It
+   must be under 2 MiB so that at most two 2 MiB identity blocks hold it,
+   one L3 page each (kernel_identity_stack_l3_tables). */
+ASSERT(boot_stack_run_bottom % 0x8000 == 0,
+       "the stack block must start on a stack-run boundary for the guards")
+ASSERT((percpu_stack_end - boot_stack_run_bottom) % 0x8000 == 0,
+       "the stack block must be whole 0x8000 stack runs for the guards")
+ASSERT(percpu_stack_end - boot_stack_run_bottom < 0x200000,
+       "the stack block must be under 2 MiB for two identity L3 pages")

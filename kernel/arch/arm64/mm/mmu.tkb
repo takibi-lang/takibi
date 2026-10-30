@@ -179,30 +179,69 @@ const KERNEL_BLOCK_RW_XN: usize = 0x0060000000000705;
 const KERNEL_PAGE_RW_XN: usize = 0x0060000000000707;
 const KERNEL_PAGE_TEXT_RX: usize = 0x0040000000000787;
 
-fn mmu_init_kernel_identity_tables() {
-    let gib_base: usize = KERNEL_IDENTITY_L1_INDEX << 30;
-    let text_block: usize = (kernel_text_start - gib_base) >> 21;
-    let text_block_base: usize = gib_base + (text_block << 21);
+// GitHub issue #1032 point 5 (maintainer D1 (a), D2 (i)): the static
+// stacks' guard pages. Every stack in the linker's .stack block is one
+// KERNEL_STACK_RUN_BYTES-aligned run whose lower half is reserved and
+// poisoned; the lowest page of that half is left unmapped, so a write that
+// runs 12 KiB past a stack's bottom without taking an exception faults
+// instead of reaching the run below. An exception taken there finds SP's
+// bit KERNEL_STACK_SHIFT clear and the generated entry moves to
+// overflow_stack_top and names the stack (#377). Process stacks (page-pool
+// runs) are not guarded here (#1226). The linker scripts assert that the
+// block is whole runs and under 2 MiB, so at most two 2 MiB blocks hold
+// it; each gets an L3 page from kernel_identity_stack_l3_tables unless it
+// is the text block, whose L3 page already exists.
+extern symbol kernel_identity_stack_l3_tables;
+extern symbol percpu_stack_end;
+const KERNEL_STATIC_STACK_RUN_BYTES: usize = 0x8000;
+const KERNEL_STACK_GUARD_BYTES: usize = 4096;
+
+// Whether a physical page of the identity is a static stack's guard.
+fn mmu_identity_page_is_stack_guard(pa: usize) -> bool {
+    let low: usize = boot_stack_run_bottom;
+    let high: usize = percpu_stack_end;
+    return pa >= low && pa < high
+        && (pa - low) % KERNEL_STATIC_STACK_RUN_BYTES == 0;
+}
+
+// One L3 page for the 2 MiB block at block_base: text pages read-only and
+// executable, guard pages invalid, everything else RW execute-never.
+fn mmu_init_identity_l3(l3: usize, block_base: usize) {
     for i: usize in 0..<MMU_TABLE_ENTRY_COUNT {
-        if (i == text_block) {
-            mmu_table_entry_write(kernel_identity_l2_table, i,
-                                  kernel_identity_l3_table | 3);
-        } else {
-            mmu_table_entry_write(kernel_identity_l2_table, i,
-                                  (gib_base + (i << 21)) | KERNEL_BLOCK_RW_XN);
-        }
-    }
-    for i: usize in 0..<MMU_TABLE_ENTRY_COUNT {
-        let pa: usize = text_block_base + (i << 12);
+        let pa: usize = block_base + (i << 12);
         // [kernel_text_start, kernel_text_end) rounded out to whole pages;
         // .rodata starts on the next page boundary (ALIGN(4096)), so the
         // last text page holds no data.
         if (pa >= kernel_text_start && pa < kernel_text_end) {
-            mmu_table_entry_write(kernel_identity_l3_table, i,
-                                  pa | KERNEL_PAGE_TEXT_RX);
+            mmu_table_entry_write(l3, i, pa | KERNEL_PAGE_TEXT_RX);
+        } else if (mmu_identity_page_is_stack_guard(pa)) {
+            mmu_table_entry_write(l3, i, 0);
         } else {
-            mmu_table_entry_write(kernel_identity_l3_table, i,
-                                  pa | KERNEL_PAGE_RW_XN);
+            mmu_table_entry_write(l3, i, pa | KERNEL_PAGE_RW_XN);
+        }
+    }
+}
+
+fn mmu_init_kernel_identity_tables() {
+    let gib_base: usize = KERNEL_IDENTITY_L1_INDEX << 30;
+    let text_block: usize = (kernel_text_start - gib_base) >> 21;
+    let stack_first: usize = (boot_stack_run_bottom - gib_base) >> 21;
+    let stack_last: usize = (percpu_stack_end - 1 - gib_base) >> 21;
+    let mut stack_tables: usize = 0;
+    for i: usize in 0..<MMU_TABLE_ENTRY_COUNT {
+        let block_base: usize = gib_base + (i << 21);
+        if (i == text_block) {
+            mmu_init_identity_l3(kernel_identity_l3_table, block_base);
+            mmu_table_entry_write(kernel_identity_l2_table, i,
+                                  kernel_identity_l3_table | 3);
+        } else if (i >= stack_first && i <= stack_last && stack_tables < 2) {
+            let l3: usize = kernel_identity_stack_l3_tables + (stack_tables << 12);
+            stack_tables = stack_tables + 1;
+            mmu_init_identity_l3(l3, block_base);
+            mmu_table_entry_write(kernel_identity_l2_table, i, l3 | 3);
+        } else {
+            mmu_table_entry_write(kernel_identity_l2_table, i,
+                                  block_base | KERNEL_BLOCK_RW_XN);
         }
     }
     dsb_ishst();

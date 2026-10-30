@@ -153,6 +153,19 @@ case "$MODE" in
         expected_ec=25
         expected_detail='^oops: data-abort dfsc=0x000000000000000[c-f] access=read$'
         ;;
+    el1_stack_guard)
+        # GitHub issue #1032 point 5: EL1 writes the guard page at the
+        # bottom of the boot stack's run -- what a frame 12 KiB past the
+        # stack's bottom would touch. GDB replaces the instruction at PID
+        # 1's first el0_context_resume with str x10, [x9] and points x9 at
+        # boot_stack_run_bottom. With the guard unmapped the store takes a
+        # translation data abort at the current EL (ec 0x25, DFSC level 3
+        # 0x07) with FAR at the guard; without it the store lands silently
+        # in the poison band and no such report appears.
+        fault_instruction=0xf900012a
+        expected_ec=25
+        expected_detail='^oops: data-abort dfsc=0x0000000000000007 access=write$'
+        ;;
     *)
         echo "error: unknown KERNEL_QEMU_OOPS_MODE: $MODE" >&2
         exit 1
@@ -388,6 +401,22 @@ PYLINE
             -ex "printf \"takibi-read-target=0x%016lx\\n\", \$x9"
             -ex "detach"
         )
+    elif [ "$MODE" = el1_stack_guard ]; then
+        # The boot stack's run is a static stack in every image; its lowest
+        # page is the guard (mmu_init_kernel_identity_tables).
+        gdb_commands=(
+            -ex "target remote :$GDB_PORT"
+            -ex "break kernel_process_boot_handoff"
+            -ex "continue"
+            -ex "disable 1"
+            -ex "break *el0_context_resume thread 1"
+            -ex "continue"
+            -ex "disable 2"
+            -ex "set \$x9 = (long)&boot_stack_run_bottom"
+            -ex "set {int}\$pc = $fault_instruction"
+            -ex "printf \"takibi-guard-target=0x%016lx\\n\", \$x9"
+            -ex "detach"
+        )
     elif [ "$MODE" = concurrent_fault ]; then
         # QEMU's gdbstub numbers vCPUs from 1: thread 1 is core 0, thread 2
         # is core 1. With scheduler-locking on, `continue` resumes only the
@@ -564,6 +593,25 @@ if [ "$MODE" = peer_fault ] || [ "$MODE" = peer_fault_start_window ] || [ "$MODE
     fi
     ext2_postcheck_after_stop
     echo "PASS kernel/qemu oops: the peer's fail-stop stopped core 0 and reported alone"
+    exit 0
+fi
+
+# GitHub issue #1032 point 5: the EL1 store to the boot stack's guard page
+# is the verdict: an EL1 data abort whose DFSC is a level-3 translation
+# fault and whose FAR is the guard.
+if [ "$MODE" = el1_stack_guard ]; then
+    target="$(sed -n 's/^takibi-guard-target=0x\([0-9a-f]*\)$/\1/p' "$ARTIFACT_DIR/arm-gdb.log" | head -1)"
+    line="$(grep -aE "^oops: fail-stop seq=1 cpu=0 slot=[0-9]+ ec=0x0*$expected_ec " "$UART_LOG" | head -1 || true)"
+    if [ -z "$target" ] || [ -z "$line" ] ||
+            ! printf '%s\n' "$line" | grep -q " far=0x$target " ||
+            ! grep -Eq "$expected_detail" "$UART_LOG"; then
+        echo "FAIL kernel/qemu oops: EL1 wrote the boot stack's guard page 0x${target:-unknown}, or did not report a translation data abort there" >&2
+        sed 's/^/  /' "$UART_LOG" >&2 || true
+        sed 's/^/  /' "$ARTIFACT_DIR/arm-gdb.log" >&2 || true
+        exit 1
+    fi
+    ext2_postcheck_after_stop
+    echo "PASS kernel/qemu oops: $MODE (EL1 store to the boot stack guard 0x$target took a translation data abort)"
     exit 0
 fi
 

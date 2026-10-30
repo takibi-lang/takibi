@@ -7444,7 +7444,9 @@ fn kernel_boot_stack_arm() !{unsafe} {
     // From the bottom of the RUN, so the reserved half below the stack is
     // poisoned in the same pass and an overflow into it is measurable
     // rather than merely harmless.
-    kernel_boot_stack_fill(boot_stack_run_bottom,
+    // Above the guard page (#1032 point 5): the run's lowest page is
+    // unmapped once the identity is built.
+    kernel_boot_stack_fill(boot_stack_run_bottom + KERNEL_STACK_GUARD_BYTES,
                            sp - KERNEL_BOOT_STACK_MARGIN_BYTES);
 }
 
@@ -7452,7 +7454,7 @@ fn kernel_boot_stack_arm() !{unsafe} {
 // reserved half below it. The boot-stack twin of
 // kernel_stack_overflow_bytes, and 0 on a kernel that is behaving.
 fn kernel_boot_stack_overflow_bytes() -> usize !{unsafe} {
-    let run_bottom: usize = boot_stack_run_bottom;
+    let run_bottom: usize = boot_stack_run_bottom + KERNEL_STACK_GUARD_BYTES;
     let bottom: usize = boot_stack_bottom;
     if (bottom <= run_bottom) { return 0; }
     return stack_poison_depth(run_bottom, bottom - run_bottom,
@@ -7495,7 +7497,8 @@ fn kernel_boot_stack_used_bytes() -> usize !{unsafe} {
 // it, so there is no frame to preserve and the measurement has no
 // unpoisoned margin counted as used.
 fn kernel_irq_stack_arm() !{unsafe} {
-    kernel_boot_stack_fill(irq_stack_run_bottom, irq_stack_top);
+    kernel_boot_stack_fill(irq_stack_run_bottom + KERNEL_STACK_GUARD_BYTES,
+                           irq_stack_top);
 }
 
 fn kernel_irq_stack_used_bytes() -> usize !{unsafe} {
@@ -7503,8 +7506,8 @@ fn kernel_irq_stack_used_bytes() -> usize !{unsafe} {
 }
 
 fn kernel_irq_stack_overflow_bytes() -> usize !{unsafe} {
-    let used: usize = kernel_linker_stack_used_bytes(irq_stack_run_bottom,
-                                                     irq_stack_bottom);
+    let used: usize = kernel_linker_stack_used_bytes(
+        irq_stack_run_bottom + KERNEL_STACK_GUARD_BYTES, irq_stack_bottom);
     return used;
 }
 

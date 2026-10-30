@@ -70,8 +70,13 @@ EXPECTED_UXN_ONLY_COUNT = 1
 # but a shared L2/L3 pair built by this function. Its text pages carry UXN
 # only (0x787, read-only, EL1-executable); every other block and page
 # carries UXN+PXN. One constant of each, as built today.
-KERNEL_IDENTITY_FUNCTION = "mmu_init_kernel_identity_tables"
-EXPECTED_IDENTITY_UXN_AND_PXN_COUNT = 1
+# GitHub issue #1032 point 5: the L3 pages are filled by one helper,
+# mmu_init_identity_l3, for the text block and the stack blocks alike.
+KERNEL_IDENTITY_FUNCTIONS = {"mmu_init_kernel_identity_tables", "mmu_init_identity_l3"}
+KERNEL_IDENTITY_FUNCTION = "mmu_init_kernel_identity_tables or mmu_init_identity_l3"
+# Two since #1032 point 5: the 2 MiB blocks in one function, the 4 KiB
+# pages in the L3 helper.
+EXPECTED_IDENTITY_UXN_AND_PXN_COUNT = 2
 DEVICE_BLOCK_FUNCTIONS = {"init_root", "platform_mmu_init_device_blocks"}
 
 ORR_IMM_RE = re.compile(r"^orr\s+x\d+,\s*x\d+,\s*#(0x[0-9a-f]+)$")
@@ -152,7 +157,7 @@ def check_uxn(insns, expected_uxn_and_pxn_count):
     # user_page_writable, ...). Only these two functions' own instructions
     # are relevant to this check.
     root_insns = [(a, t) for a, t, fn in insns
-                  if fn == KERNEL_IDENTITY_FUNCTION]
+                  if fn in KERNEL_IDENTITY_FUNCTIONS]
     device_insns = [
         (a, t) for a, t, fn in insns if fn in DEVICE_BLOCK_FUNCTIONS
     ]

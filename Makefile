@@ -2496,6 +2496,9 @@ _kernelcheck-oops-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=el1_exec_writable KERNEL_QEMU_OOPS_GDB_PORT=18626 KERNEL_QEMU_OOPS_SERIAL_PORT=18627 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-oops-qemu-el1-exec-writable" bash scripts/run_kernel_oops_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=el1_exec_user KERNEL_QEMU_OOPS_GDB_PORT=18628 KERNEL_QEMU_OOPS_SERIAL_PORT=18629 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-oops-qemu-el1-exec-user" bash scripts/run_kernel_oops_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=el1_read_user KERNEL_QEMU_OOPS_GDB_PORT=18630 KERNEL_QEMU_OOPS_SERIAL_PORT=18729 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-oops-qemu-el1-read-user" bash scripts/run_kernel_oops_qemutest.sh
+	@# GitHub issue #1032 point 5: a store to a static stack's guard page
+	@# takes a translation fault instead of landing in the run below.
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=el1_stack_guard KERNEL_QEMU_OOPS_GDB_PORT=18671 KERNEL_QEMU_OOPS_SERIAL_PORT=18672 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-oops-qemu-el1-stack-guard" bash scripts/run_kernel_oops_qemutest.sh
 	@# GitHub issues #486 and #634: two online cores fault before either
 	@# can stop the other, and both reports survive in fault order.
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=concurrent_fault KERNEL_QEMU_OOPS_GDB_PORT=18679 KERNEL_QEMU_OOPS_SERIAL_PORT=18680 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-oops-qemu-concurrent-fault" bash scripts/run_kernel_oops_qemutest.sh

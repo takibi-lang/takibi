@@ -134,6 +134,14 @@ checkable rather than asserted. GitHub issue #477's per-core stride -- that
 reader can do in this table, and the build check does them against the linked
 kernels.
 
+GitHub issue #1032 point 5: the lowest 4 KiB page of every run in this block
+(every `*_run_bottom`, and every 0x8000 step through the per-core groups) is
+a guard page, left unmapped in the kernel identity. The poison band above it
+is 12 KiB. The identity's L2 entries for the one or two 2 MiB blocks holding
+this block point at L3 pages: the text's when it is the same block, else
+`kernel_identity_stack_l3_tables` (two pages in `.bss`). The linker scripts
+assert that the block is whole runs and under 2 MiB.
+
 <!-- checked: elf-offsets -->
 
 | Symbol | Offset from `boot_stack_run_bottom` | Defined by | State |
