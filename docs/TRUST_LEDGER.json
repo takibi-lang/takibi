@@ -1033,6 +1033,35 @@
         "unprotected_globals": "typed protection: #1012 seventeen one-word kernel state globals become AtomicWord, asid_ready removed",
         "frame_lines": "AtomicWord: #1012 the ext2 undo store and the foreground session load take a line each"
       }
+    },
+    {
+      "date": "2026-10-30",
+      "head": "8530f569",
+      "counts": {
+        "raw_mint_files": 14,
+        "frame_lines": 12509,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 214,
+        "raw_deref_io": 7,
+        "raw_deref_builtin_region": 113,
+        "unsafe_blocks": 151,
+        "extern_fns": 61,
+        "invariant_stop_sites": 119,
+        "assembly_lines": 2503,
+        "per_cpu_ordinary_arrays": 67,
+        "per_cpu_stores": 7,
+        "raw_cpu_id_calls": 147,
+        "unprotected_globals": 303,
+        "frame_api_ratchet": 7,
+        "raw_sites_qemu": 318,
+        "raw_sites_rpi5": 328,
+        "range_obligations_qemu": 1141
+      },
+      "changes": {
+        "unprotected_globals": "typed protection: #1012 the console transmit queue, echo ring and lock measurement move behind the console guard",
+        "frame_lines": "typed protection: #1012 log.tkb's guarded accessors over the console transmit record, no new raw site",
+        "range_obligations_qemu": "#1012 one more bounds obligation in the rewritten console transmit accessors"
+      }
     }
   ]
 }
