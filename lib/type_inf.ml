@@ -836,9 +836,11 @@ let rec overlay_size_smt (senv : senv) (ty : Ast.type_expr) : string option =
   | Ast.TypeI16 | Ast.TypeU16 | Ast.TypeU16Be -> Some "2"
   | Ast.TypeI32 | Ast.TypeU32 | Ast.TypeU32Be -> Some "4"
   | Ast.TypeI64 | Ast.TypeU64 -> Some "8"
+  | Ast.TypeBool -> Some "1"
+  | Ast.TypeSingleton (base, _) -> overlay_size_smt senv base
   | Ast.TypeArray (elem, n) ->
       Option.map (fun e -> Printf.sprintf "(* %d %s)" n e) (overlay_size_smt senv elem)
-  | Ast.TypeNamed name ->
+  | Ast.TypeNamed name | Ast.TypeIndexed (name, _) ->
       (match StringMap.find_opt name senv with
        | Some (fields, true, None) ->
            let parts = List.map (fun (_, fty) -> overlay_size_smt senv fty) fields in
@@ -861,6 +863,33 @@ and record_overlay_obligation (senv : senv) loc (ty : Ast.type_expr) (n : int) =
           Printf.sprintf "(assert (not (<= %s %d)))" size n;
           "(check-sat)"; "" ] in
         Range_obligation.record_text loc text
+
+(* GitHub issue #1233: the other decisions that read const_type_size's
+   figure for memory safety -- a byte cast's minimum length, a pointer's
+   byte view, a fixed DMA span or cache range, the cache-line multiple of a
+   fixed DMA allocation, and sizeof(T)'s own value -- each write the same
+   kind of obligation: z3 recounts the size from the field types as written
+   (overlay_size_smt) and the decision's conclusion over that recount is
+   asserted false. `assertion` gets the recount's SMT term. *)
+and record_size_obligation (senv : senv) loc ~rule ~claim (ty : Ast.type_expr)
+    (assertion : string -> string) =
+  if !Range_obligation.enabled then
+    match overlay_size_smt senv ty with
+    | None -> ()
+    | Some size ->
+        Range_obligation.record_text loc (String.concat "\n" [
+          "; takibi-init-obligation v1";
+          "; rule: " ^ rule;
+          "; claim: " ^ claim;
+          "(set-logic QF_LIA)";
+          Printf.sprintf "(assert (not %s))" (assertion size);
+          "(check-sat)"; "" ])
+
+and size_claim_name (ty : Ast.type_expr) =
+  match ty with
+  | Ast.TypeNamed name | Ast.TypeIndexed (name, _) -> name
+  | Ast.TypeArray (Ast.TypeNamed name, n) -> Printf.sprintf "[%s; %d]" name n
+  | _ -> Ast.show_type_expr ty
 
 and overlay_invalid_reason (senv : senv) (ty : Ast.type_expr) : string option =
   match ty with
@@ -961,11 +990,20 @@ let rec const_type_size (senv : senv) (ty : Ast.type_expr) : int option =
   | Ast.TypeNamed name | Ast.TypeIndexed (name, _) ->
       (match StringMap.find_opt name senv with
        | Some (fields, true, None) ->
-           List.fold_left (fun acc (_, fty) ->
+           let size = List.fold_left (fun acc (_, fty) ->
              match acc, const_type_size senv fty with
              | Some a, Some b -> Some (a + b)
              | _ -> None
-           ) (Some 0) fields
+           ) (Some 0) fields in
+           (* Fault control only (GitHub issue #1233): two named structs get
+              a size one off, under and over, so every decision that reads
+              it is planted unsound in both directions. *)
+           if !Range_obligation.fault_type_size then
+             (match name, size with
+              | "Skew1233Under", Some n -> Some (n - 1)
+              | "Skew1233Over", Some n -> Some (n + 1)
+              | _ -> size)
+           else size
        | _ -> None)
   | _ -> None
 
@@ -4424,7 +4462,12 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                         subslice like `frame[14..<34]`). *)
                      if !unsafe_depth = 0 then
                        (match const_type_size senv (to_ast pointee), n > 0 with
-                        | Some sz, true when n >= sz -> ()
+                        | Some sz, true when n >= sz ->
+                             record_size_obligation senv e.loc ~rule:"size-cast"
+                               ~claim:(Printf.sprintf "sizeof(%s) <= %d"
+                                         (size_claim_name (to_ast pointee)) n)
+                               (to_ast pointee)
+                               (fun size -> Printf.sprintf "(<= %s %d)" size n)
                         | Some sz, true ->
                             raise (TypeError (e.loc, Printf.sprintf
                               "cannot cast %s to %s: proven minimum length %d \
@@ -4908,6 +4951,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
          pointers, usize/isize fields -- no behavior change for those. *)
       (match const_type_size senv ty with
        | Some v ->
+           record_size_obligation senv e.loc ~rule:"size-value"
+             ~claim:(Printf.sprintf "sizeof(%s) = %d" (size_claim_name ty) v) ty
+             (fun size -> Printf.sprintf "(= %s %d)" size v);
            if v > 0 then Hashtbl.replace intrinsic_nonzero_at e.loc ();
            TRefinedInt (v, v + 1, TUsize)
        | None ->
@@ -5611,8 +5657,13 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            if offset_lo < 0 || length_lo < 0 then
              raise (TypeError (e.loc,
                "dma_device_span offset and length must be nonnegative"));
-           let largest_end = (offset_hi - 1) + (length_hi - 1) in
-           if largest_end > extent then
+            let largest_end = (offset_hi - 1) + (length_hi - 1) in
+            if largest_end <= extent then
+              record_size_obligation senv e.loc ~rule:"size-dma-span"
+                ~claim:(Printf.sprintf "dma span end %d <= sizeof(%s)"
+                          largest_end (size_claim_name array_ty)) array_ty
+                (fun size -> Printf.sprintf "(<= %d %s)" largest_end size);
+            if largest_end > extent then
              raise (TypeError (e.loc, Printf.sprintf
                "dma_device_span may reach byte %d (offset up to %d, length \
                 up to %d) but '%s' is %d bytes"
@@ -5779,8 +5830,14 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                 (match repr (lookup ptr.loc name tyenv),
                        static_slice_bound senv len with
                  | TArray (elem, count), Some bytes ->
-                     (match const_type_size senv (to_ast elem) with
-                      | Some elem_bytes when bytes > count * elem_bytes ->
+                      (match const_type_size senv (to_ast elem) with
+                       | Some elem_bytes when bytes <= count * elem_bytes ->
+                           let array_ty = Ast.TypeArray (to_ast elem, count) in
+                           record_size_obligation senv len.loc ~rule:"size-dma-range"
+                             ~claim:(Printf.sprintf "%s range %d <= sizeof(%s)"
+                                       fname bytes (size_claim_name array_ty)) array_ty
+                             (fun size -> Printf.sprintf "(<= %d %s)" bytes size)
+                       | Some elem_bytes when bytes > count * elem_bytes ->
                           raise (TypeError (len.loc, Printf.sprintf
                             "%s range of %d bytes exceeds fixed allocation '%s' (%d bytes)"
                             fname bytes name (count * elem_bytes)))
@@ -6850,6 +6907,10 @@ and byte_view_cast senv eenv (e : Ast.expr) src_ty tgt el_want want_min want_acc
     raise (TypeError (e.loc, Printf.sprintf
       "cannot cast %s to %s: sizeof(%s) = %d is shorter than the required \
        minimum %d" (to_string src_ty) (to_string tgt) (to_string pointee) n want_min));
+  if want_min > 0 then
+    record_size_obligation senv e.loc ~rule:"size-byte-view"
+      ~claim:(Printf.sprintf "sizeof(%s) >= %d" (size_claim_name (to_ast pointee)) want_min)
+      (to_ast pointee) (fun size -> Printf.sprintf "(>= %s %d)" size want_min);
   if want_access = Ast.SliceWritable then begin
     if shared then
       raise (TypeError (e.loc, Printf.sprintf
@@ -10800,7 +10861,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              if alignment mod line <> 0 || size mod line <> 0 then
                raise (TypeError (decl_loc, Printf.sprintf
                  "fixed DMA allocation '%s' must have cache-line-aligned storage and extent"
-                 global))
+                 global));
+             (* GitHub issue #1233: the extent half, recounted by z3. *)
+             record_size_obligation senv decl_loc ~rule:"size-dma-lines"
+               ~claim:(Printf.sprintf "sizeof(%s) is a multiple of %d"
+                         (size_claim_name array_ty) line) array_ty
+               (fun size -> Printf.sprintf "(= (mod %s %d) 0)" size line)
          | Target_info.Coherent -> ()
          | Target_info.Unsupported ->
              raise (TypeError (decl_loc, Printf.sprintf

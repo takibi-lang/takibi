@@ -362,6 +362,21 @@ fn merge986() {
     region_release(region_merge(h, t2));
 }
 
+// GitHub issue #1233: const_type_size planted one byte short for
+// Skew1233Under (a byte cast then accepts a 7-byte slice for an 8-byte
+// struct) and one byte long for Skew1233Over (sizeof answers 9).
+struct packed Skew1233Under { a: u32; b: u32; }
+struct packed Skew1233Over { a: u32; b: u32; }
+
+fn cast1233(s: borrow [u8; 7..]) -> bool {
+    let p: *Skew1233Under = s as *Skew1233Under;
+    return p == p;
+}
+
+fn size1233() -> usize {
+    return sizeof(Skew1233Over);
+}
+
 fn main() -> i32 {
     return wrap(10, 50) as i32;
 }
@@ -460,10 +475,20 @@ def control(takibi: str) -> int:
         print("FAIL range-obligation control: #986 slice 2's planted overlay "
               "length or region static identity was not refuted")
         return 1
+    # GitHub issue #1233: both directions of a wrong size are refuted.
+    size_planted = [f for f in failures
+                    if ": sat " in f and (
+                        ("rule: size-cast" in f and "Skew1233Under" in f)
+                        or ("rule: size-value" in f and "Skew1233Over" in f))]
+    if len(size_planted) != 2:
+        print("\n".join(failures))
+        print("FAIL range-obligation control: #1233's planted short and long "
+              "type sizes were not both refuted")
+        return 1
     failures = [f for f in failures
                 if f not in init_planted and f not in fact_planted
                 and f not in mm_planted and f not in overlay_planted
-                and f not in region_planted]
+                and f not in region_planted and f not in size_planted]
     planted = [f for f in failures
                if ": sat " in f and "rule: sub" in f and "claim: {-60..<80 as usize}" in f
                and "counterexample" in f]

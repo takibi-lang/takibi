@@ -247,6 +247,9 @@ let fault_index = ref false
    decision writes must refute both. *)
 let fault_static_constants = ref false
 let fault_overlay_short = ref false
+(* GitHub issue #1233: const_type_size reports Skew1233Under one byte short
+   and Skew1233Over one byte long. *)
+let fault_type_size = ref false
 
 (* GitHub issue #954: an obligation whose text another module built (an
    initialization coverage claim, Init_pred.obligation). It shares the

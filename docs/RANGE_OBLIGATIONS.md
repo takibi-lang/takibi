@@ -207,6 +207,29 @@ slice one byte short, and requires z3 to refute each. On the QEMU kernel
 (2026-10-30): 1 region and 8 overlay obligations; the init share is
 3.41 s (68% of 5 s).
 
+## The other type-size decisions (GitHub issue #1233)
+
+Every other decision that reads `const_type_size`'s figure for memory safety
+writes an obligation of the same shape: z3 recounts the size from the field
+types as written (packed structs, integers, `bool`, arrays) and the
+decision's conclusion over that recount is asserted false.
+
+| rule | decision | asserted false |
+|---|---|---|
+| `size-cast` | a byte slice cast to `*T` outside `unsafe` | `sizeof(T) <= n` (proven minimum length) |
+| `size-byte-view` | a pointer viewed as `[const u8; M..]` | `sizeof(T) >= M` |
+| `size-dma-span` | `dma_device_span`'s largest end | `end <= sizeof(allocation)` |
+| `size-dma-range` | `dma_prepare_rx`/`dma_finish_rx` on a fixed allocation | `bytes <= sizeof(allocation)` |
+| `size-dma-lines` | a fixed DMA allocation's extent | `sizeof(allocation) mod L = 0` |
+| `size-value` | `sizeof(T)` as a refined constant | `sizeof(T) = v` |
+
+A type whose size depends on the target layout (an unpacked struct) has no
+recount and writes nothing; `const_type_size` refuses those too. `make
+range-obligation-control` plants a size one byte short (a cast then accepts
+a 7-byte slice for an 8-byte struct) and one byte long (`sizeof` answers 9)
+and requires z3 to refute both. On the QEMU kernel (2026-10-30): 3
+`size-dma-lines`, 4 `size-dma-span` and 5 `size-value` obligations.
+
 ## Not covered
 
 - A wire-endian cast (`u16be <-> u16`) keeps the logical value's range and has
