@@ -17,8 +17,9 @@
 //     (dma_span_cpu_address).
 // Trusted, not checked: that each driver names the function of its own bus,
 // and that a device given the address touches only the span's bytes. The
-// IOMMU (#1032) will make that second trust hardware-enforced: the device
-// will be able to reach only the spans mapped for it.
+// PCIe inbound window (#1032, pcie2_dma_inbound_setup) bounds that second
+// trust for RP1's devices to the one RP1 DMA arena, in hardware; within the
+// arena it stays trusted. QEMU's virtio-mmio devices are not confined yet.
 
 // A device span's address for a QEMU virt virtio-mmio queue or descriptor:
 // QEMU virt's DMA addresses are physical, with no bus offset.

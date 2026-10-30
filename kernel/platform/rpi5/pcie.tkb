@@ -500,12 +500,21 @@ fn pcie2_mip0_inbound_setup() !{unsafe} {
 //
 // Callers must therefore add the boot-DTB-validated rp1_dma_pci_offset to
 // every CPU physical address they hand to an RP1 bus master as a DMA target.
+// GitHub issue #1032 (B'): the board's DTB declares no IOMMU for GEM or xHCI
+// and no iommu-map on pcie2, so this window is the only confinement of their
+// DMA. It opens over the RP1 DMA arena (link.ld) rather than the 64 GiB the
+// device tree allows: the PCI-to-CPU offset stays 0x10_00000000, so bus
+// addresses are unchanged, but a bus master cannot reach kernel text, page
+// tables or stacks. Coarse: one arena shared by all RP1 masters.
+// 256 KiB = 2^18, encoding 18 - 15 = 3.
+const RP1_DMA_ARENA_SIZE_ENCODING: u32 = 3;
+extern symbol rp1_dma_arena_start;
+
 fn pcie2_dma_inbound_setup() !{unsafe} {
-    // PCI base 0x10_00000000 | size encoding 0x15 (64GB), matching the
-    // device tree's own second dma-ranges entry exactly.
-    pcie2.rc_bar2_lo = 0x15;
+    let base: u32 = rp1_dma_arena_start as u32;
+    pcie2.rc_bar2_lo = base | RP1_DMA_ARENA_SIZE_ENCODING;
     pcie2.rc_bar2_hi = 0x10;
-    pcie2.ubus_bar2_remap_lo = 0 | 1; // CPU base 0 | ACCESS_ENABLE
+    pcie2.ubus_bar2_remap_lo = base | 1; // CPU base | ACCESS_ENABLE
     pcie2.ubus_bar2_remap_hi = 0;
 }
 

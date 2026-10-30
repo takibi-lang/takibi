@@ -1853,6 +1853,7 @@ $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(
 
 $(KERNEL_RPI5_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_RPI5_LINK_LD) $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $(KERNEL_RPI5_MAIN_O) -o $@ $(KERNEL_GC_LIST)
+	python3 scripts/buildcheck_rp1_dma_arena.py $@
 	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 2 --asm-entries "$(KERNEL_ASM_ENTRIES)" --takibi-object $(KERNEL_RPI5_MAIN_O) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O)
 	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool_cell 16
 	python3 scripts/buildcheck_kernel_same_operand_csel.py $@ 10
@@ -3163,7 +3164,7 @@ kernelcheck-invariant-qemu: kernelbuild-invariant-qemu
 # Physical GEM failure-branch fixtures preserve the production ownership and
 # halt bodies, hiding only completion/quiescence observations. These images
 # are built with the maintained kernels; their board execution is on demand.
-KERNEL_GEM_TX_MODES := confirmed-ready confirmed-reply unconfirmed-ready unconfirmed-reply irq-primary irq-wrong-enable
+KERNEL_GEM_TX_MODES := confirmed-ready confirmed-reply unconfirmed-ready unconfirmed-reply window-closed irq-primary irq-wrong-enable
 KERNEL_GEM_TX_SRCS := $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $(KERNEL_RPI5_MAIN_TKB)
 KERNEL_GEM_TX_FLAGS := $(KERNEL_RPI5_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_EXECUTION_MODEL) --external-entry main
 KERNEL_GEM_TX_ELFS := $(foreach mode,$(KERNEL_GEM_TX_MODES),$(KERNEL_BUILD_DIR)/kernel-gem-tx-fixture-$(mode).elf)

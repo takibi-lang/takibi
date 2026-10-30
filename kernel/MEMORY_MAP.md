@@ -166,6 +166,13 @@ assert that the block is whole runs and under 2 MiB.
 | `percpu_stack_end` | `+0x60000` | linker script `.stack` | CHECKED (ELF offset) |
 | `usable_ram_start` | `+0x60000` | linker script, `ALIGN(4096)` | CHECKED (ELF offset) |
 
+### The RP1 DMA arena (RPi5)
+
+`.bss` starts with `rp1_dma_arena_start`..`rp1_dma_arena_end`: 256 KiB aligned
+to its size, holding every object GEM and xHCI are given. The PCIe inbound
+window opens over exactly this span (#1032), so the alignment gap before it
+and the padding after it are the cost of confinement, not spare room.
+
 ### The image ceiling
 
 `_start` to `usable_ram_start` is the whole kernel image. Ordinary growth

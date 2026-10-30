@@ -20,7 +20,8 @@ def main():
     parser.add_argument("overlay", type=Path)
     parser.add_argument("mode", choices=("confirmed-ready", "confirmed-reply",
                                         "unconfirmed-ready", "unconfirmed-reply",
-                                        "irq-primary", "irq-wrong-enable"))
+                                        "irq-primary", "irq-wrong-enable",
+                                        "window-closed"))
     parser.add_argument("--control", choices=("device-access", "queue-bank", "raw-irq"))
     args = parser.parse_args()
     root, overlay = args.root.resolve(), args.overlay.resolve()
@@ -31,7 +32,7 @@ def main():
     if kernel.exists():
         shutil.rmtree(kernel)
     changed = {"platform/rpi5/init.tkb", "drivers/net/rp1_gem.tkb"}
-    if args.control:
+    if args.control or args.mode == "window-closed":
         changed.add("tests/rpi5/gem_tx/fixture.tkb")
     for current, directories, files in os.walk(root / "kernel"):
         directories[:] = [name for name in directories if name != "build"]
@@ -130,6 +131,33 @@ def main():
                  "        gem_fixture_last_tsr = observed;\n"
                  "        if ((observed & (1 << 3)) == 0 &&\n"
                  "                gem_fixture_hide_halt == false) {")
+    if args.mode == "window-closed":
+        # GitHub issue #1032 (B'): after six good transfers, slide
+        # the inbound window off the arena. The address stays what the driver
+        # hands GEM; only the window no longer covers it, so the next TX must
+        # not complete and no frame may reach the wire.
+        fixture = kernel / "tests/rpi5/gem_tx/fixture.tkb"
+        replace_once(fixture, "    gem_fixture_hide_completion = true;\n",
+                     "    gem_fixture_close_window();\n")
+        replace_once(fixture, """    gem_fixture_require(gem_fixture_observed_used,
+                        "a real USED observation was hidden");
+""", """    gem_fixture_require(gem_fixture_observed_used == false,
+                        "TX completed through a closed window");
+""")
+        # RX cannot deliver through a closed window either.
+        replace_once(fixture, "    ready = gem_fixture_reply(ready, true);\n", "")
+        fixture.write_text(fixture.read_text(encoding="ascii") + """
+fn gem_fixture_close_window() !{unsafe} {
+    let moved: u32 = (rp1_dma_arena_start as u32) + 0x40000;
+    pcie2.ubus_bar2_remap_lo = 0;
+    pcie2.rc_bar2_lo = moved | RP1_DMA_ARENA_SIZE_ENCODING;
+    pcie2.ubus_bar2_remap_lo = moved | 1;
+    let settled: u32 = pcie2.ubus_bar2_remap_lo;
+    kernel_boot_log("gem-tx fixture: window moved to ");
+    uart_put_udec(settled as usize);
+    kernel_boot_log("\\n");
+}
+""", encoding="ascii")
     if args.control == "device-access":
         fixture = kernel / "tests/rpi5/gem_tx/fixture.tkb"
         fixture.write_text(fixture.read_text(encoding="ascii") + """

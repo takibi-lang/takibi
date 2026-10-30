@@ -395,7 +395,9 @@ rules globally.
   the physical address (`dma_span_cpu_address`). Each function's callers
   are fixed in `scripts/allowed_callers.tsv`. Trusted: that a driver names
   its own bus's function, and that a device touches only the span's bytes;
-  the IOMMU (#1032) is to enforce the second in hardware.
+  on RP1 the PCIe inbound window bounds the second to one 256 KiB arena in
+  hardware (#1032, `pcie2_dma_inbound_setup`), and the board's DTB gives GEM
+  and xHCI no IOMMU; within the arena, and on QEMU, it stays trusted.
   `kernel/drivers/block/memory.tkb` left the list too (2026-10-26, #637):
   its USB run read slices `block_run_data` with a compiler-proved bound.
   `kernel/drivers/net/virtio_net.tkb` keeps one raw site (2026-10-28, #637):

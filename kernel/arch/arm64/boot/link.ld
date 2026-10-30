@@ -32,6 +32,38 @@ SECTIONS {
        page-aligned global the compiler happens to place first. */
     .bss (NOLOAD) : ALIGN(4096) {
         __bss_start = .;
+        /* GitHub issue #1032 (B'): everything RP1's bus masters may touch.
+           pcie2_dma_inbound_setup opens the PCIe inbound window over exactly
+           these 256 KiB, so a size change here changes its encoding too; the
+           window's size must be a power of two and the base aligned to it.
+           The whole span is padded: whatever followed inside it would be
+           device-reachable. Overflow is a link error (the location counter
+           cannot move backward); scripts/buildcheck_rp1_dma_arena.py checks
+           that no RP1 DMA object was left out of this list. */
+        . = ALIGN(0x40000);
+        rp1_dma_arena_start = .;
+        *(.bss.gem_rx_ring)
+        *(.bss.gem_tx_ring)
+        *(.bss.gem_pkt_pool)
+        *(.bss.xhci_dcbaa)
+        *(.bss.xhci_cmd_ring)
+        *(.bss.xhci_ep0_ring)
+        *(.bss.xhci_bulk_in_ring)
+        *(.bss.xhci_bulk_out_ring)
+        *(.bss.xhci_evt_ring)
+        *(.bss.xhci_erst)
+        *(.bss.xhci_scratchpad_array)
+        *(.bss.xhci_scratchpad_buf0)
+        *(.bss.xhci_scratchpad_buf1)
+        *(.bss.xhci_input_ctx)
+        *(.bss.xhci_device_ctx)
+        *(.bss.xhci_control_receive)
+        *(.bss.msc_data_receive)
+        *(.bss.msc_csw_receive)
+        *(.bss.msc_cbw_transmit)
+        *(.bss.msc_data_transmit)
+        . = rp1_dma_arena_start + 0x40000;
+        rp1_dma_arena_end = .;
         *(.bss .bss.*) *(COMMON)
         /* GitHub issue #1032: the kernel identity's shared L2 and L3
            pages (mmu_init_kernel_identity_tables), zeroed with .bss and
