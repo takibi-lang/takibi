@@ -2248,7 +2248,10 @@ frames twice through one descriptor: into a buffer inside the arena, which must
 hold a frame, and into a sentinel outside it, which must stay intact while the
 MAC's frame counter rises, the write direction. Only those bytes decide that
 stage: GEM sets the descriptor's ownership bit for the dropped write, and RSR
-and ISR report no error. xHCI shares the window and has no such control.
+and ISR report no error. xHCI shares the window and gets the same test:
+READ(10) of one sector into a buffer inside the arena must change it, into a
+sentinel outside must leave it intact although the data and status stages report
+success, and with the window moved even the command block must complete nothing.
 The overlay hides real USED and, for the unconfirmed cases, real TGO
 observations; it preserves the maintained ownership exchanges, wait bound
 and halt body. It never fabricates completion or quiescence. The runner

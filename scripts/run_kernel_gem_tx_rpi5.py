@@ -101,6 +101,29 @@ def validate_rx_stages(text):
         raise RuntimeError('GEM wrote a buffer outside the inbound window')
 
 
+def validate_xhci_stages(text):
+    """GitHub issue #1268: the same window, as xHCI's DMA engine meets it."""
+    stages = {row[0]: {key.decode(): int(value) for key, value in re.findall(rb'(\w+)=(\d+)', row[1])}
+              for row in re.findall(rb'gem-tx fixture: xhci stage (\w+) (.*)', text)}
+    if set(stages) != {b'inside', b'outside', b'moved'}:
+        raise RuntimeError('xHCI window stages incomplete')
+    for name in (b'inside', b'outside'):
+        stage = stages[name]
+        if {'cbw', 'data', 'csw', 'changed'} - set(stage):
+            raise RuntimeError('xHCI window stage fields incomplete')
+        # The transfer ran on both: an idle controller also leaves bytes alone.
+        if stage['cbw'] != 1 or not stage['data'] or stage['csw'] != 1:
+            raise RuntimeError('xHCI window stage transfer did not run')
+    if not stages[b'inside']['changed']:
+        raise RuntimeError('xHCI positive control wrote nothing inside the window')
+    # Not judged beyond running: the data event reports success for the dropped
+    # write, as GEM's ownership bit does, so only the bytes decide.
+    if stages[b'outside']['changed']:
+        raise RuntimeError('xHCI wrote a buffer outside the inbound window')
+    if stages[b'moved'].get('cbw') != 0:
+        raise RuntimeError('xHCI completed a transfer through a moved window')
+
+
 def validate(text, frames, mode):
     marker = f'gem-tx fixture: mode {mode}\n'.encode()
     text = text.replace(b'\r', b'')
@@ -126,6 +149,7 @@ def validate(text, frames, mode):
         print(f'[kernel/rpi5 gem-tx] window-closed: tsr={int(halt[1]):#x}', flush=True)
         validate_inbound_bars(text)
         validate_rx_stages(text)
+        validate_xhci_stages(text)
     for frame in frames:
         body = bytes.fromhex(frame['bytes'])
         if len(body) != 64 or body[6:14] != BOARD + bytes.fromhex('88b5') or body[14:] != PAYLOAD:
@@ -273,7 +297,7 @@ def run_case(mode, device, directory, interface):
         else:
             validate(bytes(transcript), frames, mode)
         result['status'] = 'PASS'
-        detail = '32 timestamped sends, genuine IRQ bank control' if irq else 'other inbound BARs disabled; no frame and no USED through the moved window; RX writes inside the window, none outside' if mode == 'window-closed' else 'seven checked transfers (four kept, refused or resent), later sends dropped'
+        detail = '32 timestamped sends, genuine IRQ bank control' if irq else 'other inbound BARs disabled; no frame and no USED through the moved window; RX and xHCI write inside the window, not outside; xHCI completes nothing through a moved window' if mode == 'window-closed' else 'seven checked transfers (four kept, refused or resent), later sends dropped'
         print(f'PASS kernel/rpi5 gem-tx: {mode}; {detail}', flush=True)
     except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
         result['error'] = str(error)

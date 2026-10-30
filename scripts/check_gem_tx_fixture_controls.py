@@ -23,7 +23,10 @@ for mode in MODES:
             bars += b'gem-tx fixture: inbound bar %d lo=0 remap=0\n' % bar
         inside = b'gem-tx fixture: rx stage inside frames=124 own=1 rsr=3 isr=0 changed=8 word1=1085004156508283543\n'
         outside = b'gem-tx fixture: rx stage outside frames=123 own=1 rsr=3 isr=0 changed=0 word1=11936128518282651045\n'
-        text += bars + inside + outside
+        xhci = (b'gem-tx fixture: xhci stage inside cbw=1 data=1 csw=1 changed=64\n'
+                b'gem-tx fixture: xhci stage outside cbw=1 data=1 csw=1 changed=0\n'
+                b'gem-tx fixture: xhci stage moved cbw=0\n')
+        text += bars + inside + outside + xhci
     frames = [copy.copy(frame) for _ in range(count)]
     cases.note()
     validate(text, frames, mode)
@@ -45,7 +48,17 @@ for mode in MODES:
                               (b'inside frames=124 own=1', b'inside frames=124 own=0'),
                               (b'changed=8', b'changed=0'),
                               (b'word1=1085004156508283543', b'word1=11936128518282651045'),
-                              (outside, b''), (inside, b'')):
+                              (outside, b''), (inside, b''),
+                              # GitHub issue #1268.
+                              (b'xhci stage outside cbw=1 data=1 csw=1 changed=0', b'xhci stage outside cbw=1 data=1 csw=1 changed=3'),
+                              (b'xhci stage outside cbw=1 data=1', b'xhci stage outside cbw=0 data=1'),
+                              (b'xhci stage outside cbw=1 data=1', b'xhci stage outside cbw=1 data=0'),
+                              (b'outside cbw=1 data=1 csw=1', b'outside cbw=1 data=1 csw=0'),
+                              (b'xhci stage inside cbw=1 data=1 csw=1 changed=64', b'xhci stage inside cbw=1 data=1 csw=1 changed=0'),
+                              (b'xhci stage inside cbw=1', b'xhci stage inside cbw=0'),
+                              (b'stage moved cbw=0', b'stage moved cbw=1'),
+                              (b'gem-tx fixture: xhci stage moved cbw=0\n', b''),
+                              (b'gem-tx fixture: xhci stage inside cbw=1 data=1 csw=1 changed=64\n', b'')):
             if before not in text:
                 raise SystemExit(f'FAIL gem-tx fixture controls: stale anchor {before!r}')
             cases.note()

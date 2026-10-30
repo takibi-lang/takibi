@@ -73,6 +73,27 @@ fn gem_fixture_load(address: usize) -> usize !{unsafe} {
 
 let mut gem_fixture_rx_outside: [u8; 2048] align(64);
 
+// GitHub issue #1268: xHCI's stages need the raw half too, and this is the
+// mint file the overlay has.
+fn gem_fixture_sentinel_arm(buffer: usize) !{unsafe} {
+    for offset: usize in 0..<64 {
+        gem_fixture_store(buffer + offset * 8, 0xA5A5A5A5A5A5A5A5);
+    }
+    dma_prepare_tx(unsafe { buffer as *u8 }, 512);
+    dma_finish_rx(unsafe { buffer as *align(64) u8 }, 512);
+}
+
+fn gem_fixture_sentinel_changed(buffer: usize) -> usize !{unsafe} {
+    dma_finish_rx(unsafe { buffer as *align(64) u8 }, 512);
+    let mut changed: usize = 0;
+    for offset: usize in 0..<64 {
+        if (gem_fixture_load(buffer + offset * 8) != 0xA5A5A5A5A5A5A5A5) {
+            changed = changed + 1;
+        }
+    }
+    return changed;
+}
+
 // One receive with RX re-enabled by hand: the MAC is halted and this control
 // is the last thing the image does, so no driver owner is live on the path.
 fn gem_fixture_rx_stage(name: *u8, desc: usize, buffer: usize) !{unsafe} {
@@ -145,6 +166,125 @@ fn gem_fixture_rx_control() !{unsafe} {
 """
 
 
+# GitHub issue #1268: the same window, with the other device behind it. xHCI
+# shares the arena and reaches it through its own DMA engine, so GEM's result
+# does not speak for it. Reads a sector off the medium; nothing writes to it.
+# Raw transfers on one path, so each stage differs only in the address or the
+# window: READ(10) into a buffer inside the arena must change it, into a
+# sentinel outside must not, and with the window moved even the command block
+# must not complete. This is the last thing the image does with the controller,
+# so no owner needs to survive it.
+# The arena's addresses come through the owners; the compiler refuses the names.
+WINDOW_CLOSED_XHCI_DMA = """
+fn gem_fixture_xhci_cbw_bus() -> usize {
+    match msc_cbw_take() {
+        MscCbwTransmitAuthority::Cpu(cpu) => {
+            let device = dma_begin_tx(cpu, MscCbwTransmit);
+            let mut span = dma_device_span(device, MscCbwTransmit, 0, 31);
+            let bus: usize = rp1_span_bus_address(span);
+            let restored = dma_finish_owned_tx(device, MscCbwTransmit);
+            msc_cbw_put(MscCbwTransmitAuthority::Cpu(restored));
+            return bus;
+        }
+        MscCbwTransmitAuthority::Device(stale) => {
+            msc_cbw_fail_device(stale);
+            return 0;
+        }
+    }
+}
+fn gem_fixture_xhci_csw_bus() -> usize {
+    match msc_csw_take() {
+        MscCswReceiveAuthority::Cpu(cpu) => {
+            let device = dma_begin_rx(cpu, MscCswReceive);
+            let mut span = dma_device_span(device, MscCswReceive, 0, 13);
+            let bus: usize = rp1_span_bus_address(span);
+            let restored = dma_finish_owned_rx(device, MscCswReceive);
+            msc_csw_put(MscCswReceiveAuthority::Cpu(restored));
+            return bus;
+        }
+        MscCswReceiveAuthority::Device(stale) => {
+            msc_csw_fail_device(stale);
+            return 0;
+        }
+    }
+}
+fn gem_fixture_xhci_data_bus() -> usize {
+    match msc_data_take() {
+        MscDataReceiveAuthority::Cpu(cpu) => {
+            let device = dma_begin_rx(cpu, MscDataReceive);
+            let mut span = dma_device_span(device, MscDataReceive, 0, 512);
+            let bus: usize = rp1_span_bus_address(span);
+            let restored = dma_finish_owned_rx(device, MscDataReceive);
+            msc_data_put(MscDataReceiveAuthority::Cpu(restored));
+            return bus;
+        }
+        MscDataReceiveAuthority::Device(stale) => {
+            msc_data_fail_device(stale);
+            return 0;
+        }
+    }
+}
+"""
+
+WINDOW_CLOSED_XHCI = """
+let mut gem_fixture_xhci_outside: [u8; 512] align(64);
+
+fn gem_fixture_xhci_bus(address: usize) -> usize {
+    return address + boot_once_get(&rp1_dma_pci_offset);
+}
+
+fn gem_fixture_xhci_cbw_out() -> u32 !{unsafe} {
+    msc_cbw_header(512, true, 10);
+    msc_scsi_lba_cdb(0x28, 0, 1);
+    let bus: usize = gem_fixture_xhci_cbw_bus();
+    return usb_bulk_xfer(false, bus, 31);
+}
+
+fn gem_fixture_xhci_stage(name: *u8, buffer: usize) !{unsafe} {
+    gem_fixture_sentinel_arm(buffer);
+    let cbw: u32 = gem_fixture_xhci_cbw_out();
+    let data: u32 = usb_bulk_xfer(true, gem_fixture_xhci_bus(buffer), 512);
+    let csw: u32 = usb_bulk_xfer(true, gem_fixture_xhci_csw_bus(), 13);
+    let changed: usize = gem_fixture_sentinel_changed(buffer);
+    kernel_boot_log("gem-tx fixture: xhci stage ");
+    uart_puts(name);
+    kernel_boot_log(" cbw=");
+    uart_put_udec(cbw as usize);
+    kernel_boot_log(" data=");
+    uart_put_udec(data as usize);
+    kernel_boot_log(" csw=");
+    uart_put_udec(csw as usize);
+    kernel_boot_log(" changed=");
+    uart_put_udec(changed);
+    kernel_boot_log("\\n");
+}
+
+fn gem_fixture_xhci_control() !{unsafe} {
+    match disk_initialize() {
+        DiskIoResult::Err(error) => {
+            gem_fixture_require(false, "xHCI initialization");
+            return;
+        }
+        DiskIoResult::Ok => { }
+    }
+    let inside: usize = gem_fixture_xhci_data_bus() - boot_once_get(&rp1_dma_pci_offset);
+    let outside: usize = (gem_fixture_xhci_outside as *u8) as usize;
+    let arena: usize = rp1_dma_arena_start as usize;
+    gem_fixture_require(inside >= arena && inside + 512 <= arena + 0x40000,
+                        "xHCI buffer inside the arena");
+    gem_fixture_require(outside + 512 <= arena || outside >= arena + 0x40000,
+                        "xHCI sentinel outside the arena");
+    gem_fixture_xhci_stage("inside", inside);
+    gem_fixture_xhci_stage("outside", outside);
+    gem_fixture_close_window();
+    let cbw: u32 = gem_fixture_xhci_cbw_out();
+    kernel_boot_log("gem-tx fixture: xhci stage moved cbw=");
+    uart_put_udec(cbw as usize);
+    kernel_boot_log("\\n");
+}
+"""
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
@@ -166,7 +306,8 @@ def main():
     if args.control or args.mode == "window-closed":
         changed.add("tests/rpi5/gem_tx/fixture.tkb")
     if args.mode == "window-closed":
-        changed.add("platform/rpi5/pcie.tkb")
+        changed.update(("platform/rpi5/pcie.tkb", "platform/rpi5/usb_xhci.tkb",
+                        "platform/rpi5/usb_xhci_dma.tkb"))
     for current, directories, files in os.walk(root / "kernel"):
         directories[:] = [name for name in directories if name != "build"]
         relative = Path(current).relative_to(root / "kernel")
@@ -296,7 +437,12 @@ def main():
         driver.write_text(driver.read_text(encoding="ascii") + WINDOW_CLOSED_DRIVER,
                           encoding="ascii")
         replace_once(fixture, "    net_shutdown(ready);\n",
-                     "    gem_fixture_rx_control();\n    net_shutdown(ready);\n")
+                     "    gem_fixture_rx_control();\n    net_shutdown(ready);\n"
+                     "    gem_fixture_xhci_control();\n")
+        for name, addition in (("usb_xhci.tkb", WINDOW_CLOSED_XHCI),
+                               ("usb_xhci_dma.tkb", WINDOW_CLOSED_XHCI_DMA)):
+            path = kernel / "platform/rpi5" / name
+            path.write_text(path.read_text(encoding="ascii") + addition, encoding="ascii")
         fixture.write_text(fixture.read_text(encoding="ascii") + WINDOW_CLOSED_FIXTURE,
                            encoding="ascii")
     if args.control == "device-access":

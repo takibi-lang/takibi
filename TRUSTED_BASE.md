@@ -398,9 +398,11 @@ rules globally.
   on RP1 the PCIe inbound window bounds the second to one 256 KiB arena in
   hardware (#1032, `pcie2_dma_inbound_setup`), and the board's DTB gives GEM
   and xHCI no IOMMU; within the arena, and on QEMU, it stays trusted. The
-  gem-tx lane's `window-closed` mode is board evidence of it, for GEM only: the
-  other inbound BARs read back disabled, and neither direction crosses it
-  (#1254). Those BAR offsets come from Linux's driver and stay trusted.
+  gem-tx lane's `window-closed` mode is board evidence of it, for GEM and xHCI:
+  the other inbound BARs read back disabled, and neither device crosses it in
+  either direction (#1254, #1268). For xHCI the read direction is a transfer
+  that completes nothing through a moved window, where the undelivered event
+  and the unfetched TRB look alike. Those BAR offsets come from Linux's driver and stay trusted.
   `kernel/drivers/block/memory.tkb` left the list too (2026-10-26, #637):
   its USB run read slices `block_run_data` with a compiler-proved bound.
   `kernel/drivers/net/virtio_net.tkb` keeps one raw site (2026-10-28, #637):
