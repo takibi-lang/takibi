@@ -20,6 +20,12 @@ Usage:
                                                and a max with #961's range
                                                (#984), and require a
                                                counterexample for each
+  buildcheck_range_obligations.py --control-compiles TAKIBI
+                                               only compile the failing
+                                               control, without z3: langcheck
+                                               runs this, so a compiler change
+                                               that stops the control compiling
+                                               fails before modelcheck
 
 z3 is the version pinned in scripts/fetch_model_tools.sh (TAKIBI_Z3 names
 another binary). Verdicts are cached by obligation digest and z3 version
@@ -383,6 +389,43 @@ fn main() -> i32 {
 """
 
 
+def compile_control(takibi: str, tmp_path: pathlib.Path) -> bool:
+    """Compile CONTROL_SOURCE with the faults planted, writing its obligations.
+
+    Its functions are not reachable from each other on purpose: each one is
+    one planted case, and the obligations are the output, so the unused-function
+    check (on by default, #1027) is off. Nothing here tests that check.
+    """
+    src = tmp_path / "control.tkb"
+    src.write_text(CONTROL_SOURCE)
+    run = subprocess.run(
+        [takibi, str(src), "-o", str(tmp_path / "control.o"),
+         "--internal-range-obligation-fault-control", "--regions",
+         "--internal-allow-unused", "--facts", str(tmp_path / "facts")],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if run.returncode != 0:
+        print(run.stdout)
+        print("FAIL range-obligation control: the control did not compile")
+        return False
+    return True
+
+
+def control_compiles(takibi: str) -> int:
+    with tempfile.TemporaryDirectory(prefix="takibi-range-obl-") as tmp:
+        tmp_path = pathlib.Path(tmp)
+        if not compile_control(takibi, tmp_path):
+            return 1
+        count = len(list((tmp_path / "facts" / "rangeobl").glob("*.smt2")))
+    if count == 0:
+        print("FAIL range-obligation control: the control wrote no obligations")
+        return 1
+    report_pass("range-obligation-control-compiles",
+                "the z3 failing control still compiles under the compiler's "
+                "defaults; modelcheck's z3 run is the check of its verdicts",
+                obligations=count)
+    return 0
+
+
 def control(takibi: str) -> int:
     """#935's rule planted: unsigned Sub keeps lo < 0. Must be sat."""
     z3, _ = find_z3()
@@ -398,17 +441,8 @@ def control(takibi: str) -> int:
         return 1
     with tempfile.TemporaryDirectory(prefix="takibi-range-obl-") as tmp:
         tmp_path = pathlib.Path(tmp)
-        src = tmp_path / "control.tkb"
-        src.write_text(CONTROL_SOURCE)
         out_dir = tmp_path / "facts" / "rangeobl"
-        run = subprocess.run(
-            [takibi, str(src), "-o", str(tmp_path / "control.o"),
-             "--internal-range-obligation-fault-control", "--regions",
-             "--facts", str(tmp_path / "facts")],
-            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        if run.returncode != 0:
-            print(run.stdout)
-            print("FAIL range-obligation control: the control did not compile")
+        if not compile_control(takibi, tmp_path):
             return 1
         # GitHub issue #954: a planted init coverage claim, [0, 8) shown
         # by [0, 7) only, in lib/init_pred.ml's format. z3 must name k = 7.
@@ -568,6 +602,8 @@ def control(takibi: str) -> int:
 def main(argv: list[str]) -> int:
     if len(argv) == 3 and argv[1] == "--control":
         return control(argv[2])
+    if len(argv) == 3 and argv[1] == "--control-compiles":
+        return control_compiles(argv[2])
     if len(argv) != 2:
         print(__doc__)
         return 2

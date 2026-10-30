@@ -292,7 +292,7 @@ CHECK_CPU_BUDGET_REFS    := 18
 # CHECK_TIMEOUT_SECONDS, which is what makes "the fast gate is for checks
 # that read tracked files" a mechanism instead of a sentence: a member that
 # waits is killed and this lane goes red.
-langcheck: unused-function-control forbid-unsafe-control effect-matrix-control language-words-control cli-flags-control pool-liveness-control wont-compile-control regions-flag-control
+langcheck: unused-function-control forbid-unsafe-control effect-matrix-control language-words-control cli-flags-control pool-liveness-control wont-compile-control regions-flag-control range-obligation-compile-control
 	@bash scripts/lane_timing.sh begin langcheck
 	@bash scripts/run_check_lane.sh check $(CHECK_TIMEOUT_SECONDS) $(CHECK_CPU_BUDGET_MS) $(CHECK_CPU_BUDGET_REFS)
 # -I skips binary files. Without it a build directory left in the worktree
@@ -3028,7 +3028,7 @@ allbuild:
 # GitHub issue #645: the kernel log's litmus tests under herd7 (from opam,
 # pinned in .devcontainer/devcontainer.json; CI's from scripts/build_herd7.sh), and their tie to the
 # instructions in the RPi5 kernel object.
-.PHONY: modelcheck litmuscheck range-obligation-control
+.PHONY: modelcheck litmuscheck range-obligation-control range-obligation-compile-control
 modelcheck: build litmuscheck range-obligation-control
 	@bash scripts/lane_timing.sh begin modelcheck
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" $(NICE_HEAVY) bash scripts/run_model_checks.sh
@@ -3040,6 +3040,11 @@ modelcheck: build litmuscheck range-obligation-control
 # unsigned-Sub rule and requires z3 to report its counterexample. It lives
 # in modelcheck because z3 comes with the model tools, which the CI lang
 # part does not set up.
+# The compile step alone needs no z3, so langcheck runs it: a compiler default
+# that stops the control compiling is met before a land's modelcheck (#1027).
+range-obligation-compile-control: build
+	@$(NICE_HEAVY) python3 scripts/buildcheck_range_obligations.py --control-compiles $(TAKIBI)
+
 range-obligation-control: build
 	@$(NICE_HEAVY) python3 scripts/buildcheck_range_obligations.py --control $(TAKIBI)
 
