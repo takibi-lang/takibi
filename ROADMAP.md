@@ -245,7 +245,7 @@ next one taken. The done record of the previous queue is in HISTORY.md
    and #710 (generation exhaustion), #203 stage 3 (cross-call contracts,
    byte ranges), #732's later slices, #793 (proofs on type variables),
    #762 (no vector stores in MMU-off code; done 2026-10-30), #774 (every IRQ dispatch arm
-   acknowledges its source), #752 (typestate in more of the kernel), #755
+   acknowledges its source; done 2026-10-30, per-source linear claims), #752 (typestate in more of the kernel), #755
    (an immutable integer binding keeps one static), #751 (per-element
    witnesses, deferred until a consumer needs them),
    #769 (every use of a global, done 2026-10-30 as --emit-globals' uses table), #747 (host GDB
