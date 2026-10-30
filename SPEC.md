@@ -1010,6 +1010,14 @@ fn slot_unlease(lease: sink SlotLease[n]) {}
   runtime variable preserves one hidden rigid identity; two independent
   unknown runtime expressions receive distinct identities. Slice 1 does not
   equate computed expressions by arithmetic reasoning.
+- An immutable integer binding keeps one static for its lifetime (GitHub
+  issue #755): a `let` without `mut`, and a parameter the body never assigns,
+  rebinds with `let`, or takes the address of. Every use of such a binding
+  passed to a `usize @ k` parameter names the same `k`, so a
+  `place_take(arr[i])` and a later `place_put(arr[i], v)` name the same
+  element with a plain `i: usize`. A mutable local, and a parameter the body
+  writes, get a fresh static at each use, because the value may change
+  between them.
 - Field projection substitutes actual static arguments for the declaration's
   formals. Thus `lease.idx` above retains both `{0..<4 as usize}` and the same
   `n`, so indexing emits no bounds trap under `--forbid-trap`.

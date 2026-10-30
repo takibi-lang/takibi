@@ -5888,6 +5888,35 @@ fn stored_release(holder: sink StoredHolder[k]) { stored_drop(holder.token); }
          ii_drop(a); ii_drop(b);
        }");
 
+  (* GitHub issue #755: an immutable integer binding -- a parameter the
+     body never writes, or a `let` without `mut` -- keeps one static for its
+     lifetime, so two uses name the same value; a mutable one does not. *)
+  Alcotest.test_case "issue #755: an unwritten parameter keeps one static" `Quick
+    (fun () -> ignore (infer
+      "linear struct B755[n: usize] { private v: usize; }
+       fn b755_make(i: usize @ k) -> B755[k] { let mut l: B755[k] = { i }; return l; }
+       fn b755_eat(l: sink B755[k], i: usize @ k) {}
+       fn b755_param(i: usize) { let l = b755_make(i); b755_eat(l, i); }
+       fn b755_narrowed(i: usize) { if (i < 4) { let l = b755_make(i); b755_eat(l, i); } }"));
+  Alcotest.test_case "issue #755: an immutable let keeps one static" `Quick
+    (fun () -> ignore (infer
+      "linear struct B755[n: usize] { private v: usize; }
+       fn b755_make(i: usize @ k) -> B755[k] { let mut l: B755[k] = { i }; return l; }
+       fn b755_eat(l: sink B755[k], i: usize @ k) {}
+       fn b755_let(i: usize) { let j: usize = i + 1; let l = b755_make(j); b755_eat(l, j); }"));
+  Alcotest.test_case "issue #755: a mutable let gets a fresh static per use" `Quick
+    (expect_type_error "static value mismatch"
+      "linear struct B755[n: usize] { private v: usize; }
+       fn b755_make(i: usize @ k) -> B755[k] { let mut l: B755[k] = { i }; return l; }
+       fn b755_eat(l: sink B755[k], i: usize @ k) {}
+       fn b755_mut(i: usize) { let mut j: usize = i; let l = b755_make(j); b755_eat(l, j); }");
+  Alcotest.test_case "issue #755: an assigned parameter gets a fresh static per use" `Quick
+    (expect_type_error "static value mismatch"
+      "linear struct B755[n: usize] { private v: usize; }
+       fn b755_make(i: usize @ k) -> B755[k] { let mut l: B755[k] = { i }; return l; }
+       fn b755_eat(l: sink B755[k], i: usize @ k) {}
+       fn b755_written(i: usize) { let l = b755_make(i); i = i + 1; b755_eat(l, i); }");
+
   (* GitHub issue #266: an intermediate `let` re-annotation strips a
      singleton-typed value's own static identity (here, `idx`'s tie to
      `n` is lost the moment it flows through `let plain: {0..<4 as usize}

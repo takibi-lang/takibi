@@ -503,6 +503,14 @@ let check_where_clause loc fname bounds names relations cmp a b =
         fname (describe a) (where_cmp_text cmp) (describe b)))
 
 let value_static_identities : static_term StringMap.t ref = ref StringMap.empty
+(* GitHub issue #755: the current function's parameters that its body never
+   writes (Ast.written_names: no assignment, no `&`, no rebinding). *)
+let unwritten_params : StringSet.t ref = ref StringSet.empty
+let rec is_integer_ty t =
+  match repr t with
+  | TI8 | TI16 | TI32 | TI64 | TU8 | TU16 | TU32 | TU64 | TIsize | TUsize -> true
+  | TRefinedInt (_, _, b) | TMultiple (_, b) | TSingleton (b, _) -> is_integer_ty b
+  | _ -> false
 (* Per-function identities for the stable syntactic places supported by the
    first addr slice: &name and &name.field chains. *)
 let place_static_identities : static_term StringMap.t ref = ref StringMap.empty
@@ -1233,9 +1241,18 @@ let adapt_actual_to_expected (tyenv : tyenv) (e : Ast.expr)
         | TPtr _ | TAlignedPtr _ | TRef _ | TRefMut _ -> true
         | _ -> false
       in
-      let identity_for_immutable_name ~is_address name =
+      let rec identity_for_immutable_name ~is_address name =
         match StringMap.find_opt name tyenv with
-        | Some (_, false) ->
+        | Some (_, false) -> immutable_identity ~is_address name
+        (* GitHub issue #755: a parameter the body never assigns, rebinds or
+           takes the address of is as immutable as a `let` without `mut`,
+           so an integer one keeps one static for the whole body too. *)
+        | Some (t, true) when not is_address
+                              && StringSet.mem name !unwritten_params
+                              && is_integer_ty (strip_singleton t) ->
+            immutable_identity ~is_address name
+        | _ -> fresh_rigid_static ()
+      and immutable_identity ~is_address name =
             (match StringMap.find_opt name !value_static_identities with
              | Some identity -> identity
              | None ->
@@ -1246,7 +1263,6 @@ let adapt_actual_to_expected (tyenv : tyenv) (e : Ast.expr)
                  value_static_identities :=
                    StringMap.add name identity !value_static_identities;
                  identity)
-        | _ -> fresh_rigid_static ()
       in
       let n =
         if is_address then
@@ -8475,6 +8491,10 @@ let infer_func ~key senv eenv fenv genv (fdef : Ast.func) : func_info =
       | Some a, Some b -> runtime_bounds := Runtime_bounds.add a cmp b !runtime_bounds
       | _ -> ()) fdef.where_clauses;
     value_static_identities := StringMap.empty;
+    unwritten_params := (let written = Ast.written_names fdef.body in
+      List.fold_left (fun set (name, _) ->
+        if List.mem name written then set else StringSet.add name set)
+        StringSet.empty fdef.params);
     place_static_identities := StringMap.empty;
     Hashtbl.reset guard_narrow_hints;  (* GitHub issue #310, fresh per function *)
     var_align_bytes := !global_align_bytes_baseline;  (* see its own comment *)

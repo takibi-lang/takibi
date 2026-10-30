@@ -26,9 +26,10 @@ fn extent_new(p: sink places(Page)[c, n]) -> Extent[c, c__off, n] {
 
 fn extent_drop(x: sink Extent[c, o, n]) { places_keep(x.pages); }
 
-// Take page i, write it, put it back; a second take while it is out finds
+// Take page i, write it, put it back (a plain `i: usize` keeps one static
+// across the take and the put, GitHub issue #755); a second take while it is out finds
 // the element Empty. Answers what was written, or 0.
-fn page_cycle(pages: borrow places(Page)[b, n], i: usize @ k, value: usize)
+fn page_cycle(pages: borrow places(Page)[b, n], i: usize, value: usize)
         -> usize !{unsafe} {
     if (i < places_count(pages)) {
         match place_take(pages[i]) {
