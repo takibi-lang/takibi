@@ -12,7 +12,9 @@ The working tree's kernels are built with `make kernelbuild-qemu
 kernelbuild-rpi5`; the base is built in a temporary worktree, removed
 afterwards. Symbol lines list every data/BSS symbol whose size changed,
 appeared or disappeared. usable_ram_start says whether the image span, and
-so the page reservations, moved.
+so the page reservations, moved. It ends with the kernel memory map check and
+its status, so a moved layout is seen here and not first in a land; refresh
+with `scripts/buildcheck_kernel_memory_map.py --update`.
 """
 
 import subprocess
@@ -90,7 +92,13 @@ def main():
                 print("  " + line)
         finally:
             sh(["git", "worktree", "remove", "--force", str(tree)], ROOT)
-    return 0
+    # A moved usable_ram_start moves the allocator capacities the memory map
+    # records, and only the land's kernelbuild would otherwise say so (#1013:
+    # a +32 KiB move measured here went red in the land). The kernels above
+    # are the ones the check reads.
+    return subprocess.run([sys.executable,
+                           "scripts/buildcheck_kernel_memory_map.py"],
+                          cwd=ROOT, check=False).returncode
 
 
 if __name__ == "__main__":
