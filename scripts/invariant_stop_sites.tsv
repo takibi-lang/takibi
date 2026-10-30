@@ -106,3 +106,4 @@ kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_ring_lost	ladder	1	-	#720	a displac
 kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_input_lost	ladder	1	-	#720	a displaced input-context owner
 kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_table_lost	ladder	1	-	#720	a displaced session-table owner
 kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_live_lost	ladder	1	-	#720	a displaced live events/output owner
+kernel/init/boot_prologue.tkb	boot_once_unwritten_stop	ladder	1	-	#732	a BootOnce cell read before its boot write (#1013): a Sealed index on the cell would make it a compile error
