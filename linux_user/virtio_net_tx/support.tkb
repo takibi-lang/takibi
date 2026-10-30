@@ -324,4 +324,8 @@ fn run_initialized_case(ready: sink NetRxCanAcquire, reply_timeout: bool) !{may_
 // The kernel's address mint (kernel/drivers/dma_address.tkb, which
 // virtio_used.tkb uses) names RP1's inbound offset; the kernel defines it in
 // rpi5/pcie.tkb, which this fixture does not compile.
-let mut rp1_dma_pci_offset: usize = 0;
+// The kernel's is a BootOnce(usize) read through boot_once_get; this cell and
+// reader stand in for that shape without the boot phase.
+struct Rp1DmaOffsetCell { value: usize; }
+let mut rp1_dma_pci_offset: Rp1DmaOffsetCell;
+fn boot_once_get(cell: &mut Rp1DmaOffsetCell) -> usize { return (*cell).value; }
