@@ -890,6 +890,34 @@
       "changes": {
         "frame_lines": "#1227 security_floor, tcp_isn and siphash: new frame lines"
       }
+    },
+    {
+      "date": "2026-10-30",
+      "head": "ce8748fb",
+      "counts": {
+        "raw_mint_files": 14,
+        "frame_lines": 12431,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 214,
+        "raw_deref_io": 7,
+        "raw_deref_builtin_region": 113,
+        "unsafe_blocks": 151,
+        "extern_fns": 61,
+        "invariant_stop_sites": 119,
+        "assembly_lines": 2503,
+        "per_cpu_ordinary_arrays": 71,
+        "per_cpu_stores": 7,
+        "raw_cpu_id_calls": 150,
+        "unprotected_globals": 390,
+        "frame_api_ratchet": 7,
+        "raw_sites_qemu": 318,
+        "raw_sites_rpi5": 328,
+        "range_obligations_qemu": 1141
+      },
+      "changes": {
+        "frame_lines": "#1012 BootPhase threaded through the RPi5 DTB readers and windows; the seed of the board addresses",
+        "unprotected_globals": "BootOnce (#1012, #1246): 28 RPi5 boot-DTB configuration, xHCI capability and QEMU timer INTID globals"
+      }
     }
   ]
 }
