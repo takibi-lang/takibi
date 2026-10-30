@@ -3874,7 +3874,7 @@ private fn scheduled_process_alloc_finish(address: RegionHeld(ProcessRecord),
 // Scheduler activation drops this lock before ASID preparation. Once a
 // prepared activation exists, commit reacquires the run lock and reaches only
 // the non-allocating ASID-current check before changing TTBR0.
-private let mut scheduled_process_run_lock: Mutex;
+let mut scheduled_process_run_lock: Mutex;
 
 // THREADED, NOT ACQUIRED INTERNALLY, and that is the decision worth
 // reading. Eight functions here perform a state transition and several
@@ -7944,7 +7944,7 @@ fn kernel_process_syscall_return_schedule(current: borrow FrameRef[process, leve
 // answer is one of two things: a re-check of the event, made under the lock
 // its waker takes, or the name of what delivers the event again later.
 private fn kernel_process_block_would_miss(
-        guard: borrow ProcessRunGuard[lock], from: ProcessHandle,
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock], from: ProcessHandle,
         reason: ProcessWaitReason) -> bool {
     // GitHub issue #726: a caught signal raised after the syscall decided to
     // block, and before this publication, found the process Running and
@@ -7961,7 +7961,7 @@ private fn kernel_process_block_would_miss(
         ProcessWaitReason::None => { return false; }
         // #547: the RX interrupt pushes a byte only under this lock, after
         // finding no Blocked reader.
-        ProcessWaitReason::UartRx => { return kernel_uart_rx_pending(); }
+        ProcessWaitReason::UartRx => { return terminal_rx_pending(guard); }
         // The TX interrupt's wake (kernel_process_uart_tx_wake_all) runs
         // under this lock, after the drain that made the room. A writer on
         // any core blocks on UartTx (syscall_terminal_write_wait, #866), so
@@ -8061,7 +8061,7 @@ variant BlockSwitch {
 // exited after wait4 decided to block reruns wait4 instead of leaving its
 // parent Blocked beside a zombie.
 private fn kernel_process_block_to_idle(
-        guard: borrow ProcessRunGuard[process_run],
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
         from: ProcessHandle, current: borrow FrameRef[process, level],
         reason: ProcessWaitReason, trace_aux: usize) -> bool !{changes_witness_ProcessCurrent} {
     if (execution_state[execution_cpu_index()].current_live == false ||

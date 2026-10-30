@@ -193,7 +193,7 @@ WINDOWS = {
     "635": {
         "spin": None,
         "check": ("kernel/syscall.tkb",
-                  "            if (kernel_uart_rx_pending()) { "
+                  "            if (terminal_rx_pending(guard)) { "
                   "kernel_process_terminal_settings_wake(guard); }\n",
                   ""),
     },

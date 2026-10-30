@@ -10,6 +10,18 @@
 // for the reason linux_user/usb_init_report does: a second implementation
 // here would agree with this test while drifting from what the kernel runs.
 
+private let mut rx_state: UartRxState;
+private let mut rx_buf: [u8; 4096];
+private let mut rx_marks: [u8; 4096];
+private let mut rx_columns: [u8; 4096];
+
+private fn rx_getc() -> u8 {
+    match kernel_uart_rx_read(&rx_state, rx_buf as [u8; 4096..], rx_marks as [u8; 4096..]) {
+        UartRxReadResult::Byte(pair) => { let (value, end) = pair; return value; }
+        UartRxReadResult::EndFile => { return 0; }
+    }
+}
+
 fn check(label: *u8, ok: bool) {
     if (ok) {
         uart_puts("ok     ");
@@ -25,10 +37,10 @@ fn check(label: *u8, ok: bool) {
 // at all: planting the old 64 left five of these six checks green, still
 // labelled 4096, and only the 68-byte line caught it.
 fn app_main() {
-    kernel_uart_rx_ring_reset();
+    kernel_uart_rx_ring_reset(&rx_state);
     let mut stored: usize = 0;
     for i: usize in 0..<4096 {
-        match kernel_uart_rx_push((i % 251) as u8) {
+        match kernel_uart_rx_push(&rx_state, rx_buf as [u8; 4096..], rx_marks as [u8; 4096..], rx_columns as [u8; 4096..], (i % 251) as u8) {
             UartRxPushResult::Stored => { stored = stored + 1; }
             UartRxPushResult::Dropped => { }
         }
@@ -40,41 +52,41 @@ fn app_main() {
     let mut in_order: bool = true;
     let mut taken: usize = 0;
     for i: usize in 0..<4096 {
-        if (kernel_uart_rx_pending()) {
-            if (kernel_uart_rx_getc() != (i % 251) as u8) { in_order = false; }
+        if (kernel_uart_rx_pending(&rx_state)) {
+            if (rx_getc() != (i % 251) as u8) { in_order = false; }
             taken = taken + 1;
         }
     }
     check("the bytes came out in the order they went in",
           in_order && taken == 4095);
     check("an emptied ring has nothing pending",
-          kernel_uart_rx_pending() == false);
+          kernel_uart_rx_pending(&rx_state) == false);
 
     // Head and tail both sit at the last slot now, so these ten cross the
     // end of the array.
     let mut wrapped: bool = true;
     for i: usize in 0..<10 {
-        match kernel_uart_rx_push((0x40 + i) as u8) {
+        match kernel_uart_rx_push(&rx_state, rx_buf as [u8; 4096..], rx_marks as [u8; 4096..], rx_columns as [u8; 4096..], (0x40 + i) as u8) {
             UartRxPushResult::Stored => { }
             UartRxPushResult::Dropped => { wrapped = false; }
         }
     }
     for i: usize in 0..<10 {
-        if (kernel_uart_rx_pending()) {
-            if (kernel_uart_rx_getc() != (0x40 + i) as u8) { wrapped = false; }
+        if (kernel_uart_rx_pending(&rx_state)) {
+            if (rx_getc() != (0x40 + i) as u8) { wrapped = false; }
         } else {
             wrapped = false;
         }
     }
     check("ten bytes cross the end of the ring and come back in order",
-          wrapped && kernel_uart_rx_pending() == false);
+          wrapped && kernel_uart_rx_pending(&rx_state) == false);
 
     // The line that stalled the lanes, and a reset between: the ring
     // empties, the boot's drop total does not.
-    kernel_uart_rx_ring_reset();
+    kernel_uart_rx_ring_reset(&rx_state);
     let mut whole: bool = true;
     for i: usize in 0..<68 {
-        match kernel_uart_rx_push(0x61) {
+        match kernel_uart_rx_push(&rx_state, rx_buf as [u8; 4096..], rx_marks as [u8; 4096..], rx_columns as [u8; 4096..], 0x61) {
             UartRxPushResult::Stored => { }
             UartRxPushResult::Dropped => { whole = false; }
         }
@@ -88,83 +100,84 @@ fn app_main() {
 // Canonical framing is byte policy, so exercise its capacity and editing
 // natively instead of spending a board lease to reach every ring boundary.
 private fn check_terminal_ring() {
-    kernel_uart_rx_ring_reset();
-    kernel_uart_rx_canonical_set(true);
+    kernel_uart_rx_ring_reset(&rx_state);
+    kernel_uart_rx_canonical_set(&rx_state, rx_buf as [u8; 4096..], rx_marks as [u8; 4096..], rx_columns as [u8; 4096..], true);
     let mut framing: bool = true;
-    match kernel_uart_rx_terminal_push(65, 0, 1) {
+    match kernel_uart_rx_terminal_push(&rx_state, rx_buf as [u8; 4096..], rx_marks as [u8; 4096..], rx_columns as [u8; 4096..], 65, 0, 1) {
         UartRxPushResult::Stored => { }
         UartRxPushResult::Dropped => { framing = false; }
     }
-    if (kernel_uart_rx_pending()) { framing = false; }
-    match kernel_uart_rx_terminal_push(10, 0, 0) {
+    if (kernel_uart_rx_pending(&rx_state)) { framing = false; }
+    match kernel_uart_rx_terminal_push(&rx_state, rx_buf as [u8; 4096..], rx_marks as [u8; 4096..], rx_columns as [u8; 4096..], 10, 0, 0) {
         UartRxPushResult::Stored => { }
         UartRxPushResult::Dropped => { framing = false; }
     }
-    if (kernel_uart_rx_pending()) { framing = false; }
-    match kernel_uart_rx_terminal_push(0, 2, 0) {
+    if (kernel_uart_rx_pending(&rx_state)) { framing = false; }
+    match kernel_uart_rx_terminal_push(&rx_state, rx_buf as [u8; 4096..], rx_marks as [u8; 4096..], rx_columns as [u8; 4096..], 0, 2, 0) {
         UartRxPushResult::Stored => { }
         UartRxPushResult::Dropped => { framing = false; }
     }
-    if (kernel_uart_rx_pending() == false) { framing = false; }
-    match kernel_uart_rx_read() {
+    if (kernel_uart_rx_pending(&rx_state) == false) { framing = false; }
+    match kernel_uart_rx_read(&rx_state, rx_buf as [u8; 4096..], rx_marks as [u8; 4096..]) {
         UartRxReadResult::Byte(pair) => {
             let (value, end) = pair;
             if (value != 65 || end) { framing = false; }
         }
         UartRxReadResult::EndFile => { framing = false; }
     }
-    match kernel_uart_rx_read() {
+    match kernel_uart_rx_read(&rx_state, rx_buf as [u8; 4096..], rx_marks as [u8; 4096..]) {
         UartRxReadResult::Byte(pair) => {
             let (value, end) = pair;
             if (value != 10 || end) { framing = false; }
         }
         UartRxReadResult::EndFile => { framing = false; }
     }
-    match kernel_uart_rx_read() {
+    match kernel_uart_rx_read(&rx_state, rx_buf as [u8; 4096..], rx_marks as [u8; 4096..]) {
         UartRxReadResult::Byte(pair) => { framing = false; }
         UartRxReadResult::EndFile => { }
     }
     check("quoted newline stays uncommitted and EOF copies no NUL", framing);
-    kernel_uart_rx_ring_reset();
+    kernel_uart_rx_ring_reset(&rx_state);
     let mut capacity: usize = 0;
     for index: usize in 0..<4095 {
-        match kernel_uart_rx_terminal_push(65, 0, 1) {
+        match kernel_uart_rx_terminal_push(&rx_state, rx_buf as [u8; 4096..], rx_marks as [u8; 4096..], rx_columns as [u8; 4096..], 65, 0, 1) {
             UartRxPushResult::Stored => { capacity = capacity + 1; }
             UartRxPushResult::Dropped => { }
         }
     }
     let mut committed: bool = false;
-    match kernel_uart_rx_terminal_push(10, 1, 0) {
+    match kernel_uart_rx_terminal_push(&rx_state, rx_buf as [u8; 4096..], rx_marks as [u8; 4096..], rx_columns as [u8; 4096..], 10, 1, 0) {
         UartRxPushResult::Stored => { committed = true; }
         UartRxPushResult::Dropped => { }
     }
     check("a full canonical line reserves its committing delimiter",
-          capacity == 4094 && committed && kernel_uart_rx_pending());
+          capacity == 4094 && committed && kernel_uart_rx_pending(&rx_state));
     let mut prefix: bool = true;
     for index: usize in 0..<4094 {
-        if (kernel_uart_rx_getc() != 65) { prefix = false; }
+        if (rx_getc() != 65) { prefix = false; }
     }
-    match kernel_uart_rx_erase() {
+    match kernel_uart_rx_erase(&rx_state, rx_buf as [u8; 4096..], rx_marks as [u8; 4096..], rx_columns as [u8; 4096..]) {
         UartRxEditResult::Empty => { }
         UartRxEditResult::Erased(pair) => { prefix = false; }
     }
-    if (kernel_uart_rx_getc() != 10) { prefix = false; }
+    if (rx_getc() != 10) { prefix = false; }
     check("partial reads keep the delimiter and editing cannot cross it", prefix);
-    kernel_uart_rx_ring_reset();
-    match kernel_uart_rx_terminal_push(65, 0, 1) {
+    kernel_uart_rx_ring_reset(&rx_state);
+    match kernel_uart_rx_terminal_push(&rx_state, rx_buf as [u8; 4096..], rx_marks as [u8; 4096..], rx_columns as [u8; 4096..], 65, 0, 1) {
         UartRxPushResult::Stored => { }
         UartRxPushResult::Dropped => { }
     }
-    match kernel_uart_rx_terminal_push(0, 2, 0) {
+    match kernel_uart_rx_terminal_push(&rx_state, rx_buf as [u8; 4096..], rx_marks as [u8; 4096..], rx_columns as [u8; 4096..], 0, 2, 0) {
         UartRxPushResult::Stored => { }
         UartRxPushResult::Dropped => { }
     }
-    match kernel_uart_rx_terminal_push(66, 0, 1) {
+    match kernel_uart_rx_terminal_push(&rx_state, rx_buf as [u8; 4096..], rx_marks as [u8; 4096..], rx_columns as [u8; 4096..], 66, 0, 1) {
         UartRxPushResult::Stored => { }
         UartRxPushResult::Dropped => { }
     }
-    kernel_uart_rx_canonical_set(false);
+    kernel_uart_rx_canonical_set(&rx_state, rx_buf as [u8; 4096..], rx_marks as [u8; 4096..], rx_columns as [u8; 4096..], false);
     check("switching to raw removes EOF metadata without losing bytes",
-          kernel_uart_rx_queued() == 2 && kernel_uart_rx_getc() == 65 &&
-          kernel_uart_rx_getc() == 66 && kernel_uart_rx_pending() == false);
+          kernel_uart_rx_queued_hint() == 2 &&
+          kernel_uart_rx_queued(&rx_state) == 2 && rx_getc() == 65 &&
+          rx_getc() == 66 && kernel_uart_rx_pending(&rx_state) == false);
 }

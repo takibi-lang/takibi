@@ -1,0 +1,189 @@
+// The one UART terminal's input state, behind the process-run guard (GitHub
+// issue #1012): the termios settings and the receive ring's indices are a
+// linear record in a guarded place, and the ring's three byte arrays are a
+// region whose claim sits in another. PageFrame is the element because the
+// arrays are page-sized and that region instance is already compiled.
+//
+// Current limitations (2026-10-30):
+// - A reader that cannot take the run lock has a word of its own instead of
+//   this state: DDB reads kernel_uart_rx_queued_hint(), and the transmit path,
+//   which holds the console lock, reads terminal_flow_control_byte().
+// - An operation takes the record out of its place, works on a local copy and
+//   puts it back, because a place's by-value content has no address to lend.
+//   The record is under a hundred bytes.
+// - A function that needs the guard while the state is borrowed cannot have
+//   it; terminal_io_edit returns what is left to do instead.
+use "kernel/drivers/serial/terminal.tkb";
+use "kernel/drivers/serial/uart_rx_ring.tkb";
+use "kernel/lib/execution_model.tkb";
+use "kernel/mm/page.tkb";
+use "kernel/kernel/process.tkb";
+
+linear struct TerminalStateRecord[unit: usize] {
+    settings: TerminalSettings;
+    rx: UartRxState;
+}
+struct TerminalStateStore {
+    private record: Place(TerminalStateRecord[0]) guarded_by(scheduled_process_run_lock);
+    private frames: Place(exists c: addr. exists c__off: usize. region(PageFrame)[c, 3])
+            guarded_by(scheduled_process_run_lock);
+}
+private let mut terminal_state_store: TerminalStateStore;
+private region let mut terminal_state_frames: [PageFrame; 3];
+
+// The first use makes the record: no boot step has to come first.
+private fn terminal_state_take(guard: borrow ProcessRunGuard[&scheduled_process_run_lock])
+        -> TerminalStateRecord[0] {
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+        "terminal state holders keep the run lock without preemption");
+    match place_take(guard, terminal_state_store.record) {
+        Place::Full(record) => { return record; }
+        Place::Empty => {}
+    }
+    let mut settings: TerminalSettings = { 0, 0, 0, 0, 0, false };
+    let mut rx: UartRxState = { 0, 0, 0, false, 0 };
+    let mut fresh: TerminalStateRecord[0] = { settings, rx };
+    return fresh;
+}
+
+private fn terminal_state_record_retire(record: sink TerminalStateRecord[0]) {}
+
+private fn terminal_state_put(guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+                              record: sink TerminalStateRecord[0]) {
+    match place_put(guard, terminal_state_store.record, record) {
+        Place::Empty => {}
+        Place::Full(previous) => { terminal_state_record_retire(previous); }
+    }
+}
+
+// The first use claims the arrays.
+private fn terminal_state_frames_claim(guard: borrow ProcessRunGuard[&scheduled_process_run_lock]) {
+    static_assert(KERNEL_UART_RX_CAPACITY == PAGE_SIZE,
+        "each ring array is one PageFrame");
+    if (place_is_full(guard, terminal_state_store.frames)) { return; }
+    let RegionOf(PageFrame)::Taken(claimed) = region_of(terminal_state_frames) else {
+        RegionOf(PageFrame)::Gone => { return; }
+    };
+    match place_put(guard, terminal_state_store.frames, claimed) {
+        Place::Empty => {}
+        Place::Full(previous) => { region_release(previous); }
+    }
+}
+
+fn terminal_rx_pending(guard: borrow ProcessRunGuard[&scheduled_process_run_lock]) -> bool {
+    let mut record: TerminalStateRecord[0] = terminal_state_take(guard);
+    let answer: bool = kernel_uart_rx_pending(&record.rx);
+    terminal_state_put(guard, record);
+    return answer;
+}
+
+fn terminal_rx_queued(guard: borrow ProcessRunGuard[&scheduled_process_run_lock]) -> usize {
+    let mut record: TerminalStateRecord[0] = terminal_state_take(guard);
+    let answer: usize = kernel_uart_rx_queued(&record.rx);
+    terminal_state_put(guard, record);
+    return answer;
+}
+
+fn terminal_rx_reset(guard: borrow ProcessRunGuard[&scheduled_process_run_lock]) {
+    let mut record: TerminalStateRecord[0] = terminal_state_take(guard);
+    kernel_uart_rx_ring_reset(&record.rx);
+    terminal_state_put(guard, record);
+}
+
+// The caller has seen terminal_rx_pending() answer true under this guard.
+fn terminal_rx_read(guard: borrow ProcessRunGuard[&scheduled_process_run_lock])
+        -> UartRxReadResult {
+    terminal_state_frames_claim(guard);
+    let mut record: TerminalStateRecord[0] = terminal_state_take(guard);
+    let answer: UartRxReadResult = match place_borrow(guard, terminal_state_store.frames) {
+        Place::Empty => { UartRxReadResult::EndFile }
+        Place::Full(frames) => {
+            kernel_uart_rx_read(&record.rx,
+                region_at(frames, 0).bytes as [u8; KERNEL_UART_RX_CAPACITY..],
+                region_at(frames, 1).bytes as [u8; KERNEL_UART_RX_CAPACITY..])
+        }
+    };
+    terminal_state_put(guard, record);
+    return answer;
+}
+
+fn terminal_settings_read_byte(guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+                               index: {0..<TERMINAL_TERMIOS_BYTES as usize}) -> u8 {
+    let mut record: TerminalStateRecord[0] = terminal_state_take(guard);
+    let answer: u8 = terminal_settings_byte(&record.settings, index);
+    terminal_state_put(guard, record);
+    return answer;
+}
+
+fn terminal_is_canonical(guard: borrow ProcessRunGuard[&scheduled_process_run_lock]) -> bool {
+    let mut record: TerminalStateRecord[0] = terminal_state_take(guard);
+    let answer: bool = terminal_canonical(&record.settings);
+    terminal_state_put(guard, record);
+    return answer;
+}
+
+fn terminal_converts_output(guard: borrow ProcessRunGuard[&scheduled_process_run_lock]) -> bool {
+    let mut record: TerminalStateRecord[0] = terminal_state_take(guard);
+    let answer: bool = (terminal_output_flags(&record.settings) & 5) == 5;
+    terminal_state_put(guard, record);
+    return answer;
+}
+
+fn terminal_input_flow_refresh(guard: borrow ProcessRunGuard[&scheduled_process_run_lock]) !{unsafe} {
+    let mut record: TerminalStateRecord[0] = terminal_state_take(guard);
+    let queued: usize = kernel_uart_rx_queued(&record.rx);
+    terminal_input_flow_update(&record.settings, queued);
+    terminal_state_put(guard, record);
+}
+
+// One received byte's line edit, in terminal_io.tkb, on the state.
+fn terminal_state_edit(guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+                       received: u8) -> TerminalIoAfter !{unsafe} {
+    terminal_state_frames_claim(guard);
+    let mut record: TerminalStateRecord[0] = terminal_state_take(guard);
+    let after: TerminalIoAfter = match place_borrow(guard, terminal_state_store.frames) {
+        Place::Empty => { TerminalIoAfter::Nothing }
+        Place::Full(frames) => {
+            terminal_io_edit(&record.settings, &record.rx,
+                             region_at(frames, 0).bytes as [u8; KERNEL_UART_RX_CAPACITY..],
+                             region_at(frames, 1).bytes as [u8; KERNEL_UART_RX_CAPACITY..],
+                             region_at(frames, 2).bytes as [u8; KERNEL_UART_RX_CAPACITY..],
+                             received)
+        }
+    };
+    terminal_state_put(guard, record);
+    return after;
+}
+
+// New settings and everything they change in the ring, as one section. Flush
+// (TCSETSF) empties the ring first.
+fn terminal_settings_install(guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+                             bytes: borrow [u8; TERMINAL_TERMIOS_BYTES..], flush: bool)
+        -> TerminalSettingsResult !{unsafe} {
+    terminal_state_frames_claim(guard);
+    let mut record: TerminalStateRecord[0] = terminal_state_take(guard);
+    let mut applied: bool = true;
+    match terminal_settings_apply(&record.settings, bytes) {
+        TerminalSettingsResult::Unsupported => { applied = false; }
+        TerminalSettingsResult::Applied => {}
+    }
+    if (applied) {
+        if (flush) { kernel_uart_rx_ring_reset(&record.rx); }
+        let canonical: bool = terminal_canonical(&record.settings);
+        match place_borrow(guard, terminal_state_store.frames) {
+            Place::Empty => {}
+            Place::Full(frames) => {
+                kernel_uart_rx_canonical_set(&record.rx,
+                    region_at(frames, 0).bytes as [u8; KERNEL_UART_RX_CAPACITY..],
+                    region_at(frames, 1).bytes as [u8; KERNEL_UART_RX_CAPACITY..],
+                    region_at(frames, 2).bytes as [u8; KERNEL_UART_RX_CAPACITY..],
+                    canonical);
+            }
+        }
+        let queued: usize = kernel_uart_rx_queued(&record.rx);
+        terminal_input_flow_update(&record.settings, queued);
+    }
+    terminal_state_put(guard, record);
+    if (applied) { return TerminalSettingsResult::Applied; }
+    return TerminalSettingsResult::Unsupported;
+}

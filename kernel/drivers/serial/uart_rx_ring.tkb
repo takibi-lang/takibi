@@ -14,14 +14,15 @@
 //
 // The UART RX interrupt appends and edits the unfinished canonical line;
 // syscalls consume committed input and change its canonical interpretation.
-// Every caller in the kernel holds the process-run lock around its access.
-// That lock, not the compiler
-// fences below, orders a byte between CPUs, because a terminal reader need
-// not run on the CPU that takes the RX interrupt (GitHub issue #547). The
-// fences keep the single-threaded order for linux_user.
+// In the kernel the state is reached only through the process-run guard
+// (terminal_state.tkb), which orders a byte between CPUs, because a terminal
+// reader need not run on the CPU that takes the RX interrupt (GitHub issue
+// #547).
 //
-// Kept free of logging and of process state, so linux_user/uart_rx_ring can
-// compile this file itself and drive it past full.
+// Kept free of logging, of locks and of process state, so
+// linux_user/uart_rx_ring can compile this file itself and drive it past full:
+// the caller hands in the indices and the three byte arrays. The queued-byte
+// word stays atomic for DDB, which takes no lock; only a holder writes it.
 
 use "kernel/lib/atomic_word.tkb";
 const KERNEL_UART_RX_CAPACITY: usize = 4096;
@@ -34,35 +35,49 @@ struct UartRxLine {
     length: {0..<KERNEL_UART_RX_CAPACITY as usize};
 }
 
-private let mut kernel_uart_rx_buf: [u8; KERNEL_UART_RX_CAPACITY];
-private let mut kernel_uart_rx_head: io usize;
-private let mut kernel_uart_rx_tail: io usize;
+struct UartRxState {
+    head: usize;
+    tail: usize;
+    lines: usize;
+    canonical: bool;
+    line_columns: usize;
+}
 private let mut kernel_uart_rx_dropped: AtomicWord;
-private let mut kernel_uart_rx_marks: [u8; KERNEL_UART_RX_CAPACITY];
-private let mut kernel_uart_rx_columns: [u8; KERNEL_UART_RX_CAPACITY];
-private let mut kernel_uart_rx_lines: io usize;
-private let mut kernel_uart_rx_canonical: io bool;
-private let mut kernel_uart_rx_line_columns: usize;
+private let mut kernel_uart_rx_queued_word: AtomicWord;
+
+private fn kernel_uart_rx_publish(state: borrow &mut UartRxState) {
+    atomic_word_store(&kernel_uart_rx_queued_word, kernel_uart_rx_queued(state));
+}
+
+// DDB's reading: it takes no lock, and the world is stopped.
+fn kernel_uart_rx_queued_hint() -> usize {
+    return atomic_word_load(&kernel_uart_rx_queued_word);
+}
 
 // Empties the ring. The drop count is a boot total and survives this.
-fn kernel_uart_rx_ring_reset() {
-    kernel_uart_rx_head = 0;
-    kernel_uart_rx_tail = 0;
-    kernel_uart_rx_lines = 0;
-    kernel_uart_rx_line_columns = 0;
+fn kernel_uart_rx_ring_reset(state: borrow &mut UartRxState) {
+    state.head = 0;
+    state.tail = 0;
+    state.lines = 0;
+    state.line_columns = 0;
+    kernel_uart_rx_publish(state);
 }
 
-fn kernel_uart_rx_pending() -> bool {
-    if (kernel_uart_rx_canonical) { return kernel_uart_rx_lines != 0; }
-    return kernel_uart_rx_tail != kernel_uart_rx_head;
+fn kernel_uart_rx_pending(state: borrow &mut UartRxState) -> bool {
+    if (state.canonical) { return state.lines != 0; }
+    return state.tail != state.head;
 }
 
-fn kernel_uart_rx_canonical_set(enabled: bool) {
-    if (kernel_uart_rx_canonical == enabled) { return; }
-    kernel_uart_rx_canonical = enabled;
-    kernel_uart_rx_lines = 0;
-    let tail: usize = kernel_uart_rx_tail;
-    let queued: usize = kernel_uart_rx_queued();
+fn kernel_uart_rx_canonical_set(state: borrow &mut UartRxState,
+        buf: borrow [u8; KERNEL_UART_RX_CAPACITY..],
+        marks: borrow [u8; KERNEL_UART_RX_CAPACITY..],
+        columns_of: borrow [u8; KERNEL_UART_RX_CAPACITY..],
+        enabled: bool) {
+    if (state.canonical == enabled) { return; }
+    state.canonical = enabled;
+    state.lines = 0;
+    let tail: usize = state.tail;
+    let queued: usize = kernel_uart_rx_queued(state);
     let mut kept: usize = 0;
     for offset: usize in 0..<KERNEL_UART_RX_CAPACITY {
         if (offset < queued) {
@@ -71,41 +86,39 @@ fn kernel_uart_rx_canonical_set(enabled: bool) {
                 if (enabled == false) {
                     // EOF is line metadata, not a raw NUL byte. Compact
                     // toward the read side; no unread byte is overwritten.
-                    if (kernel_uart_rx_marks[index] != 2) {
+                    if (marks[index] != 2) {
                         let target: usize = (tail + kept) % KERNEL_UART_RX_CAPACITY;
                         if (target < KERNEL_UART_RX_CAPACITY) {
-                            kernel_uart_rx_buf[target] = kernel_uart_rx_buf[index];
-                            kernel_uart_rx_marks[target] = 0;
-                            kernel_uart_rx_columns[target] = 0;
+                            buf[target] = buf[index];
+                            marks[target] = 0;
+                            columns_of[target] = 0;
                             kept = kept + 1;
                         }
                     }
                 } else {
-                if (kernel_uart_rx_marks[index] == 0 &&
-                    kernel_uart_rx_buf[index] == 10) {
-                    kernel_uart_rx_marks[index] = 1;
+                if (marks[index] == 0 &&
+                    buf[index] == 10) {
+                    marks[index] = 1;
                 }
-                if (kernel_uart_rx_marks[index] != 0) {
-                    kernel_uart_rx_lines = kernel_uart_rx_lines + 1;
+                if (marks[index] != 0) {
+                    state.lines = state.lines + 1;
                 }
                 }
             }
         }
     }
     if (enabled == false) {
-        kernel_uart_rx_head = (tail + kept) % KERNEL_UART_RX_CAPACITY;
-        kernel_uart_rx_line_columns = 0;
+        state.head = (tail + kept) % KERNEL_UART_RX_CAPACITY;
+        state.line_columns = 0;
+        kernel_uart_rx_publish(state);
     }
 }
 
-fn kernel_uart_rx_echo_column() -> usize { return kernel_uart_rx_line_columns; }
+fn kernel_uart_rx_echo_column(state: borrow &mut UartRxState) -> usize { return state.line_columns; }
 
-// Read-only DDB observation. The stopped-world snapshot keeps the two
-// single-writer indices stable while it computes the same occupancy the
-// consumer would see, without advancing the read side.
-fn kernel_uart_rx_queued() -> usize {
-    let head: usize = kernel_uart_rx_head;
-    let tail: usize = kernel_uart_rx_tail;
+fn kernel_uart_rx_queued(state: borrow &mut UartRxState) -> usize {
+    let head: usize = state.head;
+    let tail: usize = state.tail;
     if (head >= tail) { return head - tail; }
     return KERNEL_UART_RX_CAPACITY - tail + head;
 }
@@ -115,104 +128,114 @@ private fn kernel_uart_rx_count_drop() -> UartRxPushResult {
     return UartRxPushResult::Dropped;
 }
 
-fn kernel_uart_rx_push(c: u8) -> UartRxPushResult {
-    return kernel_uart_rx_terminal_push(c, 0, 0);
+fn kernel_uart_rx_push(state: borrow &mut UartRxState,
+        buf: borrow [u8; KERNEL_UART_RX_CAPACITY..],
+        marks: borrow [u8; KERNEL_UART_RX_CAPACITY..],
+        columns_of: borrow [u8; KERNEL_UART_RX_CAPACITY..],
+        c: u8) -> UartRxPushResult {
+    return kernel_uart_rx_terminal_push(state, buf, marks, columns_of, c, 0, 0);
 }
 
 // A delimiter commits the preceding bytes. An EOF marker commits them too
 // but is consumed without copying a byte into the reader's buffer.
-fn kernel_uart_rx_terminal_push(c: u8, mark: {0..<3 as u8},
+fn kernel_uart_rx_terminal_push(state: borrow &mut UartRxState,
+        buf: borrow [u8; KERNEL_UART_RX_CAPACITY..],
+        marks: borrow [u8; KERNEL_UART_RX_CAPACITY..],
+        columns_of: borrow [u8; KERNEL_UART_RX_CAPACITY..],
+        c: u8, mark: {0..<3 as u8},
                                 columns: {0..<9 as u8}) -> UartRxPushResult {
     // Reserve a slot for the newline or EOF that makes a full canonical
     // line readable, even if its sender ignores input flow control.
-    if (kernel_uart_rx_canonical && mark == 0 &&
-        kernel_uart_rx_queued() >= KERNEL_UART_RX_CAPACITY - 2) {
+    if (state.canonical && mark == 0 &&
+        kernel_uart_rx_queued(state) >= KERNEL_UART_RX_CAPACITY - 2) {
         return kernel_uart_rx_count_drop();
     }
-    let head: usize = kernel_uart_rx_head;
+    let head: usize = state.head;
     if (head >= KERNEL_UART_RX_CAPACITY) {
         return kernel_uart_rx_count_drop();
     }
     let next: usize = (head + 1) % KERNEL_UART_RX_CAPACITY;
-    if (next == kernel_uart_rx_tail) {
+    if (next == state.tail) {
         return kernel_uart_rx_count_drop();
     }
-    kernel_uart_rx_buf[head] = c;
-    kernel_uart_rx_marks[head] = mark;
-    kernel_uart_rx_columns[head] = columns;
-    if (mark != 0) { kernel_uart_rx_lines = kernel_uart_rx_lines + 1; }
-    if (mark != 0) { kernel_uart_rx_line_columns = 0; }
-    else { kernel_uart_rx_line_columns = kernel_uart_rx_line_columns + (columns as usize); }
-    signal_fence();
-    kernel_uart_rx_head = next;
+    buf[head] = c;
+    marks[head] = mark;
+    columns_of[head] = columns;
+    if (mark != 0) { state.lines = state.lines + 1; }
+    if (mark != 0) { state.line_columns = 0; }
+    else { state.line_columns = state.line_columns + (columns as usize); }
+    state.head = next;
+    kernel_uart_rx_publish(state);
     return UartRxPushResult::Stored;
 }
 
-// The caller has asked kernel_uart_rx_pending() first, with interrupts
-// masked, and this is only reached when it answered true.
-fn kernel_uart_rx_getc() -> u8 {
-    match kernel_uart_rx_read() {
-        UartRxReadResult::Byte(pair) => { let (value, end) = pair; return value; }
-        UartRxReadResult::EndFile => { return 0; }
-    }
-}
-
-fn kernel_uart_rx_read() -> UartRxReadResult {
-    signal_fence();
-    let tail: usize = kernel_uart_rx_tail;
+// The caller has asked kernel_uart_rx_pending() first, under the lock.
+fn kernel_uart_rx_read(state: borrow &mut UartRxState,
+        buf: borrow [u8; KERNEL_UART_RX_CAPACITY..],
+        marks: borrow [u8; KERNEL_UART_RX_CAPACITY..]) -> UartRxReadResult {
+    let tail: usize = state.tail;
     if (tail >= KERNEL_UART_RX_CAPACITY) {
-        kernel_uart_rx_tail = 0;
+        state.tail = 0;
         return UartRxReadResult::EndFile;
     }
-    let c: u8 = kernel_uart_rx_buf[tail];
-    let mark: u8 = kernel_uart_rx_marks[tail];
-    if (mark != 0 && kernel_uart_rx_lines != 0) {
-        kernel_uart_rx_lines = kernel_uart_rx_lines - 1;
+    let c: u8 = buf[tail];
+    let mark: u8 = marks[tail];
+    if (mark != 0 && state.lines != 0) {
+        state.lines = state.lines - 1;
     }
-    kernel_uart_rx_tail = (tail + 1) % KERNEL_UART_RX_CAPACITY;
+    state.tail = (tail + 1) % KERNEL_UART_RX_CAPACITY;
+    kernel_uart_rx_publish(state);
     if (mark == 2) { return UartRxReadResult::EndFile; }
-    return UartRxReadResult::Byte((c, kernel_uart_rx_canonical && mark == 1));
+    return UartRxReadResult::Byte((c, state.canonical && mark == 1));
 }
 
 // Editing cannot cross a committed line or remove bytes a reader took.
-fn kernel_uart_rx_erase() -> UartRxEditResult {
-    let head: usize = kernel_uart_rx_head;
-    if (head == kernel_uart_rx_tail || head >= KERNEL_UART_RX_CAPACITY) {
+fn kernel_uart_rx_erase(state: borrow &mut UartRxState,
+        buf: borrow [u8; KERNEL_UART_RX_CAPACITY..],
+        marks: borrow [u8; KERNEL_UART_RX_CAPACITY..],
+        columns_of: borrow [u8; KERNEL_UART_RX_CAPACITY..]) -> UartRxEditResult {
+    let head: usize = state.head;
+    if (head == state.tail || head >= KERNEL_UART_RX_CAPACITY) {
         return UartRxEditResult::Empty;
     }
     let last: usize = (head + KERNEL_UART_RX_CAPACITY - 1) % KERNEL_UART_RX_CAPACITY;
     if (last < KERNEL_UART_RX_CAPACITY) {
-        if (kernel_uart_rx_marks[last] != 0) { return UartRxEditResult::Empty; }
-        let value: u8 = kernel_uart_rx_buf[last];
-        let columns: usize = kernel_uart_rx_columns[last] as usize;
-        kernel_uart_rx_buf[last] = 0;
-        kernel_uart_rx_columns[last] = 0;
-        if (kernel_uart_rx_line_columns >= columns) {
-            kernel_uart_rx_line_columns = kernel_uart_rx_line_columns - columns;
+        if (marks[last] != 0) { return UartRxEditResult::Empty; }
+        let value: u8 = buf[last];
+        let columns: usize = columns_of[last] as usize;
+        buf[last] = 0;
+        columns_of[last] = 0;
+        if (state.line_columns >= columns) {
+            state.line_columns = state.line_columns - columns;
         }
-        kernel_uart_rx_head = last;
+        state.head = last;
+        kernel_uart_rx_publish(state);
         return UartRxEditResult::Erased((value, columns));
     }
     return UartRxEditResult::Empty;
 }
 
-fn kernel_uart_rx_peek_last() -> UartRxEditResult {
-    let head: usize = kernel_uart_rx_head;
-    if (head == kernel_uart_rx_tail || head >= KERNEL_UART_RX_CAPACITY) {
+fn kernel_uart_rx_peek_last(state: borrow &mut UartRxState,
+        buf: borrow [u8; KERNEL_UART_RX_CAPACITY..],
+        marks: borrow [u8; KERNEL_UART_RX_CAPACITY..],
+        columns_of: borrow [u8; KERNEL_UART_RX_CAPACITY..]) -> UartRxEditResult {
+    let head: usize = state.head;
+    if (head == state.tail || head >= KERNEL_UART_RX_CAPACITY) {
         return UartRxEditResult::Empty;
     }
     let last: usize = (head + KERNEL_UART_RX_CAPACITY - 1) % KERNEL_UART_RX_CAPACITY;
     if (last < KERNEL_UART_RX_CAPACITY) {
-        if (kernel_uart_rx_marks[last] != 0) { return UartRxEditResult::Empty; }
-        return UartRxEditResult::Erased((kernel_uart_rx_buf[last],
-                                         kernel_uart_rx_columns[last] as usize));
+        if (marks[last] != 0) { return UartRxEditResult::Empty; }
+        return UartRxEditResult::Erased((buf[last],
+                                         columns_of[last] as usize));
     }
     return UartRxEditResult::Empty;
 }
 
-fn kernel_uart_rx_unfinished_length() -> usize {
-    let head: usize = kernel_uart_rx_head;
-    let queued: usize = kernel_uart_rx_queued();
+fn kernel_uart_rx_unfinished_length(state: borrow &mut UartRxState,
+        marks: borrow [u8; KERNEL_UART_RX_CAPACITY..]) -> usize {
+    let head: usize = state.head;
+    let queued: usize = kernel_uart_rx_queued(state);
     let mut length: usize = 0;
     let mut walking: bool = true;
     for offset: usize in 0..<KERNEL_UART_RX_CAPACITY {
@@ -220,7 +243,7 @@ fn kernel_uart_rx_unfinished_length() -> usize {
             let last: usize = (head + KERNEL_UART_RX_CAPACITY - 1 - offset) %
                               KERNEL_UART_RX_CAPACITY;
             if (last < KERNEL_UART_RX_CAPACITY) {
-                if (kernel_uart_rx_marks[last] != 0) { walking = false; }
+                if (marks[last] != 0) { walking = false; }
                 else { length = length + 1; }
             }
         }
@@ -228,9 +251,10 @@ fn kernel_uart_rx_unfinished_length() -> usize {
     return length;
 }
 
-fn kernel_uart_rx_unfinished_snapshot() -> UartRxLine {
-    let length: usize = kernel_uart_rx_unfinished_length();
-    let first: usize = (kernel_uart_rx_head + KERNEL_UART_RX_CAPACITY - length)
+fn kernel_uart_rx_unfinished_snapshot(state: borrow &mut UartRxState,
+        marks: borrow [u8; KERNEL_UART_RX_CAPACITY..]) -> UartRxLine {
+    let length: usize = kernel_uart_rx_unfinished_length(state, marks);
+    let first: usize = (state.head + KERNEL_UART_RX_CAPACITY - length)
                       % KERNEL_UART_RX_CAPACITY;
     if (first < KERNEL_UART_RX_CAPACITY && length < KERNEL_UART_RX_CAPACITY) {
         let mut line: UartRxLine = { first, length };
@@ -240,11 +264,12 @@ fn kernel_uart_rx_unfinished_snapshot() -> UartRxLine {
     return empty;
 }
 
-fn kernel_uart_rx_unfinished_byte(line: UartRxLine, offset: usize) -> UartRxReadResult {
+fn kernel_uart_rx_unfinished_byte(buf: borrow [u8; KERNEL_UART_RX_CAPACITY..],
+        line: UartRxLine, offset: usize) -> UartRxReadResult {
     if (offset >= line.length) { return UartRxReadResult::EndFile; }
     let index: usize = (line.first + offset) % KERNEL_UART_RX_CAPACITY;
     if (index < KERNEL_UART_RX_CAPACITY) {
-        return UartRxReadResult::Byte((kernel_uart_rx_buf[index], false));
+        return UartRxReadResult::Byte((buf[index], false));
     }
     return UartRxReadResult::EndFile;
 }
@@ -254,16 +279,18 @@ fn kernel_uart_rx_dropped_count() -> usize {
 }
 
 // Reprinting starts at a new display column, so tab erasure widths change.
-fn kernel_uart_rx_reprint_width(line: UartRxLine, offset: usize,
+fn kernel_uart_rx_reprint_width(state: borrow &mut UartRxState,
+        columns_of: borrow [u8; KERNEL_UART_RX_CAPACITY..],
+        line: UartRxLine, offset: usize,
                                 width: {0..<9 as u8}) {
     if (offset >= line.length) { return; }
     let index: usize = (line.first + offset) % KERNEL_UART_RX_CAPACITY;
     if (index < KERNEL_UART_RX_CAPACITY) {
-        let previous: usize = kernel_uart_rx_columns[index] as usize;
-        if (kernel_uart_rx_line_columns >= previous) {
-            kernel_uart_rx_line_columns = kernel_uart_rx_line_columns - previous;
+        let previous: usize = columns_of[index] as usize;
+        if (state.line_columns >= previous) {
+            state.line_columns = state.line_columns - previous;
         }
-        kernel_uart_rx_columns[index] = width;
-        kernel_uart_rx_line_columns = kernel_uart_rx_line_columns + (width as usize);
+        columns_of[index] = width;
+        state.line_columns = state.line_columns + (width as usize);
     }
 }

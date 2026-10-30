@@ -1684,7 +1684,9 @@ irq_uart_rx_unmask();
     // read on A is still what must resend it.
     kernel_tcp_hold_retransmit_pass_until_recovered();
     kernel_tcp_inject_drop_next_fin();
-    kernel_uart_rx_ring_reset();
+    let rx_guard = process_run_lock();
+    terminal_rx_reset(rx_guard);
+    process_run_unlock(rx_guard);
     kernel_process_execution_reset();
     kernel_syscall_connected_fixture_start();
     match boot_execution.mount {

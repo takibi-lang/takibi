@@ -1770,8 +1770,8 @@ fn workload_settings_wake_progress(operation: usize, count: usize,
             workload_settings_wake.reader_pid != 0 &&
             kernel_process_pid_blocked_in_uart_read(
                 guard, workload_settings_wake.reader_pid) &&
-            terminal_canonical() && kernel_uart_rx_pending() == false &&
-            kernel_uart_rx_queued() == SETTINGS_WAKE_BYTES) {
+            terminal_is_canonical(guard) && terminal_rx_pending(guard) == false &&
+            terminal_rx_queued(guard) == SETTINGS_WAKE_BYTES) {
             if (workload_settings_wake.asleep_reported == false) {
                 workload_settings_wake.asleep_reported = true;
                 kernel_boot_log(
@@ -1805,11 +1805,11 @@ fn workload_settings_wake_progress(operation: usize, count: usize,
                     "workload: settings wake FAILED: the reader is still asleep after the change to raw mode, so the change did not wake it\n");
                 kernel_process_pid_log_wait(guard, workload_settings_wake.reader_pid);
                 kernel_boot_log("workload: settings wake queued=");
-                uart_put_udec(kernel_uart_rx_queued());
+                uart_put_udec(terminal_rx_queued(guard));
                 kernel_boot_log(" pending=");
-                uart_put_udec(kernel_uart_rx_pending() as usize);
+                uart_put_udec(terminal_rx_pending(guard) as usize);
                 kernel_boot_log(" canonical=");
-                uart_put_udec(terminal_canonical() as usize);
+                uart_put_udec(terminal_is_canonical(guard) as usize);
                 kernel_boot_log("\n");
                 answer = 3;
             } else if (secondary_tick_value() -

@@ -403,7 +403,7 @@ def run_peer(connection: socket.socket) -> None:
                               (CPU1_THREAD,), READER_TICKS, False)
         if window.hit_count != index + 1:
             gdb.execute("thread apply all bt 6")
-            gdb.execute("x/4wx &terminal_settings")
+            gdb.execute("x/12wx &terminal_state_store")
             verdict(False,
                     f"byte {index} ({value!r}) of {PEER_LINE!r} was pushed "
                     "into the ring by CPU0 while the reader on CPU1 was past "
@@ -542,23 +542,35 @@ def run_scalar_buffering(connection: socket.socket) -> bool:
                    "; " + stalled("scalar first byte", taken, STEP_TICKS)))
         return False
 
+    # The record's place is one tag word, then the content; offsets from the
+    # compile's own table.
+    offsets: dict[tuple[str, str], int] = {}
+    for row in Path("kernel/build/qemu/main.o.facts/structs.tsv").read_text().splitlines()[1:]:
+        struct_name, field_name, offset = row.split("\t")
+        offsets[(struct_name, field_name)] = int(offset)
+
+    def rx_field(field: str) -> int:
+        store = int(gdb.parse_and_eval("(unsigned long)&terminal_state_store"))
+        return (store + offsets[("TerminalStateStore", "record")] + 8
+                + offsets[("TerminalStateRecord", "rx")] + offsets[("UartRxState", field)])
+
     def queue(bytes_to_queue: bytes) -> None:
-        head = int(gdb.parse_and_eval("*(unsigned long *)&kernel_uart_rx_head"))
-        tail = int(gdb.parse_and_eval("*(unsigned long *)&kernel_uart_rx_tail"))
+        head = int(gdb.parse_and_eval(f"*(unsigned long *){rx_field('head')}"))
+        tail = int(gdb.parse_and_eval(f"*(unsigned long *){rx_field('tail')}"))
         if head != tail or not 0 <= head < capacity:
             raise RuntimeError("scalar buffering window did not start with an empty ring")
         for value in bytes_to_queue:
-            for name, byte in (("kernel_uart_rx_buf", value),
-                               ("kernel_uart_rx_marks", 0),
-                               ("kernel_uart_rx_columns", 0)):
-                gdb.execute(f"set *((unsigned char *)&{name} + {head}) = {byte}")
+            # The ring's three arrays, one after another in their backing.
+            for array, byte in ((0, value), (1, 0), (2, 0)):
+                gdb.execute("set *((unsigned char *)&terminal_state_frames + "
+                            f"{array * capacity + head}) = {byte}")
             head = (head + 1) % capacity
-        gdb.execute(f"set *(unsigned long *)&kernel_uart_rx_head = {head}")
+        gdb.execute(f"set *(unsigned long *){rx_field('head')} = {head}")
 
     if os.environ.get("UART_WAKE_SCALAR_CONTROL") == "canonical":
         # Recreate the old unread canonical prefix at the same real scalar
         # syscall. This must fail without a new interrupt rescuing the wait.
-        gdb.execute("set *(unsigned char *)&kernel_uart_rx_canonical = 1")
+        gdb.execute(f"set *(unsigned char *){rx_field('canonical')} = 1")
     queue(PAYLOAD[1:2])
     # GitHub issue #865: the canonical control expects the diagnosis below,
     # and only a reader that every vCPU's READER_TICKS ticks did not bring
@@ -652,7 +664,7 @@ def run() -> None:
                               all_threads(), READER_TICKS, False)
         if window.hit_count != index + 1:
             gdb.execute("thread apply all bt 6")
-            gdb.execute("x/4wx &terminal_settings")
+            gdb.execute("x/12wx &terminal_state_store")
             if outcome != QUIET:
                 verdict(False, stalled(f"byte {index} of {COMMAND!r}", taken,
                                        READER_TICKS))

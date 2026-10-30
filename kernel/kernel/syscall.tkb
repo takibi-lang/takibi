@@ -8,6 +8,7 @@ use "kernel/fs/ext2/ext2_syscall.tkb";
 use "kernel/fs/procfs.tkb";
 use "kernel/drivers/serial/uart_rx_ring.tkb";
 use "kernel/drivers/serial/terminal.tkb";
+use "kernel/drivers/serial/terminal_state.tkb";
 use "kernel/net/socket_capability.tkb";
 use "kernel/net/tcp.tkb";
 use "kernel/kernel/fd_table.tkb";
@@ -2963,7 +2964,7 @@ fn syscall_terminal_write(slot: borrow SyscallSlot[0], current_authority: borrow
         // Attribute publication and the whole bounded chunk admission are
         // serialized with TCSETSW's drain query, including peer producers.
         let guard = process_run_lock();
-        let convert: bool = (terminal_output_flags() & 5) == 5;
+        let convert: bool = terminal_converts_output(guard);
         let queued: usize = uart_terminal_write_chunk(staging, convert);
         process_run_unlock(guard);
         if (queued == 0) {
@@ -3704,8 +3705,7 @@ fn syscall_read_segment_with(slot: borrow SyscallSlot[0],
 // ready (#768); every terminal fd reports as fd 0 does (#902); the rest is
 // POLLNVAL.
 // The UART RX ring lives in kernel/drivers/serial/uart_rx_ring.tkb (GitHub
-// issue #543); this file reads it through kernel_uart_rx_pending and
-// kernel_uart_rx_getc.
+// issue #543); this file reads it through terminal_state.tkb.
 
 fn syscall_poll_fd_ready(fd: usize) -> (bool, usize) {
     // GitHub issue #902: any descriptor of the terminal, not fd 0 alone.
@@ -3713,7 +3713,9 @@ fn syscall_poll_fd_ready(fd: usize) -> (bool, usize) {
         // GitHub issue #1221: POLLOUT when a write would not block -- the
         // same room syscall_terminal_write asks (#544).
         let mut ready: usize = 0;
-        if (kernel_uart_rx_pending()) { ready = POLLIN; }
+        let guard = process_run_lock();
+        if (terminal_rx_pending(guard)) { ready = POLLIN; }
+        process_run_unlock(guard);
         if (uart_user_write_room() != 0) { ready = ready | POLLOUT; }
         return (true, ready);
     }
@@ -4108,18 +4110,15 @@ fn syscall_ppoll_dispatch(current_authority: borrow ProcessCurrent[current_proce
 // settings and the receive ring are shared with the RX handler on whichever
 // core takes the UART interrupt, and with readers on every core.
 fn syscall_terminal_settings_commit(
-        guard: borrow ProcessRunGuard[process_run],
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
         settings: borrow [u8; TERMINAL_TERMIOS_BYTES..], command: usize)
         -> TerminalSettingsResult !{unsafe} {
-    match terminal_settings_apply(settings) {
+    match terminal_settings_install(guard, settings, command == 0x5404) {
         TerminalSettingsResult::Unsupported => {
             return TerminalSettingsResult::Unsupported;
         }
         TerminalSettingsResult::Applied => {
-            if (command == 0x5404) { kernel_uart_rx_ring_reset(); }
-            kernel_uart_rx_canonical_set(terminal_canonical());
-            terminal_input_flow_update(kernel_uart_rx_queued());
-            if (kernel_uart_rx_pending()) { kernel_process_terminal_settings_wake(guard); }
+            if (terminal_rx_pending(guard)) { kernel_process_terminal_settings_wake(guard); }
             if (terminal_output_paused() == false) { kernel_process_uart_tx_wake_all(guard); }
         }
     }
@@ -4159,7 +4158,7 @@ fn syscall_terminal_ioctl(current_authority: borrow ProcessCurrent[current_proce
             UserWriteRangeResult::Ok(range) => {
                 let guard = process_run_lock();
                 for index: usize in 0..<TERMINAL_TERMIOS_BYTES {
-                    match user_write_byte(range, index, terminal_settings_byte(index)) {
+                    match user_write_byte(range, index, terminal_settings_read_byte(guard, index)) {
                         UserWriteResult::Fault => {
                             process_run_unlock(guard);
                             return SyscallAction::Resume(LINUX_EFAULT);
@@ -4248,7 +4247,7 @@ fn syscall_read_uart(current_authority: borrow ProcessCurrent[current_process, P
             // after that byte is stored.
             let guard = process_run_lock();
             kernel_process_terminal_reader(guard);
-            if (kernel_uart_rx_pending() == false) {
+            if (terminal_rx_pending(guard) == false) {
                 process_run_unlock(guard);
                 syscall_terminal_note_wait();
                 // GitHub issue #448: block whenever ANYTHING else could
@@ -4275,12 +4274,12 @@ fn syscall_read_uart(current_authority: borrow ProcessCurrent[current_process, P
                 }
                 return SyscallIoResult::InterruptWait;
             }
-            let canonical: bool = terminal_canonical();
+            let canonical: bool = terminal_is_canonical(guard);
             let mut transferred: usize = 0;
             let mut reading: bool = true;
             for index: usize in 0..<KERNEL_UART_RX_CAPACITY {
-                if (reading && index < requested && kernel_uart_rx_pending()) {
-                    match kernel_uart_rx_read() {
+                if (reading && index < requested && terminal_rx_pending(guard)) {
+                    match terminal_rx_read(guard) {
                         UartRxReadResult::EndFile => { reading = false; }
                         UartRxReadResult::Byte(pair) => {
                             let (value, end) = pair;
@@ -4297,7 +4296,7 @@ fn syscall_read_uart(current_authority: borrow ProcessCurrent[current_process, P
                     }
                 }
             }
-            terminal_input_flow_update(kernel_uart_rx_queued());
+            terminal_input_flow_refresh(guard);
             process_run_unlock(guard);
             // GitHub issue #830: the reader that drained the ring sends the
             // START itself, on whichever core it runs, as a termios change
@@ -4773,7 +4772,10 @@ fn kernel_syscall_block_return(frame_sp: usize) {
         // interrupt's push holds too, so it holds for a reader on any CPU
         // (GitHub issue #547).
         disable_irq();
-        if (kernel_uart_rx_pending()) {
+        let look = process_run_lock();
+        let waiting: bool = terminal_rx_pending(look);
+        process_run_unlock(look);
+        if (waiting) {
             el0_context_retry_syscall(frame);
             workload_profile_el0_enter();
             el0_context_resume(frame);
@@ -7866,8 +7868,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
     if (number == AARCH64_NR_TAKIBI_UART_RX_WAIT) {
         let guard = process_run_lock();
-        if (kernel_uart_rx_pending()) {
-            let value: usize = kernel_uart_rx_getc() as usize;
+        if (terminal_rx_pending(guard)) {
+            let mut value: usize = 0;
+            match terminal_rx_read(guard) {
+                UartRxReadResult::Byte(pair) => { let (byte, end) = pair; value = byte as usize; }
+                UartRxReadResult::EndFile => {}
+            }
             process_run_unlock(guard);
             return syscall_finish_current(frame, SyscallAction::Resume(value), current_authority);
         }

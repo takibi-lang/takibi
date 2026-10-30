@@ -3,6 +3,7 @@ use "kernel/drivers/serial/terminal.tkb";
 use "kernel/drivers/serial/terminal_echo_ring.tkb";
 
 private let mut policy_echo: TerminalEchoState;
+private let mut policy_settings: TerminalSettings;
 
 private fn policy_echo_read() -> TerminalEchoReadResult {
     let (byte, found) = terminal_echo_state_read(&policy_echo);
@@ -16,17 +17,19 @@ private fn policy_word(bytes: borrow [u8; 36..], field: {0..<4 as usize}, word: 
 
 fn check_terminal_policy() {
     let mut settings: [u8; 36];
-    for index: usize in 0..<36 { settings[index] = terminal_settings_byte(index); }
+    for index: usize in 0..<36 { settings[index] = terminal_settings_byte(&policy_settings, index); }
     policy_word(settings as [u8; 36..], 0, 0x1500);
     policy_word(settings as [u8; 36..], 1, 5);
     policy_word(settings as [u8; 36..], 2, 0x1CB2);
     policy_word(settings as [u8; 36..], 3, 0x8A3B);
     let mut accepted: bool = false;
-    match terminal_settings_apply(settings as [u8; 36..]) {
+    match terminal_settings_apply(&policy_settings, settings as [u8; 36..]) {
         TerminalSettingsResult::Applied => { accepted = true; }
         TerminalSettingsResult::Unsupported => { }
     }
     check("BusyBox init sane settings are all accepted", accepted);
+    check("an apply publishes STOP and START for the transmit path",
+          terminal_flow_control_byte(true) == 19 && terminal_flow_control_byte(false) == 17);
     let mut rejected: bool = true;
     // Every flags word has at least one unsupported bit. Refuse the actual
     // setters, not just the validation helper, and check state preservation.
@@ -39,12 +42,12 @@ fn check_terminal_policy() {
             policy_word(invalid as [u8; 36..], field,
                         terminal_word(settings as [u8; 36..], field) ^ unsupported);
         }
-        match terminal_settings_apply(invalid as [u8; 36..]) {
+        match terminal_settings_apply(&policy_settings, invalid as [u8; 36..]) {
             TerminalSettingsResult::Applied => { rejected = false; }
             TerminalSettingsResult::Unsupported => { }
         }
         for index: usize in 0..<36 {
-            if (terminal_settings_byte(index) != settings[index]) { rejected = false; }
+            if (terminal_settings_byte(&policy_settings, index) != settings[index]) { rejected = false; }
         }
     }
     for index: usize in 0..<36 {
@@ -53,7 +56,7 @@ fn check_terminal_policy() {
             let mut invalid: [u8; 36];
             for offset: usize in 0..<36 { invalid[offset] = settings[offset]; }
             invalid[index] = invalid[index] ^ 1;
-            match terminal_settings_apply(invalid as [u8; 36..]) {
+            match terminal_settings_apply(&policy_settings, invalid as [u8; 36..]) {
                 TerminalSettingsResult::Applied => { rejected = false; }
                 TerminalSettingsResult::Unsupported => { }
             }
@@ -61,42 +64,42 @@ fn check_terminal_policy() {
     }
     check("unsupported flags and timing fail without mutating settings", rejected);
     let mut controls: bool = true;
-    match terminal_input_decode(13) {
+    match terminal_input_decode(&policy_settings, 13) {
         TerminalInput::EndLine(value) => { if (value != 10) { controls = false; } }
         _ => { controls = false; }
     }
-    match terminal_input_decode(19) { TerminalInput::StopOutput => { } _ => { controls = false; } }
+    match terminal_input_decode(&policy_settings, 19) { TerminalInput::StopOutput => { } _ => { controls = false; } }
     if (terminal_output_paused() == false) { controls = false; }
-    match terminal_input_decode(17) { TerminalInput::StartOutput => { } _ => { controls = false; } }
+    match terminal_input_decode(&policy_settings, 17) { TerminalInput::StartOutput => { } _ => { controls = false; } }
     if (terminal_output_paused()) { controls = false; }
-    match terminal_input_decode(22) { TerminalInput::LiteralNext => { } _ => { controls = false; } }
-    match terminal_input_decode(3) {
+    match terminal_input_decode(&policy_settings, 22) { TerminalInput::LiteralNext => { } _ => { controls = false; } }
+    match terminal_input_decode(&policy_settings, 3) {
         TerminalInput::Byte(value) => { if (value != 3) { controls = false; } }
         _ => { controls = false; }
     }
-    match terminal_input_decode(3) {
+    match terminal_input_decode(&policy_settings, 3) {
         TerminalInput::Signal(value) => { if (value != 2) { controls = false; } }
         _ => { controls = false; }
     }
-    match terminal_input_decode(28) {
+    match terminal_input_decode(&policy_settings, 28) {
         TerminalInput::Signal(value) => { if (value != 3) { controls = false; } }
         _ => { controls = false; }
     }
-    match terminal_input_decode(26) {
+    match terminal_input_decode(&policy_settings, 26) {
         TerminalInput::Signal(value) => { if (value != 20) { controls = false; } }
         _ => { controls = false; }
     }
-    match terminal_input_decode(127) { TerminalInput::Erase => { } _ => { controls = false; } }
-    match terminal_input_decode(21) { TerminalInput::Kill => { } _ => { controls = false; } }
-    match terminal_input_decode(23) { TerminalInput::WordErase => { } _ => { controls = false; } }
-    match terminal_input_decode(18) { TerminalInput::Reprint => { } _ => { controls = false; } }
-    match terminal_input_decode(4) { TerminalInput::EndFile => { } _ => { controls = false; } }
+    match terminal_input_decode(&policy_settings, 127) { TerminalInput::Erase => { } _ => { controls = false; } }
+    match terminal_input_decode(&policy_settings, 21) { TerminalInput::Kill => { } _ => { controls = false; } }
+    match terminal_input_decode(&policy_settings, 23) { TerminalInput::WordErase => { } _ => { controls = false; } }
+    match terminal_input_decode(&policy_settings, 18) { TerminalInput::Reprint => { } _ => { controls = false; } }
+    match terminal_input_decode(&policy_settings, 4) { TerminalInput::EndFile => { } _ => { controls = false; } }
     check("ICRNL IXON ISIG and IEXTEN decode the real control characters", controls);
-    terminal_input_flow_update(3072);
+    terminal_input_flow_update(&policy_settings, 3072);
     let mut flow: bool = terminal_input_flow_requested();
-    terminal_input_flow_update(2048);
+    terminal_input_flow_update(&policy_settings, 2048);
     if (terminal_input_flow_requested() == false) { flow = false; }
-    terminal_input_flow_update(1024);
+    terminal_input_flow_update(&policy_settings, 1024);
     if (terminal_input_flow_requested()) { flow = false; }
     check("IXOFF hysteresis requests stop at high water and releases at low water", flow);
     // The producer can stop at 512 encoded bytes with downstream room

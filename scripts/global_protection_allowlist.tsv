@@ -83,16 +83,6 @@ kernel/drivers/net/virtio_net.tkb	virtio_pkt_kept_len	unreviewed
 kernel/drivers/net/virtio_net_tx_dma.tkb	virtio_pkt_addr	unreviewed
 kernel/drivers/net/virtio_net_tx_dma.tkb	virtio_pkt_rx_seen	unreviewed
 kernel/drivers/serial/pl011.tkb	uart	unreviewed
-kernel/drivers/serial/terminal.tkb	terminal_settings	unreviewed; 2026-10-06 candidate-context: one UART terminal / settings/literal-next under process-run lock; independent flow readers use AtomicWord
-kernel/drivers/serial/terminal.tkb	terminal_settings_initialized	unreviewed; 2026-10-06 candidate-context: one UART terminal / settings/literal-next under process-run lock; independent flow readers use AtomicWord
-kernel/drivers/serial/uart_rx_ring.tkb	kernel_uart_rx_buf	unreviewed; 2026-10-06 candidate-context: one terminal RX queue / process-run lock at kernel callers; DDB quiescence; host-native fixture is serial
-kernel/drivers/serial/uart_rx_ring.tkb	kernel_uart_rx_canonical	unreviewed; 2026-10-06 candidate-context: one terminal RX queue / process-run lock at kernel callers; DDB quiescence; host-native fixture is serial
-kernel/drivers/serial/uart_rx_ring.tkb	kernel_uart_rx_columns	unreviewed; 2026-10-06 candidate-context: one terminal RX queue / process-run lock at kernel callers; DDB quiescence; host-native fixture is serial
-kernel/drivers/serial/uart_rx_ring.tkb	kernel_uart_rx_head	unreviewed; 2026-10-06 candidate-context: one terminal RX queue / process-run lock at kernel callers; DDB quiescence; host-native fixture is serial
-kernel/drivers/serial/uart_rx_ring.tkb	kernel_uart_rx_line_columns	unreviewed; 2026-10-06 candidate-context: one terminal RX queue / process-run lock at kernel callers; DDB quiescence; host-native fixture is serial
-kernel/drivers/serial/uart_rx_ring.tkb	kernel_uart_rx_lines	unreviewed; 2026-10-06 candidate-context: one terminal RX queue / process-run lock at kernel callers; DDB quiescence; host-native fixture is serial
-kernel/drivers/serial/uart_rx_ring.tkb	kernel_uart_rx_marks	unreviewed; 2026-10-06 candidate-context: one terminal RX queue / process-run lock at kernel callers; DDB quiescence; host-native fixture is serial
-kernel/drivers/serial/uart_rx_ring.tkb	kernel_uart_rx_tail	unreviewed; 2026-10-06 candidate-context: one terminal RX queue / process-run lock at kernel callers; DDB quiescence; host-native fixture is serial
 kernel/drivers/virtio_used.tkb	virtio_used_reset_confirmed	unreviewed
 kernel/fs/ext2/ext2.tkb	ext2_fence_pending	unreviewed; 2026-10-06 candidate-mount: writable filesystem mount / mutation admission; boot fixture single writer; explicit recovery
 kernel/fs/ext2/ext2.tkb	ext2_fence_pending_count	unreviewed; 2026-10-06 candidate-mount: writable filesystem mount / mutation admission; boot fixture single writer; explicit recovery

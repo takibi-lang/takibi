@@ -101,13 +101,18 @@ class TakibiConsole(gdb.Command):
             else:
                 emit("uart", base=hex(uart), status="unavailable: unsupported UART base")
             size = capacity("KERNEL_UART_RX_CAPACITY", 65536)
-            head, tail = word("kernel_uart_rx_head"), word("kernel_uart_rx_tail")
+            # The record's place: one tag word, then the content (Empty until the
+            # first terminal use, which reads as zeros, an empty ring).
+            rx_state = (address("terminal_state_store") + layout("TerminalStateStore", "record")
+                        + 8 + layout("TerminalStateRecord", "rx"))
+            head = integer(rx_state + layout("UartRxState", "head"))
+            tail = integer(rx_state + layout("UartRxState", "tail"))
             if head >= size or tail >= size:
                 emit("rx", head=head, tail=tail, status="unavailable: invalid indices")
             else:
                 queued = (head - tail) % size
-                raw = memory(address("kernel_uart_rx_buf"), size)
-                marks = memory(address("kernel_uart_rx_marks"), size)
+                raw = memory(address("terminal_state_frames"), size)
+                marks = memory(address("terminal_state_frames") + size, size)
                 indices = [(tail + offset) % size for offset in range(queued)]
                 unfinished = 0
                 for index in reversed(indices):
@@ -115,8 +120,8 @@ class TakibiConsole(gdb.Command):
                         break
                     unfinished += 1
                 emit("rx", head=head, tail=tail, queued=queued,
-                     dropped=word("kernel_uart_rx_dropped"), lines=word("kernel_uart_rx_lines"),
-                     canonical=bool(integer(address("kernel_uart_rx_canonical"), 1)),
+                     dropped=word("kernel_uart_rx_dropped"), lines=integer(rx_state + layout("UartRxState", "lines")),
+                     canonical=bool(integer(rx_state + layout("UartRxState", "canonical"), 1)),
                      pending=repr(bytes(raw[index] for index in indices)),
                      marks=bytes(marks[index] for index in indices).hex(),
                      unfinished_length=unfinished,

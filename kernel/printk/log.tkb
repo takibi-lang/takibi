@@ -1022,8 +1022,8 @@ fn kernel_log_terminal_flow_poll() !{logs, unsafe} {
         }
     };
     if (changed) {
-        control = terminal_control_byte(8);
-        if (wanted) { control = terminal_control_byte(9); }
+        control = terminal_flow_control_byte(false);
+        if (wanted) { control = terminal_flow_control_byte(true); }
     }
     console_unlock(guard);
     if (control != 0) { uart_wire_byte(control); }

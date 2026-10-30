@@ -2843,7 +2843,7 @@ private fn kernel_ddb_enter_stopped(
     ddb_snapshot.process_count = process_copy.count;
     ddb_snapshot.process_truncated = 0;
     if (process_copy.truncated) { ddb_snapshot.process_truncated = 1; }
-    ddb_snapshot.uart_rx_queued = kernel_uart_rx_queued();
+    ddb_snapshot.uart_rx_queued = kernel_uart_rx_queued_hint();
     ddb_snapshot.uart_tx_queued = kernel_log_tx_queue_count();
     ddb_snapshot.uart_tx_low_water = kernel_log_tx_writer_low_water();
     ddb_snapshot.uart_tx_state = kernel_log_tx_ddb_state();

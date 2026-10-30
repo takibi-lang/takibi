@@ -202,3 +202,15 @@ file's comment lines are not rows.
   `kernel_log_terminal_input_stopped`, an `AtomicWord` since the previous entry,
   moves into the record, since only holders touch it. 317 -> 303 unprotected (317
   after the never-set flag #1270 removed).
+- 2026-10-30: the terminal's input state behind the process-run guard. The termios
+  settings and the receive ring's indices are one linear record in a `Place`
+  `guarded_by(scheduled_process_run_lock)`, and the ring's three byte arrays a
+  `region` of three `PageFrame`s, an element type the kernel already compiles, so
+  this costs no new region instance (about 10.7M allocated words each). The settings
+  are five words, not an array, because the record travels by value through its
+  place and an array there would be copied byte by byte. Every kernel reader takes
+  the guard, including `ppoll` and the block path's early look. Two cannot: DDB, with
+  the world stopped, reads `kernel_uart_rx_queued_word`, and the transmit path, which
+  holds the console lock and so cannot take the run lock, reads
+  `terminal_flow_controls`, the STOP and START bytes published by each apply; both
+  are `AtomicWord`s that only a holder writes. 302 -> 292 unprotected.

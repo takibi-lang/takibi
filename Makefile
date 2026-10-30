@@ -441,6 +441,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/drivers/serial/terminal_echo.tkb \
 	kernel/drivers/serial/terminal_echo_ring.tkb \
 	kernel/drivers/serial/terminal_io.tkb \
+	kernel/drivers/serial/terminal_state.tkb \
 	kernel/fs/elf64.tkb \
 	kernel/fs/ext2/ext2.tkb \
 	kernel/fs/ext2/mutation_lock.tkb \
@@ -2086,7 +2087,7 @@ kernelbuild-qemu: build
 # Console offsets come from LLVM, including the wrapper around atomic words.
 $(KERNEL_CONSOLE_LAYOUT): $(KERNEL_QEMU_MAIN_O) scripts/struct_layout_gdb.py
 	@mkdir -p $(dir $@)
-	python3 scripts/struct_layout_gdb.py $(KERNEL_QEMU_MAIN_O).facts/structs.tsv KernelLogCoreState AtomicWord KernelLogTxState TerminalEchoState > $@.tmp
+	python3 scripts/struct_layout_gdb.py $(KERNEL_QEMU_MAIN_O).facts/structs.tsv KernelLogCoreState AtomicWord KernelLogTxState TerminalEchoState TerminalStateStore TerminalStateRecord UartRxState > $@.tmp
 	mv $@.tmp $@
 
 # Churn debugger layouts are host-only and track the compiled source.

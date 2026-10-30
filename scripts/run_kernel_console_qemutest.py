@@ -100,14 +100,16 @@ put(addr('terminal_echo_count') + atomic_value, 3)
 put(addr('kernel_log_tx_count') + atomic_value, 1)
 word('uart_base', 0x09000000)
 put(0x09000038, 1 << 5, 4)
-word('kernel_uart_rx_head', 2)
-word('kernel_uart_rx_tail', 4094)
-word('kernel_uart_rx_lines', 1)
+rx_state = (addr('terminal_state_store') + off('terminalstatestore', 'record')
+            + 8 + off('terminalstaterecord', 'rx'))
+put(rx_state + off('uartrxstate', 'head'), 2)
+put(rx_state + off('uartrxstate', 'tail'), 4094)
+put(rx_state + off('uartrxstate', 'lines'), 1)
 word('kernel_uart_rx_dropped', 2)
-put(addr('kernel_uart_rx_canonical'), 1, 1)
-gdb.selected_inferior().write_memory(addr('kernel_uart_rx_buf') + 4094, b'a\\n')
-gdb.selected_inferior().write_memory(addr('kernel_uart_rx_buf'), b'bc')
-put(addr('kernel_uart_rx_marks') + 4095, 1, 1)
+put(rx_state + off('uartrxstate', 'canonical'), 1, 1)
+gdb.selected_inferior().write_memory(addr('terminal_state_frames') + 4094, b'a\\n')
+gdb.selected_inferior().write_memory(addr('terminal_state_frames'), b'bc')
+put(addr('terminal_state_frames') + 4096 + 4095, 1, 1)
 ''')
                 queued = artifacts / "queued.log"
                 capture(endpoint, ELF, queued, "fixture-before-break", str(directory / "seed-gdb"))
@@ -124,7 +126,7 @@ put(addr('kernel_uart_rx_marks') + 4095, 1, 1)
                 assert state["rx"][0]["unfinished"] == "b'bc'"
                 assert state["rx"][0]["unfinished_length"] == 2
                 assert not qmp(endpoint, "query-status")["running"]
-                seed(endpoint, directory, "word('kernel_uart_rx_head', 4096)\n"
+                seed(endpoint, directory, "put(addr('terminal_state_store') + off('terminalstatestore', 'record') + 8 + off('terminalstaterecord', 'rx') + off('uartrxstate', 'head'), 4096)\n"
                      "put(addr('kernel_log_core_state') + off('kernellogcorestate', 'size') + off('kernellogcorestate', 'length'), 641)")
                 damaged = artifacts / "damaged.log"
                 capture(endpoint, ELF, damaged, "fixture-invalid-indices", str(directory / "seed-gdb"))
