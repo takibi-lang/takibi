@@ -542,3 +542,7 @@ condition below applies, and reports the land afterwards.
 - #1013: (2) the phase still ends at CPU_ON; `boot_once_get`'s first-slice check is "this cell has been written" (one written word per cell, value stays the first field). Second group: tcp.tkb's our_mac.
 - #1032 IOMMU: confirm on the board whether pcie2/RP1 is behind an IOMMU; if not, try (B') confining RP1's DMA to one DMA arena through the BCM2712 PCIe inbound window.
 - #1227: (A) the boot key comes from the device tree's /chosen/rng-seed (or kaslr-seed); the fallback when it is missing is pending.
+
+## 2026-10-30 security configurations and #1227 fallback
+- #1227: when /chosen/rng-seed is missing, (A2): derive the key from counter-timing jitter and warn loudly in the boot log; TCP keeps working, as on Linux and the BSDs.
+- Configurations: the goal now is A (boot and work without special devices). Every degraded-security fallback goes through one named policy point, `security_floor`, which records each fallback taken (boot log and /proc/takibi); #1227 (A2) is its first consumer. A strict configuration B (require every security device, refuse degraded paths) is deferred; if wanted (for example for a FPGA RISC-V port), it is a const flip of security_floor that removes the fallback code, not a second build tree, plus a build check and one lane.
