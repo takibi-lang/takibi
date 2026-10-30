@@ -567,11 +567,6 @@ let mut tcp_drop_data_segment_rearm: i32 = -1;
 // GitHub issue #740 step 2: segments queued from a kept driver buffer
 // rather than a copy, for the boot evidence that the path ran.
 let mut tcp_kept_segments: usize = 0;
-// GitHub issue #846: what the stack-wide pass did, for the boot evidence:
-// segments it retransmitted, and entries it skipped because a syscall held
-// their connection.
-let mut tcp_retx_pass_sent: AtomicWord;
-let mut tcp_retx_pass_busy: AtomicWord;
 // GitHub issue #846: a test hold. While set, the stack-wide pass does
 // nothing until the first injected data drop has been recovered, so the
 // #842 fixture still proves that a blocked read resends its own
@@ -2656,7 +2651,6 @@ fn tcp_retx_service_all(ready_in: sink NetRxCanAcquire)
                         kept = retx_chain_keep(kept, parked);
                     }
                     TcpConnectionTryTakeResult::Busy => {
-                        atomic_word_fetch_add(&tcp_retx_pass_busy, 1);
                         next_due = retx_due_earliest(
                             next_due, retx_entry_due_at(entry, retry_ticks));
                         kept = retx_chain_keep(kept, parked);
@@ -2675,7 +2669,6 @@ fn tcp_retx_service_all(ready_in: sink NetRxCanAcquire)
                             RetxEntryService::Sent(after) => {
                                 ready = after;
                                 sends = sends + 1;
-                                atomic_word_fetch_add(&tcp_retx_pass_sent, 1);
                                 tcp_connection_put(owner);
                                 next_due = retx_due_earliest(
                                     next_due, retx_entry_due_at(entry, retry_ticks));
