@@ -18,7 +18,10 @@ use "kernel/drivers/serial/pl011.tkb";
 use "kernel/platform/qemu/device_map.tkb";
 // The address the console is attached at, for the boot report; the
 // registers themselves are reached only through `uart`.
-let mut uart_base: usize = 0x09000000;
+// GitHub issue #1013: written twice during boot (the bootstrap window, then
+// the DTB's), read-only afterwards. The value is the cell's first field, so
+// scripts/kernel_console.gdb's word read of `uart_base` still sees it.
+let mut uart_base: BootOnce(usize);
 // Attached by kernel/platform/qemu/device_map.tkb: first the fixed platform
 // window, then the one the DTB names.
 fn uart_init() {
@@ -40,11 +43,11 @@ fn uart_init() {
     uart.cr = (1 << 0) | (1 << 8) | (1 << 9); // UARTEN | TXE | RXE
 }
 
-fn platform_init() {
+fn platform_init(phase: borrow BootPhase[boot]) {
     // The fixed platform address is the bootstrap console used until the
     // common memory reader has validated the whole boot blob. init.tkb then
     // replaces it with the compatible/reg result before IRQs and workloads.
-    qemu_uart_attach_bootstrap();
+    qemu_uart_attach_bootstrap(phase);
     uart_init();
 }
 

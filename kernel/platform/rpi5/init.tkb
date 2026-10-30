@@ -65,12 +65,13 @@ fn kernel_secondary_boot_cpu_on(start: CpuStart[&kernel_world_stop])
 // secondary-boot contention probes free connections, so they need it to
 // exist; the boot exchange in kernel_test_platform_network takes it from
 // the store like any other caller and puts it back.
-fn kernel_platform_net_link_up() {
+fn kernel_platform_net_link_up(phase: borrow BootPhase[boot]) {
     match net_init() {
         NetInitResult::Failed => {
             kernel_boot_log("rp1 gem: link failed\n");
         }
         NetInitResult::Ready(link_ready) => {
+            tcp_our_mac_set(phase);
             kernel_platform_net_capability_return(link_ready);
         }
     }
@@ -255,7 +256,9 @@ fn kernel_test_platform_storage() {
 }
 
 fn main() !{unsafe} {
-    kernel_boot_prologue();
+    // GitHub issue #1013: the boot phase, ended just before CPU_ON below.
+    let mut phase = boot_phase_mint();
+    kernel_boot_prologue(phase);
 
     // The firmware-resolved DTB is part of the arm64 boot contract on this
     // platform. Memory discovery failing means that contract is broken; do
@@ -486,7 +489,8 @@ fn main() !{unsafe} {
     // would free root 0's three already-in-use pages back into the pool
     // while they are still this kernel's own active page tables).
 
-    kernel_platform_net_link_up();
+    kernel_platform_net_link_up(phase);
+    boot_phase_end(phase);
     kernel_secondary_boot_report();
 
     kernel_test_rpi5_extended = true;

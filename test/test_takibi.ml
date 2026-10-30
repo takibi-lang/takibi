@@ -15152,6 +15152,29 @@ let codegen_tests = [
       "struct LocalCell[p: addr] { value: usize; } fn f() { let mut pool: usize = 0; let mut cell: LocalCell[&pool] = {0}; }");
   (* GitHub issue #1207: a bare name in an addr slot binds a new parameter;
      spelled like a global, it read as that global and was not. *)
+  (* GitHub issue #1013 (docs/wont-compile/0010): kernel/lib/boot_once.tkb's
+     phase token, reduced to a plain cell. *)
+  Alcotest.test_case "a boot-once write after the phase ends is refused" `Quick
+    (expect_type_error "linear value 'phase' was already consumed" {|
+      linear struct BootPhase[phase: addr] { private held: usize; }
+      private let mut boot_phase_flag: usize;
+      struct BootCell { private value: usize; }
+      private fn boot_phase_mint() -> BootPhase[&boot_phase_flag] {
+        let mut phase: BootPhase[&boot_phase_flag] = { 1 };
+        return phase;
+      }
+      fn boot_phase_end(phase: sink BootPhase[boot]) { let held: usize = phase.held; }
+      fn boot_cell_set(cell: &mut BootCell, phase: borrow BootPhase[boot], value: usize) {
+        (*cell).value = value;
+      }
+      let mut uart_base: BootCell;
+      fn main() {
+        let mut phase = boot_phase_mint();
+        boot_cell_set(&uart_base, phase, 0x09000000);
+        boot_phase_end(phase);
+        boot_cell_set(&uart_base, phase, 0x08000000);
+      }
+    |});
   Alcotest.test_case "a bare addr static named like a global is refused" `Quick
     (expect_type_error "shadows the global 'pool'"
       "struct Guard[p: addr] { value: usize; } let mut pool: usize; fn f(g: Guard[pool]) {}");

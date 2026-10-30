@@ -1,7 +1,9 @@
 // An ordinary no-frame invariant stop; the linked BL is its sole origin.
 fn invariant_stop_fixture_run() !{unsafe} {
     disable_irq();
-    qemu_uart_attach_bootstrap();
+    let mut phase = boot_phase_mint();
+    qemu_uart_attach_bootstrap(phase);
+    boot_phase_end(phase);
     uart_init();
     kernel_log_init();
     kernel_invariant_stop();

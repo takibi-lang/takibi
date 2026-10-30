@@ -94,7 +94,7 @@ fn uart_init() {
     uart.cr = (1 << 0) | (1 << 8) | (1 << 9); // UARTEN | TXE | RXE
 }
 
-fn platform_init() {
+fn platform_init(phase: borrow BootPhase[boot]) {
     rpi5_uart_attach_bootstrap();
     rpi5_irq_windows_attach_bootstrap();
     match rpi5_gic_apply_boot_dtb() {

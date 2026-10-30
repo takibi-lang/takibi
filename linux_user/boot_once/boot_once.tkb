@@ -1,0 +1,57 @@
+// GitHub issue #1013: kernel/lib/boot_once.tkb, the same source the kernel
+// links. One phase is minted, cells are written and read during it, the
+// phase ends, written cells still read, and a read of a cell that was never
+// written reaches the refusal (stubbed below: the kernel's stops the CPU).
+//
+// A write after boot_phase_end does not compile; that half is
+// test/test_takibi.ml's and docs/wont-compile/0010's.
+//
+// Expected output (linux_user/boot_once/boot_once.expected):
+//   0x00000000   a fresh cell is unwritten
+//   0x00000000   the phase is open
+//   0x00000001   set marks the cell written
+//   0x09000000   the value reads back during the phase
+//   0x08000000   a second write during the phase replaces it
+//   0x00000001   the phase has ended
+//   0x08000000   the cell still reads after the end
+//   0x00000001   a struct value round-trips
+//   refused      an unwritten cell is refused
+
+use "kernel/lib/boot_once.tkb";
+
+struct BootOnceMac { bytes: [u8; 6]; }
+
+let mut cell_base: BootOnce(usize);
+let mut cell_mac: BootOnce(BootOnceMac);
+let mut cell_never: BootOnce(usize);
+
+// The kernel's stops the CPU (kernel/init/boot_prologue.tkb).
+fn boot_once_unwritten_stop() {
+    uart_puts("refused\r\n");
+    linux_exit(0);
+}
+
+fn report(flag: bool) {
+    if (flag) { uart_println_hex(1); } else { uart_println_hex(0); }
+}
+
+fn app_main() -> i32 !{unsafe} {
+    report(boot_once_is_written(&cell_base));
+    let mut phase = boot_phase_mint();
+    report(boot_phase_is_ended());
+    boot_once_set(&cell_base, phase, 0x09000000);
+    report(boot_once_is_written(&cell_base));
+    uart_println_hex(boot_once_read(&cell_base, phase) as i32);
+    boot_once_set(&cell_base, phase, 0x08000000);
+    uart_println_hex(boot_once_get(&cell_base) as i32);
+    let mut mac: BootOnceMac = { {2, 0, 32, 0, 0, 2} };
+    boot_once_set(&cell_mac, phase, mac);
+    boot_phase_end(phase);
+    report(boot_phase_is_ended());
+    uart_println_hex(boot_once_get(&cell_base) as i32);
+    let mut back: BootOnceMac = boot_once_get(&cell_mac);
+    report(back.bytes[2] == 32 && back.bytes[5] == 2);
+    let never: usize = boot_once_get(&cell_never);
+    uart_println_hex(never as i32);
+    return 1;
+}

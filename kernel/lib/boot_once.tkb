@@ -1,0 +1,110 @@
+// GitHub issue #1013: a global written during boot, read freely after.
+//
+// Platform device bases, interrupt numbers and the MAC address are written
+// by the boot core while the machine comes up and never again; they are
+// read from interrupt handlers and from every core afterwards. A
+// BootOnce(T) says so in the type:
+//
+//   - boot_once_set needs a `borrow BootPhase`. The phase is one linear
+//     token, minted once by each platform's main (boot_phase_mint) and
+//     consumed by boot_phase_end just before PSCI CPU_ON starts the
+//     secondaries. After the end there is no token, so a later write does
+//     not compile (docs/wont-compile/0010).
+//   - boot_once_get is a plain load. It refuses a cell that was never
+//     written -- a boot ordering bug -- by stopping the CPU with a named
+//     line (boot_once_unwritten_stop), the first slice of "a read before
+//     the write is refused" (the maintainer's option (2) on #1013: the
+//     check is per cell, so interrupt handlers may read a written cell
+//     while the phase is still open).
+//
+// WHY THE VALUE IS THE FIRST FIELD. Debugger scripts read some of these
+// globals by symbol as a plain word (scripts/kernel_console.gdb reads
+// `uart_base`), and the console lane seeds one. With `value` at offset 0
+// the symbol's address is still the value's.
+//
+// Current limitations (2026-10-30):
+// - THE PHASE END IS ORDERED BY CPU_ON, NOT BY THIS FILE. A secondary sees
+//   every boot write because the boot core's writes precede the PSCI call
+//   that starts it, the same argument .bss zeroing relies on. The written
+//   word is release-stored and acquire-loaded, which orders a reader on
+//   the boot core's own interrupt path; nothing here orders a core that
+//   was already running, and none is during the phase.
+// - THE MINT IS TRUSTED. boot_phase_mint is `!{unsafe}` and is called once
+//   from each platform's main (TRUSTED_BASE.md); nothing stops a second
+//   call except that review. A second phase would let a write reappear
+//   after the first one ended.
+// - A WRITE DURING THE PHASE MAY REPEAT. The QEMU UART base is written
+//   twice by design (the fixed bootstrap window, then the DTB's), so set
+//   does not refuse an overwrite.
+// - THE REFUSAL IS DYNAMIC. A read before the write stops the boot rather
+//   than failing to compile; a static form needs a Sealed index on the
+//   cell (#732).
+use "kernel/lib/atomic_word.tkb";
+use "kernel/lib/execution_model.tkb";
+
+// The phase is the boot core's alone and is not preempted: a boot write is
+// one store, and a second writer would need a second phase token.
+fn boot_once_execution_model_assumption() {
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+                  "a boot write must finish before anything else runs on the boot core");
+}
+
+generic struct BootOnce(T: type) {
+    // First, on purpose: see "WHY THE VALUE IS THE FIRST FIELD" above.
+    private value: T;
+    private written: AtomicWord;
+}
+
+// The boot phase. Private fields: only this file mints or ends one.
+private let mut boot_phase_ended: AtomicWord;
+
+// Indexed by the phase flag's address: one phase per boot, and an
+// indexed linear struct is what `borrow` accepts.
+linear struct BootPhase[phase: addr] {
+    private held: usize;
+}
+
+
+// Trusted: the one token for the whole boot, minted by each platform's
+// main before its first boot write (TRUSTED_BASE.md, boot-phase mint).
+fn boot_phase_mint() -> BootPhase[&boot_phase_ended] !{unsafe} {
+    let mut phase: BootPhase[&boot_phase_ended] = { 1 };
+    return phase;
+}
+
+// Ends the write window. Called immediately before the secondaries are
+// started; the token is gone afterwards, so no boot_once_set compiles past
+// this point on that path.
+fn boot_phase_end(phase: sink BootPhase[boot]) {
+    let held: usize = phase.held;
+    atomic_word_store(&boot_phase_ended, 1);
+}
+
+// Whether boot_phase_end has run: a diagnostic, not a read gate.
+fn boot_phase_is_ended() -> bool {
+    return atomic_word_load(&boot_phase_ended) != 0;
+}
+
+fn boot_once_set(T: type, cell: &mut BootOnce(T), phase: borrow BootPhase[boot],
+                 value: T) {
+    (*cell).value = value;
+    atomic_word_store(&(*cell).written, 1);
+}
+
+// A read during the phase by code that holds it, for symmetry with the
+// issue's API: the same load as boot_once_get.
+fn boot_once_read(T: type, cell: &mut BootOnce(T), phase: borrow BootPhase[boot])
+        -> T {
+    return boot_once_get(cell);
+}
+
+fn boot_once_is_written(T: type, cell: &mut BootOnce(T)) -> bool {
+    return atomic_word_load(&(*cell).written) != 0;
+}
+
+fn boot_once_get(T: type, cell: &mut BootOnce(T)) -> T {
+    if (atomic_word_load(&(*cell).written) == 0) {
+        boot_once_unwritten_stop();
+    }
+    return (*cell).value;
+}

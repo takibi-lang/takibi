@@ -18,7 +18,7 @@ must_use variant QemuAttach {
 }
 
 // The GIC's two windows, from the DTB's cortex-a15-gic reg entries.
-fn qemu_gic_attach(dist_base: usize, dist_bytes: usize,
+fn qemu_gic_attach(phase: borrow BootPhase[boot], dist_base: usize, dist_bytes: usize,
                    cpu_base: usize, cpu_bytes: usize) -> QemuAttach !{unsafe} {
     let RegionBytes::Assumed(dist) = region_bytes_assume(dist_base, dist_bytes) else {};
     match io_handle_attach(&gicd, dist) {
@@ -30,14 +30,14 @@ fn qemu_gic_attach(dist_base: usize, dist_bytes: usize,
         IoAttach::TooSmall => { return QemuAttach::Refused; }
         IoAttach::Attached => {}
     }
-    qemu_gicd_base = dist_base;
-    qemu_gicc_base = cpu_base;
+    boot_once_set(&qemu_gicd_base, phase, dist_base);
+    boot_once_set(&qemu_gicc_base, phase, cpu_base);
     return QemuAttach::Attached;
 }
 
 // The console before the DTB: the platform's fixed address.
-fn qemu_uart_attach_bootstrap() !{unsafe} {
-    match qemu_uart_attach_window(QEMU_UART_BOOTSTRAP_BASE, QEMU_UART_WINDOW_BYTES) {
+fn qemu_uart_attach_bootstrap(phase: borrow BootPhase[boot]) !{unsafe} {
+    match qemu_uart_attach_window(phase, QEMU_UART_BOOTSTRAP_BASE, QEMU_UART_WINDOW_BYTES) {
         QemuAttach::Attached => {}
         QemuAttach::Refused => { kernel_invariant_stop(); }
     }
@@ -45,12 +45,13 @@ fn qemu_uart_attach_bootstrap() !{unsafe} {
 
 // A console window: the platform constant above or a DTB reg entry already
 // checked by its reader. The one mint of the UART's registers.
-fn qemu_uart_attach_window(base: usize, bytes: usize) -> QemuAttach !{unsafe} {
+fn qemu_uart_attach_window(phase: borrow BootPhase[boot], base: usize, bytes: usize)
+        -> QemuAttach !{unsafe} {
     let RegionBytes::Assumed(window) = region_bytes_assume(base, bytes) else {};
     match io_handle_attach(&uart, window) {
         IoAttach::TooSmall => { return QemuAttach::Refused; }
         IoAttach::Attached => {
-            uart_base = base;
+            boot_once_set(&uart_base, phase, base);
             return QemuAttach::Attached;
         }
     }
@@ -67,7 +68,8 @@ must_use variant QemuVirtioDtbResult {
     Applied;
 }
 
-let mut qemu_psci_use_hvc: bool = false;
+// GitHub issue #1013: the DTB's PSCI method, read by every CPU_ON.
+let mut qemu_psci_use_hvc: BootOnce(bool);
 
 fn qemu_virtio_apply_boot_dtb(dtb: usize)
         -> QemuVirtioDtbResult !{unsafe} {
@@ -138,7 +140,7 @@ fn qemu_virtio_apply_boot_dtb(dtb: usize)
     return QemuVirtioDtbResult::Invalid;
 }
 
-fn qemu_boot_devices_apply_dtb() -> QemuBootDevicesResult !{unsafe} {
+fn qemu_boot_devices_apply_dtb(phase: borrow BootPhase[boot]) -> QemuBootDevicesResult !{unsafe} {
     let dtb: usize = boot_dtb_address_read();
     match fdt_find_compatible_reg(dtb, bs"arm,pl011") {
         FdtDeviceRegionResult::Invalid => {
@@ -207,7 +209,7 @@ fn qemu_boot_devices_apply_dtb() -> QemuBootDevicesResult !{unsafe} {
                                             return QemuBootDevicesResult::Invalid;
                                         }
                                         FdtPsciMethodResult::Hvc => {
-                                            qemu_psci_use_hvc = true;
+                                            boot_once_set(&qemu_psci_use_hvc, phase, true);
                                         }
                                     }
                                     match qemu_virtio_apply_boot_dtb(dtb) {
@@ -216,17 +218,17 @@ fn qemu_boot_devices_apply_dtb() -> QemuBootDevicesResult !{unsafe} {
                                         }
                                         QemuVirtioDtbResult::Applied => { }
                                     }
-                                    match qemu_uart_attach_window(region.base, region.size) {
+                                    match qemu_uart_attach_window(phase, region.base, region.size) {
                                         QemuAttach::Attached => {}
                                         QemuAttach::Refused => {
                                             return QemuBootDevicesResult::Invalid;
                                         }
                                     }
-                                    qemu_uart_gic_intid =
-                                        interrupt.intid as u32;
+                                    boot_once_set(&qemu_uart_gic_intid, phase,
+                                        interrupt.intid as u32);
                                     qemu_timer_gic_intid =
                                         timer.intid as u32;
-                                    match qemu_gic_attach(gic.distributor.base, gic.distributor.size,
+                                    match qemu_gic_attach(phase, gic.distributor.base, gic.distributor.size,
                                                           gic.cpu_interface.base, gic.cpu_interface.size) {
                                         QemuAttach::Attached => {}
                                         QemuAttach::Refused => {

@@ -1,0 +1,31 @@
+// Figure for docs/wont-compile/0010-boot-configuration-written-after-boot.md
+digraph boot_configuration_written_after_boot {
+  graph [bgcolor="#fffaf0", rankdir=TB, pad=0.35, nodesep=0.55, ranksep=0.9,
+         fontname="Helvetica", fontsize=15, fontcolor="#596078"];
+  node  [fontname="Helvetica", fontsize=15, shape=box, style="rounded,filled",
+         fillcolor="#ffffff", color="#17213f", fontcolor="#17213f",
+         penwidth=2, margin="0.26,0.18"];
+  edge  [fontname="Helvetica", fontsize=13, color="#17213f", penwidth=2,
+         fontcolor="#596078", arrowsize=0.9];
+
+  subgraph cluster_rejected {
+    label="Takibi: rejected at compile time, the token is gone";
+    labelloc="t"; fontname="Helvetica"; fontsize=16; fontcolor="#c9360d";
+    color="#f05a24"; penwidth=2.5; style="rounded,dashed"; margin=18;
+
+    mint  [label="boot_phase_mint()\none BootPhase per boot"];
+    write [label="boot_once_set(&uart_base, phase, ...)\nduring boot"];
+    end   [label="boot_phase_end(phase)\nbefore CPU_ON", fillcolor="#fff3df", color="#f05a24"];
+    late  [label="boot_once_set(&uart_base, phase, ...)\nafter the end", fillcolor="#fff3df", color="#f05a24"];
+
+    mint -> write;
+    write -> end;
+    end -> late [label="  phase consumed"];
+  }
+
+  board [label="On the board\l\lA secondary core or an interrupt handler\lreads a device base another path changed\lafter boot, with no lock and no barrier.\l",
+         fillcolor="#f1f2f6", color="#17213f", fontcolor="#17213f"];
+
+  late -> board [label="  C: a comment says 'set once at boot'", style=dashed,
+                 color="#c9360d", fontcolor="#c9360d", penwidth=2.5];
+}

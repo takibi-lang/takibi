@@ -298,7 +298,6 @@ kernel/mm/process_image.tkb	process_image_root_stale_count	unreviewed; 2026-10-0
 kernel/mm/process_image.tkb	process_image_staging	unreviewed
 kernel/mm/process_image.tkb	process_image_zero_page	unreviewed; 2026-10-06 retain-context: image allocator and CPU-local image operations / pool pins; closed CPU-local operation context; permanent zero page
 kernel/net/socket_capability.tkb	network_capability_store	unreviewed; 2026-10-06 retain-owner: one network RX admission authority / indexed mutex guard and stable_replace linear owner exchange
-kernel/net/tcp.tkb	our_mac	unreviewed; 2026-10-06 retain-pools: shared connection/frame/retransmit allocators and protocol engine / typed pool guards/pins; connection owner; network capabilities; injection controls
 kernel/net/tcp.tkb	pending_tcp_probe_frame	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
 kernel/net/tcp.tkb	pin_sharing_handles	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
 kernel/net/tcp.tkb	pin_sharing_page	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
@@ -324,13 +323,7 @@ kernel/net/tcp.tkb	tcp_retx_pass_busy	unreviewed
 kernel/net/tcp.tkb	tcp_retx_pass_hold_until_recovered	unreviewed
 kernel/net/tcp.tkb	tcp_retx_pass_sent	unreviewed
 kernel/net/tcp.tkb	tcp_split_request_segments	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
-kernel/platform/qemu/device_map.tkb	qemu_psci_use_hvc	unreviewed
-kernel/platform/qemu/intc.tkb	qemu_gicc_base	unreviewed; 2026-10-06 candidate-device-config: QEMU interrupt controller configuration / boot DTB configuration before IRQ enable; shared GIC distributor and local interface
-kernel/platform/qemu/intc.tkb	qemu_gicd_base	unreviewed; 2026-10-06 candidate-device-config: QEMU interrupt controller configuration / boot DTB configuration before IRQ enable; shared GIC distributor and local interface
-kernel/platform/qemu/intc.tkb	qemu_pmu_gic_intid	unreviewed; 2026-10-06 candidate-device-config: QEMU interrupt controller configuration / boot DTB configuration before IRQ enable; shared GIC distributor and local interface
-kernel/platform/qemu/intc.tkb	qemu_uart_gic_intid	unreviewed; 2026-10-06 candidate-device-config: QEMU interrupt controller configuration / boot DTB configuration before IRQ enable; shared GIC distributor and local interface
 kernel/platform/qemu/timer_irq.tkb	qemu_timer_gic_intid	unreviewed; 2026-10-06 candidate-device-config: platform UART/GIC/timer/PSCI configuration / boot DTB writes before IRQ/CPU enable; MMIO consumers and entry ABI
-kernel/platform/qemu/uart.tkb	uart_base	unreviewed; 2026-10-06 candidate-device-config: platform UART/GIC/timer/PSCI configuration / boot DTB writes before IRQ/CPU enable; MMIO consumers and entry ABI
 kernel/platform/rpi5/intc.tkb	mip0	unreviewed
 kernel/platform/rpi5/intc.tkb	rp1_msix	unreviewed
 kernel/platform/rpi5/intc.tkb	rp1_msix_cfg_set	unreviewed

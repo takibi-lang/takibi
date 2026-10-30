@@ -30,21 +30,24 @@ use "kernel/arch/arm64/kernel/gicv2.tkb";
 use "kernel/platform/qemu/irq_source.tkb";
 use "kernel/arch/arm64/kernel/irq_finish.tkb";
 
-let mut qemu_uart_gic_intid: u32 = 33; // bootstrap route until DTB comparison
+// GitHub issue #1013: written once from the boot DTB, read by every
+// interrupt afterwards (kernel/lib/boot_once.tkb).
+let mut qemu_uart_gic_intid: BootOnce(u32);
 // The PMU overflow PPI. QEMU's `virt` machine wires each CPU's
 // "pmu-interrupt" output to PPI 7 (hw/arm/virt.c's VIRTUAL_PMU_IRQ), which
 // is architectural INTID 16 + 7. Like the timer PPI above it is banked
 // per-CPU by the GIC, so it needs no GICD_ITARGETSR write.
 const QEMU_PMU_GIC_INTID: u32 = 23;
-let mut qemu_pmu_gic_intid: u32 = QEMU_PMU_GIC_INTID;
-let mut qemu_gicd_base: usize = 0;
-let mut qemu_gicc_base: usize = 0;
+// Never written: the machine fixes it, so it is a constant (#1013).
+let qemu_pmu_gic_intid: u32 = QEMU_PMU_GIC_INTID;
+let mut qemu_gicd_base: BootOnce(usize);
+let mut qemu_gicc_base: BootOnce(usize);
 
 fn gic_uart_spi_setup() {
     // GitHub issue #830: every core online now (core 0 alone at boot);
     // uart_irq_handled widens it as secondaries come up.
-    uart_irq_route(qemu_uart_gic_intid);
-    gic_intid_enable(qemu_uart_gic_intid);
+    uart_irq_route(boot_once_get(&qemu_uart_gic_intid));
+    gic_intid_enable(boot_once_get(&qemu_uart_gic_intid));
     gicd.ctlr = gicd.ctlr | 1;
 }
 

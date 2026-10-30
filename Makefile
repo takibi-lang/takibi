@@ -492,6 +492,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/lib/peer_round.tkb \
 	kernel/lib/byte_slice.tkb \
 	kernel/lib/diagnostic_ring.tkb \
+	kernel/lib/boot_once.tkb \
 	kernel/lib/init_once.tkb \
 	kernel/lib/locked_cell.tkb \
 	kernel/lib/mutex.tkb \
@@ -598,7 +599,7 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              affine_escape_via_index align_ptr_proof linear_obligation tuple_pair region_proto region_inspection pool_space_replay \
                              field_lease match_int_lit record_loans \
                              callstack ringbuf crc8 djb2 slice slice_from_field logical_eval foreach for loop fizzbuzz fibonacci \
-                             bubblesort lz4 inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report xhci_event_match xhci_regs uart_rx_ring pl011_rx block_cache gem_tx_wait virtio_net_tx virtio_net_reply generic_variant runtime_bounds pin_placement place_array protocol_ring protocol_tx protocol_txrx protocol_snapshot region_held region_table_retire header_overlay cache_geometry wait_status plain_variant variant_abi struct_array_arg struct_array_result preempt_region
+                             bubblesort lz4 inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring boot_once publish fdt number usb_config usb_init_report xhci_event_match xhci_regs uart_rx_ring pl011_rx block_cache gem_tx_wait virtio_net_tx virtio_net_reply generic_variant runtime_bounds pin_placement place_array protocol_ring protocol_tx protocol_txrx protocol_snapshot region_held region_table_retire header_overlay cache_geometry wait_status plain_variant variant_abi struct_array_arg struct_array_result preempt_region
 # GitHub issue #1035: linux_user/ext2_host is a driver program, not a
 # stdout-against-.expected test: scripts/ext2_host.py runs it (image on fd 3,
 # operations on stdin). It is built with the others, outside the loop below.
@@ -754,6 +755,9 @@ $(LINUX_USER_DIR)/spinlock/spinlock_exe.o: LINUX_USER_EXTRA_SRCS := kernel/lib/s
 # cannot be named without its guard. It needs the same stand-ins the pool
 # prototypes take -- spinlock for the exchange, pool_lock_check for the
 # mutex_irq_save/_restore pair a hosted build has no interrupts to mask.
+# GitHub issue #1013: kernel/lib/boot_once.tkb, run natively.
+$(LINUX_USER_DIR)/boot_once/boot_once_exe.o: kernel/lib/boot_once.tkb kernel/lib/atomic_word.tkb kernel/lib/execution_model.tkb
+
 $(LINUX_USER_DIR)/locked_cell/locked_cell_exe.o: kernel/lib/spinlock.tkb kernel/lib/mutex.tkb kernel/lib/task_mutex.tkb kernel/lib/locked_cell.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
 $(LINUX_USER_DIR)/locked_cell/locked_cell_exe.o: LINUX_USER_EXTRA_SRCS := kernel/lib/spinlock.tkb kernel/lib/mutex.tkb kernel/lib/task_mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
 

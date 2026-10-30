@@ -191,6 +191,14 @@ rules globally.
   lifetime, and aliasing as applicable. A string-literal address, a kernel
   memory cast, and an MMIO cast have different rationales and are inventoried
   separately.
+- The boot-phase mint (GitHub issue #1013). `boot_phase_mint`
+  (`kernel/lib/boot_once.tkb`) is `!{unsafe}` and is called once, at the top
+  of each platform's `main` (and of the two QEMU test fixtures that attach
+  the bootstrap console). Every `BootOnce` write borrows the token it
+  returns, and `boot_phase_end` consumes it just before `CPU_ON`, so no
+  write compiles after the end on that path. Trusted: that nothing mints a
+  second phase, and that the secondaries see the boot writes because the
+  boot core's stores precede the PSCI call that starts them.
 - `*io T` supplies volatile access semantics. The register address, width,
   permitted access direction, ordering requirements, and device state still
   come from the platform specification and driver reasoning.

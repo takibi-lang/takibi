@@ -30,6 +30,7 @@ second specification.
 | [0007](0007-cpu-local-index-used-after-preemption-is-enabled.md) | A CPU-local index used after preemption is enabled again | Enforced |
 | [0008](0008-delivery-into-a-preempted-kernel-context.md) | A delivery written into a preempted kernel context | Enforced |
 | [0009](0009-interrupt-only-function-called-with-irqs-open.md) | An interrupt-only function called with IRQs open | Enforced |
+| [0010](0010-boot-configuration-written-after-boot.md) | Boot configuration written after boot | Enforced |
 
 ## Conventions
 

@@ -1,5 +1,7 @@
 // What every platform does before it does anything platform-specific.
 //
+// (Uses kernel/lib/boot_once.tkb: the phase every boot write borrows, #1013.)
+//
 // GitHub issue #517: these eight steps opened `fn main()` in both
 // kernel/platform/qemu/init.tkb and kernel/platform/rpi5/init.tkb,
 // byte-identical. The order is load-bearing and none of it is a platform
@@ -13,11 +15,12 @@
 // to be reset afterwards; running it before the first real line means the
 // evidence a boot leaves is never the probe's.
 use "kernel/printk/log.tkb";
+use "kernel/lib/boot_once.tkb";
 use "kernel/arch/arm64/kernel/cache_geometry.tkb";
 use "kernel/arch/arm64/kernel/cache_geometry_extern.tkb";
 use "kernel/arch/arm64/kernel/user_access_extern.tkb";
 
-fn kernel_boot_prologue() !{logs, unsafe} {
+fn kernel_boot_prologue(phase: borrow BootPhase[boot]) !{logs, unsafe} {
     // First, before anything has had a chance to go deep: fill the unused
     // part of the boot stack with poison so its high-water mark can be
     // measured at the end of the run, exactly as a process stack's is.
@@ -25,7 +28,7 @@ fn kernel_boot_prologue() !{logs, unsafe} {
     // Nothing is standing on the IRQ stack yet, so the whole run can be
     // poisoned outright (issue #378).
     kernel_irq_stack_arm();
-    platform_init();
+    platform_init(phase);
     kernel_log_init();
     let log_bounds_ok: bool = kernel_log_bounds_probe();
     kernel_log_init();
@@ -87,4 +90,15 @@ fn kernel_cache_geometry_require(core: usize) !{logs, unsafe} {
     uart_put_hex(ctr);
     kernel_boot_log("; halting\n");
     while (true) { }
+}
+
+// GitHub issue #1013: kernel/lib/boot_once.tkb's refusal of a read before
+// the boot write. A boot ordering bug, named so the console says which.
+// Reached from interrupt handlers too, so it writes through DDB's spinning
+// FIFO path rather than the logging queue.
+fn boot_once_unwritten_stop() !{unsafe} {
+    ddb_puts("boot once: read before its boot write (#1013) phase=" as *u8);
+    if (boot_phase_is_ended()) { ddb_puts("ended\n" as *u8); }
+    else { ddb_puts("open\n" as *u8); }
+    kernel_invariant_stop();
 }
