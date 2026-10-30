@@ -76,6 +76,10 @@ def main():
                 state = sections(empty)
                 assert state["rx"][0]["queued"] == 0
                 assert not state["terminal"][0]["output_paused"]
+                # The guest is held at reset (-S), so BootOnce's uart_base
+                # (#1013) has no value yet; the seed below supplies the one
+                # the boot attach writes.
+                assert "not yet written" in state["uart"][0].get("status", "")
                 assert not qmp(endpoint, "query-status")["running"]
                 # A collector must release its own dynamic chardev; QEMU
                 # otherwise rejects a subsequent stub as a duplicate yank.
@@ -94,6 +98,7 @@ atomic_value = off('atomicword', 'value')
 put(addr('terminal_output_stop_word') + atomic_value, 1)
 word('terminal_echo_count', 3)
 word('kernel_log_tx_count', 1)
+word('uart_base', 0x09000000)
 put(0x09000038, 1 << 5, 4)
 word('kernel_uart_rx_head', 2)
 word('kernel_uart_rx_tail', 4094)

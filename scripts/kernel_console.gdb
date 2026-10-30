@@ -87,7 +87,11 @@ class TakibiConsole(gdb.Command):
             # Only this QEMU virt PL011 window is safe to inspect. A damaged
             # base must not turn a diagnostic into an arbitrary MMIO read;
             # GIC reads have previously terminated QEMU during debugging.
-            if uart == 0x09000000:
+            # Zero is an unwritten BootOnce cell (#1013): before the boot attach
+            # no window is known, which is a state and not a damaged base.
+            if uart == 0:
+                emit("uart", base=hex(uart), status="unavailable: UART base not yet written")
+            elif uart == 0x09000000:
                 imsc = integer(uart + 0x38, 4)
                 emit("uart", base=hex(uart), imsc=hex(imsc), tx_irq_enabled=bool(imsc & (1 << 5)))
             else:
