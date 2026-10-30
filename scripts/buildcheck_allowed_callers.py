@@ -22,19 +22,10 @@ is not built there: on that table the row allows no caller at all, and the
 removed-call control is skipped. Every caller file must exist in the tree,
 so a rename cannot make a row vacuous on every kernel.
 
-Rows today: kernel_cpu_offset, the user_entry.S helper that reads TPIDR_EL1
-(#638 stage 2; the compiler has no builtin for it, DECISIONS 2026-10-25), and
-process.tkb's scheduled_process_set_exec_inode, the bare-usize store of the
-judged exec inode (#1106; the token cannot cross the user_entry.S return),
-and kernel_ddb_dcache_clean_invalidate, the user_entry.S dc civac helper
-used only by rp1_gem.tkb's DDB RX look (#1095; no compiler builtin,
-DECISIONS 2026-10-25), and the three functions of the device-address
-mint kernel/drivers/dma_address.tkb (virtio_span_address,
-rp1_span_bus_address, dma_span_cpu_address; #1162), whose writers are each
-a reviewed place a device or the DDB look is given a span's address, and
-address_space_root_mint, the maker of an AddressSpaceRoot (#693; moved here
-from a regex over .tkb text under #567, which missed a function-value use).
-Lexically, scripts/check_mpidr_reads.py is the sibling for MPIDR_EL1.
+scripts/allowed_callers.tsv is the list of rows, each with its issue and reason.
+A row holds a named function only: an equivalent loop written inline under
+another name passes (for #771's rebuild, the RECORDED page run allocator line
+and its visit count show that). Lexically, scripts/check_mpidr_reads.py is the sibling for MPIDR_EL1.
 
 Exit code only (0 = pass, 1 = fail).
 """
