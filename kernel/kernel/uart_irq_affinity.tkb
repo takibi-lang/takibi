@@ -139,15 +139,17 @@ fn uart_irq_hang_active_cpu() -> usize {
 // boot. 1 when armed; 0 when refused (a second request, the caller's core,
 // a core number past KERNEL_MAX_CORES, or a spin already pending from the
 // DDB lane's GDB). An offline target never spins; the probe's poll fails.
-private let mut uart_irq_hang_armed_once: bool;
+private let mut uart_irq_hang_armed_once: AtomicWord;
 
 fn uart_irq_hang_arm(target: usize) -> usize {
-    if (uart_irq_hang_armed_once || target == cpu_id() ||
+    if (atomic_word_load(&uart_irq_hang_armed_once) != 0 || target == cpu_id() ||
         target >= KERNEL_MAX_CORES ||
         atomic_word_load(&uart_irq_hang_request) != 0) {
         return 0;
     }
-    uart_irq_hang_armed_once = true;
+    if (atomic_word_swap(&uart_irq_hang_armed_once, 1) != 0) {
+        return 0;
+    }
     atomic_word_store(&uart_irq_hang_request, target + 1);
     return 1;
 }

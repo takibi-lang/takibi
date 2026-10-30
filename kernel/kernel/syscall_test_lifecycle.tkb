@@ -11,13 +11,14 @@
 // ever calls a named, self-contained function, never touches these
 // fields directly.
 //
-// Current limitations (2026-09-26): single-writer, matching
-// kernel/kernel/syscall.tkb's own "NOT SYNCHRONIZED, single-core dispatch
-// only" limitation, except the connected-fixture flag, which listen
-// consumes from any CPU and so is read and written under the process-run
-// lock (GitHub issue #598).
+// Current limitations (2026-10-30): every flag is an AtomicWord, and a
+// one-shot is one swap, so two CPUs take it once (GitHub issues #598, #1012).
+// Nothing orders the words against each other: the child pid is stored after
+// its fork flag, so a checkpoint seeing 0 there takes it as not yet forked.
 
-private let mut syscall_connected_fixture_pending: bool;
+use "kernel/lib/atomic_word.tkb";
+
+private let mut syscall_connected_fixture_pending: AtomicWord;
 // Set only for the persistent terminal demo shell launched (via self-replace
 // exec, see kernel/tests/ext2/init.sh's final line) after the bounded suite
 // has completed. Its direct HTTPd child is a normal daemon even though that
@@ -25,7 +26,7 @@ private let mut syscall_connected_fixture_pending: bool;
 // fixture. Named for the kernel-owned concept it gates -- persistent,
 // unbounded lifecycle vs. the bounded one-shot fixture -- not the payload
 // that happens to run under it.
-private let mut syscall_persistent_shell: bool;
+private let mut syscall_persistent_shell: AtomicWord;
 // Issue #289: lifecycle checkpoints for the persistent-shell scenario, so a
 // kernelcheck-qemu/kernelcheck-rpi5 stall names the last completed boundary
 // instead of a single generic timeout. `_child_pid` is the pending target
@@ -35,16 +36,16 @@ private let mut syscall_persistent_shell: bool;
 // once idiom (kernel/kernel/syscall_test_evidence.tkb). Each checkpoint
 // is its own named function (not inlined) so a QEMU regression can skip one
 // via a GDB breakpoint + `return`, without any dedicated test-only switch.
-private let mut syscall_persistent_shell_child_pid: usize;
-private let mut syscall_persistent_shell_checkpoint_fork_logged: bool;
-private let mut syscall_persistent_shell_checkpoint_selected_logged: bool;
-private let mut syscall_persistent_shell_checkpoint_exec_prepare_logged: bool;
-private let mut syscall_persistent_shell_checkpoint_exec_commit_logged: bool;
+private let mut syscall_persistent_shell_child_pid: AtomicWord;
+private let mut syscall_persistent_shell_checkpoint_fork_logged: AtomicWord;
+private let mut syscall_persistent_shell_checkpoint_selected_logged: AtomicWord;
+private let mut syscall_persistent_shell_checkpoint_exec_prepare_logged: AtomicWord;
+private let mut syscall_persistent_shell_checkpoint_exec_commit_logged: AtomicWord;
 
 // Called from kernel_syscall_process_configure() (syscall.tkb) alongside
 // its other real per-boot resets.
 fn syscall_test_lifecycle_persistent_shell_clear() {
-    syscall_persistent_shell = false;
+    atomic_word_store(&syscall_persistent_shell, 0);
 }
 
 enum ListenerReadyLabel: u8 { ConnectedFixture; Persistent; }
@@ -54,16 +55,12 @@ enum ListenerReadyLabel: u8 { ConnectedFixture; Persistent; }
 // whichever pending flag matches, in the same priority order the original
 // inline if/else-if/else chain used.
 //
-// Under the process-run lock since GitHub issue #598 admitted listen on a
-// peer: two listens on two CPUs must not both consume the one pending flag.
+// One swap since GitHub issue #1012 (the process-run lock since #598 admitted
+// listen on a peer): two listens on two CPUs must not both consume the flag.
 fn syscall_test_lifecycle_listener_ready_label() -> ListenerReadyLabel {
-    let guard = process_run_lock();
-    if (syscall_connected_fixture_pending) {
-        syscall_connected_fixture_pending = false;
-        process_run_unlock(guard);
+    if (atomic_word_swap(&syscall_connected_fixture_pending, 0) != 0) {
         return ListenerReadyLabel::ConnectedFixture;
     }
-    process_run_unlock(guard);
     return ListenerReadyLabel::Persistent;
 }
 
@@ -74,19 +71,15 @@ fn syscall_test_lifecycle_listener_ready_label() -> ListenerReadyLabel {
 // rule stays here, beside the flag it retires. An interactive boot runs no
 // fixture, so its first listen is httpd's and must read as persistent.
 fn syscall_test_lifecycle_extras_exec() {
-    let guard = process_run_lock();
-    syscall_connected_fixture_pending = false;
-    process_run_unlock(guard);
+    atomic_word_store(&syscall_connected_fixture_pending, 0);
 }
 
 fn kernel_syscall_connected_fixture_start() {
-    let guard = process_run_lock();
-    syscall_connected_fixture_pending = true;
-    process_run_unlock(guard);
+    atomic_word_store(&syscall_connected_fixture_pending, 1);
 }
 
 fn kernel_syscall_persistent_shell_start() {
-    syscall_persistent_shell = true;
+    atomic_word_store(&syscall_persistent_shell, 1);
     // The "shell blocked on the UART" marker is a one-shot latch, and the
     // bounded phase's own interactive ash already spent it. Re-arming it
     // here is what makes the persistent shell's block announce itself --
@@ -97,15 +90,14 @@ fn kernel_syscall_persistent_shell_start() {
 }
 
 fn kernel_syscall_persistent_shell_active() -> bool {
-    return syscall_persistent_shell;
+    return atomic_word_load(&syscall_persistent_shell) != 0;
 }
 
 // noinline (all four checkpoints below): each is a real, addressable call
 // site with a durable debugger-facing frame contract for postmortem work.
 noinline fn kernel_syscall_persistent_shell_checkpoint_fork(pid: usize) {
-    if (syscall_persistent_shell_checkpoint_fork_logged) { return; }
-    syscall_persistent_shell_checkpoint_fork_logged = true;
-    syscall_persistent_shell_child_pid = pid;
+    if (atomic_word_swap(&syscall_persistent_shell_checkpoint_fork_logged, 1) != 0) { return; }
+    atomic_word_store(&syscall_persistent_shell_child_pid, pid);
     kernel_boot_log("persistent shell: fork child pid=");
     uart_put_udec(pid);
     kernel_boot_log("\n");
@@ -116,16 +108,19 @@ noinline fn kernel_syscall_persistent_shell_checkpoint_fork(pid: usize) {
 // cleared on the very first match) is dispatched into a syscall of its own,
 // proving the scheduler actually resumed it rather than merely creating it.
 noinline fn kernel_syscall_persistent_shell_checkpoint_selected() {
-    if (syscall_persistent_shell_child_pid == 0 ||
-        syscall_persistent_shell_checkpoint_selected_logged) {
+    let child_pid: usize = atomic_word_load(&syscall_persistent_shell_child_pid);
+    if (child_pid == 0 ||
+        atomic_word_load(&syscall_persistent_shell_checkpoint_selected_logged) != 0) {
         return;
     }
-    if (kernel_process_current_pid() != syscall_persistent_shell_child_pid) {
+    if (kernel_process_current_pid() != child_pid) {
         return;
     }
-    syscall_persistent_shell_checkpoint_selected_logged = true;
+    if (atomic_word_swap(&syscall_persistent_shell_checkpoint_selected_logged, 1) != 0) {
+        return;
+    }
     kernel_boot_log("persistent shell: child selected pid=");
-    uart_put_udec(syscall_persistent_shell_child_pid);
+    uart_put_udec(child_pid);
     kernel_boot_log("\n");
 }
 
@@ -135,22 +130,20 @@ noinline fn kernel_syscall_persistent_shell_checkpoint_selected() {
 // it) and any later applet it runs would otherwise also match, well before
 // or after the boundary this checkpoint actually means.
 noinline fn kernel_syscall_persistent_shell_checkpoint_exec_prepare(pid: usize) {
-    if (pid != syscall_persistent_shell_child_pid ||
-        syscall_persistent_shell_checkpoint_exec_prepare_logged) {
+    if (pid != atomic_word_load(&syscall_persistent_shell_child_pid) ||
+        atomic_word_swap(&syscall_persistent_shell_checkpoint_exec_prepare_logged, 1) != 0) {
         return;
     }
-    syscall_persistent_shell_checkpoint_exec_prepare_logged = true;
     kernel_boot_log("persistent shell: exec prepare pid=");
     uart_put_udec(pid);
     kernel_boot_log("\n");
 }
 
 noinline fn kernel_syscall_persistent_shell_checkpoint_exec_commit(pid: usize) {
-    if (pid != syscall_persistent_shell_child_pid ||
-        syscall_persistent_shell_checkpoint_exec_commit_logged) {
+    if (pid != atomic_word_load(&syscall_persistent_shell_child_pid) ||
+        atomic_word_swap(&syscall_persistent_shell_checkpoint_exec_commit_logged, 1) != 0) {
         return;
     }
-    syscall_persistent_shell_checkpoint_exec_commit_logged = true;
     kernel_boot_log("persistent shell: exec commit pid=");
     uart_put_udec(pid);
     kernel_boot_log("\n");

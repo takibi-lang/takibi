@@ -1105,7 +1105,7 @@ fn kernel_init_script_socket_evidence() {
     }
     // GitHub issue #740 step 2: a socket segment was queued for
     // retransmission from the driver's kept buffer, not a copy.
-    if (tcp_kept_segments > 0) {
+    if (atomic_word_load(&tcp_kept_segments) > 0) {
         kernel_boot_log("linux socket retransmit queue: a sent segment kept in its driver buffer ok\n");
     }
 }

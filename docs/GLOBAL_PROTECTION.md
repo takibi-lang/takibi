@@ -151,3 +151,11 @@ by a source scan with different edges).
   compare-and-swap), the terminal-write wait and sleep counts (no longer taking
   the console lock), the dropped-echo count, and the missing-backing count,
   whose per-core array and `cpu_id()` go. 374 -> 361 unprotected.
+- 2026-10-30: seventeen fixture hooks and one-shots to `AtomicWord`, two removed.
+  TCP's injected-drop arms, their recovery markers, the retransmit-pass hold and
+  the kept-segment count; the persistent-shell checkpoints and the
+  connected-fixture label (one swap, no process-run lock); the UART hang arm. A
+  drop is taken by one swap or compare-and-swap, so two cores do not both spend
+  it, and a data segment's index is stored plus 1, so the zeroed word is
+  disarmed. `tcp_ack_each_stream_segment`, which nothing ever set, goes with
+  `tcp_split_request_segments` and its two branches. 361 -> 342 unprotected.

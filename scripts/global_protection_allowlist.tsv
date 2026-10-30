@@ -221,16 +221,8 @@ kernel/kernel/signal_contention_evidence.tkb	signal_probe_record	unreviewed; 202
 kernel/kernel/syscall.tkb	syscall_filesystem	unreviewed; 2026-10-06 retain-context: filesystem service and CPU-local action scratch / boot-published filesystem; non-preemptible local scratch; stable argv owner exchange
 kernel/kernel/syscall.tkb	syscall_scratch	unreviewed; 2026-10-06 retain-context: filesystem service and CPU-local action scratch / boot-published filesystem; non-preemptible local scratch; stable argv owner exchange
 kernel/kernel/syscall_test_evidence.tkb	syscall_test_evidence	unreviewed; 2026-10-06 retain-evidence: boot syscall evidence / accessor functions on existing dispatch/report paths
-kernel/kernel/syscall_test_lifecycle.tkb	syscall_connected_fixture_pending	unreviewed; 2026-10-06 candidate-fixture: bounded/persistent shell fixture / connected flag under run lock; remaining named fixture checkpoints/boot admission
-kernel/kernel/syscall_test_lifecycle.tkb	syscall_persistent_shell	unreviewed; 2026-10-06 candidate-fixture: bounded/persistent shell fixture / connected flag under run lock; remaining named fixture checkpoints/boot admission
-kernel/kernel/syscall_test_lifecycle.tkb	syscall_persistent_shell_checkpoint_exec_commit_logged	unreviewed; 2026-10-06 candidate-fixture: bounded/persistent shell fixture / connected flag under run lock; remaining named fixture checkpoints/boot admission
-kernel/kernel/syscall_test_lifecycle.tkb	syscall_persistent_shell_checkpoint_exec_prepare_logged	unreviewed; 2026-10-06 candidate-fixture: bounded/persistent shell fixture / connected flag under run lock; remaining named fixture checkpoints/boot admission
-kernel/kernel/syscall_test_lifecycle.tkb	syscall_persistent_shell_checkpoint_fork_logged	unreviewed; 2026-10-06 candidate-fixture: bounded/persistent shell fixture / connected flag under run lock; remaining named fixture checkpoints/boot admission
-kernel/kernel/syscall_test_lifecycle.tkb	syscall_persistent_shell_checkpoint_selected_logged	unreviewed; 2026-10-06 candidate-fixture: bounded/persistent shell fixture / connected flag under run lock; remaining named fixture checkpoints/boot admission
-kernel/kernel/syscall_test_lifecycle.tkb	syscall_persistent_shell_child_pid	unreviewed; 2026-10-06 candidate-fixture: bounded/persistent shell fixture / connected flag under run lock; remaining named fixture checkpoints/boot admission
 kernel/kernel/tcp_connection_contention_evidence.tkb	tcp_pool_cost_mailboxes	unreviewed; 2026-10-06 retain-fixture: named tcp_connection_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
 kernel/kernel/tcp_connection_contention_evidence.tkb	tcp_pool_cost_samples	unreviewed; 2026-10-06 retain-fixture: named tcp_connection_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
-kernel/kernel/uart_irq_affinity.tkb	uart_irq_hang_armed_once	unreviewed
 kernel/kernel/workload_evidence.tkb	move_cost_lost	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
 kernel/kernel/workload_evidence.tkb	move_cost_records	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
 kernel/kernel/workload_evidence.tkb	move_cost_reported	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
@@ -273,18 +265,7 @@ kernel/net/socket_capability.tkb	network_capability_store	unreviewed; 2026-10-06
 kernel/net/tcp.tkb	pending_tcp_probe_frame	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
 kernel/net/tcp.tkb	pin_sharing_handles	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
 kernel/net/tcp.tkb	pin_sharing_page	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
-kernel/net/tcp.tkb	tcp_ack_each_stream_segment	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
 kernel/net/tcp.tkb	tcp_advertised_window	unreviewed; 2026-10-06 retain-pools: shared connection/frame/retransmit allocators and protocol engine / typed pool guards/pins; connection owner; network capabilities; injection controls
-kernel/net/tcp.tkb	tcp_drop_data_segment_index	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
-kernel/net/tcp.tkb	tcp_drop_data_segment_rearm	unreviewed
-kernel/net/tcp.tkb	tcp_drop_next_fin	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
-kernel/net/tcp.tkb	tcp_drop_next_syn_ack	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
-kernel/net/tcp.tkb	tcp_injected_data_recovery_observed	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
-kernel/net/tcp.tkb	tcp_injected_data_retransmitted	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
-kernel/net/tcp.tkb	tcp_injected_syn_pending	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
-kernel/net/tcp.tkb	tcp_kept_segments	unreviewed
-kernel/net/tcp.tkb	tcp_retx_pass_hold_until_recovered	unreviewed
-kernel/net/tcp.tkb	tcp_split_request_segments	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
 kernel/platform/rpi5/intc.tkb	mip0	unreviewed
 kernel/platform/rpi5/intc.tkb	rp1_msix	unreviewed
 kernel/platform/rpi5/intc.tkb	rp1_msix_cfg_set	unreviewed

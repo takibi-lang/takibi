@@ -444,8 +444,8 @@ private fn tcp_absent_fallback_note() {
 let mut tcp_completed_handshakes: AtomicWord;
 let mut tcp_completed_echoes: AtomicWord;
 let mut tcp_completed_closes: AtomicWord;
-let mut tcp_drop_next_syn_ack: bool = false;
-let mut tcp_injected_syn_pending: bool = false;
+let mut tcp_drop_next_syn_ack: AtomicWord;
+let mut tcp_injected_syn_pending: AtomicWord;
 // GitHub issue #180: a single write() (up to TCP_MAX_PAYLOAD) used to be
 // the only unit of retransmission tracking (one pending slot).
 // Consecutive write()s on one connection -- exactly what
@@ -557,25 +557,25 @@ private let mut tcp_retx_chain: RetxChain;
 // entry through it rather than by a (slot, generation) lookup.
 private let mut tcp_retx_pool: RegionPool(RetxEntry);
 
-let mut tcp_drop_data_segment_index: i32 = -1;
+// The data segment to drop, as its index plus 1 (0: none), so the zeroed word
+// is disarmed.
+let mut tcp_drop_data_segment_index: AtomicWord;
 // GitHub issue #846: a second index, armed once the first drop fires, so
-// one boot can drop two segments (-1: none).
-let mut tcp_drop_data_segment_rearm: i32 = -1;
+// one boot can drop two segments (index plus 1; 0: none).
+let mut tcp_drop_data_segment_rearm: AtomicWord;
 // GitHub issue #740 step 2: segments queued from a kept driver buffer
 // rather than a copy, for the boot evidence that the path ran.
-let mut tcp_kept_segments: usize = 0;
+let mut tcp_kept_segments: AtomicWord;
 // GitHub issue #846: a test hold. While set, the stack-wide pass does
 // nothing until the first injected data drop has been recovered, so the
 // #842 fixture still proves that a blocked read resends its own
 // connection's segment; the pass would otherwise resend it first and hide
 // a regression there. Never set outside the boot fixture.
-let mut tcp_retx_pass_hold_until_recovered: bool = false;
-let mut tcp_injected_data_retransmitted: bool = false;
-let mut tcp_injected_data_recovery_observed: bool = false;
-let mut tcp_drop_next_fin: bool = false;
+let mut tcp_retx_pass_hold_until_recovered: AtomicWord;
+let mut tcp_injected_data_retransmitted: AtomicWord;
+let mut tcp_injected_data_recovery_observed: AtomicWord;
+let mut tcp_drop_next_fin: AtomicWord;
 let mut tcp_advertised_window: u16 = 65535;
-let mut tcp_ack_each_stream_segment: bool = false;
-let mut tcp_split_request_segments: usize = 0;
 
 must_use variant KernelTcpResult {
     TimedOut(NetRxCanAcquire);
@@ -1730,38 +1730,46 @@ fn kernel_tcp_clear_injection_markers() !{unsafe} {
 }
 
 fn kernel_tcp_inject_drop_data_segment(index: usize) !{unsafe} {
-    tcp_drop_data_segment_index = index as i32;
-    tcp_drop_data_segment_rearm = -1;
+    atomic_word_store(&tcp_drop_data_segment_index, index + 1);
+    atomic_word_store(&tcp_drop_data_segment_rearm, 0);
     kernel_tcp_clear_injection_markers();
-    tcp_injected_data_retransmitted = false;
-    tcp_injected_data_recovery_observed = false;
+    atomic_word_store(&tcp_injected_data_retransmitted, 0);
+    atomic_word_store(&tcp_injected_data_recovery_observed, 0);
+}
+
+// Takes the armed drop if it names this segment, so two cores sending their
+// connections' segment `index` at once drop only one of them.
+private fn tcp_drop_data_segment_claim(index: usize) -> bool {
+    match atomic_word_compare_swap(&tcp_drop_data_segment_index, index + 1, 0) {
+        CasResult::Swapped => { return true; }
+        CasResult::Observed(_) => { return false; }
+    }
 }
 
 // GitHub issue #846: after the armed drop fires, drop data segment `index`
 // of whichever connection sends one next.
 fn kernel_tcp_inject_drop_data_segment_again(index: usize) {
-    tcp_drop_data_segment_rearm = index as i32;
+    atomic_word_store(&tcp_drop_data_segment_rearm, index + 1);
 }
 
 // GitHub issue #846: hold the stack-wide pass off until the armed drop's
 // recovery has been observed (see tcp_retx_pass_hold_until_recovered).
 fn kernel_tcp_hold_retransmit_pass_until_recovered() {
-    tcp_retx_pass_hold_until_recovered = true;
+    atomic_word_store(&tcp_retx_pass_hold_until_recovered, 1);
 }
 
 fn tcp_retx_pass_held() -> bool {
-    return tcp_retx_pass_hold_until_recovered &&
-           tcp_injected_data_recovery_observed == false;
+    return atomic_word_load(&tcp_retx_pass_hold_until_recovered) != 0 &&
+           atomic_word_load(&tcp_injected_data_recovery_observed) == 0;
 }
 
 fn kernel_tcp_inject_drop_next_fin() !{unsafe} {
-    tcp_drop_next_fin = true;
+    atomic_word_store(&tcp_drop_next_fin, 1);
     kernel_tcp_clear_injection_markers();
 }
 
 fn kernel_tcp_restore_stream_policy() {
     tcp_advertised_window = 65535;
-    tcp_ack_each_stream_segment = false;
 }
 
 fn retx_lock(m: *TaskMutex @ address) -> RetxGuard[address]
@@ -2354,8 +2362,8 @@ fn pending_tcp_ack_frame(held: borrow NetPacket[pb, po], conn: borrow &mut TcpCo
                     // kernel_tcp_injected_syn_ack_recovered()
                     // already had.
                     if (region_slot_address(parked) == conn.injected_data_entry &&
-                        tcp_injected_data_retransmitted) {
-                        tcp_injected_data_recovery_observed = true;
+                        atomic_word_load(&tcp_injected_data_retransmitted) != 0) {
+                        atomic_word_store(&tcp_injected_data_recovery_observed, 1);
                     }
                     acked = true;
                 }
@@ -2450,7 +2458,7 @@ fn retx_entry_service(conn: borrow &mut TcpConnection,
             ready, frame_bytes[0..<1514], length as i32);
     }
     if (region_slot_address(parked) == conn.injected_data_entry) {
-        tcp_injected_data_retransmitted = true;
+        atomic_word_store(&tcp_injected_data_retransmitted, 1);
     }
     return RetxEntryService::Sent(ready);
 }
@@ -3296,12 +3304,11 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection_pool, conn
                                     build_syn_ack(conn, frame, header.ihl);
                                     slice_copy(stream_frames[0..<54],
                                                frame[0..<54]);
-                                    if (tcp_drop_next_syn_ack) {
-                                        tcp_drop_next_syn_ack = false;
-                                        tcp_injected_syn_pending = true;
+                                    if (atomic_word_swap(&tcp_drop_next_syn_ack, 0) != 0) {
+                                        atomic_word_store(&tcp_injected_syn_pending, 1);
                                         plan = TcpRxPlan::ProtocolDrop;
                                     } else {
-                                        tcp_injected_syn_pending = false;
+                                        atomic_word_store(&tcp_injected_syn_pending, 0);
                                         plan = TcpRxPlan::Send(
                                             14 + (header.ihl as i32) + 20);
                                     }
@@ -3318,7 +3325,7 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection_pool, conn
                                     (header.flags & TCP_FLAG_RST) != 0) {
                                     handled_current = true;
                                     conn.state = ConnState::Listen;
-                                    tcp_injected_syn_pending = false;
+                                    atomic_word_store(&tcp_injected_syn_pending, 0);
                                 } else if (
                                     conn.state == ConnState::SynRcvd &&
                                     header.src_port == conn.remote_port &&
@@ -3426,11 +3433,10 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection_pool, conn
             // this from a single race into "must lose 20 times running"
             // -- see the kernel-tcp-retry-timing memory for the earlier,
             // narrower retry_ticks widening this builds on.
-            if (tcp_injected_syn_pending) {
-                tcp_drop_next_syn_ack = true;
+            if (atomic_word_swap(&tcp_injected_syn_pending, 0) != 0) {
+                atomic_word_store(&tcp_drop_next_syn_ack, 1);
             }
             conn.state = ConnState::Listen;
-            tcp_injected_syn_pending = false;
         }
     tcp_connection_frame_unhold(owner, TcpFrameRole::Tx, tx);
     conn.accept_syn_ack_sent_at = syn_ack_sent_at;
@@ -3669,14 +3675,6 @@ fn tcp_route_received_segment(current_address: usize,
                                         }
                                     }
                                 }
-                                if (tcp_ack_each_stream_segment) {
-                                    tcp_split_request_segments =
-                                        tcp_split_request_segments + 1;
-                                    build_receive_ack(
-                                        target, frame, header.ihl);
-                                    tcp_connection_put(target_owner);
-                                    return TcpReceiveRouteResult::Ack;
-                                }
                                 tcp_connection_put(target_owner);
                                 return TcpReceiveRouteResult::Routed;
                             }
@@ -3823,14 +3821,6 @@ fn kernel_tcp_receive_once(owner: borrow TcpConnectionOwner[connection_pool, con
                             net_rx_send_reply(
                                 net_rx_reply_ready(acquired, 54)));
                     }
-                    if (tcp_ack_each_stream_segment) {
-                        tcp_split_request_segments =
-                            tcp_split_request_segments + 1;
-                        build_receive_ack(conn, frame, 20);
-                        return KernelTcpReceiveResult::Received(
-                            net_rx_send_reply(
-                                net_rx_reply_ready(acquired, 54)));
-                    }
                     // Delayed ACK: release RX immediately so the next
                     // in-order segment can be accepted and the cumulative
                     // ACK can ride on userspace output.
@@ -3936,7 +3926,7 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection_pool, co
         let this_index: usize = conn.data_segment_counter;
         conn.data_segment_counter =
             conn.data_segment_counter + 1;
-        if (this_index as i32 == tcp_drop_data_segment_index) {
+        if (tcp_drop_data_segment_claim(this_index)) {
             let this_entry: usize = pending_tcp_record(serviced,
                 owner, PendingTcpKind::Data, frame_bytes, frame_length,
                 NET_KEPT_NONE);
@@ -3955,13 +3945,15 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection_pool, co
                 // recovery-observed flag, both come from
                 // pending_tcp_service_once's real timeout+peer-ack path,
                 // the same one every other segment uses.
-                tcp_drop_data_segment_index = tcp_drop_data_segment_rearm;
-                tcp_drop_data_segment_rearm = -1;
+                atomic_word_store(&tcp_drop_data_segment_index,
+                    atomic_word_swap(&tcp_drop_data_segment_rearm, 0));
                 conn.injected_data_entry = this_entry;
                 tcp_connection_frame_unhold(owner, TcpFrameRole::Tx,
                                             tx);
                 return KernelTcpSendResult::Sent(serviced);
             }
+            // Nothing tracks it, so the drop stays armed for a later attempt.
+            atomic_word_store(&tcp_drop_data_segment_index, this_index + 1);
             let sent = net_transmit_ready(serviced, frame_bytes, frame_length as i32);
             tcp_connection_frame_unhold(owner, TcpFrameRole::Tx, tx);
             return KernelTcpSendResult::Sent(sent);
@@ -3986,7 +3978,7 @@ fn tcp_send_and_record(owner: borrow TcpConnectionOwner[connection_pool, connect
     let slot: usize = net_tx_keep_slot();
     match net_transmit_keep(ready, slot, frame, frame_length as i32) {
         NetTxKeep::Kept(after) => {
-            tcp_kept_segments = tcp_kept_segments + 1;
+            atomic_word_fetch_add(&tcp_kept_segments, 1);
             pending_tcp_record(after, owner, kind, frame, frame_length, slot);
             return after;
         }
@@ -4058,7 +4050,7 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection_pool, con
     tcp_hdr.urgent = 0;
     fix_tcp_checksum(ip, tcp);
     conn.snd_nxt = conn.snd_nxt + 1;
-    if (tcp_drop_next_fin) {
+    if (atomic_word_swap(&tcp_drop_next_fin, 0) != 0) {
         let fin_entry: usize = pending_tcp_record(ready,
                 owner, PendingTcpKind::Fin, frame, 54, NET_KEPT_NONE);
         // GitHub issue #295: same reasoning as the Data-segment send site
@@ -4066,9 +4058,8 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection_pool, con
         // deliberate-drop injection must not arm (that would skip the
         // only transmission this FIN would ever get). Falls through to
         // the real send instead.
-        if (fin_entry != 0) {
-            tcp_drop_next_fin = false;
-        } else {
+        if (fin_entry == 0) {
+            atomic_word_store(&tcp_drop_next_fin, 1);
             ready = net_transmit_ready(ready, frame, 54);
         }
     } else {
