@@ -15,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 from await_timing import AwaitTiming  # noqa: E402
+from buildcheck_kernel_memory_map import fdt_expected_pages_for  # noqa: E402
 from qemu_vcpu_lease import QEMU, lease  # noqa: E402
 
 # Each boot's wait for its memory line: a fixed budget from QEMU launch, or
@@ -24,31 +25,24 @@ OBSERVE_TIMEOUT_SECONDS = 10.0
 LABEL = "kernel/qemu fdt-multibank"
 
 
-MULTIBANK_EXPECTED = (
-    b"memory: source=dtb base_bytes=1073741824 detected_mib=1024 "
-    b"regions=1 reservations=0 allocator_pages=261592")
-# The page count is what is left after every statically laid-out kernel
-# region, so it moves whenever the image or the linker script does -- which
-# is the point of asserting it exactly rather than as a range. It went
-# 31904 -> 31888 for GitHub issue #477, exactly the 16 pages (64 KiB) that
-# the second core's own IRQ and overflow stacks cost after the allocator was
-# changed to size its runtime inventory from the boot DTB. Enabling kernel
-# frame pointers later grew the linked QEMU image by 8 pages (32 KiB), moving
-# this count and the topology variants below down by 8. The deterministic
-# contention probes later crossed the next stack-group alignment boundary,
-# moving them down by another 8 pages. Reserving boot and per-core stacks
-# for cores 2 and 3 as well as core 1 then moved them down by 48 pages
-# (192 KiB): two 32 KiB boot stacks and two 64 KiB per-core groups.
-# The DDB waker snapshot and its bounded network inspection later crossed the
-# next 32 KiB alignment granule, moving these QEMU counts down by 8 pages.
-# #1241 code growth on top of #1012 slice 4 crossed the next granule: 8 more.
-LOW_MEMORY_EXPECTED = (
-    b"memory: source=dtb base_bytes=1073741824 detected_mib=128 "
-    b"regions=1 reservations=0 allocator_pages=32216")
+# Hand-written inventory of each boot; the page count is rendered from the
+# linked image the lane boots, because it is what is left after every
+# statically laid-out kernel region and moves whenever the image does. The
+# count is still asserted exactly, and the line terminator keeps a count with
+# an extra digit from matching: the kernel computes its count from the DTB at
+# run time, and this one comes from the linker symbol and the RAM layout.
+MEMORY_LINES = {
+    "MULTIBANK_EXPECTED":
+        b"memory: source=dtb base_bytes=1073741824 detected_mib=1024 "
+        b"regions=1 reservations=0",
+    "LOW_MEMORY_EXPECTED":
+        b"memory: source=dtb base_bytes=1073741824 detected_mib=128 "
+        b"regions=1 reservations=0",
+    "DISCONTIGUOUS_MEMORY_EXPECTED":
+        b"memory: source=dtb base_bytes=1073741824 detected_mib=768 "
+        b"regions=2 reservations=0",
+}
 MISSING_EXPECTED = b"memory: boot DTB has no usable /memory; halting"
-DISCONTIGUOUS_MEMORY_EXPECTED = (
-    b"memory: source=dtb base_bytes=1073741824 detected_mib=768 "
-    b"regions=2 reservations=0 allocator_pages=196056")
 DISCONTIGUOUS_PROBE_EXPECTED = (
     b"memory: physical hole excluded and both extent boundaries round-trip")
 # GitHub issue #1227/#1245: with a /chosen seed the ISN key comes from it and
@@ -57,6 +51,12 @@ SEED_KEY_LINE = b"tcp isn: key from the boot DTB's /chosen seed"
 SEED_LIST_LINE = b"security floor: /proc lists none"
 NO_SEED_WARNING = b"WARNING security floor: degraded tcp-isn-key"
 NO_SEED_LIST_LINE = b"security floor: /proc lists tcp-isn-key degraded"
+
+
+def rendered_memory_lines(kernel: Path) -> dict[str, bytes]:
+    pages = fdt_expected_pages_for(kernel)
+    return {name: b"%s allocator_pages=%d\n" % (line, pages[name])
+            for name, line in MEMORY_LINES.items()}
 
 
 def make_discontiguous(blob: bytes) -> bytes:
@@ -206,6 +206,8 @@ def main() -> int:
                                     str(repo / "_build"))) / "kernel-fdt-multibank-qemu"
     artifacts.mkdir(parents=True, exist_ok=True)
 
+    lines = rendered_memory_lines(kernel)
+
     def timing(boot: str) -> str:
         return str(artifacts / f"await-{boot}.jsonl")
 
@@ -224,12 +226,12 @@ def main() -> int:
         "-serial", "stdio",
         "-kernel", str(kernel),
     ]
-    found, transcript = observe(command, MULTIBANK_EXPECTED,
+    found, transcript = observe(command, lines["MULTIBANK_EXPECTED"],
                                timing("multibank"), "multi-bank memory line")
     if not found:
         sys.stderr.buffer.write(transcript)
-        print("FAIL kernel/qemu FDT multi-bank: expected memory line absent",
-              file=sys.stderr)
+        print("FAIL kernel/qemu FDT multi-bank: expected memory line absent: "
+              f"{lines['MULTIBANK_EXPECTED']!r}", file=sys.stderr)
         return 1
     print("PASS kernel/qemu FDT multi-bank: two adjacent NUMA nodes normalized to one 1024 MiB region")
 
@@ -278,10 +280,10 @@ def main() -> int:
         found, transcript = observe_patched_dtb(
             discontiguous_command, dtb, DISCONTIGUOUS_PROBE_EXPECTED,
             timing("physical-hole"), "physical-hole allocator probe")
-        if not found or DISCONTIGUOUS_MEMORY_EXPECTED not in transcript:
+        if not found or lines["DISCONTIGUOUS_MEMORY_EXPECTED"] not in transcript:
             sys.stderr.buffer.write(transcript)
-            print("FAIL kernel/qemu FDT physical-hole allocator probe",
-                  file=sys.stderr)
+            print("FAIL kernel/qemu FDT physical-hole allocator probe; expected: "
+                  f"{lines['DISCONTIGUOUS_MEMORY_EXPECTED']!r}", file=sys.stderr)
             return 1
     print("PASS kernel/qemu FDT physical hole: two extents, excluded hole, and boundary round-trips")
 
@@ -296,14 +298,14 @@ def main() -> int:
         "-serial", "stdio",
         "-kernel", str(kernel),
     ]
-    found, transcript = observe(low_memory_command, LOW_MEMORY_EXPECTED,
+    found, transcript = observe(low_memory_command, lines["LOW_MEMORY_EXPECTED"],
                                timing("low-memory"), "low-memory sizing line")
     if not found:
         sys.stderr.buffer.write(transcript)
-        print("FAIL kernel/qemu FDT allocator sizing: expected memory line absent",
-              file=sys.stderr)
+        print("FAIL kernel/qemu FDT allocator sizing: expected memory line absent: "
+              f"{lines['LOW_MEMORY_EXPECTED']!r}", file=sys.stderr)
         return 1
-    print("PASS kernel/qemu FDT allocator sizing: 128 MiB DTB supplies 31856 pages")
+    print("PASS kernel/qemu FDT allocator sizing: 128 MiB DTB supplies the rendered page count")
 
     with tempfile.TemporaryDirectory(prefix="takibi-fdt-") as directory:
         dtb = Path(directory) / "virt.dtb"

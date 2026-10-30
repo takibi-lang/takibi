@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Fail the build when kernel/MEMORY_MAP.md and the build disagree.
 
-Run with --qemu-boot-expected ELF to render the maintained QEMU boot
-expectation with allocator capacity derived from that linked image.
+Run with --qemu-boot-expected ELF or --rpi5-boot-expected ELF to render that
+platform's boot expectation with allocator capacity derived from the linked
+image. kernel/tests/check_fdt_multibank_qemu.py imports fdt_expected_pages_for
+for the same derivation, so no allocator page count is kept by hand.
 
 Run with --update to rewrite the ELF-symbol rows from the current build
 instead of failing. That is the maintenance action after a change that
@@ -66,12 +68,15 @@ ELFS = {
     "QEMU": REPO / "kernel" / "build" / "qemu" / "kernel.elf",
 }
 QEMU_DEBUG_ELF = REPO / "kernel" / "build" / "qemu" / "kernel-debug.elf"
+QEMU_RAM_BASE = 0x40000000
 QEMU_RAM_END = 0x80000000
 QEMU_LOW_RAM_END = 0x48000000
 QEMU_HOLE_FIRST_END = 0x50000000
 QEMU_HOLE_SECOND_START = 0x60000000
 # The maintained board's firmware DTB leaves ordinary RAM below this address.
-# A firmware/DTB change should fail here and require an explicit fixture audit.
+# A firmware/DTB change fails the rendered boot view on the board and requires
+# an explicit audit of this value.
+RPI5_MANAGED_RAM_BASE = 0x80000
 RPI5_MANAGED_RAM_END = 0x3FC00000
 PAGE_SIZE = 4096
 # Every stack in this kernel is the upper half of a 32768-byte region aligned
@@ -415,46 +420,36 @@ def check_consts(text, problems):
                 f"{unbacktick(cells[2])} says {actual}")
 
 
-def expected_boot_pages(path):
-    text = path.read_text()
-    matches = re.findall(r"^memory: .* allocator_pages=(\d+)$",
-                         text, re.MULTILINE)
-    if len(matches) != 1:
-        fail(f"{path.relative_to(REPO)} must contain exactly one memory line "
-             "with allocator_pages")
-    return int(matches[0])
+def linked_usable_ram_start(elf, floor, platform):
+    start = nm_symbols(elf).get("usable_ram_start")
+    if start is None:
+        fail(f"usable_ram_start is absent from {elf}")
+    if start < floor:
+        fail(f"{elf}: usable_ram_start is outside {platform} RAM")
+    return start
 
 
-def render_qemu_boot_expected(elf):
+def render_boot_expected(platform_dir, elf, floor, end, platform):
     """Keep the hand-written inventory; derive only the linked capacity."""
-    path = REPO / "kernel/tests/qemu/views/boot.expected"
+    path = REPO / "kernel/tests" / platform_dir / "views/boot.expected"
     text = path.read_text(encoding="ascii")
     token = "<allocator_pages>"
     memory = re.findall(r"^memory: .* allocator_pages=(.*)$", text, re.MULTILINE)
     if memory != [token] or text.count(token) != 1:
         fail(f"{path.relative_to(REPO)} must contain exactly one memory line "
              f"ending in allocator_pages={token}")
-    start = nm_symbols(elf).get("usable_ram_start")
-    if start is None:
-        fail(f"usable_ram_start is absent from {elf}")
-    if start < 0x40000000:
-        fail(f"{elf}: usable_ram_start is outside QEMU RAM")
-    pages = page_span(start, QEMU_RAM_END, "QEMU managed RAM")
+    start = linked_usable_ram_start(elf, floor, platform)
+    pages = page_span(start, end, f"{platform} managed RAM")
     return text.replace(token, str(pages))
 
 
-def expected_python_pages(path, name):
-    text = path.read_text()
-    match = re.search(
-        rf"^{re.escape(name)}\s*=\s*\((.*?)\)\s*$",
-        text, re.MULTILINE | re.DOTALL)
-    if match is None:
-        fail(f"{path.relative_to(REPO)} has no {name} tuple")
-    pages = re.findall(r"allocator_pages=(\d+)", match.group(1))
-    if len(pages) != 1:
-        fail(f"{name} in {path.relative_to(REPO)} must contain exactly one "
-             "allocator_pages value")
-    return int(pages[0])
+def render_qemu_boot_expected(elf):
+    return render_boot_expected("qemu", elf, QEMU_RAM_BASE, QEMU_RAM_END, "QEMU")
+
+
+def render_rpi5_boot_expected(elf):
+    return render_boot_expected("rpi5", elf, RPI5_MANAGED_RAM_BASE,
+                                RPI5_MANAGED_RAM_END, "RPi5")
 
 
 def page_span(start, end, label):
@@ -477,78 +472,29 @@ def fdt_expected_pages(qemu_start):
     }
 
 
-def check_allocator_expectations(problems, include_debug) -> int:
-    """Compare the documented page counts, and return how many were read."""
-    symbols = {name: nm_symbols(elf) for name, elf in ELFS.items()}
-    starts = {}
-    for platform in ("RPi5", "QEMU"):
-        start = symbols[platform].get("usable_ram_start")
-        if start is None:
-            fail(f"usable_ram_start is absent from the {platform} build")
-        starts[platform] = start
+def fdt_expected_pages_for(elf):
+    """The FDT lane's page counts, from the kernel image it boots."""
+    return fdt_expected_pages(linked_usable_ram_start(elf, QEMU_RAM_BASE, "QEMU"))
 
-    expected = {
-        "kernel/tests/rpi5/views/boot.expected":
-            page_span(starts["RPi5"], RPI5_MANAGED_RAM_END,
-                      "RPi5 managed RAM"),
-    }
+
+def render_allocator_expectations(include_debug) -> int:
+    """Refuse a template or layout no lane could render; count the renderings."""
+    render_rpi5_boot_expected(ELFS["RPi5"])
     render_qemu_boot_expected(ELFS["QEMU"])
-    compared = 1
-    for relative, actual in expected.items():
-        compared += 1
-        documented = expected_boot_pages(REPO / relative)
-        if documented != actual:
-            problems.append(
-                f"`{relative}` says allocator_pages={documented}, "
-                f"linked layout requires {actual}")
-
-    fdt_path = REPO / "kernel/tests/check_fdt_multibank_qemu.py"
-    for name, actual in fdt_expected_pages(starts["QEMU"]).items():
-        compared += 1
-        documented = expected_python_pages(fdt_path, name)
-        if documented != actual:
-            problems.append(
-                f"`{name}` says allocator_pages={documented}, "
-                f"linked layout requires {actual}")
-
+    rendered = 2 + len(fdt_expected_pages_for(ELFS["QEMU"]))
     if include_debug:
         render_qemu_boot_expected(QEMU_DEBUG_ELF)
-        compared += 1
-    return compared
-
-
-def update_allocator_expectations():
-    """Rewrite the page counts the check compares; returns how many moved."""
-    starts = {name: nm_symbols(elf)["usable_ram_start"]
-              for name, elf in ELFS.items()}
-    moved = 0
-    boot = REPO / "kernel/tests/rpi5/views/boot.expected"
-    pages = page_span(starts["RPi5"], RPI5_MANAGED_RAM_END, "RPi5 managed RAM")
-    text = boot.read_text()
-    new = re.sub(r"^(memory: .* allocator_pages=)\d+$",
-                 lambda m: f"{m.group(1)}{pages}", text, flags=re.MULTILINE)
-    if new != text:
-        boot.write_text(new)
-        moved += 1
-    path = REPO / "kernel/tests/check_fdt_multibank_qemu.py"
-    text = path.read_text()
-    for name, pages in fdt_expected_pages(starts["QEMU"]).items():
-        new = re.sub(
-            rf"(^{re.escape(name)}\s*=\s*\(.*?allocator_pages=)\d+",
-            lambda m, p=pages: f"{m.group(1)}{p}", text,
-            count=1, flags=re.MULTILINE | re.DOTALL)
-        if new != text:
-            moved += 1
-        text = new
-    path.write_text(text)
-    return moved
+        rendered += 1
+    return rendered
 
 
 def main():
-    if sys.argv[1:2] == ["--qemu-boot-expected"]:
+    renderers = {"--qemu-boot-expected": render_qemu_boot_expected,
+                 "--rpi5-boot-expected": render_rpi5_boot_expected}
+    if sys.argv[1:2] and sys.argv[1] in renderers:
         if len(sys.argv) != 3:
-            fail("usage: --qemu-boot-expected ELF")
-        sys.stdout.write(render_qemu_boot_expected(Path(sys.argv[2])))
+            fail(f"usage: {sys.argv[1]} ELF")
+        sys.stdout.write(renderers[sys.argv[1]](Path(sys.argv[2])))
         return
     if not DOC.exists():
         fail(f"{DOC} does not exist")
@@ -564,18 +510,13 @@ def main():
         else:
             print("kernel/memory-map: ELF rows refreshed from the current build")
         text = updated
-        # The messages below promise --update refreshes these too; on #1013
-        # it did not, and the three FDT rows would have been hand-edited.
-        moved = update_allocator_expectations()
-        print(f"kernel/memory-map: {moved} allocator page count(s) refreshed")
     problems = []
     check_elf_symbols(text, problems)
     check_elf_offsets(text, problems)
     check_image_ceiling(text, problems)
     check_layout_invariants(problems)
     check_consts(text, problems)
-    expectations = check_allocator_expectations(
-        problems, "--debug" in sys.argv[1:])
+    expectations = render_allocator_expectations("--debug" in sys.argv[1:])
     if problems:
         for problem in problems:
             print(f"  {problem}", file=sys.stderr)

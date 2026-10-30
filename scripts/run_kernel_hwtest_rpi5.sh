@@ -45,6 +45,11 @@ ETH_TEST_MAC="${ETH_TEST_MAC:-02:00:20:00:00:02}"
 ETH_TEST_HOST_IP="${ETH_TEST_HOST_IP:-192.168.20.1}"
 
 mkdir -p "$ARTIFACT_DIR"
+# The boot view's allocator capacity comes from the image this run loads.
+EXPECTED_VIEW_DIR="$ARTIFACT_DIR/expected-views"
+mkdir -p "$EXPECTED_VIEW_DIR"
+python3 "$REPO_ROOT/scripts/buildcheck_kernel_memory_map.py" \
+    --rpi5-boot-expected "$ELF" >"$EXPECTED_VIEW_DIR/boot.expected"
 rm -f "$INTERACTIVE_HTTPD_LISTENER" "$INTERACTIVE_HTTPD_READY" \
     "$INTERACTIVE_HTTPD_DONE"
 exec 9>"$ARTIFACT_DIR/runner.lock"
@@ -644,7 +649,7 @@ kernel_views_normalize "$UART_LOG"
 
 views_status=0
 kernel_views_compare "kernel/rpi5" "$ARTIFACT_DIR" "$UART_LOG.normalized" \
-    "$COMMON_VIEW_DIR" "$VIEW_DIR" || views_status=$?
+    "$COMMON_VIEW_DIR" "$VIEW_DIR" "$EXPECTED_VIEW_DIR" || views_status=$?
 view_count="$kernel_views_passed"
 failed_views="$kernel_views_failed"
 

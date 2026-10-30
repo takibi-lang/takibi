@@ -26,31 +26,15 @@ def load_checker():
     return module
 
 
-def write_fixtures(checker, root, qemu_pages, rpi5_pages):
+def write_fixtures(root, rpi5_pages="<allocator_pages>"):
     prefix = "mem" + "ory"
-    paths = [
-        "kernel/tests/qemu/views/boot.expected",
-        "kernel/tests/rpi5/views/boot.expected",
-    ]
-    for relative, pages in zip(paths, ("<allocator_pages>", rpi5_pages), strict=True):
-        path = root / relative
+    for relative, pages in (("qemu", "<allocator_pages>"), ("rpi5", rpi5_pages)):
+        path = root / "kernel/tests" / relative / "views/boot.expected"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             f"{prefix}: test allocator_pages={pages}\n",
             encoding="ascii",
         )
-
-    fdt = root / "kernel/tests/check_fdt_multibank_qemu.py"
-    fdt.parent.mkdir(parents=True, exist_ok=True)
-    fdt.write_text(
-        "MULTIBANK_EXPECTED = "
-        f'("{prefix}: test allocator_pages={qemu_pages}\\n")\n'
-        "LOW_MEMORY_EXPECTED = "
-        f'("{prefix}: test allocator_pages={checker.page_span(0x40200000, checker.QEMU_LOW_RAM_END, "test")}\\n")\n'
-        "DISCONTIGUOUS_MEMORY_EXPECTED = "
-        f'("{prefix}: test allocator_pages={checker.page_span(0x40200000, checker.QEMU_HOLE_FIRST_END, "test") + checker.page_span(checker.QEMU_HOLE_SECOND_START, checker.QEMU_RAM_END, "test")}\\n")\n',
-        encoding="ascii",
-    )
 
 
 # GitHub issue #526: a control asserts the number of scenarios it ran.
@@ -331,14 +315,132 @@ def qemu_boot_controls():
     return 0
 
 
+def link_image(root, base, size):
+    """Link an image whose usable_ram_start really comes from the linker."""
+    script = root / "layout.ld"
+    script.write_text(f"SECTIONS {{ . = {base:#x}; .bss : {{ *(.bss) }} "
+                      "usable_ram_start = ALIGN(0x8000); }\n")
+    asm = root / "image.s"
+    obj = root / "image.o"
+    elf = root / f"image-{base:x}-{size:x}.elf"
+    asm.write_text(f".bss\n.skip {size}\n")
+    for command in (
+        ["llvm-mc-19", "-triple=aarch64", "-filetype=obj", str(asm),
+         "-o", str(obj)],
+        ["ld.lld-19", "-T", str(script), str(obj), "-o", str(elf)],
+    ):
+        subprocess.run(command, check=True, capture_output=True)
+    return elf
+
+
+def rpi5_boot_controls():
+    """The board's boot view renders and compares like QEMU's, off the board."""
+    cases = 0
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        template = (ROOT / "kernel/tests/rpi5/views/boot.expected").read_text()
+        overlay = root / "overlay"
+        platform = root / "platform"
+        common = root / "common"
+        artifacts = root / "artifacts"
+        for path in (overlay, platform, common, artifacts):
+            path.mkdir()
+        (platform / "boot.filter").write_bytes(
+            (ROOT / "kernel/tests/rpi5/views/boot.filter").read_bytes())
+        (platform / "boot.expected").write_text(template)
+        renders = []
+        # Written out, not computed with the checker's helper: (0x3FC00000 -
+        # 0x408000) / 4096, and eight pages fewer across a 32 KiB granule.
+        for size, pages in ((0x8000, 260088), (0x9000, 260080)):
+            result = subprocess.run(
+                [sys.executable, str(CHECKER), "--rpi5-boot-expected",
+                 str(link_image(root, 0x400000, size))],
+                capture_output=True, text=True)
+            assert result.returncode == 0, result.stderr
+            assert result.stdout == template.replace(
+                "<allocator_pages>", str(pages)), result.stdout
+            renders.append(result.stdout)
+            cases += 1
+        command = ["bash", "-c", 'source "$1"; kernel_views_compare control '
+                   '"$2" "$3" "$4" "$5" "$6"', "control",
+                   str(ROOT / "scripts/kernel_views.sh"), str(artifacts),
+                   str(root / "uart.log"), str(common), str(platform),
+                   str(overlay)]
+        for name, expected, observed, success in (
+            ("rendered", renders[0], renders[0], True),
+            ("stale capacity", renders[1], renders[0], False),
+            ("wrong capacity", renders[0],
+             renders[0].replace("260088", "260087"), False),
+        ):
+            (overlay / "boot.expected").write_text(expected)
+            (root / "uart.log").write_text(observed)
+            result = subprocess.run(command, capture_output=True, text=True)
+            report = result.stdout + result.stderr
+            assert (result.returncode == 0) == success, (name, report)
+            cases += 1
+        result = subprocess.run(
+            [sys.executable, str(CHECKER), "--rpi5-boot-expected",
+             str(link_image(root, 0x1000, 0x1000))],
+            capture_output=True, text=True)
+        assert result.returncode != 0 and "outside RPi5 RAM" in result.stderr, (
+            result.stderr)
+        cases += 1
+    report_pass("RPi5 boot capacity controls",
+                "linked growth renders exact capacity; shared views reject "
+                "stale and wrong counts; an image below RAM fails", cases=cases)
+    return 0
+
+
+def fdt_lane_controls():
+    """The FDT lane's own matcher against its own rendered lines."""
+    spec = importlib.util.spec_from_file_location(
+        "fdt_multibank", ROOT / "kernel/tests/check_fdt_multibank_qemu.py")
+    driver = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(driver)
+
+    def uart(text):
+        return subprocess.Popen(
+            [sys.executable, "-c",
+             f"import sys; sys.stdout.buffer.write({text!r})"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+    cases = 0
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        base = driver.rendered_memory_lines(link_image(root, 0x40200000, 0x8000))
+        grown = driver.rendered_memory_lines(link_image(root, 0x40200000, 0x9000))
+        # Written out, from a start of 0x40208000 and the three RAM layouts.
+        for name, pages, grown_pages in (
+            ("MULTIBANK_EXPECTED", 261624, 261616),
+            ("LOW_MEMORY_EXPECTED", 32248, 32240),
+            ("DISCONTIGUOUS_MEMORY_EXPECTED", 196088, 196080),
+        ):
+            line = base[name]
+            assert line.endswith(b" allocator_pages=%d\n" % pages), line
+            assert grown[name].endswith(
+                b" allocator_pages=%d\n" % grown_pages), grown[name]
+            cases += 1
+            for label, observed, success in (
+                ("rendered", line, True),
+                ("stale image", grown[name], False),
+                ("one page short", line.replace(b"%d\n" % pages,
+                                                b"%d\n" % (pages - 1)), False),
+                ("extra digit", line.replace(b"%d\n" % pages,
+                                             b"%d0\n" % pages), False),
+            ):
+                found, _ = driver.observe_process(uart(observed), line)
+                assert found == success, (name, label, observed)
+                cases += 1
+    report_pass("FDT lane allocator controls",
+                "rendered lines match; stale, short and extra-digit counts "
+                "are not found", cases=cases)
+    return 0
+
+
 def main():
     checker = load_checker()
     qemu_start = 0x40200000
     rpi5_start = 0x00400000
-    qemu_pages = checker.page_span(qemu_start, checker.QEMU_RAM_END, "test")
-    rpi5_pages = checker.page_span(
-        rpi5_start, checker.RPI5_MANAGED_RAM_END, "test"
-    )
 
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -358,21 +460,19 @@ def main():
         checker.check_image_ceiling = lambda _text, _problems: None
         checker.check_layout_invariants = lambda _problems: None
 
-        write_fixtures(checker, root, qemu_pages, rpi5_pages)
+        write_fixtures(root)
         positive_status, positive_output = run_main(checker)
         if positive_status != 0:
             print("FAIL kernel-memory-map control: current fixtures failed")
             print(positive_output, end="")
             return 1
 
-        write_fixtures(checker, root, qemu_pages, rpi5_pages - 1)
+        # A count written back by hand is the mistake this template replaced.
+        write_fixtures(root, rpi5_pages=259120)
         negative_status, negative_output = run_main(checker)
-        expected = (
-            "`kernel/tests/rpi5/views/boot.expected` says "
-            f"allocator_pages={rpi5_pages - 1}, linked layout requires {rpi5_pages}"
-        )
+        expected = "must contain exactly one memory line"
         if negative_status == 0:
-            print("FAIL kernel-memory-map control: stale fixture succeeded")
+            print("FAIL kernel-memory-map control: hand-kept count succeeded")
             return 1
         if expected not in negative_output:
             print("FAIL kernel-memory-map control: wrong diagnostic")
@@ -381,11 +481,12 @@ def main():
 
     report_pass(
         "kernel-memory-map controls",
-        "positive and one-page-stale fixtures",
+        "rendered templates pass and a hand-kept count fails",
         cases=CASES.ran)
     # A fresh module: the allocator control above stubs out the very
     # functions these controls exist to exercise.
-    status = qemu_boot_controls()
+    status = (qemu_boot_controls() or rpi5_boot_controls() or
+              fdt_lane_controls())
     return status if status else layout_controls(load_checker())
 
 

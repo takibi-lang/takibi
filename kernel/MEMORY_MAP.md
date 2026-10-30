@@ -271,9 +271,8 @@ The secondary boot stacks have the same arrangement.
 cores 2 and 3 follow at that stride, with no symbols of their own. Their
 entry code derives the stride from those two symbols. So the block reserves
 storage for four cores whatever `KERNEL_MAX_CORES` says. The allocator
-counts in the views and in `kernel/tests/check_fdt_multibank_qemu.py` fell
-by 48 pages when cores 2 and 3 were added: two 32 KiB boot stacks and two
-64 KiB per-core groups.
+capacity fell by 48 pages when cores 2 and 3 were added: two 32 KiB boot
+stacks and two 64 KiB per-core groups.
 
 ### An address between `_start` and `usable_ram_start` is kernel image
 
