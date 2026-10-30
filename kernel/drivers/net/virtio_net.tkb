@@ -164,7 +164,6 @@ private let mut net_init_once: InitOnce;
 // Not private: linux_user/virtio_net_tx's support file raises them in place
 // of the IRQ handler.
 let mut virtio_rx_irq_flag: AtomicWord;
-let mut virtio_tx_irq_flag: AtomicWord;
 // Initialization sets this latch once. Expiry clears it permanently: the
 // InitOnce gate refuses reinitialization and IRQs never change readiness.
 // In-place RX bytes may still belong to TX, so neither queue is republished.
@@ -227,7 +226,6 @@ fn virtio_net_irq_handler() !{interrupt} {
     let status: i32 = virtio_net_regs.interrupt_status;
     virtio_net_regs.interrupt_ack = status;
     atomic_word_store(&virtio_rx_irq_flag, 1);
-    atomic_word_store(&virtio_tx_irq_flag, 1);
     interrupt_notify();
 }
 
@@ -317,7 +315,6 @@ fn net_init() -> NetInitResult {
     }
 
     atomic_word_store(&virtio_rx_irq_flag, 0);
-    atomic_word_store(&virtio_tx_irq_flag, 0);
     virtio_net_gic_enable();
 
     if (virtio_net_regs.version != VIRTIO_MMIO_VERSION_MODERN ||
@@ -729,7 +726,6 @@ fn virtio_net_tx_ring(length: usize) {
     avail_ring_set(1, 0, 0);
     tx_avail_idx = virtio_ring_index_next(tx_avail_idx);
     avail_publish(1, tx_avail_idx);
-    atomic_word_store(&virtio_tx_irq_flag, 0);
     virtio_notify(1);
 }
 

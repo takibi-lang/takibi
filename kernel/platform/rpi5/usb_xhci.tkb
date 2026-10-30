@@ -116,7 +116,6 @@ let mut xhci_ep0_enq: usize = 0;
 let mut xhci_ep0_cycle: u32 = 1;
 let mut xhci_evt_idx: usize = 0;
 let mut xhci_evt_cycle: u32 = 1;
-let mut xhci_last_residual: u32 = 0;
 let mut xhci_last_evt_dw3: u32 = 0;
 
 let mut xhci_msc_config_value: u32 = 0;
@@ -345,7 +344,6 @@ fn usb_await_event(want: XhciEventWant, timeout_ms: usize) -> u32 !{unsafe} {
         }
 
         if (xhci_event_matches(want, dw0, dw1, dw3)) {
-            xhci_last_residual = dw2 & 0xFFFFFF;
             xhci_last_evt_dw3 = dw3;
             return (dw2 >> 24) & 0xFF;
         }
@@ -360,8 +358,7 @@ fn usb_await_event(want: XhciEventWant, timeout_ms: usize) -> u32 !{unsafe} {
 // Status Stage, one doorbell ring, one Transfer Event. Shape follows
 // U-Boot's xhci_ctrl_tx(). Pass w_length=0 for a no-data request, in
 // which case buf_dma is ignored. Returns the Transfer Event's completion
-// code (1 = Success, 0 = no event); the residual byte count lands in
-// xhci_last_residual.
+// code (1 = Success, 0 = no event).
 // Private: a device-written buffer reaches it only through usb_ctrl_in,
 // whose address and length come from one device span (GitHub issue #623).
 private fn usb_ctrl_xfer(bm_request_type: u32, b_request: u32, w_value: u32,

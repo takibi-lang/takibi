@@ -136,7 +136,6 @@ kernel/init/test_driver.tkb	init_boot_fixture_status	unreviewed
 kernel/init/test_driver.tkb	kernel_exec_reserve_undercount	unreviewed
 kernel/init/test_driver.tkb	kernel_init_socket_evidence	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
 kernel/init/test_driver.tkb	kernel_test_init_script	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
-kernel/init/test_driver.tkb	kernel_test_rpi5_extended	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
 kernel/init/test_driver.tkb	page_baseline	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
 kernel/init/test_driver.tkb	page_baseline_init_root	unreviewed
 kernel/init/test_driver.tkb	process_pool_baseline	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
@@ -293,11 +292,7 @@ kernel/net/tcp.tkb	tcp_drop_next_fin	unreviewed; 2026-10-06 retain-fixture: TCP 
 kernel/net/tcp.tkb	tcp_drop_next_syn_ack	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
 kernel/net/tcp.tkb	tcp_injected_data_recovery_observed	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
 kernel/net/tcp.tkb	tcp_injected_data_retransmitted	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
-kernel/net/tcp.tkb	tcp_injected_fin_recovery_observed	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
-kernel/net/tcp.tkb	tcp_injected_fin_retransmitted	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
-kernel/net/tcp.tkb	tcp_injected_syn_accepted	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
 kernel/net/tcp.tkb	tcp_injected_syn_pending	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
-kernel/net/tcp.tkb	tcp_injected_syn_retransmitted	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
 kernel/net/tcp.tkb	tcp_kept_segments	unreviewed
 kernel/net/tcp.tkb	tcp_retx_pass_hold_until_recovered	unreviewed
 kernel/net/tcp.tkb	tcp_split_request_segments	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
@@ -334,7 +329,6 @@ kernel/platform/rpi5/usb_xhci.tkb	xhci_foreign_events	unreviewed
 kernel/platform/rpi5/usb_xhci.tkb	xhci_init_attempted	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
 kernel/platform/rpi5/usb_xhci.tkb	xhci_init_description	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
 kernel/platform/rpi5/usb_xhci.tkb	xhci_last_evt_dw3	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	xhci_last_residual	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
 kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_bulk_in_burst	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
 kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_bulk_in_ep	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
 kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_bulk_in_mps	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state

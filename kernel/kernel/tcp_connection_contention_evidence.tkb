@@ -24,9 +24,6 @@ private let mut tcp_owner_probe_sequence: AtomicWord;
 private let mut tcp_owner_probe_seen: PeerTally;
 // Per peer: the last phase sequence it finished.
 private let mut tcp_owner_probe_done: PeerTally;
-// Busy answers peers met from EACH OTHER after the release. Printed, not
-// asserted: how often the peers collided is about the machine.
-private let mut tcp_owner_probe_peer_busy: AtomicWord;
 
 // Armed for `cpu` only while it still has work (GitHub issue #860).
 fn tcp_connection_contention_is_armed(cpu: usize) -> bool !{unsafe} {
@@ -52,7 +49,6 @@ fn tcp_connection_contention_secondary_run(cpu: usize) !{unsafe} {
                     stepping = false;
                 } else {
                     // Another peer holds it; try again until it is free.
-                    atomic_word_fetch_add(&tcp_owner_probe_peer_busy, 1);
                 }
             }
             TcpConnectionProbeStep::Advanced => {
@@ -103,7 +99,6 @@ fn tcp_connection_contention_probe(ready: borrow NetRxCanAcquire) -> bool !{unsa
     let before: u32 = tcp_connection_of(owner).snd_nxt;
     atomic_word_store(&tcp_owner_probe_slot, slot);
     atomic_word_store(&tcp_owner_probe_generation, generation);
-    atomic_word_store(&tcp_owner_probe_peer_busy, 0);
     peer_tally_reset(&tcp_owner_probe_done, online);
     atomic_word_store(&tcp_owner_probe_sequence, 0);
     let peers: usize = peer_tally_peers(&tcp_owner_probe_done);

@@ -495,7 +495,6 @@ fn main() !{unsafe} {
     boot_phase_end(phase);
     kernel_secondary_boot_report();
 
-    kernel_test_rpi5_extended = true;
     kernel_test_init_script = true;
     kernel_test_driver_run();
 

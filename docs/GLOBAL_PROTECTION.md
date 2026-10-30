@@ -73,6 +73,14 @@ the code happens to take around the global. A global protected only by a
 convention (a lock taken by every caller, "core 0 only", "written during
 boot") is `none` until its type says so.
 
+## Unread globals
+
+`scripts/buildcheck_unread_globals.py` reads the uses table of both kernels and
+refuses a global only ever assigned or atomically stored. `address` does not
+say what a callee does, so an atomic use is classified from its source line, and
+an unclassifiable one counts as a read: it can miss a case, never refuse a
+real reader.
+
 ## The ratchet
 
 Production means compiled into either kernel image, under `kernel/` and

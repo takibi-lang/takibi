@@ -39,14 +39,12 @@ private let mut page_probe_armed: AtomicWord;
 // Completed cycles and the inside-the-run level, one word per core
 // (GitHub issue #756: every online peer, index 0 is core 0's).
 private let mut page_probe_tally: PeerTally;
-private let mut page_probe_failed: AtomicWord;
 private let mut page_probe_overlap: AtomicWord;
 
 // Take one page and give it straight back. Every online core runs this.
 private fn page_probe_cycle() -> bool !{allocates, unsafe} {
     match page_alloc(PageOwnerTag::UserPage) {
         PageAllocResult::OutOfMemory => {
-            atomic_word_fetch_add(&page_probe_failed, 1);
             return false;
         }
         PageAllocResult::Allocated(owner) => {

@@ -41,7 +41,6 @@ fn workload_profile_interrupt_wait() !{may_block} {
     fake_now = fake_now + wake_ticks;
     if (done_at >= 0 && fake_now >= done_at) {
         (*tx_used()).idx = virtio_ring_index_next(tx_used_seen);
-        atomic_word_store(&virtio_tx_irq_flag, 1);
     }
 }
 
