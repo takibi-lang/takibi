@@ -208,7 +208,7 @@ next one taken. The done record of the previous queue is in HISTORY.md
 1. **Verification (#954; B owns the refinement code).** The rest of #954
    stage 2 (docs/VERIFICATION_DESIGN.md, "Stage 2 scope"), then #955's
    evidence log; #986 slice 2 (region arithmetic and overlay length as
-   z3-checked obligations) once the maintainer authorizes it (Awaiting).
+   z3-checked obligations), #954 stage 3 (C), done 2026-10-30.
 2. **Equivalence oracles.** ext2: tier B (#1034, landed 2026-10-25:
    `kernel/tests/ext2_eq/ops.eq` replayed on host Linux and libext2fs,
    compared logically in kernelcheck-qemu-main), #1033 (tier A, fsck after
@@ -303,8 +303,6 @@ made.
   (maintainer, 2026-10-25): before #789's token design starts, and before
   the next split of `process.tkb` or `syscall.tkb` that #1008's `module`
   line would otherwise have to retract.
-- **#986 slice 2**: z3 re-checks region arithmetic and overlay length,
-  as B compiler work.
 - **The consolidation umbrellas** are decided direction and deliberately
   off these queues except their stop-gaps in band 0: #986 (trusted-base
   ledger; #1017 the frame), #998 (signals: three tiers, never silently
