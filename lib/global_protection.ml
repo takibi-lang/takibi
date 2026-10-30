@@ -115,7 +115,8 @@ let write_table (out : out_channel) (prog : toplevel list) =
    - `region`  the operand of a region claim (`region_of(g)`);
    - `index`   the base of an index or slice (`g[i]`, `g[a..<b]`);
    - `cast`    the operand of a cast (`g as T`);
-   - `read`    any other use.
+   - `read`    any other use, including `g(x)`, a call through a global
+               function pointer.
 
    A global's initializer that names another global is a use in function
    `-`. Uses inside a generic template are reported at the template. *)
@@ -154,7 +155,12 @@ let write_uses (out : out_channel) (prog : toplevel list) =
          | _ -> sub inner)
     | Call ("region_of", [ ({ desc = Var _; _ } as a) ]) ->
         expr fn locals "region" a
-    | Call (_, args) -> List.iter sub args
+    | Call (callee, args) ->
+        (* `g(x)` calls through a global function pointer: a read of `g`. A
+           local of that name shadows it, as for any other use. *)
+        if S.mem callee globals && not (S.mem callee locals) then
+          row fn e callee "read";
+        List.iter sub args
     | Index (b, i) -> expr fn locals (base_kind b) b; sub i
     | SliceOf (b, lo, hi) -> expr fn locals (base_kind b) b; sub lo; sub hi
     | Cast (_, inner) ->

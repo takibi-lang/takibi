@@ -38,7 +38,7 @@ shadows the global for the rest of its scope).
 | --- | --- |
 | `file`, `line` | where the use is |
 | `name` | the global |
-| `kind` | `write` (root of an assignment target), `address` (`&g`, `&g.f`, `&g[i]`), `region` (`region_of(g)`), `index` (`g[i]`, `g[a..<b]`), `cast` (`g as T`), or `read` |
+| `kind` | `write` (root of an assignment target), `address` (`&g`, `&g.f`, `&g[i]`), `region` (`region_of(g)`), `index` (`g[i]`, `g[a..<b]`), `cast` (`g as T`), or `read` (any other use, including `g(x)` through a global function pointer) |
 | `function` | the function containing the use; `-` for another global's initializer |
 
 It is the inventory a migration of a global needs (#637's region seal,

@@ -26,7 +26,6 @@ USES = {
     "gdb_read": [("a.tkb", 5, "address")],
     "assigned": [("a.tkb", 1, "write")],
     "read_too": [("a.tkb", 1, "write"), ("a.tkb", 1, "read")],
-    "uart_rx_handler": [("a.tkb", 1, "write")],
 }
 GLOBALS = {name: "a.tkb" for name in USES}
 GLOBALS.update({"unused": "a.tkb", "claim": "<builtin region>"})

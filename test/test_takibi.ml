@@ -24058,7 +24058,10 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
           let mut h: usize;
           fn writer(i: usize) { g[i] = h; h = 1; }
           fn shadow() { let h: usize = 2; let k: usize = h; }
-          fn addr() -> *usize { return &g[0] as *usize; }" in
+          fn addr() -> *usize { return &g[0] as *usize; }
+          let mut handler: fn(u8) -> void;
+          fn dispatch(x: u8) { handler(x); }
+          fn shadow_call(handler: fn(u8) -> void) { handler(0); }" in
        let user = parse_as "user.tkb"
          "fn reader() -> usize { return g[1] + (h as usize); }" in
        let path = Filename.temp_file "takibi-uses-" ".tsv" in
@@ -24084,6 +24087,10 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
             match String.split_on_char '\t' r with
             | [_; _; "h"; _; "shadow"] -> true | _ -> false) rows);
        Alcotest.(check bool) "&g[0] takes g's address" true (has "g" "address" "addr" "defs.tkb");
+       Alcotest.(check bool) "a call through a global function pointer reads it"
+         true (has "handler" "read" "dispatch" "defs.tkb");
+       Alcotest.(check bool) "a parameter shadows a called global" false
+         (has "handler" "read" "shadow_call" "defs.tkb");
        Alcotest.(check bool) "g[1] in another file indexes g" true (has "g" "index" "reader" "user.tkb");
        Alcotest.(check bool) "h as usize casts h" true (has "h" "cast" "reader" "user.tkb"));
 

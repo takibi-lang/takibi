@@ -14,7 +14,7 @@ read: the check can miss a write-only global, never refuse a read one.
 
 A `dma_fixed` global is skipped: the compiler reaches it through its generated
 owner, so its name is never used. Readers the table cannot see: scripts/*.gdb reading by symbol (named in a gdb
-file), and NOT_IN_TABLE for what the compiler does not record.
+file).
 
 Usage: buildcheck_unread_globals.py QEMU.facts/globals.tsv RPI5.facts/globals.tsv
 """
@@ -30,8 +30,6 @@ from pass_line import report_pass
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUILTIN = "<builtin"
-# An indirect call through a global function pointer is not in the uses table.
-NOT_IN_TABLE = {"uart_rx_handler": "called in kernel/drivers/serial/pl011_rx.tkb"}
 ATOMIC_WRITE_ONLY = re.compile(
     r"^\s*atomic_word_(store|fetch_add|fetch_sub)\(&[^;]*\);\s*$")
 
@@ -66,7 +64,7 @@ def find_unread(globs: dict, uses: dict, root: pathlib.Path) -> list[str]:
                       for path in sorted(root.glob("scripts/*.gdb")))
     unread = []
     for name, file in sorted(globs.items()):
-        if file.startswith(BUILTIN) or name in NOT_IN_TABLE:
+        if file.startswith(BUILTIN):
             continue
         if all(is_write_only(use, root) for use in uses[name]) \
                 and not re.search(rf"\b{re.escape(name)}\b", outside):
