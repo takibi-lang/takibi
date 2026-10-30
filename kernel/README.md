@@ -2240,10 +2240,20 @@ maintained branch in the generated overlay. Captures go to
 The on-demand physical GEM branch fixture runs with
 `make kernelcheck-gem-tx-rpi5`. Four isolated images exercise both ready-frame
 and RX-reply entry points with confirmed and unconfirmed halt observations.
+A fifth, `window-closed`, tests the PCIe inbound window that confines RP1's DMA
+to its arena. It reads back all ten inbound BAR slots and requires every one
+but MSI's and the arena's disabled. It moves the window and requires no frame
+and no USED, the read direction. It then restores the window and receives real
+frames twice through one descriptor: into a buffer inside the arena, which must
+hold a frame, and into a sentinel outside it, which must stay intact while the
+MAC's frame counter rises, the write direction. Only those bytes decide that
+stage: GEM sets the descriptor's ownership bit for the dropped write, and RSR
+and ISR report no error. xHCI shares the window and has no such control.
 The overlay hides real USED and, for the unconfirmed cases, real TGO
 observations; it preserves the maintained ownership exchanges, wait bound
 and halt body. It never fabricates completion or quiescence. The runner
-checks exactly three physical Ethernet transfers with matching payloads,
+checks exactly seven physical Ethernet transfers (six in `window-closed`) with
+matching payloads,
 then checks retained Cpu or Device authority and refusal of later sends.
 UART, Ethernet bodies, ELF digests and verdicts are kept under
 `$TAKIBI_LANE_ARTIFACT_ROOT/gem-tx-rpi5/` (default `_build/gem-tx-rpi5/`).

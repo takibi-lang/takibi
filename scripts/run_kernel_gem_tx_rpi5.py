@@ -56,6 +56,51 @@ def peer(interface):
     print(json.dumps(frames), flush=True)
 
 
+# GitHub issue #1254: enough frames at the MAC that an untouched buffer cannot
+# be a quiet link. The peer sends about 125 during each 500 ms stage.
+RX_STAGE_MIN_FRAMES = 10
+ETHERTYPE_IN_WORD1 = 0xB588
+
+
+def validate_inbound_bars(text):
+    """Every inbound slot but MSI's and the arena's is disabled, by readback."""
+    rows = {int(row[0]): (int(row[1]), int(row[2])) for row in re.findall(
+        rb'gem-tx fixture: inbound bar (\d+) lo=(\d+) remap=(\d+)', text)}
+    if sorted(rows) != list(range(1, 11)):
+        raise RuntimeError('inbound BAR readback incomplete')
+    # The two open slots prove the readback reads the registers it names.
+    msi_lo, msi_remap = rows[1]
+    if msi_lo & 0x1F != 0x1C or not msi_remap & 1:
+        raise RuntimeError('MSI inbound BAR differs from its 4 KiB setup')
+    arena_lo, arena_remap = rows[2]
+    if arena_lo & 0x1F != 3 or not arena_remap & 1 or arena_lo & ~0x1F != arena_remap & ~1:
+        raise RuntimeError('arena inbound BAR differs from its 256 KiB setup')
+    for bar in range(3, 11):
+        lo, remap = rows[bar]
+        if lo & 0x1F or remap & 1:
+            raise RuntimeError(f'inbound BAR {bar} is not disabled')
+
+
+def validate_rx_stages(text):
+    """A device write lands inside the window and is dropped outside it."""
+    stages = {row[0]: {key.decode(): int(value) for key, value in re.findall(rb'(\w+)=(\d+)', row[1])}
+              for row in re.findall(rb'gem-tx fixture: rx stage (\w+) (.*)', text)}
+    if set(stages) != {b'inside', b'outside'}:
+        raise RuntimeError('RX window stages incomplete')
+    for stage in stages.values():
+        if {'frames', 'own', 'changed', 'word1'} - set(stage):
+            raise RuntimeError('RX window stage fields incomplete')
+        if stage['frames'] < RX_STAGE_MIN_FRAMES:
+            raise RuntimeError('RX window stage saw too few frames at the MAC')
+    inside, outside = stages[b'inside'], stages[b'outside']
+    if not inside['own'] or not inside['changed'] or (inside['word1'] >> 32) & 0xFFFF != ETHERTYPE_IN_WORD1:
+        raise RuntimeError('RX positive control wrote no frame inside the window')
+    # Not judged: outside's own bit. GEM sets it even though the buffer write
+    # was dropped, and RSR and ISR report nothing, so only the bytes decide.
+    if outside['changed']:
+        raise RuntimeError('GEM wrote a buffer outside the inbound window')
+
+
 def validate(text, frames, mode):
     marker = f'gem-tx fixture: mode {mode}\n'.encode()
     text = text.replace(b'\r', b'')
@@ -79,6 +124,8 @@ def validate(text, frames, mode):
         if not halt:
             raise RuntimeError('window-closed halt evidence absent')
         print(f'[kernel/rpi5 gem-tx] window-closed: tsr={int(halt[1]):#x}', flush=True)
+        validate_inbound_bars(text)
+        validate_rx_stages(text)
     for frame in frames:
         body = bytes.fromhex(frame['bytes'])
         if len(body) != 64 or body[6:14] != BOARD + bytes.fromhex('88b5') or body[14:] != PAYLOAD:
@@ -226,7 +273,7 @@ def run_case(mode, device, directory, interface):
         else:
             validate(bytes(transcript), frames, mode)
         result['status'] = 'PASS'
-        detail = '32 timestamped sends, genuine IRQ bank control' if irq else 'no frame and no USED through the moved window' if mode == 'window-closed' else 'seven checked transfers (four kept, refused or resent), later sends dropped'
+        detail = '32 timestamped sends, genuine IRQ bank control' if irq else 'other inbound BARs disabled; no frame and no USED through the moved window; RX writes inside the window, none outside' if mode == 'window-closed' else 'seven checked transfers (four kept, refused or resent), later sends dropped'
         print(f'PASS kernel/rpi5 gem-tx: {mode}; {detail}', flush=True)
     except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
         result['error'] = str(error)

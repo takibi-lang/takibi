@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Hold the board lease across the four physical GEM ownership controls.
+# Hold the board lease across the physical GEM ownership and window controls.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT_DIR="${KERNEL_GEM_TX_ARTIFACT_DIR:-${TAKIBI_LANE_ARTIFACT_ROOT:-$REPO_ROOT/_build}/gem-tx-rpi5}"

@@ -14,6 +14,137 @@ def replace_once(path, before, after):
     path.write_text(text.replace(before, after), encoding="ascii")
 
 
+# The window-closed mode's additions to the fixture. The runner, not this code,
+# judges the printed values (scripts/run_kernel_gem_tx_rpi5.py).
+#
+# GitHub issue #1254: moving the window off the arena stops GEM at its descriptor
+# read, which proves the read direction again. The write that protects kernel
+# memory needs a descriptor GEM can read and a buffer outside the window, so the
+# RX control leaves the window on the arena and only points the descriptor away.
+# Both stages run the same code on real frames from the runner's peer; the first
+# shows that this path does write when the buffer is inside the window.
+WINDOW_CLOSED_FIXTURE = """
+fn gem_fixture_close_window() !{unsafe} {
+    gem_fixture_print_inbound_bars();
+    let moved: u32 = (rp1_dma_arena_start as u32) + 0x40000;
+    pcie2.ubus_bar2_remap_lo = 0;
+    pcie2.rc_bar2_lo = moved | RP1_DMA_ARENA_SIZE_ENCODING;
+    pcie2.ubus_bar2_remap_lo = moved | 1;
+    let settled: u32 = pcie2.ubus_bar2_remap_lo;
+    kernel_boot_log("gem-tx fixture: window moved to ");
+    uart_put_udec(settled as usize);
+    kernel_boot_log("\\n");
+}
+
+fn gem_fixture_print_bar(bar: usize, lo: u32, remap: u32) {
+    kernel_boot_log("gem-tx fixture: inbound bar ");
+    uart_put_udec(bar);
+    kernel_boot_log(" lo=");
+    uart_put_udec(lo as usize);
+    kernel_boot_log(" remap=");
+    uart_put_udec(remap as usize);
+    kernel_boot_log("\\n");
+}
+
+// Slots 1..3 sit in the first register bank, 4..10 in the second, each slot
+// one LO/HI pair. Only LO holds the size and only REMAP_LO the enable.
+fn gem_fixture_print_inbound_bars() !{unsafe} {
+    gem_fixture_print_bar(1, pcie2.rc_bar1_lo, pcie2.ubus_bar1_remap_lo);
+    gem_fixture_print_bar(2, pcie2.rc_bar2_lo, pcie2.ubus_bar2_remap_lo);
+    gem_fixture_print_bar(3, pcie2.rc_bar3_lo, pcie2.ubus_bar3_remap_lo);
+    for slot: usize in 0..<7 {
+        let word: usize = slot * 2;
+        if (word < 14) {
+            gem_fixture_print_bar(slot + 4, pcie2.rc_bar4_to_10[word], pcie2.ubus_bar4_to_10[word]);
+        }
+    }
+}
+
+"""
+
+# The driver is a raw mint file, so the raw half of the control is appended there.
+WINDOW_CLOSED_DRIVER = """
+fn gem_fixture_store(address: usize, value: usize) !{unsafe} {
+    unsafe { atomic_store_release(address, value); }
+}
+fn gem_fixture_load(address: usize) -> usize !{unsafe} {
+    return unsafe { atomic_load_acquire(address) };
+}
+
+let mut gem_fixture_rx_outside: [u8; 2048] align(64);
+
+// One receive with RX re-enabled by hand: the MAC is halted and this control
+// is the last thing the image does, so no driver owner is live on the path.
+fn gem_fixture_rx_stage(name: *u8, desc: usize, buffer: usize) !{unsafe} {
+    gem.ncr = 1 << 4;
+    for offset: usize in 0..<256 {
+        gem_fixture_store(buffer + offset * 8, 0xA5A5A5A5A5A5A5A5);
+    }
+    dma_prepare_tx(unsafe { buffer as *u8 }, 2048);
+    dma_finish_rx(unsafe { buffer as *align(64) u8 }, 2048);
+    let bus: usize = buffer + boot_once_get(&rp1_dma_pci_offset);
+    gem_fixture_store(desc, (bus & 0xFFFFFFFC) | 2);
+    gem_fixture_store(desc + 8, bus >> 32);
+    dma_prepare_tx(unsafe { desc as *u8 }, 16);
+    let desc_bus: usize = desc + boot_once_get(&rp1_dma_pci_offset);
+    gem.rbqp = desc_bus as u32;
+    gem.rbqph = (desc_bus >> 32) as u32;
+    gem.rsr = 0x0F;
+    let cleared: u32 = gem.frames_rx;
+    gem.ncr = (1 << 4) | (1 << 2);
+    let start: i64 = read_cntpct();
+    let deadline: i64 = read_cntfrq() / 2;
+    while (read_cntpct() - start < deadline) {
+    }
+    gem.ncr = 1 << 4;
+    let frames: u32 = gem.frames_rx;
+    let rsr: u32 = gem.rsr;
+    let isr: u32 = gem.isr;
+    dma_finish_rx(unsafe { desc as *align(64) u8 }, 64);
+    dma_finish_rx(unsafe { buffer as *align(64) u8 }, 2048);
+    let own: usize = gem_fixture_load(desc) & 1;
+    let mut changed: usize = 0;
+    for offset: usize in 0..<256 {
+        if (gem_fixture_load(buffer + offset * 8) != 0xA5A5A5A5A5A5A5A5) {
+            changed = changed + 1;
+        }
+    }
+    kernel_boot_log("gem-tx fixture: rx stage ");
+    uart_puts(name);
+    kernel_boot_log(" frames=");
+    uart_put_udec(frames as usize);
+    kernel_boot_log(" own=");
+    uart_put_udec(own);
+    kernel_boot_log(" rsr=");
+    uart_put_udec(rsr as usize);
+    kernel_boot_log(" isr=");
+    uart_put_udec(isr as usize);
+    kernel_boot_log(" changed=");
+    uart_put_udec(changed);
+    kernel_boot_log(" word1=");
+    uart_put_udec(gem_fixture_load(buffer + 8));
+    kernel_boot_log("\\n");
+}
+
+fn gem_fixture_rx_control() !{unsafe} {
+    pcie2_dma_inbound_setup();
+    let desc: usize = gem_rx_ring_cpu_address;
+    dma_finish_rx(unsafe { desc as *align(64) u8 }, 64);
+    let inside_bus: usize = (gem_fixture_load(desc) & 0xFFFFFFFC) |
+                            (gem_fixture_load(desc + 8) << 32);
+    let inside: usize = inside_bus - boot_once_get(&rp1_dma_pci_offset);
+    let outside: usize = (gem_fixture_rx_outside as *u8) as usize;
+    let arena: usize = rp1_dma_arena_start as usize;
+    gem_fixture_require(inside >= arena && inside + 2048 <= arena + 0x40000,
+                        "RX buffer inside the arena");
+    gem_fixture_require(outside + 2048 <= arena || outside >= arena + 0x40000,
+                        "sentinel outside the arena");
+    gem_fixture_rx_stage("inside", desc, inside);
+    gem_fixture_rx_stage("outside", desc, outside);
+}
+"""
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
@@ -34,6 +165,8 @@ def main():
     changed = {"platform/rpi5/init.tkb", "drivers/net/rp1_gem.tkb"}
     if args.control or args.mode == "window-closed":
         changed.add("tests/rpi5/gem_tx/fixture.tkb")
+    if args.mode == "window-closed":
+        changed.add("platform/rpi5/pcie.tkb")
     for current, directories, files in os.walk(root / "kernel"):
         directories[:] = [name for name in directories if name != "build"]
         relative = Path(current).relative_to(root / "kernel")
@@ -146,18 +279,26 @@ def main():
 """)
         # RX cannot deliver through a closed window either.
         replace_once(fixture, "    ready = gem_fixture_reply(ready, true);\n", "")
-        fixture.write_text(fixture.read_text(encoding="ascii") + """
-fn gem_fixture_close_window() !{unsafe} {
-    let moved: u32 = (rp1_dma_arena_start as u32) + 0x40000;
-    pcie2.ubus_bar2_remap_lo = 0;
-    pcie2.rc_bar2_lo = moved | RP1_DMA_ARENA_SIZE_ENCODING;
-    pcie2.ubus_bar2_remap_lo = moved | 1;
-    let settled: u32 = pcie2.ubus_bar2_remap_lo;
-    kernel_boot_log("gem-tx fixture: window moved to ");
-    uart_put_udec(settled as usize);
-    kernel_boot_log("\\n");
-}
-""", encoding="ascii")
+        # GitHub issue #1254: the window's other half, on registers production
+        # never touches. Declared here so they stay out of the kernel image.
+        pcie = kernel / "platform/rpi5/pcie.tkb"
+        replace_once(pcie, "    rc_bar2_hi: u32 at 0x4038;\n",
+                     "    rc_bar2_hi: u32 at 0x4038;\n"
+                     "    rc_bar3_lo: u32 at 0x403C;\n")
+        replace_once(pcie, "    ubus_bar2_remap_hi: u32 at 0x40B8;\n",
+                     "    ubus_bar2_remap_hi: u32 at 0x40B8;\n"
+                     "    ubus_bar3_remap_lo: u32 at 0x40BC;\n"
+                     "    rc_bar4_to_10: [u32; 14] at 0x40D4;\n"
+                     "    ubus_bar4_to_10: [u32; 14] at 0x410C;\n")
+        replace_once(driver, "    sa1_top: u32 at 0x8C;\n",
+                     "    sa1_top: u32 at 0x8C;\n"
+                     "    frames_rx: u32 at 0x158;\n")
+        driver.write_text(driver.read_text(encoding="ascii") + WINDOW_CLOSED_DRIVER,
+                          encoding="ascii")
+        replace_once(fixture, "    net_shutdown(ready);\n",
+                     "    gem_fixture_rx_control();\n    net_shutdown(ready);\n")
+        fixture.write_text(fixture.read_text(encoding="ascii") + WINDOW_CLOSED_FIXTURE,
+                           encoding="ascii")
     if args.control == "device-access":
         fixture = kernel / "tests/rpi5/gem_tx/fixture.tkb"
         fixture.write_text(fixture.read_text(encoding="ascii") + """

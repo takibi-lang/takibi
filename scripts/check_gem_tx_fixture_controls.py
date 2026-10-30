@@ -17,12 +17,44 @@ for mode in MODES:
     count = 6 if mode == 'window-closed' else 7
     if mode == 'window-closed':
         text += b'gem-tx fixture: halt tsr=33 ncr=0\n'
+        bars = (b'gem-tx fixture: inbound bar 1 lo=4294963228 remap=1245185\n'
+                b'gem-tx fixture: inbound bar 2 lo=6291459 remap=6291457\n')
+        for bar in range(3, 11):
+            bars += b'gem-tx fixture: inbound bar %d lo=0 remap=0\n' % bar
+        inside = b'gem-tx fixture: rx stage inside frames=124 own=1 rsr=3 isr=0 changed=8 word1=1085004156508283543\n'
+        outside = b'gem-tx fixture: rx stage outside frames=123 own=1 rsr=3 isr=0 changed=0 word1=11936128518282651045\n'
+        text += bars + inside + outside
     frames = [copy.copy(frame) for _ in range(count)]
     cases.note()
     validate(text, frames, mode)
     bad = copy.deepcopy(frames)
     bad[0]['bytes'] = bad[0]['bytes'][:-2] + '00'
     wrong_authority = text.replace(b'authority ' + last.encode(), b'authority wrong')
+    if mode == 'window-closed':
+        # GitHub issue #1254: each stands for a board that defeats the arena,
+        # or for evidence that could not have shown it.
+        for before, after in ((b'bar 3 lo=0 remap=0', b'bar 3 lo=3 remap=0'),
+                              (b'bar 10 lo=0 remap=0', b'bar 10 lo=0 remap=1'),
+                              (b'gem-tx fixture: inbound bar 7 lo=0 remap=0\n', b''),
+                              (b'bar 2 lo=6291459', b'bar 2 lo=0'),
+                              (b'bar 2 lo=6291459', b'bar 2 lo=7340035'),
+                              (b'bar 1 lo=4294963228 remap=1245185', b'bar 1 lo=0 remap=0'),
+                              (b'outside frames=123 own=1 rsr=3 isr=0 changed=0', b'outside frames=123 own=1 rsr=3 isr=0 changed=8'),
+                              (b'outside frames=123', b'outside frames=0'),
+                              (b'inside frames=124', b'inside frames=0'),
+                              (b'inside frames=124 own=1', b'inside frames=124 own=0'),
+                              (b'changed=8', b'changed=0'),
+                              (b'word1=1085004156508283543', b'word1=11936128518282651045'),
+                              (outside, b''), (inside, b'')):
+            if before not in text:
+                raise SystemExit(f'FAIL gem-tx fixture controls: stale anchor {before!r}')
+            cases.note()
+            try:
+                validate(text.replace(before, after), frames, mode)
+            except RuntimeError:
+                pass
+            else:
+                raise SystemExit(f'FAIL gem-tx fixture controls: accepted {after!r}')
     for candidate, bodies in ((PASS, frames), (text.replace(PASS, b''), frames),
                               (text + b'FAIL gem-tx: failure\n', frames),
                               (text.replace(b'keep refused at the reserve ok', b''), frames),
