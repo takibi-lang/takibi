@@ -431,30 +431,20 @@ fn kernel_tcp_ddb_connection_pending() -> NetPendingState !{unsafe} {
 // from a pin and cannot be absent; what is left to count is a frame missing
 // from a connection (tcp_frame_missing).
 //
-// Indexed by cpu_id() and sized by KERNEL_MAX_CORES, the same shape as every
-// other counter in this family, so two cores cannot lose each other's
-// increments to a read-modify-write on one word.
-private let mut tcp_absent_fallback_count: [usize; KERNEL_MAX_CORES];
+// One AtomicWord, so two cores cannot lose each other's increments, and a
+// task that moves between cores cannot either (#1012).
+private let mut tcp_absent_fallback_count: AtomicWord;
 
 fn tcp_absent_fallback_uses() -> usize {
-    let mut total: usize = 0;
-    for core: usize in 0..<KERNEL_MAX_CORES {
-        total = total + tcp_absent_fallback_count[core];
-    }
-    return total;
+    return atomic_word_load(&tcp_absent_fallback_count);
 }
 
 private fn tcp_absent_fallback_note() {
-    let core: usize = cpu_id();
-    if (core >= KERNEL_MAX_CORES) {
-        tcp_absent_fallback_count[0] = tcp_absent_fallback_count[0] + 1;
-        return;
-    }
-    tcp_absent_fallback_count[core] = tcp_absent_fallback_count[core] + 1;
+    atomic_word_fetch_add(&tcp_absent_fallback_count, 1);
 }
-let mut tcp_completed_handshakes: usize = 0;
-let mut tcp_completed_echoes: usize = 0;
-let mut tcp_completed_closes: usize = 0;
+let mut tcp_completed_handshakes: AtomicWord;
+let mut tcp_completed_echoes: AtomicWord;
+let mut tcp_completed_closes: AtomicWord;
 let mut tcp_drop_next_syn_ack: bool = false;
 let mut tcp_injected_syn_pending: bool = false;
 let mut tcp_injected_syn_retransmitted: bool = false;
@@ -580,8 +570,8 @@ let mut tcp_kept_segments: usize = 0;
 // GitHub issue #846: what the stack-wide pass did, for the boot evidence:
 // segments it retransmitted, and entries it skipped because a syscall held
 // their connection.
-let mut tcp_retx_pass_sent: usize = 0;
-let mut tcp_retx_pass_busy: usize = 0;
+let mut tcp_retx_pass_sent: AtomicWord;
+let mut tcp_retx_pass_busy: AtomicWord;
 // GitHub issue #846: a test hold. While set, the stack-wide pass does
 // nothing until the first injected data drop has been recovered, so the
 // #842 fixture still proves that a blocked read resends its own
@@ -2666,7 +2656,7 @@ fn tcp_retx_service_all(ready_in: sink NetRxCanAcquire)
                         kept = retx_chain_keep(kept, parked);
                     }
                     TcpConnectionTryTakeResult::Busy => {
-                        tcp_retx_pass_busy = tcp_retx_pass_busy + 1;
+                        atomic_word_fetch_add(&tcp_retx_pass_busy, 1);
                         next_due = retx_due_earliest(
                             next_due, retx_entry_due_at(entry, retry_ticks));
                         kept = retx_chain_keep(kept, parked);
@@ -2685,7 +2675,7 @@ fn tcp_retx_service_all(ready_in: sink NetRxCanAcquire)
                             RetxEntryService::Sent(after) => {
                                 ready = after;
                                 sends = sends + 1;
-                                tcp_retx_pass_sent = tcp_retx_pass_sent + 1;
+                                atomic_word_fetch_add(&tcp_retx_pass_sent, 1);
                                 tcp_connection_put(owner);
                                 next_due = retx_due_earliest(
                                     next_due, retx_entry_due_at(entry, retry_ticks));
@@ -3084,9 +3074,9 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
         conn.remote_ip as []u8;
     conn.state = ConnState::Listen;
     conn.local_port = TCP_ECHO_PORT;
-    tcp_completed_handshakes = 0;
-    tcp_completed_echoes = 0;
-    tcp_completed_closes = 0;
+    atomic_word_store(&tcp_completed_handshakes, 0);
+    atomic_word_store(&tcp_completed_echoes, 0);
+    atomic_word_store(&tcp_completed_closes, 0);
     let start: i64 = read_cntpct();
     let deadline_ticks: i64 = read_cntfrq() * 30;
     while ((read_cntpct() - start) < deadline_ticks) {
@@ -3136,8 +3126,7 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
                                                     header.ack == conn.snd_nxt &&
                                                     header.seq == conn.rcv_nxt) {
                                                     conn.state = ConnState::Established;
-                                                    tcp_completed_handshakes =
-                                                        tcp_completed_handshakes + 1;
+                                                    atomic_word_fetch_add(&tcp_completed_handshakes, 1);
                                                 }
                                             } else if (conn.state == ConnState::Established) {
                                                 if ((header.flags & TCP_FLAG_FIN) != 0 &&
@@ -3176,8 +3165,7 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
                                                                 conn.rcv_nxt + (data_len as u32);
                                                             conn.snd_nxt =
                                                                 conn.snd_nxt + (data_len as u32);
-                                                            tcp_completed_echoes =
-                                                                tcp_completed_echoes + 1;
+                                                            atomic_word_fetch_add(&tcp_completed_echoes, 1);
                                                         }
                                                     }
                                                 }
@@ -3186,8 +3174,7 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
                                                     header.ack == conn.snd_nxt) {
                                                     // Close complete; ready for a new client.
                                                     conn.state = ConnState::Listen;
-                                                    tcp_completed_closes =
-                                                        tcp_completed_closes + 1;
+                                                    atomic_word_fetch_add(&tcp_completed_closes, 1);
                                                 }
                                             }
                                         }
@@ -3205,9 +3192,9 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
                                     net_rx_reply_ready(acquired, reply_len));
                             }
                         }
-                        if (tcp_completed_handshakes >= 2 &&
-                            tcp_completed_echoes >= 1 &&
-                            tcp_completed_closes >= 1) {
+                        if (atomic_word_load(&tcp_completed_handshakes) >= 2 &&
+                            atomic_word_load(&tcp_completed_echoes) >= 1 &&
+                            atomic_word_load(&tcp_completed_closes) >= 1) {
                             tcp_connection_free(ready, echo_owner);
                             return KernelTcpResult::Verified(ready);
                         }

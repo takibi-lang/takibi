@@ -5035,7 +5035,7 @@ private fn kernel_syscall_child_exec_enter(frame: sink FrameRef[process, Excepti
 private fn kernel_syscall_child_exec_refused(frame: sink FrameRef[process, ExceptionLevel::El0],
         current_authority: ProcessCurrent[current_process, ProcessState::Running]) !{unsafe} {
     kernel_syscall_exec_clear();
-    kernel_syscall_exec_refused_count = kernel_syscall_exec_refused_count + 1;
+    atomic_word_fetch_add(&kernel_syscall_exec_refused_count, 1);
     el0_context_set_x0(frame, LINUX_ENOMEM);
     workload_profile_el0_enter();
     process_current_end(current_authority);
@@ -5051,7 +5051,7 @@ private fn kernel_syscall_child_exec_refused(frame: sink FrameRef[process, Excep
 private fn kernel_syscall_child_exec_lost(frame: borrow FrameRef[process, ExceptionLevel::El0],
         current_authority: ProcessCurrent[current_process, ProcessState::Running]) !{unsafe} {
     kernel_syscall_exec_clear();
-    kernel_syscall_exec_lost_count = kernel_syscall_exec_lost_count + 1;
+    atomic_word_fetch_add(&kernel_syscall_exec_lost_count, 1);
     kernel_process_child_exec_lost(current_authority);
     // The same exit tail a refused sigreturn takes: it does not return.
     signal_return_exit(current_authority, frame,
@@ -5060,11 +5060,12 @@ private fn kernel_syscall_child_exec_lost(frame: borrow FrameRef[process, Except
 
 // Evidence for the #1079 paths: execs refused with ENOMEM before the
 // teardown, and execs that ended their process after it.
-private let mut kernel_syscall_exec_refused_count: usize;
-private let mut kernel_syscall_exec_lost_count: usize;
+private let mut kernel_syscall_exec_refused_count: AtomicWord;
+private let mut kernel_syscall_exec_lost_count: AtomicWord;
 
 fn kernel_syscall_exec_reserve_evidence() -> (usize, usize) {
-    return (kernel_syscall_exec_refused_count, kernel_syscall_exec_lost_count);
+    return (atomic_word_load(&kernel_syscall_exec_refused_count),
+            atomic_word_load(&kernel_syscall_exec_lost_count));
 }
 
 // GitHub issue #831 (maintainer decision 2026-10-20, item 2-1 A): PID 1

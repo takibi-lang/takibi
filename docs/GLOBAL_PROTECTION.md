@@ -57,7 +57,7 @@ Tried in this order; an array `[T; N]` takes the class of `T`.
 | `atomic` | `AtomicWord` |
 | `lock` | `LockedCell(T)`, `RegionPool(T)` |
 | `place` | `Place(T)` |
-| `boot_once` | `BootOnce(T)` (#1013, not yet in the tree) |
+| `boot_once` | `BootOnce(T)`: written under one `BootPhase`, read after by `boot_once_get` |
 | `per_cpu` | a `struct per_cpu` store |
 | `dma_fixed` | a `struct dma_fixed` record |
 | `protocol` | a struct a `protocol` declaration generated |
@@ -128,3 +128,9 @@ by a source scan with different edges).
   USB host base, each reader's status word, and the xHCI capability values;
   QEMU's timer INTID. 418 -> 390 unprotected. The windows' `IoHandle`s stay
   listed: a handle is reached by register syntax, not through `boot_once_get`.
+- 2026-10-30: diagnostic counters to `AtomicWord`: the TCP completion and
+  stack-wide retransmit counts, the descriptor-table invariant counts, the
+  exec refused/lost counts, and the process-image reap, missing-record and
+  stale-root counts. The three per-core arrays among them become one word,
+  so an increment takes no `cpu_id()` a preempted task could outlive.
+  390 -> 374 unprotected.

@@ -144,9 +144,6 @@ kernel/init/test_driver.tkb	rootfs_metadata	unreviewed; 2026-10-06 retain-boot: 
 kernel/kernel/fd_table.tkb	fd_refcount_probe_handle	unreviewed; 2026-10-06 retain-fixture: refcount contention fixture / fixture rendezvous/guarded production count operations
 kernel/kernel/fd_table.tkb	fd_refcount_probe_ready	unreviewed; 2026-10-06 retain-fixture: refcount contention fixture / fixture rendezvous/guarded production count operations
 kernel/kernel/fd_table.tkb	fd_slot_total	unreviewed; 2026-10-06 retain-pools: FD namespace and shared open descriptions / typed pool guards/pins; process ownership of chains; refcount lock
-kernel/kernel/fd_table.tkb	object_double_release_count	unreviewed; 2026-10-06 retain-evidence: FD/refcount invariant evidence / existing guarded record/refcount paths; snapshot/report readers
-kernel/kernel/fd_table.tkb	unified_fd_record_missing_count	unreviewed; 2026-10-06 retain-evidence: FD/refcount invariant evidence / existing guarded record/refcount paths; snapshot/report readers
-kernel/kernel/fd_table.tkb	unified_object_ref_bound_breaks	unreviewed; 2026-10-06 retain-evidence: FD/refcount invariant evidence / existing guarded record/refcount paths; snapshot/report readers
 kernel/kernel/freelist_contention_evidence.tkb	freelist_probe	unreviewed; 2026-10-06 retain-fixture: named freelist_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
 kernel/kernel/freelist_contention_evidence.tkb	freelist_probe_ready	unreviewed; 2026-10-06 retain-fixture: named freelist_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
 kernel/kernel/init_once_contention_evidence.tkb	init_once_probe_gate	unreviewed; 2026-10-06 retain-fixture: named init_once_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
@@ -231,8 +228,6 @@ kernel/kernel/schedule_contention_evidence.tkb	schedule_probe_attempts	unreviewe
 kernel/kernel/schedule_contention_evidence.tkb	schedule_probe_handle	unreviewed; 2026-10-06 retain-fixture: named schedule_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
 kernel/kernel/schedule_contention_evidence.tkb	schedule_probe_ready	unreviewed; 2026-10-06 retain-fixture: named schedule_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
 kernel/kernel/signal_contention_evidence.tkb	signal_probe_record	unreviewed; 2026-10-06 retain-fixture: named signal_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
-kernel/kernel/syscall.tkb	kernel_syscall_exec_lost_count	unreviewed
-kernel/kernel/syscall.tkb	kernel_syscall_exec_refused_count	unreviewed
 kernel/kernel/syscall.tkb	syscall_filesystem	unreviewed; 2026-10-06 retain-context: filesystem service and CPU-local action scratch / boot-published filesystem; non-preemptible local scratch; stable argv owner exchange
 kernel/kernel/syscall.tkb	syscall_scratch	unreviewed; 2026-10-06 retain-context: filesystem service and CPU-local action scratch / boot-published filesystem; non-preemptible local scratch; stable argv owner exchange
 kernel/kernel/syscall.tkb	syscall_syslog_peer_reported	unreviewed; 2026-10-06 retain-context: filesystem service and CPU-local action scratch / boot-published filesystem; non-preemptible local scratch; stable argv owner exchange
@@ -283,24 +278,15 @@ kernel/lib/diagnostic_ring.tkb	diagnostic_trace_test_enabled	unreviewed; 2026-10
 kernel/lib/occupancy.tkb	kernel_world_stop	unreviewed; 2026-10-06 retain-owner: machine WorldStop controller / linear complete/partial tokens and generation acknowledgements
 kernel/mm/address_space.tkb	address_space_backing_missing_count	unreviewed; 2026-10-06 retain-partition: backing allocator; CPU-active root; permanent root0 / pool pins; CPU-local hardware root; bootstrap mint and teardown run protocol
 kernel/mm/address_space.tkb	address_space_backing_root0	unreviewed; 2026-10-06 retain-partition: backing allocator; CPU-active root; permanent root0 / pool pins; CPU-local hardware root; bootstrap mint and teardown run protocol
-kernel/mm/process_image.tkb	process_image_exec_reap_clean_count	unreviewed; 2026-10-06 retain-context: image allocator and CPU-local image operations / pool pins; closed CPU-local operation context; permanent zero page
-kernel/mm/process_image.tkb	process_image_exec_reap_count	unreviewed; 2026-10-06 retain-context: image allocator and CPU-local image operations / pool pins; closed CPU-local operation context; permanent zero page
-kernel/mm/process_image.tkb	process_image_exec_reap_stack_growth_count	unreviewed; 2026-10-06 retain-context: image allocator and CPU-local image operations / pool pins; closed CPU-local operation context; permanent zero page
-kernel/mm/process_image.tkb	process_image_record_missing_count	unreviewed; 2026-10-06 retain-context: image allocator and CPU-local image operations / pool pins; closed CPU-local operation context; permanent zero page
 kernel/mm/process_image.tkb	process_image_root0_record	unreviewed
-kernel/mm/process_image.tkb	process_image_root_stale_count	unreviewed; 2026-10-06 retain-context: image allocator and CPU-local image operations / pool pins; closed CPU-local operation context; permanent zero page
 kernel/mm/process_image.tkb	process_image_staging	unreviewed
 kernel/mm/process_image.tkb	process_image_zero_page	unreviewed; 2026-10-06 retain-context: image allocator and CPU-local image operations / pool pins; closed CPU-local operation context; permanent zero page
 kernel/net/socket_capability.tkb	network_capability_store	unreviewed; 2026-10-06 retain-owner: one network RX admission authority / indexed mutex guard and stable_replace linear owner exchange
 kernel/net/tcp.tkb	pending_tcp_probe_frame	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
 kernel/net/tcp.tkb	pin_sharing_handles	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
 kernel/net/tcp.tkb	pin_sharing_page	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
-kernel/net/tcp.tkb	tcp_absent_fallback_count	unreviewed; 2026-10-06 retain-pools: shared connection/frame/retransmit allocators and protocol engine / typed pool guards/pins; connection owner; network capabilities; injection controls
 kernel/net/tcp.tkb	tcp_ack_each_stream_segment	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
 kernel/net/tcp.tkb	tcp_advertised_window	unreviewed; 2026-10-06 retain-pools: shared connection/frame/retransmit allocators and protocol engine / typed pool guards/pins; connection owner; network capabilities; injection controls
-kernel/net/tcp.tkb	tcp_completed_closes	unreviewed; 2026-10-06 retain-pools: shared connection/frame/retransmit allocators and protocol engine / typed pool guards/pins; connection owner; network capabilities; injection controls
-kernel/net/tcp.tkb	tcp_completed_echoes	unreviewed; 2026-10-06 retain-pools: shared connection/frame/retransmit allocators and protocol engine / typed pool guards/pins; connection owner; network capabilities; injection controls
-kernel/net/tcp.tkb	tcp_completed_handshakes	unreviewed; 2026-10-06 retain-pools: shared connection/frame/retransmit allocators and protocol engine / typed pool guards/pins; connection owner; network capabilities; injection controls
 kernel/net/tcp.tkb	tcp_drop_data_segment_index	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
 kernel/net/tcp.tkb	tcp_drop_data_segment_rearm	unreviewed
 kernel/net/tcp.tkb	tcp_drop_next_fin	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
@@ -313,9 +299,7 @@ kernel/net/tcp.tkb	tcp_injected_syn_accepted	unreviewed; 2026-10-06 retain-fixtu
 kernel/net/tcp.tkb	tcp_injected_syn_pending	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
 kernel/net/tcp.tkb	tcp_injected_syn_retransmitted	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
 kernel/net/tcp.tkb	tcp_kept_segments	unreviewed
-kernel/net/tcp.tkb	tcp_retx_pass_busy	unreviewed
 kernel/net/tcp.tkb	tcp_retx_pass_hold_until_recovered	unreviewed
-kernel/net/tcp.tkb	tcp_retx_pass_sent	unreviewed
 kernel/net/tcp.tkb	tcp_split_request_segments	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
 kernel/platform/rpi5/intc.tkb	mip0	unreviewed
 kernel/platform/rpi5/intc.tkb	rp1_msix	unreviewed

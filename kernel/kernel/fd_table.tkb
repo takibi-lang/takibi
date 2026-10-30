@@ -186,7 +186,7 @@ private fn fd_block_slot_free(slot: sink RegionReleaseSlot(FdBlock)[p, k]) !{uns
     let guard = fd_block_pool_lock(&fd_block_pool);
     match region_slot_adopt(guard, slot) {
         RegionReleaseAdopt(FdBlock)::Foreign(stray) => {
-            unified_fd_record_missing_count = unified_fd_record_missing_count + 1;
+            atomic_word_fetch_add(&unified_fd_record_missing_count, 1);
             region_slot_abandon(stray);
         }
         RegionReleaseAdopt(FdBlock)::Adopted(mine) => {
@@ -218,12 +218,12 @@ private fn fd_block_pin(pool: *RegionPool(FdBlock) @ blocks, address: usize,
 
 // Failed release validation is counted; stale lookups return closed failure
 // cases rather than references to shared fallback payloads.
-private let mut unified_fd_record_missing_count: usize = 0;
+private let mut unified_fd_record_missing_count: AtomicWord;
 
 // Printed by the boot summary when nonzero, like its two siblings in
 // kernel/mm/. Zero is the whole claim.
 fn unified_fd_record_missing_uses() -> usize {
-    return unified_fd_record_missing_count;
+    return atomic_word_load(&unified_fd_record_missing_count);
 }
 
 // How many descriptor slots exist across every process, maintained as
@@ -309,7 +309,7 @@ private fn fd_context_slot_free(slot: sink RegionReleaseSlot(ProcessFdContext)[p
     let guard = fd_context_pool_lock(&fd_context_pool);
     match region_slot_adopt(guard, slot) {
         RegionReleaseAdopt(ProcessFdContext)::Foreign(stray) => {
-            unified_fd_record_missing_count = unified_fd_record_missing_count + 1;
+            atomic_word_fetch_add(&unified_fd_record_missing_count, 1);
             region_slot_abandon(stray);
         }
         RegionReleaseAdopt(ProcessFdContext)::Adopted(mine) => {
@@ -863,7 +863,7 @@ private fn object_slot_free(slot: sink RegionReleaseSlot(SharedObject)[p, k]) !{
     let guard = object_pool_lock(&object_pool);
     match region_slot_adopt(guard, slot) {
         RegionReleaseAdopt(SharedObject)::Foreign(stray) => {
-            unified_fd_record_missing_count = unified_fd_record_missing_count + 1;
+            atomic_word_fetch_add(&unified_fd_record_missing_count, 1);
             region_slot_abandon(stray);
         }
         RegionReleaseAdopt(SharedObject)::Adopted(mine) => {
@@ -1024,7 +1024,7 @@ private fn unified_object_retain_locked(
 // A release of a live object that nobody holds is the double release
 // RefcountSlotMap counted, and it is counted here for the same reason:
 // unified_fd_table_probe asserts the count is 0 at the end of a run.
-private let mut object_double_release_count: usize = 0;
+private let mut object_double_release_count: AtomicWord;
 
 // GitHub issue #479. Its own global rather than a field, for the reason
 // kernel/mm/page.tkb's is: an 8-byte field at the front of an aligned
@@ -1102,7 +1102,7 @@ fn unified_fd_recycled_handle_count() -> usize !{unsafe} {
 }
 
 fn unified_object_double_release_count() -> usize {
-    return object_double_release_count;
+    return atomic_word_load(&object_double_release_count);
 }
 
 private fn unified_object_release(handle: UnifiedObjectHandle)
@@ -1169,7 +1169,7 @@ private fn unified_object_release_locked(
     let refs = guarded_usize_load(guard, &object.refs);
     let held: usize = refs;
     if (held < 1) {
-        object_double_release_count = object_double_release_count + 1;
+        atomic_word_fetch_add(&object_double_release_count, 1);
         { let __object_result: UnifiedObjectReleaseResult = UnifiedObjectReleaseResult::Invalid; object_unpin(object_pin); return __object_result; }
     }
     guarded_usize_store(guard, &object.refs, held - 1);
@@ -1342,7 +1342,7 @@ fn unified_fd_table_init() !{unsafe} {
     // itself is deliberately NOT re-initialised, for the same reason the
     // context pool is not -- see unified_object_pool_init.
     unified_object_pool_drain();
-    object_double_release_count = 0;
+    atomic_word_store(&object_double_release_count, 0);
     // GitHub issue #392: the loop is over LIVE contexts rather than over
     // every process slot, because contexts only exist for processes that
     // have one. Emptying them is not optional: this function also resets
@@ -2537,14 +2537,14 @@ fn unified_object_ref_bound() -> usize {
 // LINUX_EMFILE, because a bound this file computes for the first time
 // should not be able to halt the kernel. Promoting it to a fail-stop is a
 // one-line change once it has run long enough to be trusted.
-private let mut unified_object_ref_bound_breaks: usize = 0;
+private let mut unified_object_ref_bound_breaks: AtomicWord;
 
 fn unified_object_ref_bound_breaks_count() -> usize {
-    return unified_object_ref_bound_breaks;
+    return atomic_word_load(&unified_object_ref_bound_breaks);
 }
 
 private fn unified_object_ref_bound_break(object: usize) {
-    unified_object_ref_bound_breaks = unified_object_ref_bound_breaks + 1;
+    atomic_word_fetch_add(&unified_object_ref_bound_breaks, 1);
     kernel_boot_log("fd table: INVARIANT BREAK -- shared object at ");
     uart_put_udec(object);
     kernel_boot_log(" has more references than there are descriptor slots (");

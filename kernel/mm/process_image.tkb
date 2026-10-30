@@ -27,13 +27,6 @@ struct ProcessImageExt2Source {
 }
 variant ProcessImageSourceState { Absent; Ext2(ProcessImageExt2Source); }
 
-
-private fn process_image_cpu_index() -> {0..<KERNEL_MAX_CORES as usize} {
-    let core: usize = cpu_id();
-    if (core < KERNEL_MAX_CORES) { return core; }
-    return 0;
-}
-
 // GitHub issue #638: the ext2 exec staging -- the file the PT_LOAD bytes come
 // from, the interpreter's file for a dynamic pair, and the one-block read
 // buffer -- is held across ext2 reads, which wait for the device (may_block).
@@ -208,20 +201,14 @@ const PROCESS_IMAGE_CHUNK_PAGES: usize = 1;
 // reported from sixty-odd field accesses, so it is COUNTED, and the count
 // is printed at the end of the boot suite; a missing record reads as all
 // zero and its writes are dropped.
-private let mut process_image_record_missing_count:
-    [usize; KERNEL_MAX_CORES];
+private let mut process_image_record_missing_count: AtomicWord;
 
 private fn process_image_record_missing_note() {
-    let core = process_image_cpu_index();
-    process_image_record_missing_count[core] = process_image_record_missing_count[core] + 1;
+    atomic_word_fetch_add(&process_image_record_missing_count, 1);
 }
 
 fn process_image_record_missing_uses() -> usize {
-    let mut total: usize = 0;
-    for core: usize in 0..<KERNEL_MAX_CORES {
-        total = total + process_image_record_missing_count[core];
-    }
-    return total;
+    return atomic_word_load(&process_image_record_missing_count);
 }
 
 private fn process_image_pool_lock(pool: *RegionPool(ProcessImageRecord) @ images)
@@ -803,21 +790,12 @@ fn process_image_record_release_words(root: usize,
 // was BusyBox init's live image until #831, so it unmapped PID 1. Counted
 // and gated on zero. (The "no target chosen" half went with the per-CPU
 // target, #981.)
-private let mut process_image_root_stale_count:
-    [usize; KERNEL_MAX_CORES];
-
-private fn process_image_root_counter_total(counts: borrow [usize; KERNEL_MAX_CORES..]) -> usize {
-    let mut total: usize = 0;
-    for core: usize in 0..<KERNEL_MAX_CORES {
-        total = total + counts[core];
-    }
-    return total;
-}
+private let mut process_image_root_stale_count: AtomicWord;
 
 // A target that was chosen and whose root has since stopped naming a live
 // process. This one is gated on zero, and it is the one issue #270 hit.
 fn process_image_root_stale_fallback_uses() -> usize {
-    return process_image_root_counter_total(process_image_root_stale_count as []usize);
+    return atomic_word_load(&process_image_root_stale_count);
 }
 
 // GitHub issue #492 counted lookups that named an image slot with the
@@ -857,8 +835,7 @@ fn process_image_root_checked(root: AddressSpaceRoot)
         -> ProcessImageTargetRootResult !{unsafe} {
     if (address_space_root_slot_valid(address_space_root_slot(
             root)) == false) {
-        let stale_count_core = process_image_cpu_index();
-        process_image_root_stale_count[stale_count_core] = process_image_root_stale_count[stale_count_core] + 1;
+        atomic_word_fetch_add(&process_image_root_stale_count, 1);
         return ProcessImageTargetRootResult::Missing;
     }
     return ProcessImageTargetRootResult::Ready(
@@ -1545,9 +1522,9 @@ fn process_image_exec_install(
 // are torn down here instead. Counting both reaps and clean reaps here
 // keeps that VM-hygiene assertion, and does it for every applet at once
 // rather than one hand-written check per kernel-side launch.
-private let mut process_image_exec_reap_count: usize;
-private let mut process_image_exec_reap_clean_count: usize;
-private let mut process_image_exec_reap_stack_growth_count: usize;
+private let mut process_image_exec_reap_count: AtomicWord;
+private let mut process_image_exec_reap_clean_count: AtomicWord;
+private let mut process_image_exec_reap_stack_growth_count: AtomicWord;
 
 fn process_image_root_window_is_clear(
         root: AddressSpaceRoot) -> bool !{unsafe} {
@@ -1555,9 +1532,9 @@ fn process_image_root_window_is_clear(
 }
 
 fn process_image_exec_reap_evidence() -> (usize, usize, usize) {
-    return (process_image_exec_reap_count,
-            process_image_exec_reap_clean_count,
-            process_image_exec_reap_stack_growth_count);
+    return (atomic_word_load(&process_image_exec_reap_count),
+            atomic_word_load(&process_image_exec_reap_clean_count),
+            atomic_word_load(&process_image_exec_reap_stack_growth_count));
 }
 
 // GitHub issue #392: split in two, because the two halves belong to two
@@ -1601,8 +1578,7 @@ fn process_image_exec_teardown(target: AddressSpaceRoot,
                 process_image_record_pin_words(&process_image_pool, words), 0);
             if (installed) {
                 if (before.stack_growth_active && before.active_page_count > count) {
-                    process_image_exec_reap_stack_growth_count =
-                        process_image_exec_reap_stack_growth_count + 1;
+                    atomic_word_fetch_add(&process_image_exec_reap_stack_growth_count, 1);
                 }
                 // process_image_unmap_pages for this root, whose resets
                 // process_image_cleanup_root repeats unconditionally.
@@ -1614,11 +1590,9 @@ fn process_image_exec_teardown(target: AddressSpaceRoot,
                 process_image_set_stack_lowest_l3_pinned(
                     process_image_record_pin_words(&process_image_pool, words),
                     process_stack_top_page());
-                process_image_exec_reap_count =
-                    process_image_exec_reap_count + 1;
+                atomic_word_fetch_add(&process_image_exec_reap_count, 1);
                 if (process_image_root_window_is_clear(target)) {
-                    process_image_exec_reap_clean_count =
-                        process_image_exec_reap_clean_count + 1;
+                    atomic_word_fetch_add(&process_image_exec_reap_clean_count, 1);
                 }
             }
         }
