@@ -368,6 +368,8 @@ LINUX_UNUSED_CHECK       := --reject-unused-functions --external-entry main
 #   drives the whole parser;
 # - drivers/block/memory.tkb: each platform picks one of its two block
 #   devices;
+# - lib/lz4.tkb: a general codec; the kernel decodes only, and
+#   linux_user/lz4 drives the encoder (#1218);
 # - lib/freelist.tkb: generic API the slotmap generics call, driven whole by
 #   linux_user;
 # - lib/task_mutex.tkb: linux_user/spinlock drives init and is_held, which
@@ -403,6 +405,7 @@ KERNEL_GC_LIST = --print-gc-sections > $@.gc-sections
 # The DMA and GEM fixtures have their own --check-unused-file invocations and are
 # absent from both production closures.
 KERNEL_UNUSED_EXEMPT := \
+	kernel/lib/lz4.tkb \
 	kernel/tests/rpi5/gem_tx/fixture.tkb \
 	kernel/tests/rpi5/gem_tx/irq_fixture.tkb \
 	kernel/tests/qemu/invariant_stop/fixture.tkb \
@@ -556,6 +559,7 @@ KERNEL_UNUSED_CHECKED_RPI5 := \
 	kernel/platform/rpi5/device_map.tkb \
 	kernel/platform/rpi5/uart.tkb \
 	kernel/platform/rpi5/usb_provision.tkb \
+	kernel/lib/lz4_image.tkb \
 	kernel/platform/rpi5/usb_xhci_dtb.tkb \
 	kernel/platform/rpi5/usb_xhci_dma.tkb \
 	kernel/platform/rpi5/xhci_irq_affinity.tkb \
@@ -596,7 +600,7 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              affine_escape_via_index align_ptr_proof linear_obligation tuple_pair region_proto region_inspection pool_space_replay \
                              field_lease match_int_lit record_loans \
                              callstack ringbuf crc8 djb2 slice slice_from_field logical_eval foreach for loop fizzbuzz fibonacci \
-                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report xhci_event_match xhci_regs uart_rx_ring pl011_rx block_cache gem_tx_wait virtio_net_tx virtio_net_reply generic_variant runtime_bounds pin_placement place_array protocol_ring protocol_tx protocol_txrx protocol_snapshot region_held header_overlay cache_geometry wait_status plain_variant variant_abi struct_array_arg struct_array_result preempt_region
+                             bubblesort lz4 inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report xhci_event_match xhci_regs uart_rx_ring pl011_rx block_cache gem_tx_wait virtio_net_tx virtio_net_reply generic_variant runtime_bounds pin_placement place_array protocol_ring protocol_tx protocol_txrx protocol_snapshot region_held header_overlay cache_geometry wait_status plain_variant variant_abi struct_array_arg struct_array_result preempt_region
 # GitHub issue #1035: linux_user/ext2_host is a driver program, not a
 # stdout-against-.expected test: scripts/ext2_host.py runs it (image on fd 3,
 # operations on stdin). It is built with the others, outside the loop below.
@@ -632,6 +636,11 @@ $(LINUX_USER_DIR)/virtio_net_tx/virtio_net_tx_exe.o $(LINUX_USER_DIR)/virtio_net
 $(LINUX_USER_DIR)/virtio_net_tx/virtio_net_tx_exe.o $(LINUX_USER_DIR)/virtio_net_reply/virtio_net_reply_exe.o: LINUX_USER_EXTRA_FLAGS := --regions --device-semantics-file kernel/drivers/net/virtio_net_tx_dma.tkb --device-semantics-file kernel/drivers/virtio_used.tkb
 $(LINUX_USER_DIR)/tcp_parse/tcp_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb
 $(LINUX_USER_DIR)/byte_slice/byte_slice_exe.o: kernel/lib/byte_slice.tkb
+# GitHub issue #1218: the kernel's LZ4 codec against the host encoder's bytes.
+LINUX_USER_LZ4_FIXTURE := $(LINUX_USER_BUILD_DIR)/lz4/image.tkz
+$(LINUX_USER_LZ4_FIXTURE): scripts/lz4_image.py
+	python3 scripts/lz4_image.py fixture $(LINUX_USER_BUILD_DIR)/lz4
+$(LINUX_USER_DIR)/lz4/lz4_exe.o: kernel/lib/lz4.tkb kernel/lib/lz4_image.tkb $(LINUX_USER_LZ4_FIXTURE)
 $(LINUX_USER_DIR)/wait_status/wait_status_exe.o: kernel/kernel/wait_status.tkb
 $(LINUX_USER_DIR)/wait_status/wait_status_exe.o: LINUX_USER_EXTRA_SRCS := kernel/kernel/wait_status.tkb
 # GitHub issue #470: the kernel's device-tree reader, run against a blob
@@ -930,6 +939,8 @@ linuxcheck: linuxbuild compiler-fuzz
 	@# hostile images, and the planted rollback bug. About 35 s; the long
 	@# runs are `make ext2-host-long`.
 	@python3 scripts/ext2_host.py self-test
+	@# GitHub issue #1218: the host LZ4 encoder and its decoder.
+	@python3 scripts/lz4_image.py self-test
 	@python3 scripts/ext2_host.py eq kernel/tests/ext2_eq/ops.eq
 	@python3 scripts/ext2_host.py campaign
 	@python3 scripts/ext2_host.py faults
@@ -1052,7 +1063,12 @@ KERNEL_UTIL_LINUX_MISC_APK := $(KERNEL_USER_BUILD_DIR)/util-linux-misc.apk
 KERNEL_TASKSET            := $(KERNEL_USER_BUILD_DIR)/taskset
 KERNEL_EXT2_FIXTURE_DIR  := $(KERNEL_DIR)/tests/ext2
 KERNEL_EXT2_IMAGE        := $(KERNEL_USER_BUILD_DIR)/ext2.img
+KERNEL_LZ4_TKB           := kernel/lib/lz4.tkb kernel/lib/lz4_image.tkb
 KERNEL_SHELL_EXT2_IMAGE  := $(KERNEL_USER_BUILD_DIR)/ext2-shell.img
+# GitHub issue #1218: the RPi5 kernel embeds these compressed images, not
+# the raw ones (scripts/lz4_image.py; kernel/lib/lz4_image.tkb expands them).
+KERNEL_EXT2_TKZ          := $(KERNEL_USER_BUILD_DIR)/ext2.tkz
+KERNEL_SHELL_EXT2_TKZ    := $(KERNEL_USER_BUILD_DIR)/ext2-shell.tkz
 # GitHub issue #742 stage 1: stress-ng and hackbench, musl static PIEs from
 # scripts/build_load_programs.sh (downloads kept in TAKIBI_LOAD_CACHE,
 # outside the repository), live in the fixture rootfs itself, so QEMU and the
@@ -1814,7 +1830,7 @@ $(KERNEL_HANG_CORE_ELF): $(KERNEL_HANG_CORE_O)
 	$(LLD) -pie --no-dynamic-linker -e hang_core $< -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
-$(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_EXT2_MUTATION_LOCK_TKB) $(KERNEL_EXT2_MUTATION_PROBE_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_PMU_EXTERN) $(KERNEL_CACHE_GEOMETRY_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_RPI5_MEMORY_TKB) $(KERNEL_FDT_TKB) \
+$(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_EXT2_MUTATION_LOCK_TKB) $(KERNEL_EXT2_MUTATION_PROBE_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_PMU_EXTERN) $(KERNEL_CACHE_GEOMETRY_EXTERN) $(KERNEL_EXT2_TKZ) $(KERNEL_LZ4_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_RPI5_MEMORY_TKB) $(KERNEL_FDT_TKB) \
     $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_INTC_TKB) $(KERNEL_RPI5_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile | $(KERNEL_BUILD_DIR)
 	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $< $(KERNEL_RPI5_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_EXECUTION_MODEL) $(KERNEL_UNUSED_CHECK_RPI5) --facts $@.facts -o $@
 	python3 scripts/buildcheck_kernel_unused_coverage.py rpi5 $@.facts/deps.d
@@ -1838,10 +1854,21 @@ $(KERNEL_RPI5_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_
 	python3 scripts/buildcheck_kernel_same_operand_csel.py $@ 10
 	python3 scripts/buildcheck_kernel_byte_copy.py $@ 0
 
-$(KERNEL_RPI5_SHELL_ELF): $(KERNEL_RPI5_ELF) $(KERNEL_EXT2_IMAGE) \
-	$(KERNEL_SHELL_EXT2_IMAGE) scripts/patch_embedded_image.py
+# Both containers come from one run and are padded to one length, so the
+# shell kernel below is the main kernel with its container replaced in
+# place. The run decodes each with its own decoder and compares it with
+# the image (GitHub issue #1218).
+$(KERNEL_EXT2_TKZ): $(KERNEL_EXT2_IMAGE) $(KERNEL_SHELL_EXT2_IMAGE) scripts/lz4_image.py
+	python3 scripts/lz4_image.py pack-pair $(KERNEL_EXT2_IMAGE) $(KERNEL_SHELL_EXT2_IMAGE) \
+		$(KERNEL_EXT2_TKZ).tmp $(KERNEL_SHELL_EXT2_TKZ).tmp
+	mv $(KERNEL_SHELL_EXT2_TKZ).tmp $(KERNEL_SHELL_EXT2_TKZ)
+	mv $(KERNEL_EXT2_TKZ).tmp $(KERNEL_EXT2_TKZ)
+$(KERNEL_SHELL_EXT2_TKZ): $(KERNEL_EXT2_TKZ)
+
+$(KERNEL_RPI5_SHELL_ELF): $(KERNEL_RPI5_ELF) $(KERNEL_EXT2_TKZ) \
+	$(KERNEL_SHELL_EXT2_TKZ) scripts/patch_embedded_image.py
 	python3 scripts/patch_embedded_image.py $(KERNEL_RPI5_ELF) \
-		$(KERNEL_EXT2_IMAGE) $(KERNEL_SHELL_EXT2_IMAGE) $@
+		$(KERNEL_EXT2_TKZ) $(KERNEL_SHELL_EXT2_TKZ) $@
 	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 2
 	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool_cell 16
 

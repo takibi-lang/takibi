@@ -1,0 +1,306 @@
+// LZ4 block format (no frame header): a compressor and a decompressor over
+// borrowed regions. GitHub issue #1218: the RPi5 kernel embeds its
+// provisioning image compressed (kernel/lib/lz4_image.tkb) so the board
+// loads fewer bytes over SWD; the codec itself knows nothing of images and
+// is meant to serve a later compressed-memory feature as well.
+//
+// The format is the reference one (lz4/doc/lz4_Block_format.md): a run of
+// sequences, each a token (literal length high nibble, match length - 4 low
+// nibble), 255-continued length bytes, the literals, a little-endian 16-bit
+// offset and further match-length bytes; the last sequence is literals only.
+//
+// Every read and write is checked against the borrowed region's own length,
+// so a hostile or truncated input ends in Invalid, never in an access past
+// either region. The output bound is the destination's length: a decoder
+// never writes past dst.len, an encoder never past dst.len, and each says so
+// with a distinct case instead of a truncated result.
+//
+// Current limitations (2026-10-29). Keep this list current as call sites
+// change; a limitation that goes stale here is worse than none.
+// - The only callers are the RPi5 provisioning path (decoder, one 64 KiB
+//   chunk at a time, single-threaded at boot) and the linux_user tests. No
+//   caller shares a region with another core; nothing here locks.
+// - The encoder is greedy with one hash probe per position (no lazy
+//   matching, no acceleration): its ratio is below the reference encoder's,
+//   and the host encoder (scripts/lz4_image.py) is the one that sizes the
+//   embedded image. The two need not produce the same bytes; any valid
+//   block decodes.
+// - The encoder's hash table is the caller's region (LZ4_HASH_ENTRIES
+//   words); it is cleared on entry, so it carries nothing between calls.
+// - Inputs larger than 4 GiB are refused (the table holds 32-bit positions).
+
+const LZ4_MIN_MATCH: usize = 4;
+// The reference format's end rules: the last five bytes are literals, and
+// the last match starts at least twelve bytes before the end.
+const LZ4_LAST_LITERALS: usize = 5;
+const LZ4_MATCH_FIND_LIMIT: usize = 12;
+const LZ4_MAX_OFFSET: usize = 65535;
+const LZ4_HASH_ENTRIES: usize = 4096;
+
+must_use variant Lz4DecodeResult {
+    // The input is not a well-formed block, or it would write past the
+    // destination (which a caller sized for the block cannot tell apart).
+    Invalid;
+    Decoded(usize);
+}
+
+must_use variant Lz4EncodeResult {
+    // The destination is too small for this input's block; nothing written
+    // is meaningful.
+    NoRoom;
+    Encoded(usize);
+}
+
+must_use variant Lz4LengthResult {
+    Invalid;
+    // (the extra length, the input position after its bytes)
+    Length((usize, usize));
+}
+
+must_use variant Lz4EmitResult {
+    NoRoom;
+    Emitted(usize);
+}
+
+// The 255-continued length that follows a nibble of 15.
+private fn lz4_read_length(src: borrow []const u8, from: usize)
+        -> Lz4LengthResult {
+    let mut total: usize = 0;
+    let mut at: usize = from;
+    while (true) {
+        let position: usize = at;
+        if (position < src.len) {
+            let value: usize = src[position] as usize;
+            // A length past any destination this format can address.
+            if (total > 0x7FFFFFFF) { return Lz4LengthResult::Invalid; }
+            total = total + value;
+            at = position + 1;
+            if (value != 255) {
+                return Lz4LengthResult::Length((total, at));
+            }
+        } else {
+            return Lz4LengthResult::Invalid;
+        }
+    }
+    return Lz4LengthResult::Invalid;
+}
+
+// Decode one block from src into dst; Decoded carries the bytes written.
+fn lz4_decode(src: borrow []const u8, dst: borrow []u8) -> Lz4DecodeResult {
+    let src_len: usize = src.len;
+    let dst_len: usize = dst.len;
+    let mut ip: usize = 0;
+    let mut op: usize = 0;
+    while (ip < src_len) {
+        let token_at: usize = ip;
+        if (token_at >= src.len) { return Lz4DecodeResult::Invalid; }
+        let token: usize = src[token_at] as usize;
+        ip = token_at + 1;
+        let mut literals: usize = token >> 4;
+        if (literals == 15) {
+            match lz4_read_length(src, ip) {
+                Lz4LengthResult::Invalid => { return Lz4DecodeResult::Invalid; }
+                Lz4LengthResult::Length(found) => {
+                    let (more, next) = found;
+                    literals = literals + more;
+                    ip = next;
+                }
+            }
+        }
+        if (ip > src_len || literals > src_len - ip ||
+            op > dst_len || literals > dst_len - op) {
+            return Lz4DecodeResult::Invalid;
+        }
+        for k: usize in 0..<literals {
+            let from: usize = ip + k;
+            let to: usize = op + k;
+            if (from < src.len && to < dst.len) {
+                dst[to] = src[from];
+            } else {
+                return Lz4DecodeResult::Invalid;
+            }
+        }
+        ip = ip + literals;
+        op = op + literals;
+        // The last sequence ends after its literals.
+        if (ip == src_len) { return Lz4DecodeResult::Decoded(op); }
+        let low_at: usize = ip;
+        let high_at: usize = ip + 1;
+        if (high_at >= src.len) { return Lz4DecodeResult::Invalid; }
+        if (low_at >= src.len) { return Lz4DecodeResult::Invalid; }
+        let offset: usize = (src[low_at] as usize) |
+                            ((src[high_at] as usize) << 8);
+        ip = high_at + 1;
+        if (offset == 0 || offset > op) { return Lz4DecodeResult::Invalid; }
+        let mut match_length: usize = (token & 15) + LZ4_MIN_MATCH;
+        if ((token & 15) == 15) {
+            match lz4_read_length(src, ip) {
+                Lz4LengthResult::Invalid => { return Lz4DecodeResult::Invalid; }
+                Lz4LengthResult::Length(found) => {
+                    let (more, next) = found;
+                    match_length = match_length + more;
+                    ip = next;
+                }
+            }
+        }
+        if (match_length > dst_len - op) { return Lz4DecodeResult::Invalid; }
+        // Byte by byte: a match may overlap the bytes it is producing
+        // (offset < length repeats a pattern), as the format intends.
+        let match_from: usize = op - offset;
+        for k: usize in 0..<match_length {
+            let from: usize = match_from + k;
+            let to: usize = op + k;
+            if (from < dst.len && to < dst.len) {
+                dst[to] = dst[from];
+            } else {
+                return Lz4DecodeResult::Invalid;
+            }
+        }
+        op = op + match_length;
+    }
+    // An empty input is the empty block; any other block ends with a
+    // literals-only sequence, returned above.
+    if (src_len == 0) { return Lz4DecodeResult::Decoded(0); }
+    return Lz4DecodeResult::Invalid;
+}
+
+// Write a 255-continued length (the part past a nibble of 15).
+private fn lz4_put_length(dst: borrow []u8, from: usize, length: usize)
+        -> Lz4EmitResult {
+    let mut left: usize = length;
+    let mut at: usize = from;
+    while (left >= 255) {
+        let position: usize = at;
+        if (position < dst.len) { dst[position] = 255; }
+        else { return Lz4EmitResult::NoRoom; }
+        left = left - 255;
+        at = position + 1;
+    }
+    let position: usize = at;
+    if (position < dst.len) { dst[position] = left as u8; }
+    else { return Lz4EmitResult::NoRoom; }
+    return Lz4EmitResult::Emitted(position + 1);
+}
+
+// One sequence: src[literal_start..<literal_start + literals], then (when
+// match_length != 0) a match of match_length at offset.
+private fn lz4_emit(src: borrow []const u8, dst: borrow []u8, from: usize,
+                    literal_start: usize, literals: usize, offset: usize,
+                    match_length: usize) -> Lz4EmitResult {
+    let mut literal_nibble: usize = literals;
+    if (literal_nibble > 15) { literal_nibble = 15; }
+    let mut match_nibble: usize = 0;
+    if (match_length != 0) {
+        match_nibble = match_length - LZ4_MIN_MATCH;
+        if (match_nibble > 15) { match_nibble = 15; }
+    }
+    let token_at: usize = from;
+    if (token_at < dst.len) {
+        dst[token_at] = ((literal_nibble << 4) | match_nibble) as u8;
+    } else {
+        return Lz4EmitResult::NoRoom;
+    }
+    let mut op: usize = token_at + 1;
+    if (literal_nibble == 15) {
+        match lz4_put_length(dst, op, literals - 15) {
+            Lz4EmitResult::NoRoom => { return Lz4EmitResult::NoRoom; }
+            Lz4EmitResult::Emitted(next) => { op = next; }
+        }
+    }
+    for k: usize in 0..<literals {
+        let from_at: usize = literal_start + k;
+        let to: usize = op + k;
+        if (from_at < src.len && to < dst.len) {
+            dst[to] = src[from_at];
+        } else {
+            return Lz4EmitResult::NoRoom;
+        }
+    }
+    op = op + literals;
+    if (match_length == 0) { return Lz4EmitResult::Emitted(op); }
+    let low_at: usize = op;
+    let high_at: usize = op + 1;
+    if (low_at < dst.len && high_at < dst.len) {
+        dst[low_at] = (offset & 255) as u8;
+        dst[high_at] = ((offset >> 8) & 255) as u8;
+    } else {
+        return Lz4EmitResult::NoRoom;
+    }
+    op = high_at + 1;
+    if (match_nibble == 15) {
+        return lz4_put_length(dst, op, match_length - LZ4_MIN_MATCH - 15);
+    }
+    return Lz4EmitResult::Emitted(op);
+}
+
+private fn lz4_word(src: borrow []const u8, at: usize) -> u32 {
+    let mut word: u32 = 0;
+    for k: usize in 0..<4 {
+        let position: usize = at + k;
+        if (position < src.len) {
+            word = word | ((src[position] as u32) << ((k * 8) as u32));
+        }
+    }
+    return word;
+}
+
+private fn lz4_hash(word: u32) -> usize {
+    return ((word ^ (word >> 11) ^ (word >> 21)) & 0xFFF) as usize;
+}
+
+// Encode src as one block into dst. table is the caller's scratch of
+// at least LZ4_HASH_ENTRIES positions (NoRoom otherwise); it is cleared here.
+fn lz4_encode(src: borrow []const u8, dst: borrow []u8,
+              table: borrow []u32)
+        -> Lz4EncodeResult {
+    let src_len: usize = src.len;
+    if (src_len > 0xFFFFFFF0) { return Lz4EncodeResult::NoRoom; }
+    if (table.len < LZ4_HASH_ENTRIES) { return Lz4EncodeResult::NoRoom; }
+    for slot: usize in 0..<table.len { table[slot] = 0; }
+    let mut op: usize = 0;
+    let mut anchor: usize = 0;
+    if (src_len > LZ4_MATCH_FIND_LIMIT) {
+        let find_limit: usize = src_len - LZ4_MATCH_FIND_LIMIT;
+        let match_limit: usize = src_len - LZ4_LAST_LITERALS;
+        let mut ip: usize = 0;
+        while (ip < find_limit) {
+            let here: usize = ip;
+            let word: u32 = lz4_word(src, here);
+            let slot: usize = lz4_hash(word);
+            // A table entry is a position + 1; zero is empty.
+            let mut candidate: usize = 0;
+            if (slot < table.len) {
+                candidate = table[slot] as usize;
+                table[slot] = (here + 1) as u32;
+            }
+            if (candidate != 0 && here - (candidate - 1) <= LZ4_MAX_OFFSET &&
+                lz4_word(src, candidate - 1) == word) {
+                let reference: usize = candidate - 1;
+                let mut length: usize = LZ4_MIN_MATCH;
+                while (here + length < match_limit) {
+                    let a: usize = here + length;
+                    let b: usize = reference + length;
+                    if (a < src.len && b < src.len) {
+                        if (src[a] != src[b]) { break; }
+                    } else {
+                        break;
+                    }
+                    length = length + 1;
+                }
+                match lz4_emit(src, dst, op, anchor, here - anchor,
+                               here - reference, length) {
+                    Lz4EmitResult::NoRoom => { return Lz4EncodeResult::NoRoom; }
+                    Lz4EmitResult::Emitted(next) => { op = next; }
+                }
+                ip = here + length;
+                anchor = ip;
+            } else {
+                ip = here + 1;
+            }
+        }
+    }
+    match lz4_emit(src, dst, op, anchor, src_len - anchor, 0, 0) {
+        Lz4EmitResult::NoRoom => { return Lz4EncodeResult::NoRoom; }
+        Lz4EmitResult::Emitted(next) => { return Lz4EncodeResult::Encoded(next); }
+    }
+}

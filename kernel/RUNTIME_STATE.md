@@ -373,8 +373,9 @@ USB completion wait. The acquire tries the slot numbered by the current CPU
 first, so while the kernel is not preemptible slot and core coincide and
 `workload_evidence.tkb`'s per-core reads of the counters still name cores.
 
-`kernel/platform/rpi5/usb_provision.tkb` holds the embedded ext2 image and
-its two copy buffers. It is used once, by CPU0, while storage is set up and
+`kernel/platform/rpi5/usb_provision.tkb` holds the embedded ext2 image (an
+immutable LZ4 container, GitHub issue #1218), its batch buffer and the
+buffer one chunk expands into. It is used once, by CPU0, while storage is set up and
 before any process exists. Only the board's init uses that file, and the
 image is private to it: `KernelBlockDevice` has no memory backend, so the
 image cannot be mounted (94f1c36).

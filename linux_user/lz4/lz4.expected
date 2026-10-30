@@ -1,0 +1,18 @@
+round trip 0:0 ok
+round trip 1:12 ok
+round trip 1:13 ok
+round trip 0:5000 ok
+round trip 1:9000 ok
+round trip 2:9000 ok
+round trip 3:4096 ok
+host block ok
+short output noroom
+short table noroom
+offset zero invalid
+offset far invalid
+length open invalid
+literals short invalid
+literals full invalid
+match full invalid
+container chunks=3 equal=3 end
+cut chunk invalid

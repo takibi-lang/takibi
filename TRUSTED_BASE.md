@@ -595,7 +595,17 @@ Takibi does not currently establish all of the following:
 - confidentiality properties such as clearing every byte before exposing a
   page to another protection domain;
 - absence of every architectural exception. `--forbid-trap` covers only the
-  compiler-recorded checks described above.
+  compiler-recorded checks described above;
+- that the RPi5 stick receives exactly `kernel/build/user/ext2.img` (#1218).
+  The kernel embeds an LZ4 container and expands it at boot
+  (`kernel/lib/lz4.tkb`, `kernel/lib/lz4_image.tkb`). Bounds are checked:
+  every read and write of the codec is against its borrowed regions, and a
+  malformed container ends in `Invalid`, under `--forbid-trap`. The bytes
+  are trusted to a host encoder and decoder (`scripts/lz4_image.py`, whose
+  pack step decodes its own output and compares it with the image) and to
+  `linux_user/lz4`, which checks the kernel decoder against the host
+  encoder's bytes. The boot's read-back compare is against a second
+  expansion, so it checks the USB path, not the codec.
 
 What the hardware enforces rather than trusts (#1032, 2026-10-29): no page is
 both writable and executable at EL1 or EL0. SCTLR_EL1.WXN is set on every

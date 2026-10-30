@@ -61,3 +61,7 @@ docs/talks/*/dist/
 # built by scripts/make_fdt_fixture.py. The script is the source; the blob
 # is an output, and committing it would give the same values two homes.
 linux_user/build/*.dtb
+
+# linux_user/lz4 inputs (GitHub issue #1218), written by
+# scripts/lz4_image.py fixture.
+linux_user/build/lz4/

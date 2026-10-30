@@ -1,0 +1,162 @@
+use "kernel/lib/lz4_image.tkb";
+
+// GitHub issue #1218: the kernel's LZ4 codec and image container, against
+// bytes the host encoder (scripts/lz4_image.py fixture) wrote. Each line
+// names what it checked; the .expected file is the verdict.
+
+let mut fixture_image = embed_file("linux_user/build/lz4/image.bin");
+let mut fixture_container = embed_file("linux_user/build/lz4/image.tkz");
+let mut fixture_text = embed_file("linux_user/build/lz4/text.bin");
+let mut fixture_text_block = embed_file("linux_user/build/lz4/text.lz4");
+
+let mut plain: [u8; 9000];
+let mut coded: [u8; 9200];
+let mut back: [u8; 9000];
+let mut chunk: [u8; LZ4_IMAGE_CHUNK_BYTES];
+let mut table: [u32; LZ4_HASH_ENTRIES];
+
+fn equal_prefix(a: borrow []const u8, b: borrow []const u8, length: usize) -> bool {
+    if (length > a.len || length > b.len) { return false; }
+    for k: usize in 0..<length {
+        if (k < a.len && k < b.len) {
+            if (a[k] != b[k]) { return false; }
+        }
+    }
+    return true;
+}
+
+// Fill plain with pattern kind, encode its first length bytes with the
+// kernel's encoder, decode, compare.
+fn round_trip(kind: usize, length: usize) {
+    let mut state: usize = 7;
+    for i: usize in 0..<9000 {
+        state = (state * 1103515245 + 12345) & 0x7FFFFFFF;
+        let mut value: u8 = 0;
+        if (kind == 1) { value = ((i / 7) & 3) as u8; }
+        if (kind == 2) { value = ((state >> 16) & 255) as u8; }
+        if (kind == 3) { value = (i & 255) as u8; }
+        plain[i] = value;
+    }
+    let plain_view = plain as []const u8;
+    if (length > plain_view.len) { uart_puts("bad length\n"); return; }
+    let source = plain_view[0..<length];
+    match lz4_encode(source, coded as []u8, table as []u32) {
+        Lz4EncodeResult::NoRoom => { uart_puts("encode noroom\n"); }
+        Lz4EncodeResult::Encoded(size) => {
+            let coded_view = coded as []const u8;
+            if (size > coded_view.len) { uart_puts("encode overrun\n"); return; }
+            let block = coded_view[0..<size];
+            match lz4_decode(block, back as []u8) {
+                Lz4DecodeResult::Invalid => { uart_puts("decode invalid\n"); }
+                Lz4DecodeResult::Decoded(written) => {
+                    uart_puts("round trip ");
+                    uart_print(kind);
+                    uart_puts(":");
+                    uart_print(length);
+                    if (written == length &&
+                        equal_prefix(back as []const u8, plain as []const u8, length)) {
+                        uart_puts(" ok\n");
+                    } else {
+                        uart_puts(" DIFFERENT\n");
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn expect_invalid(name: *u8, block: borrow []const u8, capacity: usize) {
+    let back_view = back as []u8;
+    if (capacity > back_view.len) { return; }
+    let out = back_view[0..<capacity];
+    uart_puts(name);
+    match lz4_decode(block, out) {
+        Lz4DecodeResult::Invalid => { uart_puts(" invalid\n"); }
+        Lz4DecodeResult::Decoded(written) => { uart_puts(" DECODED\n"); }
+    }
+}
+
+fn app_main() {
+    round_trip(0, 0);
+    round_trip(1, 12);
+    round_trip(1, 13);
+    round_trip(0, 5000);
+    round_trip(1, 9000);
+    round_trip(2, 9000);
+    round_trip(3, 4096);
+
+    // The host encoder's block decodes to the host's bytes.
+    match lz4_decode(fixture_text_block as []const u8, back as []u8) {
+        Lz4DecodeResult::Invalid => { uart_puts("host block invalid\n"); }
+        Lz4DecodeResult::Decoded(written) => {
+            if (written == (fixture_text as []const u8).len &&
+                equal_prefix(back as []const u8, fixture_text as []const u8, written)) {
+                uart_puts("host block ok\n");
+            } else {
+                uart_puts("host block DIFFERENT\n");
+            }
+        }
+    }
+    // An encoder with too little room, or too small a table, says so.
+    match lz4_encode(fixture_text as []const u8, coded[0..<20], table as []u32) {
+        Lz4EncodeResult::NoRoom => { uart_puts("short output noroom\n"); }
+        Lz4EncodeResult::Encoded(size) => { uart_puts("short output ENCODED\n"); }
+    }
+    match lz4_encode(fixture_text as []const u8, coded as []u8, table[0..<100]) {
+        Lz4EncodeResult::NoRoom => { uart_puts("short table noroom\n"); }
+        Lz4EncodeResult::Encoded(size) => { uart_puts("short table ENCODED\n"); }
+    }
+    // Offset zero; offset before the output; a literal length that runs
+    // off the input; literals with no room; a match with no room.
+    let mut zero_offset: [u8; 5] = { 0x10, 0x61, 0, 0, 0 };
+    expect_invalid("offset zero", zero_offset as []const u8, 64);
+    let mut far_offset: [u8; 5] = { 0x10, 0x61, 2, 0, 0 };
+    expect_invalid("offset far", far_offset as []const u8, 64);
+    let mut open_length: [u8; 1] = { 0xF0 };
+    expect_invalid("length open", open_length as []const u8, 64);
+    let mut short_literals: [u8; 2] = { 0x20, 0x61 };
+    expect_invalid("literals short", short_literals as []const u8, 64);
+    expect_invalid("literals full", fixture_text_block as []const u8, 10);
+    let mut long_match: [u8; 9] = { 0x1F, 0x61, 1, 0, 0, 0x10, 0x61, 0, 0 };
+    expect_invalid("match full", long_match as []const u8, 8);
+
+    // The container: every chunk expands to the image's bytes.
+    match lz4_image_header(fixture_container as []const u8) {
+        Lz4ImageHeaderResult::Invalid => { uart_puts("container invalid\n"); }
+        Lz4ImageHeaderResult::Chunks(count) => {
+            let mut cursor: usize = LZ4_IMAGE_HEADER_BYTES;
+            let mut same: usize = 0;
+            for index: usize in 0..<count {
+                match lz4_image_expand_chunk(fixture_container as []const u8,
+                                             cursor, chunk as []u8) {
+                    Lz4ImageChunkResult::Invalid => { uart_puts("chunk invalid\n"); }
+                    Lz4ImageChunkResult::Expanded(next) => {
+                        cursor = next;
+                        let start: usize = index * LZ4_IMAGE_CHUNK_BYTES;
+                        let whole = fixture_image as []const u8;
+                        if (start <= whole.len) {
+                            let rest = whole[start..<whole.len];
+                            if (equal_prefix(chunk as []const u8, rest,
+                                             LZ4_IMAGE_CHUNK_BYTES)) {
+                                same = same + 1;
+                            }
+                        }
+                    }
+                }
+            }
+            uart_puts("container chunks=");
+            uart_print(count);
+            uart_puts(" equal=");
+            uart_print(same);
+            if (cursor == (fixture_container as []const u8).len) { uart_puts(" end\n"); }
+            else { uart_puts(" TRAILING\n"); }
+        }
+    }
+    // A chunk cut short is refused.
+    let whole_container = fixture_container as []const u8;
+    let cut = whole_container[0..<100];
+    match lz4_image_expand_chunk(cut, LZ4_IMAGE_HEADER_BYTES, chunk as []u8) {
+        Lz4ImageChunkResult::Invalid => { uart_puts("cut chunk invalid\n"); }
+        Lz4ImageChunkResult::Expanded(next) => { uart_puts("cut chunk EXPANDED\n"); }
+    }
+}

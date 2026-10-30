@@ -1,0 +1,134 @@
+use "kernel/lib/lz4.tkb";
+
+// A block image stored as zero-block-elided, LZ4-compressed chunks
+// (GitHub issue #1218). scripts/lz4_image.py writes the container and
+// documents its layout; this file expands it one chunk at a time into a
+// caller's chunk-sized region, so expanding a 6 MiB image needs 64 KiB.
+//
+//   "TKZ1"  u32 block_size  u32 chunk_blocks  u32 chunk_count
+//   per chunk:  u64 present  u32 coded_len  coded_len bytes
+//
+// present bit i: block i of the chunk is not all zero. The present blocks,
+// concatenated in order, are one LZ4 block of coded_len bytes.
+//
+// Current limitations (2026-10-29). Keep this list current as call sites
+// change; a limitation that goes stale here is worse than none.
+// - The geometry is fixed: 1 KiB blocks, 64 per chunk (the RPi5 USB batch,
+//   KERNEL_BLOCK_BATCH). A container with any other geometry is Invalid.
+// - Chunks are expanded in order by a caller that carries the cursor; there
+//   is no index for random access. The one caller (the RPi5 provisioning
+//   path) walks the image front to back, twice.
+// - Zero bytes after the last chunk are padding (the build pads the main
+//   and shell containers to one length); nothing here reads them.
+// - The container is trusted only as far as the bounds go: a corrupt one
+//   ends in Invalid or in wrong bytes, never in an access past a region. The
+//   provisioning path's read-back compare is against the same expansion, so
+//   the build (scripts/lz4_image.py pack) checks the bytes against the image.
+
+const LZ4_IMAGE_BLOCK_SIZE: usize = 1024;
+const LZ4_IMAGE_CHUNK_BLOCKS: usize = 64;
+const LZ4_IMAGE_CHUNK_BYTES: usize = 65536;
+const LZ4_IMAGE_HEADER_BYTES: usize = 16;
+const LZ4_IMAGE_CHUNK_HEADER_BYTES: usize = 12;
+
+must_use variant Lz4ImageHeaderResult {
+    Invalid;
+    // The chunk count; the first chunk starts at LZ4_IMAGE_HEADER_BYTES.
+    Chunks(usize);
+}
+
+must_use variant Lz4ImageChunkResult {
+    Invalid;
+    // The cursor of the next chunk.
+    Expanded(usize);
+}
+
+private fn lz4_image_u32(bytes: borrow []const u8, at: usize) -> u64 {
+    let mut value: u64 = 0;
+    for k: usize in 0..<4 {
+        let position: usize = at + k;
+        if (position < bytes.len) {
+            value = value | ((bytes[position] as u64) << ((k * 8) as u64));
+        }
+    }
+    return value;
+}
+
+fn lz4_image_header(container: borrow []const u8) -> Lz4ImageHeaderResult {
+    let length: usize = container.len;
+    if (length < LZ4_IMAGE_HEADER_BYTES) { return Lz4ImageHeaderResult::Invalid; }
+    // "TKZ1"
+    if (lz4_image_u32(container, 0) != 0x315A4B54 ||
+        lz4_image_u32(container, 4) != LZ4_IMAGE_BLOCK_SIZE as u64 ||
+        lz4_image_u32(container, 8) != LZ4_IMAGE_CHUNK_BLOCKS as u64) {
+        return Lz4ImageHeaderResult::Invalid;
+    }
+    return Lz4ImageHeaderResult::Chunks(lz4_image_u32(container, 12) as usize);
+}
+
+// Expand the chunk at cursor into out[0..<LZ4_IMAGE_CHUNK_BYTES].
+fn lz4_image_expand_chunk(container: borrow []const u8, cursor: usize,
+                          out: borrow []u8) -> Lz4ImageChunkResult {
+    if (out.len < LZ4_IMAGE_CHUNK_BYTES || cursor > container.len ||
+        container.len - cursor < LZ4_IMAGE_CHUNK_HEADER_BYTES) {
+        return Lz4ImageChunkResult::Invalid;
+    }
+    let present: u64 = lz4_image_u32(container, cursor) |
+                       (lz4_image_u32(container, cursor + 4) << 32);
+    let coded_length: usize = lz4_image_u32(container, cursor + 8) as usize;
+    let coded_start: usize = cursor + LZ4_IMAGE_CHUNK_HEADER_BYTES;
+    if (coded_start > container.len) { return Lz4ImageChunkResult::Invalid; }
+    let rest = container[coded_start..<container.len];
+    if (coded_length > rest.len) { return Lz4ImageChunkResult::Invalid; }
+    let coded = rest[0..<coded_length];
+    let mut count: usize = 0;
+    for block: usize in 0..<LZ4_IMAGE_CHUNK_BLOCKS {
+        if (((present >> (block as u64)) & 1) != 0) { count = count + 1; }
+    }
+    let kept_length: usize = count * LZ4_IMAGE_BLOCK_SIZE;
+    if (kept_length > out.len) { return Lz4ImageChunkResult::Invalid; }
+    if (count == 0) {
+        if (coded_length != 0) { return Lz4ImageChunkResult::Invalid; }
+    } else {
+        let kept = out[0..<kept_length];
+        match lz4_decode(coded, kept) {
+            Lz4DecodeResult::Invalid => { return Lz4ImageChunkResult::Invalid; }
+            Lz4DecodeResult::Decoded(written) => {
+                if (written != kept_length) {
+                    return Lz4ImageChunkResult::Invalid;
+                }
+            }
+        }
+    }
+    // Spread the present blocks to their places, last first: block b's
+    // source is its rank k <= b, and every rank above k has already moved,
+    // so no source is overwritten before it is read.
+    let mut rank: usize = count;
+    for step: usize in 0..<LZ4_IMAGE_CHUNK_BLOCKS {
+        let block: usize = LZ4_IMAGE_CHUNK_BLOCKS - 1 - step;
+        let target: usize = block * LZ4_IMAGE_BLOCK_SIZE;
+        if (((present >> (block as u64)) & 1) != 0) {
+            if (rank == 0) { return Lz4ImageChunkResult::Invalid; }
+            rank = rank - 1;
+            let source: usize = rank * LZ4_IMAGE_BLOCK_SIZE;
+            if (source != target) {
+                for offset: usize in 0..<LZ4_IMAGE_BLOCK_SIZE {
+                    let from: usize = source + offset;
+                    let to: usize = target + offset;
+                    if (from < out.len && to < out.len) {
+                        out[to] = out[from];
+                    } else {
+                        return Lz4ImageChunkResult::Invalid;
+                    }
+                }
+            }
+        } else {
+            for offset: usize in 0..<LZ4_IMAGE_BLOCK_SIZE {
+                let to: usize = target + offset;
+                if (to < out.len) { out[to] = 0; }
+                else { return Lz4ImageChunkResult::Invalid; }
+            }
+        }
+    }
+    return Lz4ImageChunkResult::Expanded(coded_start + coded_length);
+}

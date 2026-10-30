@@ -211,8 +211,10 @@ transfer on each RPi5 lane run. The ceiling leaves 160 KiB above the
 
 What the span costs is not one number. The RPi5 lane loads the ELF with
 OpenOCD's `load_image ... elf`, which writes each LOAD segment's file
-contents, so SWD time follows the file bytes -- about 3.0 MiB, mostly the
-embedded root filesystem in `.data`. It does not follow the span. `.bss`
+contents, so SWD time follows the file bytes -- mostly the embedded root
+filesystem, which since GitHub issue #1218 is the compressed container
+(`kernel/build/user/ext2.tkz`, about 3.3 MB in `.rodata` for the 6 MiB
+image) rather than the raw image in `.data`. It does not follow the span. `.bss`
 and `.stack` are NOBITS, and growth in either costs no transfer time; all
 of this raise is growth of that kind. A growth that adds file bytes is the
 kind that costs SWD time.
