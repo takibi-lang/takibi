@@ -9,6 +9,7 @@ ok     a full canonical line reserves its committing delimiter
 ok     partial reads keep the delimiter and editing cannot cross it
 ok     switching to raw removes EOF metadata without losing bytes
 ok     BusyBox init sane settings are all accepted
+ok     an apply publishes STOP and START for the transmit path
 ok     unsupported flags and timing fail without mutating settings
 ok     ICRNL IXON ISIG and IEXTEN decode the real control characters
 ok     IXOFF hysteresis requests stop at high water and releases at low water

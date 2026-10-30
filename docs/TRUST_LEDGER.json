@@ -1062,6 +1062,30 @@
         "frame_lines": "typed protection: #1012 log.tkb's guarded accessors over the console transmit record, no new raw site",
         "range_obligations_qemu": "#1012 one more bounds obligation in the rewritten console transmit accessors"
       }
+    },
+    {
+      "date": "2026-10-30",
+      "head": "99dce4f2",
+      "counts": {
+        "raw_mint_files": 14,
+        "frame_lines": 12509,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 214,
+        "raw_deref_io": 7,
+        "raw_deref_builtin_region": 113,
+        "unsafe_blocks": 151,
+        "extern_fns": 61,
+        "invariant_stop_sites": 119,
+        "assembly_lines": 2503,
+        "per_cpu_ordinary_arrays": 67,
+        "per_cpu_stores": 7,
+        "raw_cpu_id_calls": 147,
+        "unprotected_globals": 292,
+        "frame_api_ratchet": 7
+      },
+      "changes": {
+        "unprotected_globals": "typed protection: terminal input state behind the run guard"
+      }
     }
   ]
 }
