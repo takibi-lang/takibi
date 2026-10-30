@@ -332,7 +332,8 @@ fn kernel_idle_tick_reenter() {
 }
 
 // The one timer-tick entry for every core (GitHub issues #447, #775, #932).
-// Each platform acknowledges its own GIC source after this returns and then
+// Each platform rearms the timer before it (irq_timer_clear, GitHub issue
+// #774), acknowledges its own GIC source after this returns and then
 // leaves for idle if the tick said so (kernel_timer_tick_leave).
 //
 // GitHub issue #453: this branch is why most of kernel/ can share mutable
@@ -344,7 +345,8 @@ fn kernel_idle_tick_reenter() {
 // constant, whose assertions then name every site.
 fn kernel_tick(frame: sink FrameRef[process, level])
         -> TimerSwitch !{interrupt, unsafe} {
-    timer_irq_handler();
+    // GitHub issue #774: the timer was rearmed by the platform's
+    // irq_timer_clear, which consumed the tick's claim before this call.
     // GitHub issue #992: the interrupted level is the frame's own, read
     // from its SPSR, not a flag the entry passed beside it.
     match frame_level(frame) {

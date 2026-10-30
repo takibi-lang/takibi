@@ -27,6 +27,7 @@ use "kernel/kernel/irq_counts.tkb";
 use "kernel/kernel/nic_irq_affinity.tkb";
 use "kernel/kernel/uart_irq_affinity.tkb";
 use "kernel/arch/arm64/kernel/gicv2.tkb";
+use "kernel/platform/qemu/irq_source.tkb";
 
 let mut qemu_uart_gic_intid: u32 = 33; // bootstrap route until DTB comparison
 // The PMU overflow PPI. QEMU's `virt` machine wires each CPU's
@@ -99,56 +100,58 @@ fn gic_pmu_core_enable() {
 fn platform_irq_dispatch_ordinary(frame: sink FrameRef[process, level],
         iar: u32, id: {0..<1020 as u32}) -> AnyFrame !{interrupt, unsafe} {
     workload_profile_irq_enter();
-
-    // GitHub issue #497: a PMU overflow, on any core, before the tick path
-    // below, which handles nothing else and would leave this
-    // level-triggered line asserted -- a storm of millions per second, seen
-    // on the first four-core RPi5 session. Sampling takes the interrupted PC
-    // out of the frame this entry already saved and acknowledges the
-    // overflow before the EOI (GitHub issue #500). Core 0 once had its own
-    // copy of this branch further down (GitHub issue #775).
-    if (id == qemu_pmu_gic_intid) {
-        profile_sample_irq(frame);
-        gicc.eoir = iar;
-        workload_profile_irq_exit();
-        return frame_any(frame);
+    // GitHub issue #774: every case holds its source's claim, which only
+    // that source's clear consumes (kernel/platform/qemu/irq_source.tkb).
+    match irq_take(id) {
+        // GitHub issue #497: a PMU overflow, on any core. The tick path
+        // handles nothing else and would leave this level-triggered line
+        // asserted -- a storm of millions per second, seen on the first
+        // four-core RPi5 session. Core 0 once had its own copy of this
+        // branch (GitHub issue #775).
+        IrqTaken::Pmu(claim) => {
+            irq_eoi(irq_pmu_clear(claim, frame), iar);
+            workload_profile_irq_exit();
+            return frame_any(frame);
+        }
+        // GitHub issue #830: the NIC's SPI rotates through the online cores.
+        IrqTaken::Net(claim) => {
+            irq_eoi(irq_net_clear(claim, id), iar);
+            workload_profile_irq_exit();
+            return frame_any(frame);
+        }
+        // GitHub issue #830 (UART slice): the route is rewritten after the
+        // EOI, and a BREAK enters DDB on this core after it.
+        IrqTaken::Uart(claim) => {
+            match irq_uart_clear(claim) {
+                IrqUartServed::Plain(acked) => {
+                    irq_eoi(acked, iar);
+                    uart_irq_after_eoi(id);
+                }
+                IrqUartServed::Break(acked) => {
+                    irq_eoi(acked, iar);
+                    uart_irq_after_eoi(id);
+                    kernel_ddb_enter(frame_ref_address(frame), 1, id as usize);
+                }
+            }
+            return frame_any(frame);
+        }
+        // GitHub issue #932: one timer-tick entry for every core. GICC_IAR
+        // was read on this core: acknowledging is its own job on its own
+        // banked interface. GitHub issue #830: the DDB lane's hung-core
+        // scenario polls first (a no-op unless a debugger armed it).
+        IrqTaken::Timer(claim) => {
+            uart_irq_hang_poll();
+            let acked: IrqAcked = irq_timer_clear(claim);
+            let switch: TimerSwitch = kernel_tick(frame);
+            irq_eoi(acked, iar);
+            workload_profile_irq_exit();
+            return kernel_timer_tick_leave(switch);
+        }
+        IrqTaken::Unclaimed(stray) => {
+            uart_irq_hang_poll();
+            irq_eoi(irq_unclaimed(stray), iar);
+            workload_profile_irq_exit();
+            return frame_any(frame);
+        }
     }
-    // GitHub issue #830: the NIC's SPI rotates through the online cores, so
-    // any core takes it. The handler acknowledges the device and sends SEV;
-    // the retarget names the next core before this EOI. The >= 0 guard keeps
-    // the "no device" sentinel -1 from matching (GitHub issue #237 M4).
-    if (virtio_net_gic_intid >= 0 && id == (virtio_net_gic_intid as u32)) {
-        virtio_net_irq_handler();
-        nic_irq_handled(id);
-        gicc.eoir = iar;
-        workload_profile_irq_exit();
-        return frame_any(frame);
-    }
-    // GitHub issue #830 (UART slice): the UART SPI goes to every online core
-    // (GICv2 1-of-N), so any core takes it. One core at a time serves it
-    // (uart_irq_serve); the route is rewritten after the EOI, and a BREAK
-    // enters DDB on this core after it.
-    if (id == qemu_uart_gic_intid) {
-        let debug_break: bool = uart_irq_serve();
-        gicc.eoir = iar;
-        uart_irq_after_eoi(id);
-        if (debug_break) { kernel_ddb_enter(frame_ref_address(frame), 1, id as usize); }
-        return frame_any(frame);
-    }
-    // GitHub issue #830: the DDB lane's hung-core scenario (a no-op unless
-    // a debugger armed it for this core).
-    uart_irq_hang_poll();
-    // GitHub issue #932: one timer-tick entry for every core. GICC_IAR was
-    // read above: acknowledging is the interrupted core's own job on its
-    // own banked interface.
-    if (id == qemu_timer_gic_intid) {
-        let switch: TimerSwitch = kernel_tick(frame);
-        gicc.eoir = iar;
-        workload_profile_irq_exit();
-        return kernel_timer_tick_leave(switch);
-    }
-
-    gicc.eoir = iar;
-    workload_profile_irq_exit();
-    return frame_any(frame);
 }

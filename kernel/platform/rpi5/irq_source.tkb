@@ -1,0 +1,132 @@
+// GitHub issue #774: every ordinary IRQ this platform handles is a claim
+// that must be acknowledged at its source before the GIC EOI.
+//
+// irq_take turns the acknowledged INTID into one IrqTaken case per source
+// this build handles. Each case carries a linear claim indexed by its
+// source, so the dispatcher must hand it on: the only consumer of
+// IrqClaim[IrqSource::Pmu] is irq_pmu_clear, and so on, and each clear
+// returns the IrqAcked that irq_eoi alone takes. An arm that serves only
+// part of the work -- the #497 secondary branch that ticked and left the
+// level-triggered PMU line asserted -- leaves a claim unconsumed, which
+// is a compile error. A source added to IrqSource breaks irq_take's
+// `match ... as IrqSource` until it is decoded and given a case.
+//
+// The claims and the acknowledgement are private views: only this file
+// mints them, and they erase to nothing at run time. Trusted: that each
+// clear below really silences its source (the handlers it calls), and
+// irq_source_code's decode of the INTIDs found at boot.
+// scripts/check_irq_eoi.py keeps GICC_EOIR writes to irq_eoi and the
+// SGI paths of kernel/arch/arm64/kernel/gicv2.tkb.
+
+enum IrqSource: u32 {
+    Pmu = 0;
+    Gem = 1;
+    Usb = 2;
+    Uart = 3;
+    Timer = 4;
+}
+
+private linear view IrqClaim[source: IrqSource];
+private linear view IrqStray;
+private linear view IrqAcked;
+
+must_use variant IrqTaken {
+    Pmu(IrqClaim[IrqSource::Pmu]);
+    Gem(IrqClaim[IrqSource::Gem]);
+    Usb(IrqClaim[IrqSource::Usb]);
+    Uart(IrqClaim[IrqSource::Uart]);
+    Timer(IrqClaim[IrqSource::Timer]);
+    Unclaimed(IrqStray);
+}
+
+// The UART's service says whether it saw a BREAK, which enters DDB after
+// the EOI.
+must_use variant IrqUartServed {
+    Plain(IrqAcked);
+    Break(IrqAcked);
+}
+
+const IRQ_SOURCE_NONE: u32 = 0xFFFFFFFF;
+
+// The source an INTID names. Each core's PMU line is its own SPI, 16 + N
+// above RPI5_PMU_GIC_INTID's base (see the constant's note).
+private fn irq_source_code(id: u32) -> u32 {
+    if (id >= RPI5_PMU_GIC_INTID &&
+            id < RPI5_PMU_GIC_INTID + (KERNEL_MAX_CORES as u32)) {
+        return IrqSource::Pmu as u32;
+    }
+    if (id == RPI5_GEM_GIC_INTID) { return IrqSource::Gem as u32; }
+    if (id == RPI5_USB0_GIC_INTID) { return IrqSource::Usb as u32; }
+    if (id == RPI5_UART0_GIC_INTID) { return IrqSource::Uart as u32; }
+    if (id == rpi5_timer_gic_intid) { return IrqSource::Timer as u32; }
+    return IRQ_SOURCE_NONE;
+}
+
+fn irq_take(id: u32) -> IrqTaken {
+    match irq_source_code(id) as IrqSource {
+        IrqSource::Pmu => { return IrqTaken::Pmu(view IrqClaim[IrqSource::Pmu]); }
+        IrqSource::Gem => { return IrqTaken::Gem(view IrqClaim[IrqSource::Gem]); }
+        IrqSource::Usb => { return IrqTaken::Usb(view IrqClaim[IrqSource::Usb]); }
+        IrqSource::Uart => { return IrqTaken::Uart(view IrqClaim[IrqSource::Uart]); }
+        IrqSource::Timer => { return IrqTaken::Timer(view IrqClaim[IrqSource::Timer]); }
+        miss => { return IrqTaken::Unclaimed(view IrqStray); }
+    }
+}
+
+// GitHub issue #497/#500: sampling takes the interrupted PC from the saved
+// frame and clears or rearms the overflow.
+fn irq_pmu_clear(claim: sink IrqClaim[IrqSource::Pmu],
+        frame: borrow FrameRef[process, level]) -> IrqAcked !{interrupt, unsafe} {
+    profile_sample_irq(frame);
+    return view IrqAcked;
+}
+
+// GitHub issue #830: the handler acknowledges GEM's ISR and sends SEV;
+// RP1's level-triggered MSI-X wrapper needs its IACK after that, and the
+// retarget names the next core before the EOI.
+fn irq_gem_clear(claim: sink IrqClaim[IrqSource::Gem], id: u32)
+        -> IrqAcked !{interrupt, unsafe} {
+    gem_irq_handler();
+    rp1_vector_iack(RP1_GEM_VECTOR);
+    nic_irq_handled(id);
+    return view IrqAcked;
+}
+
+// GitHub issue #830 (xHCI slice): the handler clears IMAN.IP and
+// USBSTS.EINT (both write-1-to-clear) and sends SEV; it does not write
+// ERDP, whose only writer is the event consumer. The source is
+// edge-triggered, so there is no RP1-level IACK, matching
+// rp1_chained_handle_irq's own rp1_level_triggered_irq[hwirq] check.
+fn irq_usb_clear(claim: sink IrqClaim[IrqSource::Usb], id: u32)
+        -> IrqAcked !{interrupt, unsafe} {
+    xhci_irq_handler();
+    xhci_irq_handled(id);
+    return view IrqAcked;
+}
+
+// GitHub issue #830 (UART slice): one core at a time serves the UART.
+// RP1's level-triggered MSI-X wrapper needs an IACK after the device
+// source has been serviced, matching rp1_chained_handle_irq.
+fn irq_uart_clear(claim: sink IrqClaim[IrqSource::Uart])
+        -> IrqUartServed !{interrupt, unsafe} {
+    let debug_break: bool = uart_irq_serve();
+    rp1_vector_iack(RP1_UART0_VECTOR);
+    if (debug_break) { return IrqUartServed::Break(view IrqAcked); }
+    return IrqUartServed::Plain(view IrqAcked);
+}
+
+// The tick's own source: the timer is rearmed before kernel_tick runs.
+fn irq_timer_clear(claim: sink IrqClaim[IrqSource::Timer])
+        -> IrqAcked !{interrupt, unsafe} {
+    timer_irq_handler();
+    return view IrqAcked;
+}
+
+// An INTID this build does not handle: nothing to silence, EOI it.
+fn irq_unclaimed(stray: sink IrqStray) -> IrqAcked {
+    return view IrqAcked;
+}
+
+fn irq_eoi(acked: sink IrqAcked, iar: u32) {
+    gicc.eoir = iar;
+}

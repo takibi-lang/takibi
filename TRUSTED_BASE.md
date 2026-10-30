@@ -579,6 +579,14 @@ Takibi does not currently establish all of the following:
   `scripts/check_lock_rank_wrappers.py`), that every masking guard carries a
   `lock_guard_` annotation the rank check can see, and that the kernel is not
   preemptible (a `static_assert`);
+- that an interrupt is silenced at its source. Checked since #774: each
+  ordinary IRQ is a linear claim per source from `irq_take`
+  (`kernel/platform/<target>/irq_source.tkb`), consumed only by that
+  source's clear, whose `IrqAcked` is what `irq_eoi` takes, so a dispatch
+  arm that skips a source's clear does not compile; GICC_EOIR is written
+  only there and on the GIC's SGI paths (`scripts/check_irq_eoi.py`).
+  Trusted: that each clear's handler really clears its source, and
+  `irq_source_code`'s decode of the INTIDs;
 - absence of stack overflow, resource exhaustion, or nontermination;
 - correctness of linker scripts, memory maps, ABI declarations, assembly, LLVM,
   firmware, peripherals, or silicon;

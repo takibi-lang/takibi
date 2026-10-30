@@ -521,6 +521,7 @@ KERNEL_UNUSED_CHECKED_QEMU := \
 	kernel/mm/page.tkb \
 	kernel/platform/qemu/init.tkb \
 	kernel/platform/qemu/intc.tkb \
+	kernel/platform/qemu/irq_source.tkb \
 	kernel/platform/qemu/memory.tkb \
 	kernel/platform/qemu/mmu_layout.tkb \
 	kernel/platform/qemu/timer_irq.tkb \
@@ -538,6 +539,7 @@ KERNEL_UNUSED_CHECKED_RPI5 := \
 	kernel/platform/rpi5/gic_dtb.tkb \
 	kernel/platform/rpi5/init.tkb \
 	kernel/platform/rpi5/intc.tkb \
+	kernel/platform/rpi5/irq_source.tkb \
 	kernel/platform/rpi5/memory.tkb \
 	kernel/platform/rpi5/mip_dtb.tkb \
 	kernel/platform/rpi5/mmu_layout.tkb \
@@ -2108,6 +2110,7 @@ kernel-lib-check:
 	python3 scripts/check_fallback_counters.py
 	python3 scripts/check_probe_entry_gates.py
 	python3 scripts/check_mpidr_reads.py
+	python3 scripts/check_irq_eoi.py
 
 # Generate AArch64 exception-frame offset constants from the struct
 # definition (GitHub issue #286). This is a REAL file-based Make rule (not
