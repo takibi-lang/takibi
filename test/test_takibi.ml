@@ -29235,6 +29235,7 @@ fn take(s: borrow Rx_Posted[b, o, 64, r]) {}
 |}
 
 let device_consumer = {|private region let mut buf: [u8; 64] align(64);
+fn pick() -> usize { return 64; }
 fn main() -> i32 {
     let RegionOf(u8)::Taken(memory) = region_of(buf) else {
         RegionOf(u8)::Gone => { return 1; }
@@ -29694,6 +29695,64 @@ let device_protocol_tests = [
   Alcotest.test_case "device protocol: a backing global with no alignment" `Quick
     (expect_device_error ~sub:"[u8; 64] align(64)" ~by:"[u8; 64]"
        "must be declared align(64)");
+  (* GitHub issue #779 (c): the region reaching P_init is judged by its
+     concrete identity and element offset, so a split of an aligned global
+     must still start on a line, and one whose offset is known only at run
+     time is refused. *)
+  Alcotest.test_case "device protocol: a split region starts on a line" `Quick
+    (fun () ->
+      let use = device_consumer
+        |> replace_once ~sub:"[u8; 64] align(64)" ~by:"[u8; 192] align(64)"
+        |> replace_once ~sub:"let RegionOf(u8)::Taken(memory) = region_of(buf) else {\n        RegionOf(u8)::Gone => { return 1; }\n    };"
+             ~by:"let RegionOf(u8)::Taken(whole) = region_of(buf) else {\n        RegionOf(u8)::Gone => { return 1; }\n    };\n    let (head, rest) = region_split_static(whole, 64);\n    let (memory, tail) = region_split_static(rest, 64);\n    region_release(head);\n    region_release(tail);" in
+      ignore (compile_device ~use ()));
+  Alcotest.test_case "device protocol: a split region off a line is refused" `Quick
+    (fun () ->
+      let use = device_consumer
+        |> replace_once ~sub:"[u8; 64] align(64)" ~by:"[u8; 96] align(64)"
+        |> replace_once ~sub:"let RegionOf(u8)::Taken(memory) = region_of(buf) else {\n        RegionOf(u8)::Gone => { return 1; }\n    };"
+             ~by:"let RegionOf(u8)::Taken(whole) = region_of(buf) else {\n        RegionOf(u8)::Gone => { return 1; }\n    };\n    let (head, memory) = region_split_static(whole, 32);\n    region_release(head);" in
+      match compile_device ~use () with
+      | _ -> Alcotest.fail "expected a region off a line to be refused"
+      | exception Types.TypeError (_, msg) ->
+          Alcotest.(check bool) msg true
+            (contains_substring msg "starts at element 32 of 'buf', 32 bytes in"));
+  Alcotest.test_case "device protocol: a run-time split point is refused" `Quick
+    (fun () ->
+      let use = {|private region let mut buf: [u8; 128] align(64);
+fn pick() -> usize { return 64; }
+fn start(m: region(u8)[b, 64]) { region_release(Rx_release(Rx_init(m))); }
+fn main() -> i32 {
+    let RegionOf(u8)::Taken(whole) = region_of(buf) else {
+        RegionOf(u8)::Gone => { return 1; }
+    };
+    match region_split(whole, pick()) {
+        RegionSplit(u8)::TooShort(w) => { region_release(w); return 1; }
+        RegionSplit(u8)::Split(parts) => {
+            let (head, rest) = parts;
+            region_release(head);
+            match region_split(rest, 64) {
+                RegionSplit(u8)::TooShort(w) => { region_release(w); return 1; }
+                RegionSplit(u8)::Split(more) => {
+                    let (memory, tail) = more;
+                    region_release(tail);
+                    start(memory);
+                    return 0;
+                }
+            }
+        }
+    }
+}
+|} in
+      match compile_device ~use () with
+      | _ -> Alcotest.fail "expected a run-time offset to be refused"
+      | exception Types.TypeError (_, msg) ->
+          Alcotest.(check bool) msg true
+            (contains_substring msg "not fixed at compile time"));
+  Alcotest.test_case "device protocol: P_init's caller is not a function value" `Quick
+    (expect_device_error ~sub:"fn main() -> i32 {"
+       ~by:"fn start(m: region(u8)[b, 64]) { region_release(Rx_release(Rx_init(m))); }\nfn main() -> i32 {\n    let f = start;"
+       "must be called directly");
   Alcotest.test_case "device protocol: the extent is whole lines" `Quick
     (fun () ->
       let swap s =

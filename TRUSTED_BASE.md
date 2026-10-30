@@ -313,8 +313,10 @@ rules globally.
   device-state owner, or of a writable state declared `addressed`.
   Checked: no other CPU-access state yields a span and no device state
   reaches the region; a span dies with its owner; the region's
-  extent is whole cache lines; every backing global of the protocol's element
-  type and count is line-aligned. Trusted: the generator's placement of the
+  extent is whole cache lines; every region reaching P_init starts on a
+  line -- its concrete backing global is line-aligned and its element
+  offset is whole lines, followed through direct calls (#779,
+  lib/line_owner.ml), with anything not fixed at compile time refused. Trusted: the generator's placement of the
   cache operations (Protocol_decl.source_of) and the reuse of the
   `dma_prepare_tx`/`_rx`/`dma_finish_rx` lowerings; that the declared
   direction is what the device does (a device that writes a `tx` region is
@@ -324,12 +326,10 @@ rules globally.
   a publishing lowering, after the generated clean; the `observe` lowerings of the files in
   `kernel/DEVICE_SEMANTICS_FILES`, which assert completion and quiescence
   like a dma_fixed mint file; `unsafe dma_span_address` and the bus
-  translation applied at its one site, `kernel/drivers/dma_address.tkb`; and the line ownership of a region of the
-  right type and count made by `region_split*` or `region_bytes_typed`
-  rather than claimed from a backing global. Also trusted: that a stored
+  translation applied at its one site, `kernel/drivers/dma_address.tkb`. Also trusted: that a stored
   owner is the one the device was programmed with. An owner kept in a
   `Place(exists b: addr. ...)` slot has an existential region identity,
-  because `region_of` returns an anonymous one, so a driver that stores ring
+  because the slot's type closes it, so a driver that stores ring
   B's owner where the controller was given ring A's address type-checks
   (a driver error, not a memory-safety one: each owner still holds exactly
   its own region). Holder-tied identities (GitHub issue #750) would let the

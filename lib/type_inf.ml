@@ -1252,6 +1252,17 @@ let adapt_actual_to_expected (tyenv : tyenv) (e : Ast.expr)
         if is_address then
           match e.desc with
           | AddrOf place -> static_identity_for_place place
+          (* GitHub issue #779: a global array decayed to its first
+             element's address -- the witness a region claim passes
+             (Monomorphize.region_claim_lowering) -- is that global's
+             identity, so the region's identity names its backing global. *)
+          | Cast (TypePtr _, ({ desc = Var name; _ } as place))
+            when StringSet.mem name !global_address_names
+                 && not (StringSet.mem name !locally_bound_names)
+                 && (match StringMap.find_opt name tyenv with
+                     | Some (t, _) -> (match repr t with TArray _ -> true | _ -> false)
+                     | None -> false) ->
+              static_identity_for_place place
           | Var name -> identity_for_immutable_name ~is_address:true name
           | _ -> fresh_rigid_static ()
         else
@@ -3507,6 +3518,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            | Some [(target, ft)] ->
                resolved_function_values :=
                  StringMap.add (loc_key e.loc) target !resolved_function_values;
+               Line_owner.record_value target e.loc;
                let ft = instantiate_static_params ft in
                if contains_view_ty ft then
                  raise (TypeError (e.loc, Printf.sprintf
@@ -5515,6 +5527,13 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
         | None -> raise (TypeError (e.loc, Printf.sprintf
             "Undefined function: %s" name)));
       let rt = infer_expr senv eenv tyenv fenv r in
+      (* GitHub issue #779: P_init's own_lines call seeds the line-ownership
+         requirement on P_init's region identity and offset. *)
+      (match repr rt, Device_protocol_registry.name_of_loc e.loc with
+       | TIndexedStruct (_, [ b; o; _ ]), Some proto
+         when name = Device_protocol_registry.own_lines ->
+           Line_owner.record_seed !active_runtime_bounds_key b o proto e.loc
+       | _ -> ());
       (match repr rt with
        | TIndexedStruct (n, _) | TStruct n
          when String.length n > 8 && String.sub n 0 8 = "region__" -> ()
@@ -6045,6 +6064,16 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            let target = Option.value
              (StringMap.find_opt (loc_key e.loc) !resolved_call_targets)
              ~default:fname in
+           (* GitHub issue #779: a call that can carry a region on to a
+              device protocol's P_init (Line_owner.solve). *)
+           (match direct with
+            | Some candidates ->
+                (match List.assoc_opt target candidates with
+                 | Some formal ->
+                     Line_owner.record_call ~caller:!active_runtime_bounds_key
+                       ~callee:target e.loc ~formal ~actual:ft
+                 | None -> ())
+            | None -> ());
            let modes = Option.value
              (StringMap.find_opt target !function_param_modes)
              ~default:(List.map (fun _ -> None) param_tys) in
@@ -8459,6 +8488,7 @@ let infer_func ~key senv eenv fenv genv (fdef : Ast.func) : func_info =
     ) fdef.params;
     let param_tys = List.map (fun (_, ty_opt) -> of_ast_opt ty_opt) fdef.params in
     let ret_ty    = ret_of_ast_opt fdef.ret_type in
+    Line_owner.record_signature key scope;
     List.iter (reject_no_copy_value senv fdef.def_loc) param_tys;
     reject_no_copy_value senv fdef.def_loc ret_ty;
     let bindings = Local_bindings.resolve_func fdef in
@@ -8659,6 +8689,7 @@ let validate_per_cpu (prog : Ast.toplevel list) =
    call before parsing, so a policy pass that reads these site tables
    without type-checking first never sees an earlier compilation's. *)
 let reset_compilation_state () =
+  Line_owner.reset ();
   runtime_bounds_regions := StringSet.empty;
   active_runtime_bounds_key := "";
   runtime_bounds := Runtime_bounds.empty;
@@ -11227,6 +11258,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
    | [] -> ()
    | [(loc, msg)] -> raise (Types.TypeError (loc, msg))
    | errors -> raise (Types.MultiTypeError errors));
+  (* GitHub issue #779: every region identity and offset reaching a device
+     protocol's P_init, now that the bodies' statics are solved. *)
+  Line_owner.solve ();
   (* GitHub issue #203: definite initialization of field paths and of
      scratch globals (see Init_flow). Every independent error of every
      function is reported (#763). *)

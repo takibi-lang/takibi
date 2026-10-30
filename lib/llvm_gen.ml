@@ -5073,8 +5073,10 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       else if name = Device_protocol_registry.finish_rx then cache "dma_finish_rx"
       else if name = Device_protocol_registry.own_lines then begin
         (* The region's lines are its own: its extent is whole lines, and
-           every backing global that can supply a region of this element
-           type and count starts on a line. *)
+           every region that reaches this P_init starts on a line -- its
+           backing global is line-aligned and its element offset is whole
+           lines (GitHub issue #779: Line_owner.solve found each one from
+           the concrete identity and offset at the calls). *)
         (match Target_info.dma_cache_contract () with
          | Target_info.Cache_line line ->
              let extent = size entry.count in
@@ -5083,18 +5085,27 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                  "device protocol region is %d bytes, which is not a whole \
                   number of %d-byte cache lines; cache work on it would reach \
                   a neighbour's lines" extent line));
-             Hashtbl.iter (fun g (ty, gvar) ->
-               match ty with
-               | TypeArray (el, k)
-                 when Region_backing.is_marked g && el = entry.elem
-                      && k = entry.count ->
-                   let a = Llvm.alignment gvar in
-                   if a = 0 || a mod line <> 0 then
-                     raise (Types.TypeError (entry.loc, Printf.sprintf
-                       "region backing global '%s' can back this device \
-                        protocol's region, so it must be declared align(%d) \
-                        to own whole cache lines" g line))
-               | _ -> ()) global_vars
+             let proto = Option.value ~default:""
+                 (Device_protocol_registry.name_of_loc e.loc) in
+             List.iter (fun (g, o, loc) ->
+               let a = match Hashtbl.find_opt global_vars g with
+                 | Some (_, gvar) when Region_backing.is_marked g -> Llvm.alignment gvar
+                 | _ -> raise (Types.TypeError (loc, Printf.sprintf
+                     "device protocol '%s' is reached from '%s', which is not \
+                      a region backing global" proto g)) in
+               if a = 0 || a mod line <> 0 then
+                 raise (Types.TypeError (loc, Printf.sprintf
+                   "region backing global '%s' backs device protocol '%s''s \
+                    region here, so it must be declared align(%d) to own \
+                    whole cache lines" g proto line));
+               let bytes = o * size 1 in
+               if bytes mod line <> 0 then
+                 raise (Types.TypeError (loc, Printf.sprintf
+                   "device protocol '%s''s region starts at element %d of '%s', \
+                    %d bytes in, which is not a whole number of %d-byte cache \
+                    lines; its cache work would reach a neighbour's lines \
+                    (GitHub issue #779)" proto o g bytes line)))
+               (Device_protocol_registry.reaching_of proto)
          | Target_info.Coherent -> ()
          | Target_info.Unsupported -> raise (Types.TypeError (entry.loc,
              "device protocols are unavailable on this target: it has no DMA \

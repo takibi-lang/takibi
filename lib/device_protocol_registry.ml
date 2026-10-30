@@ -27,9 +27,19 @@ let table : (string, entry) Hashtbl.t = Hashtbl.create 4
    owner in their first argument, as dma_device_span's is to its token. *)
 let span_functions : (string, unit) Hashtbl.t = Hashtbl.create 8
 
+(* GitHub issue #779: per protocol, every (backing global, element
+   offset, call site) that reaches its P_init (Line_owner.solve). *)
+let reaching : (string, string * int * Ast.loc) Hashtbl.t = Hashtbl.create 8
+
 let reset () =
   Hashtbl.reset table;
-  Hashtbl.reset span_functions
+  Hashtbl.reset span_functions;
+  Hashtbl.reset reaching
+
+let add_reaching proto r =
+  if not (List.mem r (Hashtbl.find_all reaching proto)) then
+    Hashtbl.add reaching proto r
+let reaching_of proto = List.rev (Hashtbl.find_all reaching proto)
 
 let register name entry = Hashtbl.replace table name entry
 let register_span_function name = Hashtbl.replace span_functions name ()
@@ -45,6 +55,15 @@ let of_loc (loc : Ast.loc) =
   if String.length file > n + 1 && String.sub file 0 n = prefix
      && file.[String.length file - 1] = '>' then
     Hashtbl.find_opt table (String.sub file n (String.length file - n - 1))
+  else None
+
+(* The device protocol's name, for a location in its generated file. *)
+let name_of_loc (loc : Ast.loc) =
+  let file = Ast.source_file_of_loc loc in
+  let n = String.length prefix in
+  if String.length file > n + 1 && String.sub file 0 n = prefix
+     && file.[String.length file - 1] = '>' then
+    Some (String.sub file n (String.length file - n - 1))
   else None
 
 (* The builtins the generated wrappers call. *)

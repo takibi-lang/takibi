@@ -52,7 +52,7 @@ fn completion(s: borrow TxRing_InFlight[b, o, 4, r]) -> TxRing_completion_Raw {
 fn reclaim(s: borrow TxRing_InFlight[b, o, 4, r]) { uart_puts("reclaimed\n"); }
 
 // The ring's owner between requests lives in a global place; its region
-// identity is existential (region_of's identity is anonymous).
+// identity is existential (the slot type closes it).
 struct RingSlot {
     private mutex: i32;
     private value: Place(exists b: addr. exists o: usize. TxRing_Ready[b, o, 4]);

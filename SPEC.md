@@ -4665,19 +4665,28 @@ region of `u8` or a named type, and declare at least one `device` state. It
 is accepted only in a file named by `--device-semantics-file <path>`: its
 `observe` lowerings assert completion and quiescence. The kernel's list is
 `kernel/DEVICE_SEMANTICS_FILES`. On a cache-maintained target the region's
-byte extent must be whole cache lines, and every region backing global of
-the same element type and count (`region let mut g: [T; N]`) must be
-declared `align(L)` for the line size L; both are checked when `P_init` is
-compiled. On a coherent target (x86-64) the cache work lowers to the
+byte extent must be whole cache lines, and every region that reaches
+`P_init` must start on a line: the compiler follows each region argument
+from `P_init` back through direct calls to where its identity and element
+offset are concrete (GitHub issue #779), and requires that identity to be
+a region backing global declared `align(L)` for the line size L and the
+offset, in bytes, to be a multiple of L. A region split from a larger one
+at constant points is accepted when it starts on a line; one whose identity
+or offset is not fixed at compile time -- a split at a run-time point, a
+region converted from bytes (`region_bytes_typed`, `region_bytes_assume`),
+an identity opened from a stored existential -- is refused at the call
+that hands it on, and so is a function that hands a region on to `P_init`
+used as a function value. The property is inferred, not written: a later
+visible region kind such as `region line(T)[b, n]`, whose split rules keep
+the kind, would carry the same property in signatures (GitHub issue
+#1006, the syntax review). On a coherent target (x86-64) the cache work lowers to the
 publish/consume barriers. A target with neither rejects device protocols.
 The generated cache work calls `__protocol_dma_*` builtins, which only a
 device protocol's generated code may call.
 
 Not covered yet: the emitted TLA+ model has no cache variables, so it says
 nothing about the cache work (`kernel/models/DmaCacheVisibility.tla` is the
-model of that order); and a region of the right type and count made by
-splitting a larger region or by converting bytes (`region_bytes_typed`) is
-not tied to a checked backing global, so its line ownership is trusted.
+model of that order).
 `linux_user/protocol_tx` runs a `tx` protocol whose owner is kept in a
 global `Place(exists b: addr. exists o: usize. TxRing_Ready[b, o, 4])` and
 moved across functions.
