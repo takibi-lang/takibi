@@ -29,7 +29,7 @@ def main():
             ('Constructing', 'scheduled_process_cancel_clone', '', '')]:
         cases.append((transition, f'''
 private fn current_phase_control(
-        guard: borrow ProcessRunGuard[lock],
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
         current: borrow ProcessCurrent[process, ProcessState::{phase}],
         owner: borrow ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::{phase}],
