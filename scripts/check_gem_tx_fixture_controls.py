@@ -14,7 +14,10 @@ for mode in MODES:
     text += b'gem-tx fixture: keep refused at the reserve ok\n'
     text += PASS + b'\n'
     frame = {'bytes': (bytes.fromhex('ffffffffffff') + BOARD + bytes.fromhex('88b5') + PAYLOAD).hex()}
-    frames = [copy.copy(frame) for _ in range(7)]
+    count = 6 if mode == 'window-closed' else 7
+    if mode == 'window-closed':
+        text += b'gem-tx fixture: halt tsr=33 ncr=0\n'
+    frames = [copy.copy(frame) for _ in range(count)]
     cases.note()
     validate(text, frames, mode)
     bad = copy.deepcopy(frames)
@@ -23,7 +26,7 @@ for mode in MODES:
     for candidate, bodies in ((PASS, frames), (text.replace(PASS, b''), frames),
                               (text + b'FAIL gem-tx: failure\n', frames),
                               (text.replace(b'keep refused at the reserve ok', b''), frames),
-                              (text, frames[:6]), (text, frames + frames[:1]),
+                              (text, frames[:count - 1]), (text, frames + frames[:1]),
                               (text, bad), (wrong_authority, frames)):
         cases.note()
         try:

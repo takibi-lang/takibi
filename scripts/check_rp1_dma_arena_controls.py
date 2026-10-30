@@ -6,6 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from buildcheck_rp1_dma_arena import declared_objects, problems
+from pass_line import report_pass
 
 GOOD = {"rp1_dma_arena_start": (0x600000, 0), "rp1_dma_arena_end": (0x640000, 0),
         "gem_rx_ring": (0x600000, 0x40)}
@@ -38,7 +39,7 @@ def main():
         print(f"FAIL rp1-dma-arena-controls: {name}")
     if failed:
         return 1
-    print(f"PASS rp1-dma-arena-controls: {len(cases)} controls")
+    report_pass("rp1-dma-arena-controls", "the arena check rejects each bad image", controls=len(cases))
     return 0
 
 

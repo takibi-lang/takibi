@@ -14,6 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from pass_line import report_pass
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DRIVER_GLOBS = ("kernel/drivers/net/rp1_gem*.tkb", "kernel/platform/rpi5/usb_xhci*.tkb")
 RAW_OBJECTS = ("xhci_dcbaa",)
@@ -79,7 +81,8 @@ def main(argv):
         print(f"FAIL rp1-dma-arena: {elf}: {reason}")
     if found:
         return 1
-    print(f"PASS rp1-dma-arena: {elf}: {len(names)} declared objects are inside the window")
+    report_pass("rp1-dma-arena", f"{elf}: declared RP1 DMA objects are inside the window",
+                objects=len(names))
     return 0
 
 
