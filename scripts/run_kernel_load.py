@@ -23,16 +23,20 @@ Times are RECORDED, never judged: under QEMU they measure the host
 per phase, the host-measured span between its begin and end lines, plus
 stress-ng's bogo-ops rates and hackbench's `Time:` -- is printed and kept in
 <artifact root>/kernel-load-<platform>/load-report.txt beside the
-transcript.
+transcript. With --record (the make targets pass it) the sample is also
+appended to docs/LOAD_SERIES.md as one table per program, Takibi beside Linux
+on the same machine (#1158): a reference column, never a verdict.
 """
 
 import argparse
+import datetime
 import hashlib
 import os
 import pty
 import re
 import select
 import signal
+import subprocess
 import sys
 import time
 
@@ -53,7 +57,7 @@ PHASES = ("xargs", "fork", "exec", "pipe", "hackbench")
 # watch it fail. Remove an entry when its issue lands.
 # Since #1172 (setitimer) the fork and pipe stressors stop at --timeout.
 PHASE_WAITS = {
-    "exec": "the next blocker after #1176 (seen 2026-10-29): stress-ng's exec stressor skips with \"can't determine stress-ng executable name\" -- readlinkat (nr 78) of /proc/self/exe is unimplemented",
+    "exec": "#1190: stress-ng's exec stressor skips with \"can't determine stress-ng executable name\" -- readlinkat (nr 78) of /proc/self/exe is unimplemented",
 }
 
 
@@ -78,6 +82,7 @@ UNIMPL = re.compile(rb"\nddb: unimpl nr=([0-9]+) first-pid=([0-9]+)(?=\n)")
 # OPS/S(REAL) OPS/S(USR+SYS)`.
 METRIC = re.compile(rb"stress-ng: metrc: \[[0-9]+\] +([a-z-]+) +([0-9]+) +"
                     rb"([0-9.]+) +([0-9.]+) +([0-9.]+) +([0-9.]+) +([0-9.]+)")
+SKIPPED = re.compile(rb"stress-ng: [a-z]+: +\[[0-9]+\] +skipped: +[1-9]|skipping the stressor")
 HACKBENCH_TIME = re.compile(rb"\nTime: ([0-9.]+)\n")
 EXIT_TIMEOUT_SECONDS = 15
 
@@ -165,6 +170,10 @@ def run_load(session, seconds, jobs, loops, phases, stall_seconds):
         verdict = VERDICT.search(text, start)
         parse_metrics(text, start, record)
         ran, failed = int(verdict.group(1)), int(verdict.group(2))
+        skipped = [name for name, entry in record.items() if entry.get("skipped")]
+        if skipped and not failed:
+            return ("phases that exited 0 but skipped their stressor: "
+                    f"{' '.join(skipped)}", record)
         if ran != len(phases) or failed != 0:
             bad = [name for name, entry in record.items() if entry["status"]]
             return (f"verdict phases={ran} failed={failed} "
@@ -172,8 +181,19 @@ def run_load(session, seconds, jobs, loops, phases, stall_seconds):
         return None, record
 
 
+def mark_skipped(text, start, record):
+    """#1178: stress-ng exits 0 when it skips a stressor, so a skip is read
+    from its summary, within the phase's own begin and end lines."""
+    for name, entry in record.items():
+        begin = text.find(BEGIN_PREFIX + name.encode("ascii"), start)
+        end = text.find(END_PREFIX + name.encode("ascii"), start)
+        if begin >= 0 and end > begin and SKIPPED.search(text, begin, end):
+            entry["skipped"] = True
+
+
 def parse_metrics(text, start, record):
     """Fold stress-ng's and hackbench's own numbers into record."""
+    mark_skipped(text, start, record)
     for metric in METRIC.finditer(text, start):
         name = metric.group(1).decode("ascii")
         if name in record:
@@ -185,88 +205,105 @@ def parse_metrics(text, start, record):
         record["hackbench"]["reported_seconds"] = float(hackbench.group(1))
 
 
-REFERENCE_DIR = os.path.join(REPO_ROOT, "kernel/build/user/load-reference")
-REFERENCE_CPUS = 4
+LINUX_REFERENCE_DIR = os.path.join(REPO_ROOT, "kernel/build/user/load-linux")
+LINUX_KERNEL = re.compile(rb"\nload: linux-kernel ([^\n]+)\n")
 
 
-def run_reference(args, artifact_dir):
-    """The Linux reference column: the same load.sh under this host's Linux.
+def read_reference_text(text):
+    """Per-phase numbers from a Linux run's output, with no wall clock."""
+    record = {}
+    for ended in END.finditer(text):
+        record[ended.group(1).decode("ascii")] = {"status": int(ended.group(2))}
+    parse_metrics(text, 0, record)
+    kernel = LINUX_KERNEL.search(text)
+    if kernel:
+        record["__kernel__"] = kernel.group(1).decode("ascii", "replace")
+    return record
 
-    #742 stage 1 records each program beside the same program run under
-    Linux on the same machine -- a reference, never a verdict. A Linux guest
-    under QEMU would need a kernel image this tree does not build, so the
-    reference is the host itself: the same program versions built for it
-    (scripts/build_load_programs.sh --host), Alpine's x86_64 busybox-static
-    of the rootfs's version, the same scripts, pinned to REFERENCE_CPUS host
-    CPUs. The jobs digest the same AArch64 files the guest digests. What
-    differs is named in the report: native host CPUs against QEMU's TCG
-    vCPUs (or the board's cores), and the host's /bin/sh running the job
-    script's #! line. A dict per phase, or a string saying why there is none.
+
+def run_reference_qemu(args, artifact_dir, stall_seconds):
+    """The Linux column on QEMU: the same rootfs under a mainline arm64 kernel.
+
+    #1158: same program, same build, same arguments, on the same machine.
+    The guest is the virt machine run_kernel_shell_qemu.sh starts, and its
+    initramfs is unpacked from the image the Takibi side boots
+    (scripts/build_load_linux_reference.sh). The caller's vCPU lease covers
+    it. A dict per phase, or a string saying why there is none.
     """
-    import shutil
-    import subprocess
-    import tempfile
+    image = os.environ.get("KERNEL_SHELL_EXT2_IMAGE",
+                           os.path.join(REPO_ROOT, "kernel/build/user/ext2-shell.img"))
     try:
-        subprocess.run(["bash", os.path.join(REPO_ROOT, "scripts/build_load_programs.sh"),
-                        "--host", REFERENCE_DIR], check=True,
+        subprocess.run(["bash", os.path.join(REPO_ROOT, "scripts/build_load_linux_reference.sh"),
+                        image, LINUX_REFERENCE_DIR], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     except subprocess.CalledProcessError as error:
-        return "host build failed: " + error.stderr.decode("ascii", "replace")[-200:]
-    root = tempfile.mkdtemp(prefix="load-reference-", dir=artifact_dir)
-    try:
-        bin_dir = os.path.join(root, "bin")
-        path_dir = os.path.join(root, "path")
-        os.makedirs(bin_dir)
-        os.makedirs(path_dir)
-        for name in ("stress-ng", "hackbench"):
-            shutil.copy2(os.path.join(REFERENCE_DIR, name), bin_dir)
-        for name in ("busybox", "sh"):
-            os.symlink(os.path.join(REFERENCE_DIR, "busybox"),
-                       os.path.join(path_dir, name))
-        user = os.path.join(REPO_ROOT, "kernel/build/user")
-        shutil.copy2(os.path.join(user, "busybox-static"),
-                     os.path.join(bin_dir, "busybox.static"))
-        shutil.copy2(os.path.join(user, "taskset"), bin_dir)
-        fixtures = os.path.join(REPO_ROOT, "kernel/tests/ext2")
-        for name in ("load.sh", "load-job.sh"):
-            shutil.copy2(os.path.join(fixtures, name), bin_dir)
-            os.chmod(os.path.join(bin_dir, name), 0o755)
-        env = dict(os.environ, LOAD_ROOT=root,
-                   PATH=path_dir + os.pathsep + os.environ.get("PATH", ""))
-        cpus = sorted(os.sched_getaffinity(0))[:REFERENCE_CPUS]
-        command = [os.path.join(path_dir, "busybox"), "sh",
-                   os.path.join(bin_dir, "load.sh"), str(args.seconds),
-                   str(args.jobs), str(args.loops), *PHASES]
-        process = subprocess.Popen(
-            command, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            preexec_fn=lambda: os.sched_setaffinity(0, cpus))
-        text = b"\n"
-        record = {}
-        begun = {}
-        for line in process.stdout:
-            now = time.monotonic()
-            text += line
+        return "build failed: " + " ".join(error.stderr.decode("ascii", "replace").split())[-200:]
+    command_line = ("console=ttyAMA0 quiet loglevel=1 rdinit=/init -- "
+                    f"{args.seconds} {args.jobs} {args.loops} " + " ".join(PHASES))
+    process = subprocess.Popen(
+        [os.path.join(REPO_ROOT, "scripts/qemu.sh"), "-machine", "virt",
+         "-cpu", "cortex-a76", "-smp", os.environ.get("KERNEL_QEMU_SHELL_SMP", "4"),
+         "-m", "1024", "-display", "none", "-monitor", "none", "-serial", "stdio",
+         "-kernel", os.path.join(LINUX_REFERENCE_DIR, "Image"),
+         "-initrd", os.path.join(LINUX_REFERENCE_DIR, "initramfs.cpio"),
+         "-append", command_line],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    text = b"\n"
+    seen = 0
+    begun = {}
+    spans = {}
+    last = time.monotonic()
+    stalled = False
+    while True:
+        readable, _, _ = select.select([process.stdout], [], [], 5)
+        now = time.monotonic()
+        if readable:
+            data = os.read(process.stdout.fileno(), 65536)
+            if not data:
+                break
+            text += data.replace(b"\r", b"")
+            last = now
+        elif now - last > stall_seconds:
+            stalled = True
+            process.kill()
+            break
+        complete = text.rfind(b"\n") + 1
+        for line in text[seen:complete].splitlines():
             if line.startswith(BEGIN_PREFIX):
                 begun[line[len(BEGIN_PREFIX):].strip().decode("ascii")] = now
-            ended = END.match(b"\n" + line)
-            if ended:
-                name = ended.group(1).decode("ascii")
-                record[name] = {"status": int(ended.group(2)),
-                                "host_seconds": now - begun.get(name, now)}
-        process.wait()
-        parse_metrics(text, 0, record)
-        with open(os.path.join(artifact_dir, "reference-transcript.log"),
-                  "wb") as handle:
-            handle.write(text)
-        return record
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
+            elif line.startswith(END_PREFIX):
+                name = line[len(END_PREFIX):].split()[0].decode("ascii")
+                spans[name] = now - begun.get(name, now)
+        seen = complete
+    process.wait()
+    with open(os.path.join(artifact_dir, "reference-transcript.log"), "wb") as handle:
+        handle.write(text)
+    record = read_reference_text(text)
+    for name, seconds in spans.items():
+        if name in record:
+            record[name]["host_seconds"] = seconds
+    if stalled:
+        record["__problem__"] = f"no output for {stall_seconds} s; killed"
+    return record
+
+
+def reference_for(args, artifact_dir, stall_seconds):
+    """The Linux column: a transcript from the machine, or the QEMU guest."""
+    if args.linux_transcript:
+        with open(args.linux_transcript, "rb") as handle:
+            return read_reference_text(b"\n" + handle.read().replace(b"\r", b""))
+    if args.platform == "qemu":
+        return run_reference_qemu(args, artifact_dir, stall_seconds)
+    return ("the board has not run this load under Raspberry Pi OS; pass its "
+            "output with --linux-transcript")
 
 
 def phase_parts(entry):
-    parts = [f"status={entry['status']}",
-             f"host-seconds={entry['host_seconds']:.2f}"]
+    parts = [f"status={entry['status']}"]
+    if entry.get("skipped"):
+        parts.append("SKIPPED")
+    if "host_seconds" in entry:
+        parts.append(f"host-seconds={entry['host_seconds']:.2f}")
     if "bogo_ops" in entry:
         parts += [f"bogo-ops={entry['bogo_ops']}",
                   f"ops/s-real={entry['ops_per_real_second']:.2f}",
@@ -274,6 +311,59 @@ def phase_parts(entry):
     if "reported_seconds" in entry:
         parts.append(f"reported-seconds={entry['reported_seconds']:.3f}")
     return parts
+
+
+SERIES_NAME = "docs/LOAD_SERIES.md"
+SERIES_PROGRAMS = {
+    "xargs": "BusyBox xargs -P 4",
+    "fork": "stress-ng --fork 4",
+    "exec": "stress-ng --exec 4",
+    "pipe": "stress-ng --pipe 4",
+    "hackbench": "hackbench -P -p -g 4",
+}
+SERIES_ROWS = (
+    ("status", "status", "{}"),
+    ("wall s (host clock)", "host_seconds", "{:.2f}"),
+    ("bogo-ops", "bogo_ops", "{}"),
+    ("ops/s real", "ops_per_real_second", "{:.2f}"),
+    ("ops/s usr+sys", "ops_per_cpu_second", "{:.2f}"),
+    ("reported s", "reported_seconds", "{:.3f}"),
+)
+
+
+def git_head():
+    return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO_ROOT,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def series_cell(entry, key, form):
+    if entry is None:
+        return "not run"
+    if key == "status" and entry.get("skipped"):
+        return f"{entry['status']} (skipped)"
+    return form.format(entry[key]) if key in entry else "-"
+
+
+def series_section(date, platform, head, args, record, reference, failure):
+    """One sample as one table per program, Takibi beside Linux (#1158)."""
+    linux = reference if isinstance(reference, dict) else {}
+    lines = [f"## {date} {platform}", "",
+             f"Takibi commit {head}; sample {'FAILED: ' + failure if failure else 'clean'}.",
+             "Linux: " + (linux.get("__kernel__", "kernel not printed") if linux
+                          else f"no column ({reference})") + ".",
+             f"Arguments: seconds={args.seconds} jobs={args.jobs} loops={args.loops}.",
+             ""]
+    waits = phase_waits(platform)
+    for name in PHASES:
+        lines += [f"### {SERIES_PROGRAMS[name]}", ""]
+        if name in waits and name not in args.phases:
+            lines += [f"Takibi waits for {waits[name]}.", ""]
+        lines += ["| | Takibi | Linux |", "| --- | ---: | ---: |"]
+        for title, key, form in SERIES_ROWS:
+            lines.append(f"| {title} | {series_cell(record.get(name), key, form)} "
+                         f"| {series_cell(linux.get(name), key, form)} |")
+        lines.append("")
+    return "\n".join(lines) + "\n"
 
 
 def kernel_elf_identity():
@@ -303,8 +393,11 @@ def report_lines(label, args, record, unimpl, reference):
     if isinstance(reference, str):
         lines.append(f"{label} linux reference: none ({reference})")
     elif reference is not None:
-        lines.append(f"{label} linux reference: this host's Linux, native, "
-                     f"{REFERENCE_CPUS} CPUs -- a reference, never a verdict")
+        lines.append(f"{label} linux reference: "
+                     f"{reference.get('__kernel__', 'kernel not printed')} on this "
+                     "machine -- a reference, never a verdict"
+                     + (f"; {reference['__problem__']}"
+                        if "__problem__" in reference else ""))
     waits = phase_waits(args.platform)
     for name in PHASES:
         column = ""
@@ -346,8 +439,13 @@ def main():
                              ",".join(PHASES) + "; default: those the "
                              "platform can run today")
     parser.add_argument("--no-reference", action="store_true",
-                        help="skip the Linux reference column (the same "
-                             "load.sh run natively on this host)")
+                        help="skip the Linux reference column")
+    parser.add_argument("--linux-transcript", default="",
+                        help="the same load.sh's output under Linux on this "
+                             "machine, for the column a runner cannot produce "
+                             "itself (the RPi5 under Raspberry Pi OS)")
+    parser.add_argument("--record", action="store_true",
+                        help="append this sample's tables to " + SERIES_NAME)
     parser.add_argument("--stall-seconds", type=int, default=0,
                         help="seconds without a load line that count as a "
                              "hang; 0 means 600, or three stressor runs plus "
@@ -443,8 +541,15 @@ def main():
     # the host's CPUs.
     reference = None
     if not args.no_reference:
-        reference = run_reference(args, artifact_dir)
+        reference = reference_for(args, artifact_dir, stall_seconds)
     lines = report_lines(label, args, record, unimpl, reference)
+    if args.record:
+        section = series_section(
+            datetime.date.today().isoformat(), args.platform, git_head(), args,
+            record, reference, failure)
+        with open(os.path.join(REPO_ROOT, SERIES_NAME), "a", encoding="ascii") as handle:
+            handle.write(section)
+        lines.append(f"{label} recorded in {SERIES_NAME}")
     with open(report_path, "w", encoding="ascii") as handle:
         handle.write("\n".join(lines) + "\n")
     for line in lines:

@@ -20,8 +20,8 @@
 # harness must not depend on what one of its phases is there to find.
 # The last line is the verdict the runner reads.
 #
-# LOAD_ROOT (empty on Takibi) prefixes every path, so the runner's Linux
-# reference column runs this same script on the host, with the host-built
+# LOAD_ROOT (empty on Takibi) prefixes every path, so a Linux machine can run
+# this same script unprivileged for its reference column, with the same
 # programs under LOAD_ROOT/bin and BusyBox first in PATH.
 seconds=$1
 jobs=$2
@@ -36,7 +36,7 @@ busybox mkdir -p "$root/load"
 # stress-ng's exec stressor refuses to run as root (GitHub issue #1176), so
 # a root caller -- Takibi's shell -- runs every stressor as /etc/passwd's
 # `load` user through BusyBox su; an unprivileged caller, the Linux
-# reference column, runs them as itself. A file, not a command
+# unprivileged Linux run, runs them as itself. A file, not a command
 # substitution, carries the uid (see above).
 busybox id -u >"$root/load/uid"
 read uid <"$root/load/uid"
