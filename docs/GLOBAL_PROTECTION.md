@@ -115,8 +115,36 @@ needs an accepting issue and a fall names its rule (`typed protection`,
 Rows seeded on 2026-10-29 read `unreviewed`, followed by the global's
 2026-10-06 disposition (`docs/KERNEL_GLOBAL_DISPOSITIONS_2026-10-06.tsv`)
 when it had one. Slice 3 of #1012 replaces each with the reader the global
-rests on (DDB under `MachineStopped`, a probe's totals, an ABI record) or
-migrates it out of the list.
+rests on or migrates it out of the list.
+
+## What a reviewed row says
+
+A reviewed row reads `read-by NAME[,NAME...]: why`. Each `NAME` is a function
+with a use of the global other than `write` or `atomic_store` in the uses
+table, or a path, containing a slash, to a file that names the global (a GDB
+script, a lane's checker). The check refuses any other `NAME` and any cell that
+is neither this nor `unreviewed...`, and its PASS line prints how many rows are
+still unreviewed. That count moves when a review is done; the trust-ledger
+category counts rows, so a review alone does not lower `unprotected_globals`.
+
+What the check guarantees: on this build, each named reader exists and touches
+the global, and it fails when a rename or deletion takes a reader away. A file
+reader is only known to contain the name as a word.
+
+What it does not guarantee: that the named readers are all the readers, that
+they are the important ones, or that anything in `why` is true. The access
+premise there (core 0 at boot, under the run lock, with the world stopped) is a
+reviewer's reading of the code on the review date. Neither the compiler nor this
+check enforces it, a later change can falsify it silently, and a data race on the
+global stays possible. A reviewed row remains unprotected: it is moved into the
+trusted base with a name on it, not excluded. A read through an accessor is
+credited to the accessor. Being reached is not checked either, since the call
+graph has no entries from assembly and a test-shaped fixture is compiled into the
+same image as everything else; `retain-fixture` means the code's purpose is a
+fixture, not that an ordinary boot cannot reach it.
+
+A row whose 2026-10-06 label stopped describing the global stays `unreviewed`
+with a dated note saying so, even when it has a reader.
 
 ## Measured, 2026-10-29
 

@@ -7,7 +7,9 @@ unprotected global, a stale row (migrated or deleted), a duplicate row, a
 row with no reader, a scratch global, a test or model file, an empty table,
 another format and an unknown class must each be refused or handled as the
 docstring there says. The --drop/--prune rewrite (#1201) must refuse a drop
-or a write that loses an unprotected global's row. The tracked allow-list is also read for shape.
+or a write that loses an unprotected global's row. A reviewed row's named
+reader must be a real non-write use or a file naming the global. The tracked
+allow-list is also read for shape.
 """
 
 import sys
@@ -105,6 +107,30 @@ def main():
            refused(lambda: g.rewrite_allowlist(allow, found, {("kernel/a.tkb", "x")})))
     expect("rewrite of an emptied list is refused",
            refused(lambda: g.rewrite_allowlist(allow, found, set(allowed))))
+
+    # A named reader must exist; it is not judged correct.
+    uses = g.parse_uses(table(row("kernel/a.tkb", "x")) + "# uses\nfile\tline\tname\tkind\tfunction\n"
+                        "kernel/a.tkb\t3\tx\tload\tf\nkernel/a.tkb\t4\tx\twrite\tw\n"
+                        "kernel/a.tkb\t5\tx\tatomic_store\ts\n")
+
+    def reader(cell, name="x"):
+        return g.reader_errors({("kernel/a.tkb", name): cell}, uses, g.ROOT)
+
+    expect("unreviewed names no reader", reader("unreviewed; no idea") == [])
+    expect("a function with a read passes", reader("read-by f: because") == [])
+    expect("a missing function is refused", any("no use" in e for e in reader("read-by nope: because")))
+    expect("a function that only writes is refused", reader("read-by w: because") != [])
+    expect("a function that only atomically stores is refused", reader("read-by s: because") != [])
+    expect("one bad name among several is refused", reader("read-by f,nope: because") != [])
+    expect("a cell of plain prose is refused", any("neither" in e for e in reader("the debugger")))
+    expect("read-by with no reason is refused", any("neither" in e for e in reader("read-by f:")))
+    expect("a script naming the global passes",
+           reader("read-by scripts/buildcheck_global_protection.py: because", "USES_MARK") == [])
+    expect("a script not naming the global is refused",
+           reader("read-by scripts/buildcheck_global_protection.py: because", "no_such_word") != [])
+    expect("a missing script is refused", reader("read-by scripts/no_such_file: because") != [])
+    expect("unreviewed rows are counted", g.unreviewed_count(
+        {("a", "x"): "unreviewed", ("a", "y"): "read-by f: why"}) == 1)
 
     tracked, shape = g.parse_allowlist(g.ALLOWLIST.read_text(encoding="utf-8"))
     expect("tracked allow-list is well formed", shape == [])

@@ -10,7 +10,12 @@ Reads the compiler's `--facts globals.tsv` tables of both kernels
 - a listed row that no longer names such a global (it was migrated,
   renamed or deleted): the list only shrinks, and a stale row would let
   the next unprotected global of that name in for free;
-- a duplicate row, a row without a reader cell, an empty table.
+- a duplicate row, a row without a reader cell, an empty table;
+- a reader cell that is neither `unreviewed...` nor `read-by NAME[,NAME...]: why`,
+  or a NAME that is not a reader of that global: a function must have a use of
+  the global other than a write in the uses table, and a path with a slash must
+  be a file naming the global. This shows the reader exists, nothing about
+  whether it is correct (docs/GLOBAL_PROTECTION.md).
 
 Production means compiled into a kernel image under kernel/ and outside
 kernel/tests and kernel/models. The row count of the allow-list is the
@@ -37,6 +42,7 @@ kernel/build/{qemu,rpi5}/main.o.facts/globals.tsv.
 
 import collections
 import pathlib
+import re
 import sys
 
 from pass_line import report_pass
@@ -45,6 +51,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 ALLOWLIST = ROOT / "scripts" / "global_protection_allowlist.tsv"
 FORMAT = 3
 USES_MARK = "# uses"
+WRITE_KINDS = {"write", "atomic_store"}
+READ_BY = re.compile(r"read-by ([^\s:,]+(?:,[^\s:,]+)*): \S")
 HEADER = "# takibi globals, format "
 COLUMNS = ("file", "line", "name", "visibility", "qualifier", "type", "protection")
 PROTECTED = {"atomic", "lock", "per_cpu", "region", "place", "dma_fixed",
@@ -81,6 +89,19 @@ def parse_table(text, origin):
     if not rows:
         raise TableError(f"{origin}: no rows")
     return rows
+
+
+def parse_uses(text):
+    """global name -> the functions with a use of it that is not a write."""
+    readers = collections.defaultdict(set)
+    lines = text.splitlines()
+    if USES_MARK not in lines:
+        return readers
+    for line in lines[lines.index(USES_MARK) + 2:]:
+        cells = line.split("\t")
+        if len(cells) == 5 and cells[3] not in WRITE_KINDS:
+            readers[cells[2]].add(cells[4])
+    return readers
 
 
 def production(file):
@@ -134,6 +155,34 @@ def check(found, allowed):
         why = "is now protected" if key in found else "is no longer a production global"
         errors.append(f"{ALLOWLIST.name}: stale row {key[0]} {key[1]}: {why}; delete the row")
     return errors
+
+
+def reader_errors(allowed, readers, root=ROOT):
+    """A reviewed row's named readers exist; `unreviewed` rows name none."""
+    errors = []
+    for (file, name), cell in sorted(allowed.items()):
+        if cell.startswith("unreviewed"):
+            continue
+        match = READ_BY.match(cell)
+        if not match:
+            errors.append(f"{ALLOWLIST.name}: {file} {name}: reader is neither unreviewed "
+                          "nor 'read-by NAME[,NAME...]: why'")
+            continue
+        for reader in match.group(1).split(","):
+            if "/" in reader:
+                path = root / reader
+                if not path.is_file() or not re.search(
+                        rf"\b{re.escape(name)}\b", path.read_text(encoding="utf-8")):
+                    errors.append(f"{ALLOWLIST.name}: {file} {name}: {reader} does not "
+                                  "exist or does not name the global")
+            elif reader not in readers.get(name, ()):
+                errors.append(f"{ALLOWLIST.name}: {file} {name}: {reader} has no use of "
+                              "the global other than a write")
+    return errors
+
+
+def unreviewed_count(allowed):
+    return sum(1 for cell in allowed.values() if cell.startswith("unreviewed"))
 
 
 def stale_keys(found, allowed):
@@ -240,7 +289,8 @@ def main(argv):
         print(__doc__, file=sys.stderr)
         return 2
     try:
-        found = globals_of([(p, pathlib.Path(p).read_text(encoding="utf-8")) for p in paths])
+        tables = [(p, pathlib.Path(p).read_text(encoding="utf-8")) for p in paths]
+        found = globals_of(tables)
     except (TableError, OSError) as error:
         print(f"global-protection: {error}", file=sys.stderr)
         return 1
@@ -251,6 +301,11 @@ def main(argv):
         return edit(found, drops, prune)
     allowed, errors = parse_allowlist(ALLOWLIST.read_text(encoding="utf-8"))
     errors += check(found, allowed)
+    readers = collections.defaultdict(set)
+    for _, text in tables:
+        for name, functions in parse_uses(text).items():
+            readers[name] |= functions
+    errors += reader_errors(allowed, readers)
     if errors:
         for error in errors:
             print(f"global-protection: {error}", file=sys.stderr)
@@ -258,7 +313,8 @@ def main(argv):
     open_count = sum(1 for r in found.values() if unprotected(r))
     report_pass("global-protection",
                 f"{len(found)} production globals; {open_count} unprotected, all "
-                f"allow-listed ({summary(found)})",
+                f"allow-listed, {unreviewed_count(allowed)} of those rows unreviewed "
+                f"({summary(found)})",
                 globals=len(found))
     return 0
 

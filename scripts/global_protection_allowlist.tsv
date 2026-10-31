@@ -3,32 +3,34 @@
 # scripts/buildcheck_global_protection.py refuses an unlisted unprotected global and a
 # stale row, and the row count is the trust-ledger category unprotected_globals.
 # "unreviewed" rows carry the 2026-10-06 disposition as a starting point (slice 3);
-# a reviewed row names the global's reader and the premise it rests on.
-kernel/arch/arm64/kernel/exception_evidence.tkb	crash_console_owner	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
-kernel/arch/arm64/kernel/exception_evidence.tkb	crash_fault_order	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
-kernel/arch/arm64/kernel/exception_evidence.tkb	crash_report_abandoned	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
-kernel/arch/arm64/kernel/exception_evidence.tkb	crash_report_contended	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
-kernel/arch/arm64/kernel/exception_evidence.tkb	crash_report_owner	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
-kernel/arch/arm64/kernel/exception_evidence.tkb	crash_snapshot_capturing_per_core	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
-kernel/arch/arm64/kernel/exception_evidence.tkb	crash_snapshot_per_core	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
-kernel/arch/arm64/kernel/exception_evidence.tkb	ddb_snapshot	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
-kernel/arch/arm64/kernel/exception_evidence.tkb	ddb_snapshot_published_sequence	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
-kernel/arch/arm64/kernel/exception_evidence.tkb	ddb_stopped_root	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
-kernel/arch/arm64/kernel/exception_evidence.tkb	ddb_wait_test_records	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
-kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_backtrace_test_enabled	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
-kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_breakpoint_test_enabled	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
-kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_console_hold_armed	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
-kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_console_test_enabled	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
+# a reviewed row reads "read-by NAME[,NAME...]: why", and the build refuses a NAME that
+# is not a non-write use of the global or a file naming it. Being named shows a reader
+# exists; the rest of the cell is a reviewer's claim, not a checked one.
+kernel/arch/arm64/kernel/exception_evidence.tkb	crash_console_owner	read-by crash_console_owner_address: 2026-10-31 retain-abi: the compare-and-swap in crash_console_claim, on the failing path; no debugger reads it
+kernel/arch/arm64/kernel/exception_evidence.tkb	crash_fault_order	read-by crash_fault_order_address: 2026-10-31 retain-abi: the ticket crash_snapshot_capture takes and crash_snapshot_render_every_core orders the report by; safety comes from each record's valid flag
+kernel/arch/arm64/kernel/exception_evidence.tkb	crash_report_abandoned	read-by crash_snapshot_render_every_core,crash_report_abandoned_address: 2026-10-31 retain-abi: the crash summary line a lane asserts abandoned=0 on, read after both cores have stopped; crash_report_claim counts atomically
+kernel/arch/arm64/kernel/exception_evidence.tkb	crash_report_contended	read-by crash_snapshot_render_every_core,crash_report_contended_address: 2026-10-31 retain-abi: the crash summary line, read after both cores have stopped; printed, crash_report_claim counts atomically
+kernel/arch/arm64/kernel/exception_evidence.tkb	crash_report_owner	read-by crash_report_owner_address: 2026-10-31 retain-abi: the claim word of crash_report_claim and crash_report_release, reached only by atomics through the accessor
+kernel/arch/arm64/kernel/exception_evidence.tkb	crash_snapshot_capturing_per_core	read-by crash_snapshot_capturing_here: 2026-10-31 retain-abi: crash_snapshot_capture's flag, through a pointer to the calling core's element, or to element 0 if cpu_id is out of range
+kernel/arch/arm64/kernel/exception_evidence.tkb	crash_snapshot_per_core	read-by crash_snapshot_of,scripts/kernel_crash_snapshot.gdb,scripts/kernel_state.gdb: 2026-10-31 retain-abi: the crash report and DDB through crash_snapshot_of, and the GDB scripts by name; a record is read after its valid flag is published
+kernel/arch/arm64/kernel/exception_evidence.tkb	ddb_snapshot	read-by ddb_render_intr,ddb_render_ps,scripts/kernel_state.gdb: 2026-10-31 retain-abi: DDB's commands on the machine kernel_ddb_enter_stopped stopped, and GDB after checking the published sequence
+kernel/arch/arm64/kernel/exception_evidence.tkb	ddb_snapshot_published_sequence	read-by ddb_snapshot_published_sequence_address,scripts/kernel_state.gdb: 2026-10-31 retain-abi: an external debugger accepts ddb_snapshot only when this equals its sequence before and after the read
+kernel/arch/arm64/kernel/exception_evidence.tkb	ddb_stopped_root	read-by ddb_stopped_unwind_root,ddb_claimed_pid: 2026-10-31 retain-abi: DDB's walk of every stopped core's root; each core publishes its own element
+kernel/arch/arm64/kernel/exception_evidence.tkb	ddb_wait_test_records	read-by ddb_render_wait_test: 2026-10-31 retain-abi: the debugger-armed wait-topology rendering, compared by a view on both lanes
+kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_backtrace_test_enabled	read-by kernel_ddb_enter_stopped: 2026-10-31 retain-abi: debugger-set arm (scripts/debugger_set_globals.tsv), false on an ordinary boot
+kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_breakpoint_test_enabled	read-by kernel_ddb_breakpoint_test_checkpoint: 2026-10-31 retain-abi: debugger-set arm of the breakpoint checkpoint, false on an ordinary boot
+kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_console_hold_armed	read-by workload_peer_console_progress: 2026-10-31 retain-abi: debugger-set by scripts/kernel_console_hold_check.py after its prerequisites; the peer writer polls it
+kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_console_test_enabled	read-by workload_peer_console_progress: 2026-10-31 retain-abi: debugger-set arm that keeps the peer writer alive after its verdict in DDB lanes
 kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_log_test_enabled	unreviewed
-kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_memory_access	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
-kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_memory_fault_test_enabled	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
-kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_wait_test_enabled	unreviewed; 2026-10-06 retain-abi: machine diagnostics / per-CPU terminal capture; atomic report claims; complete WorldStopped for DDB
+kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_memory_access	read-by kernel_ddb_memory_access_here: 2026-10-31 retain-abi: DDB's guarded read, through a pointer to the calling core's element, or to element 0 if cpu_id is out of range
+kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_memory_fault_test_enabled	read-by kernel_ddb_enter_stopped: 2026-10-31 retain-abi: debugger-set arm of the memory-fault case
+kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_wait_test_enabled	read-by kernel_ddb_enter_stopped: 2026-10-31 retain-abi: debugger-set arm of ddb_render_wait_test
 kernel/arch/arm64/kernel/gicv2.tkb	gicc	unreviewed
 kernel/arch/arm64/kernel/gicv2.tkb	gicd	unreviewed
-kernel/arch/arm64/kernel/platform_uart_common.tkb	uart_rx_handler	unreviewed; 2026-10-06 retain-singleton: one physical UART / boot installs callback before CPU0 UART IRQ unmask
-kernel/arch/arm64/kernel/secondary.tkb	kernel_online_cores	unreviewed; 2026-10-06 retain-partition: machine CPU set / boot clear/CPU_ON publication; each CPU publishes its own tick/state word
-kernel/arch/arm64/mm/asid.tkb	asid_bits	written once by asid_init with the MMU off, where the compiler refuses an atomic call; read lock-free after
-kernel/arch/arm64/mm/asid.tkb	asid_last	written once by asid_init with the MMU off, where the compiler refuses an atomic call; read lock-free after
+kernel/arch/arm64/kernel/platform_uart_common.tkb	uart_rx_handler	read-by uart_rx_drain: 2026-10-31 retain-singleton: the UART receive path calls it; uart_init and uart_set_rx_handler store it at boot before the IRQ is unmasked, an order nothing checks
+kernel/arch/arm64/kernel/secondary.tkb	kernel_online_cores	read-by kernel_online_core_count,kernel_online_core_note_cpu_on: 2026-10-31 retain-partition: every online-prefix walk; only core 0's boot writes it, with the range rechecked at each read (outside 1..=max reads as 1)
+kernel/arch/arm64/mm/asid.tkb	asid_bits	read-by asid_width_bits: 2026-10-31 written once by asid_init with the MMU off, where the compiler refuses an atomic call; read lock-free after
+kernel/arch/arm64/mm/asid.tkb	asid_last	read-by asid_highest_value,asid_assign_locked: 2026-10-31 written once by asid_init with the MMU off, where the compiler refuses an atomic call; read lock-free after
 kernel/drivers/block/block_cache.tkb	block_cache_backend	unreviewed; 2026-10-06 candidate-context: one read cache per CPU / bounded caller-supplied CPU; release/acquire write epoch; local synchronous access
 kernel/drivers/block/block_cache.tkb	block_cache_block	unreviewed; 2026-10-06 candidate-context: one read cache per CPU / bounded caller-supplied CPU; release/acquire write epoch; local synchronous access
 kernel/drivers/block/block_cache.tkb	block_cache_data	unreviewed; 2026-10-06 candidate-context: one read cache per CPU / bounded caller-supplied CPU; release/acquire write epoch; local synchronous access
@@ -92,57 +94,57 @@ kernel/fs/ext2/ext2.tkb	ext2_write_blocks	unreviewed; 2026-10-06 candidate-mount
 kernel/init/ext2_fixture.tkb	ext2_release_fenced	unreviewed
 kernel/init/ext2_fixture.tkb	ext2_release_first	unreviewed
 kernel/init/ext2_fixture.tkb	ext2_release_second	unreviewed
-kernel/init/ext2_fixture.tkb	ext2_write_fixture_bitmap	unreviewed; 2026-10-06 retain-fixture: shared boot filesystem fixture / boot writes/reads static test buffers before normal users
-kernel/init/ext2_fixture.tkb	ext2_write_fixture_readback	unreviewed; 2026-10-06 retain-fixture: shared boot filesystem fixture / boot writes/reads static test buffers before normal users
-kernel/init/ext2_fixture.tkb	ext2_write_fixture_source	unreviewed; 2026-10-06 retain-fixture: shared boot filesystem fixture / boot writes/reads static test buffers before normal users
-kernel/init/test_driver.tkb	address_space_baseline	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
+kernel/init/ext2_fixture.tkb	ext2_write_fixture_bitmap	read-by ext2_io_bitmap_matches,ext2_write_indirect_check: 2026-10-31 retain-fixture: the boot ext2 fixture's own checks, core 0 before userspace
+kernel/init/ext2_fixture.tkb	ext2_write_fixture_readback	read-by ext2_io_file_is,ext2_exhaustion_mode: 2026-10-31 retain-fixture: the boot ext2 fixture's read-back comparisons, core 0 before userspace
+kernel/init/ext2_fixture.tkb	ext2_write_fixture_source	read-by ext2_io_file_is,ext2_release_full_file: 2026-10-31 retain-fixture: the boot ext2 fixture compares what it wrote against this, core 0 before userspace
+kernel/init/test_driver.tkb	address_space_baseline	read-by kernel_init_boot_fixture_poll: 2026-10-31 retain-fixture: the deferred end-of-fixture leak report; taken in kernel_test_driver_run and kernel_init_process_start
 kernel/init/test_driver.tkb	boot_exec_windows	unreviewed
 kernel/init/test_driver.tkb	boot_execution	unreviewed
-kernel/init/test_driver.tkb	clone_growth_probe_ok	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
+kernel/init/test_driver.tkb	clone_growth_probe_ok	read-by kernel_init_script_success_evidence: 2026-10-31 retain-fixture: prints the vm fork child stack growth line a lane reads
 kernel/init/test_driver.tkb	exec_windows	unreviewed
-kernel/init/test_driver.tkb	ext2_read_fixture	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
-kernel/init/test_driver.tkb	ext2_symlink_fixture	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
-kernel/init/test_driver.tkb	fd_context_baseline	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
-kernel/init/test_driver.tkb	image_record_baseline	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
-kernel/init/test_driver.tkb	init_boot_fixture_pending	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
-kernel/init/test_driver.tkb	init_boot_fixture_reported	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
+kernel/init/test_driver.tkb	ext2_read_fixture	read-by ext2_create_check,ext2_io_file_is: 2026-10-31 retain-fixture: the boot ext2 fixture reads file bytes here and compares them, core 0 before userspace
+kernel/init/test_driver.tkb	ext2_symlink_fixture	read-by kernel_ext2_fixture_run: 2026-10-31 retain-fixture: the boot ext2 fixture's symlink target buffer
+kernel/init/test_driver.tkb	fd_context_baseline	read-by kernel_init_boot_fixture_poll: 2026-10-31 retain-fixture: the deferred end-of-fixture leak report; taken once in kernel_test_driver_run
+kernel/init/test_driver.tkb	image_record_baseline	read-by kernel_init_boot_fixture_poll: 2026-10-31 retain-fixture: the deferred end-of-fixture leak report
+kernel/init/test_driver.tkb	init_boot_fixture_pending	read-by kernel_init_boot_fixture_poll: 2026-10-31 retain-fixture: one-shot gate of the deferred report, polled on the syscall path; the pid 1 test leaves one process as the taker, by check then clear rather than a swap
+kernel/init/test_driver.tkb	init_boot_fixture_reported	read-by kernel_init_boot_fixture_reaped: 2026-10-31 retain-fixture: whether the deferred report ran, read when PID 1's fixture child is reaped
 kernel/init/test_driver.tkb	init_boot_fixture_status	unreviewed
 kernel/init/test_driver.tkb	kernel_exec_reserve_undercount	unreviewed
-kernel/init/test_driver.tkb	kernel_test_init_script	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
-kernel/init/test_driver.tkb	page_baseline	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
+kernel/init/test_driver.tkb	kernel_test_init_script	read-by kernel_test_driver_run: 2026-10-31 retain-fixture: main's choice of init script, one read on the boot path
+kernel/init/test_driver.tkb	page_baseline	read-by kernel_init_boot_fixture_poll: 2026-10-31 retain-fixture: the deferred end-of-fixture page-leak report
 kernel/init/test_driver.tkb	page_baseline_init_root	unreviewed
-kernel/init/test_driver.tkb	process_pool_baseline	unreviewed; 2026-10-06 retain-fixture: boot fixture and deferred report lifecycle / boot configuration or scenario-specific progress/report hooks
-kernel/init/test_driver.tkb	rootfs_metadata	unreviewed; 2026-10-06 retain-boot: retained boot image metadata / boot fills once; saved image plan borrows the permanent window
-kernel/kernel/fd_table.tkb	fd_refcount_probe_handle	unreviewed; 2026-10-06 retain-fixture: refcount contention fixture / fixture rendezvous/guarded production count operations
-kernel/kernel/fd_table.tkb	fd_refcount_probe_ready	unreviewed; 2026-10-06 retain-fixture: refcount contention fixture / fixture rendezvous/guarded production count operations
-kernel/kernel/fd_table.tkb	fd_slot_total	unreviewed; 2026-10-06 retain-pools: FD namespace and shared open descriptions / typed pool guards/pins; process ownership of chains; refcount lock
-kernel/kernel/freelist_contention_evidence.tkb	freelist_probe	unreviewed; 2026-10-06 retain-fixture: named freelist_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
-kernel/kernel/freelist_contention_evidence.tkb	freelist_probe_ready	unreviewed; 2026-10-06 retain-fixture: named freelist_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
-kernel/kernel/init_once_contention_evidence.tkb	init_once_probe_gate	unreviewed; 2026-10-06 retain-fixture: named init_once_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
-kernel/kernel/init_once_contention_evidence.tkb	init_once_probe_naive_complete	unreviewed; 2026-10-06 retain-fixture: named init_once_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
+kernel/init/test_driver.tkb	process_pool_baseline	read-by kernel_init_boot_fixture_poll: 2026-10-31 retain-fixture: the deferred end-of-fixture process-pool report (#270)
+kernel/init/test_driver.tkb	rootfs_metadata	read-by kernel_test_driver_run: 2026-10-31 retain-boot: the boot read of the image's metadata; the exec plan borrows this permanent buffer afterward
+kernel/kernel/fd_table.tkb	fd_refcount_probe_handle	read-by fd_refcount_probe_cycle,fd_refcount_contention_probe: 2026-10-31 retain-fixture: the contention probe's two cores; published before the rendezvous, an order the probe keeps by hand
+kernel/kernel/fd_table.tkb	fd_refcount_probe_ready	read-by fd_refcount_contention_probe: 2026-10-31 retain-fixture: first-run guard of the probe, core 0
+kernel/kernel/fd_table.tkb	fd_slot_total	read-by unified_object_ref_bound,fd_block_publish: 2026-10-31 retain-pools: the refcount bound, under the same guard as SharedObject.refs; a GuardedFieldGuard in signatures enforces that, which the protection class does not see
+kernel/kernel/freelist_contention_evidence.tkb	freelist_probe	read-by freelist_probe_cycle,freelist_contention_phase: 2026-10-31 retain-fixture: the probe's two cores; the core's own operations are the protocol under test
+kernel/kernel/freelist_contention_evidence.tkb	freelist_probe_ready	read-by freelist_probe_init: 2026-10-31 retain-fixture: first-run guard of the probe, core 0
+kernel/kernel/init_once_contention_evidence.tkb	init_once_probe_gate	read-by init_once_probe_locked_attempt: 2026-10-31 retain-fixture: the probe's locked phase on both cores, through InitOnce's own operations
+kernel/kernel/init_once_contention_evidence.tkb	init_once_probe_naive_complete	read-by init_once_contention_probe,init_once_contention_secondary_run: 2026-10-31 retain-fixture: the deliberately unlocked phase: racing on it is what the probe measures
 kernel/kernel/log_storm_evidence.tkb	log_storm_last_round	unreviewed
 kernel/kernel/log_storm_evidence.tkb	log_storm_trace_rounds	unreviewed
 kernel/kernel/nic_irq_affinity.tkb	nic_irq_evidence_intid	unreviewed
 kernel/kernel/nic_irq_affinity.tkb	nic_irq_phase_start	unreviewed
-kernel/kernel/occupancy_drain_evidence.tkb	occupancy_probe_teardowns	unreviewed; 2026-10-06 retain-fixture: named occupancy_drain_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
-kernel/kernel/occupancy_drain_evidence.tkb	world_stop_probe_inspections	unreviewed; 2026-10-06 retain-fixture: named occupancy_drain_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
-kernel/kernel/occupancy_drain_evidence.tkb	world_stop_stale_probe_controller	unreviewed; 2026-10-06 retain-fixture: named occupancy_drain_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
+kernel/kernel/occupancy_drain_evidence.tkb	occupancy_probe_teardowns	read-by occupancy_drain_report,occupancy_probe_teardown: 2026-10-31 retain-fixture: the probe's printed total
+kernel/kernel/occupancy_drain_evidence.tkb	world_stop_probe_inspections	read-by world_stop_probe,world_stop_probe_inspect: 2026-10-31 retain-fixture: the probe's verdict that the stopped inspection ran
+kernel/kernel/occupancy_drain_evidence.tkb	world_stop_stale_probe_controller	read-by world_stop_probe: 2026-10-31 retain-fixture: a second controller, for the stale-token case; WorldStop's own operations reach it
 kernel/kernel/pool_contention_evidence.tkb	contention_pool_grown	unreviewed
-kernel/kernel/pool_contention_evidence.tkb	contention_pool_ready	unreviewed; 2026-10-06 retain-fixture: named pool_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
+kernel/kernel/pool_contention_evidence.tkb	contention_pool_ready	read-by contention_pool_init: 2026-10-31 retain-fixture: first-run guard of the probe, core 0
 kernel/kernel/pool_lock_wait.tkb	pool_lock_wait_cores	unreviewed
 kernel/kernel/pool_walk_contention_evidence.tkb	pool_walk_floor	unreviewed
-kernel/kernel/pool_walk_contention_evidence.tkb	pool_walk_ready	unreviewed; 2026-10-06 retain-fixture: named pool_walk_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
-kernel/kernel/process.tkb	execution_state	unreviewed; 2026-10-06 retain-partition: one execution/activity record per CPU / cpu_id selection and non-preemptible/IRQ entry protocol
-kernel/kernel/process.tkb	kernel_activity	unreviewed; 2026-10-06 retain-partition: one execution/activity record per CPU / cpu_id selection and non-preemptible/IRQ entry protocol
-kernel/kernel/process.tkb	kernel_crash_trace	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	kernel_crash_trace_next	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	kernel_process_exec_failure_reason	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	kernel_process_trace_probe_child_frame	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	kernel_process_trace_probe_parent_frame	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	scheduled_process_freed_site	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	scheduled_process_missing_site	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	scheduled_process_record_absent	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process_test_evidence.tkb	process_test_evidence	unreviewed; 2026-10-06 retain-evidence: boot process evidence / accessor functions on existing test/dispatch paths
+kernel/kernel/pool_walk_contention_evidence.tkb	pool_walk_ready	read-by pool_walk_init: 2026-10-31 retain-fixture: first-run guard of the probe, core 0
+kernel/kernel/process.tkb	execution_state	read-by kernel_process_cpu_current_pid,kernel_process_block_current: 2026-10-31 retain-partition: each core's scheduler on its own element, selected by execution_cpu_index; DDB through kernel_process_cpu_current_pid and the protocol observation under the run lock read other cores' elements
+kernel/kernel/process.tkb	kernel_activity	read-by kernel_activity_of,kernel_activity_code_here: 2026-10-31 retain-partition: DDB's per-CPU view with the world stopped (kernel_activity_of) and the running core itself; the partition is by execution_cpu_index, not by type
+kernel/kernel/process.tkb	kernel_crash_trace	read-by kernel_process_crash_trace_copy: 2026-10-31 retain-abi: the DDB and crash snapshots, and the boot trace probes; each core writes its own segment
+kernel/kernel/process.tkb	kernel_crash_trace_next	read-by kernel_process_trace_record: 2026-10-31 retain-abi: its own core's next slot; the only other use is the reset, and the report reads the ring, not this
+kernel/kernel/process.tkb	kernel_process_exec_failure_reason	read-by kernel_process_exec_failure_render: 2026-10-31 retain-abi: the oops text of a failed exec; it is one word shared by every core, so a report shows the last failure's reason, not necessarily the crashing process's
+kernel/kernel/process.tkb	kernel_process_trace_probe_child_frame	unreviewed; 2026-10-31 label retain-abi does not hold: a boot probe's stand-in frame, no debugger or retained-evidence reader; fixture shape, read by kernel_process_trace_block_wake_probe
+kernel/kernel/process.tkb	kernel_process_trace_probe_parent_frame	unreviewed; 2026-10-31 label retain-abi does not hold: a boot probe's stand-in frame, no debugger or retained-evidence reader; fixture shape, read by kernel_process_scheduler_probe_frame_a
+kernel/kernel/process.tkb	scheduled_process_freed_site	read-by scheduled_process_freed_site_value: 2026-10-31 retain-abi: the boot report of the first read of a freed record; the writer has won the compare-and-swap of the first-occurrence word
+kernel/kernel/process.tkb	scheduled_process_missing_site	read-by scheduled_process_missing_site_value: 2026-10-31 retain-abi: the boot report of the first missing record; the writer has won the first-occurrence compare-and-swap
+kernel/kernel/process.tkb	scheduled_process_record_absent	unreviewed; 2026-10-31 label retain-abi does not hold: not evidence but the fallback every lookup failure returns a writable pointer to; any core can reach it with no lock, and no reader reads it as data except scheduled_process_scalar_snapshot's copy
+kernel/kernel/process_test_evidence.tkb	process_test_evidence	read-by process_test_evidence_clone_calls,process_test_evidence_exit_42_seen: 2026-10-31 retain-evidence: the boot evidence predicates, kernel_process_*_evidence, and the log lines they gate; a record path can run on any core, so its counts are evidence, not exact totals
 kernel/kernel/profile_samples.tkb	profile_sample_active	unreviewed; 2026-10-06 candidate-diagnostics: named PMU sampling interval / one sampling CPU; per-CPU prefix buffers; local IRQ observation limits
 kernel/kernel/profile_samples.tkb	profile_sample_available	unreviewed; 2026-10-06 candidate-diagnostics: named PMU sampling interval / one sampling CPU; per-CPU prefix buffers; local IRQ observation limits
 kernel/kernel/profile_samples.tkb	profile_sample_checked	unreviewed; 2026-10-06 candidate-diagnostics: named PMU sampling interval / one sampling CPU; per-CPU prefix buffers; local IRQ observation limits
@@ -162,67 +164,67 @@ kernel/kernel/profile_timeline.tkb	profile_timeline_active	unreviewed; 2026-10-0
 kernel/kernel/profile_timeline.tkb	profile_timeline_cores	unreviewed; 2026-10-06 candidate-diagnostics: named busy-pair timeline / world-stopped start/finish; IRQ-masked per-CPU writers; frozen filters
 kernel/kernel/profile_timeline.tkb	profile_timeline_pid_a	unreviewed; 2026-10-06 candidate-diagnostics: named busy-pair timeline / world-stopped start/finish; IRQ-masked per-CPU writers; frozen filters
 kernel/kernel/profile_timeline.tkb	profile_timeline_pid_b	unreviewed; 2026-10-06 candidate-diagnostics: named busy-pair timeline / world-stopped start/finish; IRQ-masked per-CPU writers; frozen filters
-kernel/kernel/protocol_trace.tkb	protocol_trace_active	unreviewed; 2026-10-06 retain-protocol: bounded protocol observation interval / run-lock acquire/release observations include changes made outside the lock; closed-window reporting
-kernel/kernel/protocol_trace.tkb	protocol_trace_cores	unreviewed; 2026-10-06 retain-protocol: bounded protocol observation interval / run-lock acquire/release observations include changes made outside the lock; closed-window reporting
-kernel/kernel/protocol_trace.tkb	protocol_trace_events	unreviewed; 2026-10-06 retain-protocol: bounded protocol observation interval / run-lock acquire/release observations include changes made outside the lock; closed-window reporting
-kernel/kernel/protocol_trace.tkb	protocol_trace_lost	unreviewed; 2026-10-06 retain-protocol: bounded protocol observation interval / run-lock acquire/release observations include changes made outside the lock; closed-window reporting
-kernel/kernel/protocol_trace.tkb	protocol_trace_process_count	unreviewed; 2026-10-06 retain-protocol: bounded protocol observation interval / run-lock acquire/release observations include changes made outside the lock; closed-window reporting
-kernel/kernel/protocol_trace.tkb	protocol_trace_processes	unreviewed; 2026-10-06 retain-protocol: bounded protocol observation interval / run-lock acquire/release observations include changes made outside the lock; closed-window reporting
-kernel/kernel/protocol_trace.tkb	protocol_trace_sequence	unreviewed; 2026-10-06 retain-protocol: bounded protocol observation interval / run-lock acquire/release observations include changes made outside the lock; closed-window reporting
-kernel/kernel/protocol_trace.tkb	protocol_trace_stored	unreviewed; 2026-10-06 retain-protocol: bounded protocol observation interval / run-lock acquire/release observations include changes made outside the lock; closed-window reporting
-kernel/kernel/protocol_trace.tkb	protocol_trace_unlocked_pass	unreviewed; 2026-10-06 retain-protocol: bounded protocol observation interval / run-lock acquire/release observations include changes made outside the lock; closed-window reporting
-kernel/kernel/schedule_contention_evidence.tkb	schedule_probe_attempts	unreviewed; 2026-10-06 retain-fixture: named schedule_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
-kernel/kernel/schedule_contention_evidence.tkb	schedule_probe_handle	unreviewed; 2026-10-06 retain-fixture: named schedule_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
-kernel/kernel/schedule_contention_evidence.tkb	schedule_probe_ready	unreviewed; 2026-10-06 retain-fixture: named schedule_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
-kernel/kernel/signal_contention_evidence.tkb	signal_probe_record	unreviewed; 2026-10-06 retain-fixture: named signal_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
-kernel/kernel/syscall.tkb	syscall_filesystem	unreviewed; 2026-10-06 retain-context: filesystem service and CPU-local action scratch / boot-published filesystem; non-preemptible local scratch; stable argv owner exchange
-kernel/kernel/syscall.tkb	syscall_scratch	unreviewed; 2026-10-06 retain-context: filesystem service and CPU-local action scratch / boot-published filesystem; non-preemptible local scratch; stable argv owner exchange
-kernel/kernel/syscall_test_evidence.tkb	syscall_test_evidence	unreviewed; 2026-10-06 retain-evidence: boot syscall evidence / accessor functions on existing dispatch/report paths
-kernel/kernel/tcp_connection_contention_evidence.tkb	tcp_pool_cost_mailboxes	unreviewed; 2026-10-06 retain-fixture: named tcp_connection_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
-kernel/kernel/tcp_connection_contention_evidence.tkb	tcp_pool_cost_samples	unreviewed; 2026-10-06 retain-fixture: named tcp_connection_contention_evidence fixture / explicit arming/rendezvous/atomic or guard protocol in indexed entry functions
-kernel/kernel/workload_evidence.tkb	move_cost_lost	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
-kernel/kernel/workload_evidence.tkb	move_cost_records	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
-kernel/kernel/workload_evidence.tkb	move_cost_reported	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
-kernel/kernel/workload_evidence.tkb	move_cost_stored	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
-kernel/kernel/workload_evidence.tkb	workload_busy_pair	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
-kernel/kernel/workload_evidence.tkb	workload_busy_starve_armed	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
-kernel/kernel/workload_evidence.tkb	workload_busy_starve_injection_ticks	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
-kernel/kernel/workload_evidence.tkb	workload_busy_starve_remaining	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
-kernel/kernel/workload_evidence.tkb	workload_busy_starve_worker	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
-kernel/kernel/workload_evidence.tkb	workload_busy_waits	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/protocol_trace.tkb	protocol_trace_active	read-by protocol_trace_is_active: 2026-10-31 retain-protocol: the observers' gate; opened and closed under the run lock
+kernel/kernel/protocol_trace.tkb	protocol_trace_cores	read-by protocol_trace_observe_core,protocol_trace_commit_open: 2026-10-31 retain-protocol: the observation's diff of each core's current and stack, under the run lock
+kernel/kernel/protocol_trace.tkb	protocol_trace_events	read-by protocol_trace_report: 2026-10-31 retain-protocol: the closed window's report, consumed by scripts/validate_protocol_trace.py
+kernel/kernel/protocol_trace.tkb	protocol_trace_lost	read-by protocol_trace_report,protocol_trace_record: 2026-10-31 retain-protocol: the report's lost count; a nonzero count refuses the window
+kernel/kernel/protocol_trace.tkb	protocol_trace_process_count	read-by protocol_trace_observe_process,protocol_trace_pass_end: 2026-10-31 retain-protocol: the observation pass, under the run lock
+kernel/kernel/protocol_trace.tkb	protocol_trace_processes	read-by protocol_trace_observe_process,protocol_trace_pass_end: 2026-10-31 retain-protocol: the observation pass's previous state of each process, under the run lock
+kernel/kernel/protocol_trace.tkb	protocol_trace_sequence	read-by protocol_trace_record,protocol_trace_report: 2026-10-31 retain-protocol: the event sequence the report prints, under the run lock
+kernel/kernel/protocol_trace.tkb	protocol_trace_stored	read-by protocol_trace_report,protocol_trace_record: 2026-10-31 retain-protocol: the stored count the report walks, under the run lock
+kernel/kernel/protocol_trace.tkb	protocol_trace_unlocked_pass	read-by protocol_trace_record: 2026-10-31 retain-protocol: marks events observed outside a lock hold; a single flag the pass writes
+kernel/kernel/schedule_contention_evidence.tkb	schedule_probe_attempts	read-by schedule_contention_report: 2026-10-31 retain-fixture: printed, never asserted, after both cores finished
+kernel/kernel/schedule_contention_evidence.tkb	schedule_probe_handle	read-by schedule_probe_claim,schedule_probe_teardown: 2026-10-31 retain-fixture: the probe's two cores; set by the primary before the rendezvous
+kernel/kernel/schedule_contention_evidence.tkb	schedule_probe_ready	read-by schedule_contention_probe: 2026-10-31 retain-fixture: first-run guard of the probe, core 0
+kernel/kernel/signal_contention_evidence.tkb	signal_probe_record	read-by signal_probe_round,signal_contention_secondary_run: 2026-10-31 retain-fixture: both cores of the probe, on a record of its own rather than the pool's
+kernel/kernel/syscall.tkb	syscall_filesystem	read-by syscall_filesystem_lookup: 2026-10-31 retain-context: every path syscall; written once by kernel_syscall_ext2_configure at boot, an order nothing checks
+kernel/kernel/syscall.tkb	syscall_scratch	read-by syscall_exec_path_here,kernel_syscall_path_name: 2026-10-31 retain-context: the syscall in progress, by a linear SyscallSlot token rather than by the CPU (scripts/check_per_cpu_arrays.py lists it as a slot pool)
+kernel/kernel/syscall_test_evidence.tkb	syscall_test_evidence	read-by syscall_test_evidence_accept_calls,syscall_test_evidence_listen_calls: 2026-10-31 retain-evidence: the socket fixture's verdict in syscall.tkb's lifecycle check; its counts are evidence, not exact totals across cores
+kernel/kernel/tcp_connection_contention_evidence.tkb	tcp_pool_cost_mailboxes	read-by tcp_pool_cost_evidence,tcp_pool_cost_secondary_poll: 2026-10-31 retain-fixture: the probe's driver and peers; every word but the padding is an AtomicWord, and the padding keeps this row listed
+kernel/kernel/tcp_connection_contention_evidence.tkb	tcp_pool_cost_samples	read-by pin_sharing_evidence: 2026-10-31 retain-fixture: printed with the pin-sharing result; written by tcp_pool_cost_evidence on the boot core
+kernel/kernel/workload_evidence.tkb	move_cost_lost	read-by workload_move_cost_report,workload_move_cost_progress: 2026-10-31 retain-fixture: the /bin/movecost summary, reached by its progress syscall
+kernel/kernel/workload_evidence.tkb	move_cost_records	read-by workload_move_cost_report: 2026-10-31 retain-fixture: the /bin/movecost summary, reached by its progress syscall
+kernel/kernel/workload_evidence.tkb	move_cost_reported	read-by workload_move_cost_report: 2026-10-31 retain-fixture: one-shot gate of that summary; two cores asking at once are not excluded by its type
+kernel/kernel/workload_evidence.tkb	move_cost_stored	read-by workload_move_cost_report,workload_move_cost_progress: 2026-10-31 retain-fixture: the /bin/movecost summary's count and the bound of its records
+kernel/kernel/workload_evidence.tkb	workload_busy_pair	read-by workload_busy_pair_report,workload_busy_record_progress,scripts/kernel_peer_exit_check.py: 2026-10-31 retain-fixture: the busy-pair verdict, printed under a stop and a run guard, and the peer-exit check by name
+kernel/kernel/workload_evidence.tkb	workload_busy_starve_armed	read-by workload_busy_wait_begin,workload_busy_starve_skips: 2026-10-31 retain-fixture: the starve negative control's arm, in the next-ready walk
+kernel/kernel/workload_evidence.tkb	workload_busy_starve_injection_ticks	read-by workload_busy_wait_begin,scripts/kernel_starve_gdb_check.py: 2026-10-31 retain-fixture: debugger-set N for the negative control; zero on an ordinary boot
+kernel/kernel/workload_evidence.tkb	workload_busy_starve_remaining	read-by workload_busy_starve_skips,workload_busy_note_tick_locked: 2026-10-31 retain-fixture: ticks left of the injection, in the next-ready walk
+kernel/kernel/workload_evidence.tkb	workload_busy_starve_worker	read-by workload_busy_starve_skips,workload_busy_note_tick_locked: 2026-10-31 retain-fixture: which worker the injection passes over
+kernel/kernel/workload_evidence.tkb	workload_busy_waits	read-by workload_busy_waits_report,workload_busy_wait_pick: 2026-10-31 retain-fixture: the busy pair's wait report, and the next-ready pick
 kernel/kernel/workload_evidence.tkb	workload_ddb_hold_park_since	unreviewed
-kernel/kernel/workload_evidence.tkb	workload_peer_exec_control	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
-kernel/kernel/workload_evidence.tkb	workload_peer_exec_cpu	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
-kernel/kernel/workload_evidence.tkb	workload_peer_exec_pid	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
-kernel/kernel/workload_evidence.tkb	workload_peer_fork_control	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
-kernel/kernel/workload_evidence.tkb	workload_peer_fork_cpu	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
-kernel/kernel/workload_evidence.tkb	workload_peer_fork_pid	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
-kernel/kernel/workload_evidence.tkb	workload_peer_mutation_pid	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
-kernel/kernel/workload_evidence.tkb	workload_peer_mutation_seen	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
-kernel/kernel/workload_evidence.tkb	workload_peer_net_wake_block_requested	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
-kernel/kernel/workload_evidence.tkb	workload_peer_net_wake_pid	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
+kernel/kernel/workload_evidence.tkb	workload_peer_exec_control	read-by workload_peer_exec_report: 2026-10-31 retain-fixture: the /bin/peer-exec verdict: an exec on core 0 was reported first
+kernel/kernel/workload_evidence.tkb	workload_peer_exec_cpu	read-by workload_peer_exec_report: 2026-10-31 retain-fixture: the /bin/peer-exec verdict: which CPU committed
+kernel/kernel/workload_evidence.tkb	workload_peer_exec_pid	read-by workload_peer_exec_report,workload_exec_commit_note: 2026-10-31 retain-fixture: the /bin/peer-exec verdict, and the filter that takes only that process's exec
+kernel/kernel/workload_evidence.tkb	workload_peer_fork_control	read-by workload_peer_fork_report: 2026-10-31 retain-fixture: the /bin/peer-fork verdict: a fork on core 0 was reported first
+kernel/kernel/workload_evidence.tkb	workload_peer_fork_cpu	read-by workload_peer_fork_report: 2026-10-31 retain-fixture: the /bin/peer-fork verdict: which CPU ran it
+kernel/kernel/workload_evidence.tkb	workload_peer_fork_pid	read-by workload_peer_fork_report,workload_clone_note: 2026-10-31 retain-fixture: the /bin/peer-fork verdict, and the filter that takes only that process's fork
+kernel/kernel/workload_evidence.tkb	workload_peer_mutation_pid	read-by workload_peer_mutation_report,workload_peer_mutation_note: 2026-10-31 retain-fixture: the /bin/peer-mutate verdict and its pid filter
+kernel/kernel/workload_evidence.tkb	workload_peer_mutation_seen	read-by workload_peer_mutation_report,workload_peer_mutation_note: 2026-10-31 retain-fixture: the set of mutations /bin/peer-mutate's verdict requires
+kernel/kernel/workload_evidence.tkb	workload_peer_net_wake_block_requested	read-by workload_peer_net_wake_progress: 2026-10-31 retain-fixture: one-shot of the NetRx publication test, tag-6 syscall
+kernel/kernel/workload_evidence.tkb	workload_peer_net_wake_pid	read-by workload_peer_net_wake_progress: 2026-10-31 retain-fixture: the one process owning that test
 kernel/kernel/workload_evidence.tkb	workload_peer_sleep_armed	unreviewed
 kernel/kernel/workload_evidence.tkb	workload_peer_sleep_done	unreviewed
 kernel/kernel/workload_evidence.tkb	workload_peer_sleep_finished	unreviewed
 kernel/kernel/workload_evidence.tkb	workload_peer_sleep_pid	unreviewed
-kernel/kernel/workload_evidence.tkb	workload_peer_wait_blocked	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
-kernel/kernel/workload_evidence.tkb	workload_peer_wait_pid	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
-kernel/kernel/workload_evidence.tkb	workload_peer_wait_reaped	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
-kernel/kernel/workload_evidence.tkb	workload_profile_active	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
-kernel/kernel/workload_evidence.tkb	workload_profile_cores	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
-kernel/kernel/workload_evidence.tkb	workload_settings_wake	unreviewed; 2026-10-06 retain-fixture: named multicore workload observations / per-CPU/profile interval hooks and scenario-specific publication
-kernel/lib/diagnostic_ring.tkb	diagnostic_trace_records	unreviewed; 2026-10-06 retain-protocol: retained per-CPU diagnostic rings / typed publish_begin/commit; per-CPU sequence; debugger test activation
-kernel/lib/diagnostic_ring.tkb	diagnostic_trace_test_enabled	unreviewed; 2026-10-06 retain-protocol: retained per-CPU diagnostic rings / typed publish_begin/commit; per-CPU sequence; debugger test activation
-kernel/lib/occupancy.tkb	kernel_world_stop	unreviewed; 2026-10-06 retain-owner: machine WorldStop controller / linear complete/partial tokens and generation acknowledgements
-kernel/mm/address_space.tkb	address_space_backing_root0	unreviewed; 2026-10-06 retain-partition: backing allocator; CPU-active root; permanent root0 / pool pins; CPU-local hardware root; bootstrap mint and teardown run protocol
+kernel/kernel/workload_evidence.tkb	workload_peer_wait_blocked	read-by workload_peer_wait_report: 2026-10-31 retain-fixture: /bin/peer-mutate's wait4 verdict: it blocked on CPU 1
+kernel/kernel/workload_evidence.tkb	workload_peer_wait_pid	read-by workload_peer_wait_report,workload_peer_wait_note: 2026-10-31 retain-fixture: that verdict and its pid filter
+kernel/kernel/workload_evidence.tkb	workload_peer_wait_reaped	read-by workload_peer_wait_report: 2026-10-31 retain-fixture: /bin/peer-mutate's wait4 verdict: it reaped on CPU 1
+kernel/kernel/workload_evidence.tkb	workload_profile_active	read-by workload_profile_transition,workload_profile_irq_enter,workload_profile_current_cpu: 2026-10-31 retain-fixture: the profile hooks' gate, on the hottest paths; start and finish write it, and a hook that read true just before finish is what the finish's stop excludes
+kernel/kernel/workload_evidence.tkb	workload_profile_cores	read-by workload_busy_pair_report,workload_profile_charge: 2026-10-31 retain-fixture: the busy-pair report on a stopped machine, and each core's own charge with IRQs masked
+kernel/kernel/workload_evidence.tkb	workload_settings_wake	read-by workload_settings_wake_progress,workload_settings_wake_ioctl_served: 2026-10-31 retain-fixture: the settings-wake fixture's phases, through its syscall tag
+kernel/lib/diagnostic_ring.tkb	diagnostic_trace_records	read-by diagnostic_trace_copy_cpu,scripts/kernel_state.gdb: 2026-10-31 retain-protocol: DDB and GDB; per-CPU sequence words decide whether a copy is whole
+kernel/lib/diagnostic_ring.tkb	diagnostic_trace_test_enabled	read-by diagnostic_trace_record: 2026-10-31 retain-protocol: debugger-set arm of the ring's activation test
+kernel/lib/occupancy.tkb	kernel_world_stop	read-by world_stop_machine_begin_kind,cpu_start_reserve: 2026-10-31 retain-owner: the one machine stop; its address is the type index, and the protocol is linear tokens and generation acknowledgements on its AtomicWords, with one plain field keeping this row listed
+kernel/mm/address_space.tkb	address_space_backing_root0	read-by address_space_backing_read_checked,kernel_mmu_init,address_space_diagnostic_snapshot: 2026-10-31 retain-partition: root 0's page-table backing, the one that exists before the allocator; never released; each MMU init reads it
 kernel/mm/process_image.tkb	process_image_root0_record	unreviewed
 kernel/mm/process_image.tkb	process_image_staging	unreviewed
-kernel/mm/process_image.tkb	process_image_zero_page	unreviewed; 2026-10-06 retain-context: image allocator and CPU-local image operations / pool pins; closed CPU-local operation context; permanent zero page
-kernel/net/socket_capability.tkb	network_capability_store	unreviewed; 2026-10-06 retain-owner: one network RX admission authority / indexed mutex guard and stable_replace linear owner exchange
-kernel/net/tcp.tkb	pending_tcp_probe_frame	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
-kernel/net/tcp.tkb	pin_sharing_handles	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
-kernel/net/tcp.tkb	pin_sharing_page	unreviewed; 2026-10-06 retain-fixture: TCP injection and pin-sharing fixtures / boot/scenario controls; typed fixture pool guards and handshake state
-kernel/net/tcp.tkb	tcp_advertised_window	unreviewed; 2026-10-06 retain-pools: shared connection/frame/retransmit allocators and protocol engine / typed pool guards/pins; connection owner; network capabilities; injection controls
+kernel/mm/process_image.tkb	process_image_zero_page	read-by process_image_load_page,process_image_load_page_ext2: 2026-10-31 retain-context: zero bytes to compare and copy; no use writes it, though `cast` could, and its type does not say read-only
+kernel/net/socket_capability.tkb	network_capability_store	read-by network_capability_take,network_capability_ddb_stored: 2026-10-31 retain-owner: one RX admission owner exchanged under its mutex, and DDB's look with the world stopped
+kernel/net/tcp.tkb	pending_tcp_probe_frame	read-by pending_tcp_chain_probe_body: 2026-10-31 retain-fixture: the chain probe's segments copy these bytes; only the chain is checked
+kernel/net/tcp.tkb	pin_sharing_handles	read-by pin_sharing_cycles,pin_sharing_cleanup: 2026-10-31 retain-fixture: the fixture's handles; set up by core 0 before the cycles
+kernel/net/tcp.tkb	pin_sharing_page	read-by pin_sharing_cleanup: 2026-10-31 retain-fixture: the fixture's page, released at the end
+kernel/net/tcp.tkb	tcp_advertised_window	unreviewed; 2026-10-31 label retain-pools does not hold: no pool or guard reaches it; its one write stores the value it starts with, so build_syn_ack, build_receive_ack and build_fin_ack always read 65535
 kernel/platform/rpi5/intc.tkb	mip0	unreviewed
 kernel/platform/rpi5/intc.tkb	rp1_msix	unreviewed
 kernel/platform/rpi5/intc.tkb	rp1_msix_cfg_set	unreviewed
@@ -230,8 +232,8 @@ kernel/platform/rpi5/pcie.tkb	bcm_reset	unreviewed
 kernel/platform/rpi5/pcie.tkb	pcie2	unreviewed
 kernel/platform/rpi5/pcie.tkb	pcie_rescal	unreviewed
 kernel/platform/rpi5/system_timer_dtb.tkb	rpi5_system_timer	unreviewed
-kernel/platform/rpi5/usb_provision.tkb	usb_provision_batch	unreviewed; 2026-10-06 retain-boot: boot rootfs provisioning operation / immutable embedded image; bounded boot block/batch scratch; synchronous device access
-kernel/platform/rpi5/usb_provision.tkb	usb_provision_expanded	2026-10-30 #1218 retain-boot: one expanded chunk of the embedded image; written and read only by usb_provision_rootfs and its verify, synchronously on core 0 at boot
+kernel/platform/rpi5/usb_provision.tkb	usb_provision_batch	read-by usb_provision_rootfs,usb_provision_rootfs_verify: 2026-10-31 retain-boot: synchronous on core 0 at boot, RPi5 only
+kernel/platform/rpi5/usb_provision.tkb	usb_provision_expanded	read-by usb_provision_rootfs,usb_provision_rootfs_verify: 2026-10-31 retain-boot: one expanded chunk of the embedded image; synchronous on core 0 at boot, RPi5 only
 kernel/platform/rpi5/usb_xhci.tkb	msc_tag	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
 kernel/platform/rpi5/usb_xhci.tkb	rp1_xhci_cap	unreviewed
 kernel/platform/rpi5/usb_xhci.tkb	rp1_xhci_db	unreviewed
