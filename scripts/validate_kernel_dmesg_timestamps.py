@@ -18,6 +18,33 @@ def fail(message: str) -> None:
 
 
 CPU_PREFIX = re.compile(rb"^cpu([0-9]) ")
+# GitHub issue #1298: how close the snapshot came to evicting the first marker.
+# The ring's size comes from the kernel, so the figure cannot outlive it. The
+# margin is an upper bound: records are counted from the replay, and a slot a
+# writer gave up is not in it.
+LOG_SOURCE = Path(__file__).resolve().parent.parent / "kernel/printk/log.tkb"
+SLOT_COUNT = re.compile(r"const KERNEL_LOG_SLOT_COUNT: usize = (\d+);")
+SLOT_BYTES = re.compile(r"const KERNEL_LOG_SLOT_BYTES: usize = (\d+);")
+OVERWRITTEN = re.compile(rb"kernel log: overwritten records=(\d+)")
+
+
+def ring_geometry() -> tuple[int, int]:
+    source = LOG_SOURCE.read_text(encoding="utf-8")
+    count = SLOT_COUNT.search(source)
+    size = SLOT_BYTES.search(source)
+    if not count or not size:
+        fail(f"cannot read the log ring's geometry from {LOG_SOURCE}")
+    return int(count.group(1)), int(size.group(1))
+
+
+def ring_slots_used(records: list[tuple[int, bytes]], slot_bytes: int) -> int:
+    used = 0
+    for _, text in records:
+        stored = CPU_PREFIX.sub(b"", text)
+        used += max(1, (len(stored) + slot_bytes - 1) // slot_bytes)
+    return used
+
+
 # GitHub issues #281/#208: the block layer's boot total. Held here for the
 # same reason the console spin figure is -- it is a per-boot number, so no
 # view can compare it, and a counter with no reader is the shape issue #410
@@ -192,7 +219,16 @@ def main() -> None:
         # block layer's read-ahead brought the board back to 18.3 s outside
         # a 3.6 s session, the figure the 25 s above was calibrated on.
         maximum_boot = 25_000_000
+    slot_count, slot_bytes = ring_geometry()
+    ring_margin = slot_count - ring_slots_used(records, slot_bytes)
     if first not in by_text:
+        overwritten = OVERWRITTEN.search(data)
+        if overwritten:
+            fail(f"first kernel marker is absent: the log ring overwrote "
+                 f"{int(overwritten.group(1))} records before /bin/dmesg read "
+                 f"its {slot_count} slots. The boot log has grown past the "
+                 "ring, so look at what kernel/tests/ext2/init.sh logs before "
+                 "its snapshot")
         fail("first kernel marker is absent")
     assembled = [item for item in records if item[1].startswith(assembled_prefix)]
     if len(assembled) != 1 or b" detected_mib=" not in assembled[0][1]:
@@ -311,6 +347,7 @@ def main() -> None:
 
     print(
         f"PASS kernel/{args.platform} dmesg: {len(records)} monotonic records, "
+        f"log ring margin at most {ring_margin} of {slot_count} slots, "
         f"assembled lines, delay={elapsed} us, boot={boot_us / 1_000_000:.1f} s, "
         f"ash-session={session_us / 1_000_000:.1f} s, "
         f"bounded={bounded_us / 1_000_000:.1f} s"

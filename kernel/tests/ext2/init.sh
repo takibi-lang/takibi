@@ -128,6 +128,20 @@ if [ -e /lib/ext2-eq.enable ]; then
     echo "ext2-eq: /grow ran"
 fi
 
+# Read the retained, kernel-timestamped text ring through Linux syslog(2),
+# exactly as the packaged BusyBox dmesg applet does on Linux. Snapshot
+# before anything further logs: the first boot marker must still be in the
+# 256-slot ring, the variable-length protocol report's 512-event buffer can
+# evict it, and on the board this snapshot once had about one slot left (#1298)
+# because movecost's records and the peer lines below came first.
+/bin/dmesg
+if [ "$?" -eq 0 ]; then
+    echo "busybox dmesg exit: 0"
+else
+    echo "busybox dmesg failed"
+    exit 1
+fi
+
 # GitHub issue #503: what one move between cores costs. Silent on success;
 # its numbers are the kernel's `profile: move-cost` records, collected by the
 # lane runners. Here, before the busy pair starts, so nothing else computes.
@@ -158,18 +172,6 @@ fi
 /bin/peer-fork
 if [ "$?" -ne 0 ]; then
     echo "peer-fork failed"
-    exit 1
-fi
-
-# Read the retained, kernel-timestamped text ring through Linux syslog(2),
-# exactly as the packaged BusyBox dmesg applet does on Linux. Snapshot
-# before the variable-length protocol report: its 512-event buffer can
-# otherwise evict the first boot marker from the 256-record retained ring.
-/bin/dmesg
-if [ "$?" -eq 0 ]; then
-    echo "busybox dmesg exit: 0"
-else
-    echo "busybox dmesg failed"
     exit 1
 fi
 

@@ -138,6 +138,16 @@ def main() -> int:
         ("a healthy boot", HEALTHY, True,
          "boot=17.4 s, ash-session=2.0 s, bounded=15.4 s"),
 
+        # GitHub issue #1298: the margin is printed, from the kernel's geometry.
+        ("a healthy boot's ring margin", HEALTHY, True,
+         "log ring margin at most 250 of 256 slots"),
+
+        # ...and a boot past the ring says so rather than only "absent".
+        ("a boot that overwrote the first marker",
+         [r for r in HEALTHY if "takibi kernel" not in r[1]]
+         + [(17.5, "kernel log: overwritten records=000007")],
+         False, "the log ring overwrote 7 records"),
+
         # Nothing to read at all. A summary of no records would read as a
         # boot with no problems.
         ("a transcript with no records", [], False, "emitted no timestamped"),
