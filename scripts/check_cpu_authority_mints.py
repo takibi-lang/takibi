@@ -34,7 +34,7 @@ PUBLIC_MINT = re.compile(
 def public_mints(text):
     """Names of the non-private functions in `text` that return CpuHere."""
     return PUBLIC_MINT.findall(code_only(text))
-FUNCTION = re.compile(r"^\s*(?:private\s+)?(?:noinline\s+)?fn\s+(\w+)", re.M)
+FUNCTION = re.compile(r"^\s*(?:private\s+)?(?:(?:no)?inline\s+)?fn\s+(\w+)", re.M)
 
 
 def references(text, name):

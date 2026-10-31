@@ -55,6 +55,9 @@ def main():
              tsv + ROW.replace("unmodelled", "ladder")),
         "a comment-only mention and a definition are ignored":
             (accepted, {**files, FILE: files[FILE] + comment + grown}, tsv),
+        "a stop in an inline function belongs to that function":
+            (accepted, {**files, FILE: files[FILE] + replace_once(planted, "fn planted", "inline fn planted", FILE)},
+             tsv + ROW),
         "the real tree is accepted":
             (accepted, files, tsv),
         "a planted stop with its row is accepted":

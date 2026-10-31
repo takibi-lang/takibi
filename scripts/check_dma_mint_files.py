@@ -45,7 +45,7 @@ MINT_SITES = {
 EXCLUDED = (KERNEL / "tests" / "debug_return_abi", KERNEL / "build")
 
 RECORD = re.compile(r"^\s*struct\s+dma_fixed\s+(\w+)", re.M)
-FUNCTION = re.compile(r"^\s*(?:private\s+)?(?:noinline\s+)?fn\s+(\w+)", re.M)
+FUNCTION = re.compile(r"^\s*(?:private\s+)?(?:(?:no)?inline\s+)?fn\s+(\w+)", re.M)
 FINISH = re.compile(r"\bdma_finish_owned_(?:rx|tx)\s*\(")
 
 

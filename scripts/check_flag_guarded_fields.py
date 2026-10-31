@@ -64,7 +64,7 @@ def functions(text):
     lines = text.split("\n")
     found, index = [], 0
     while index < len(lines):
-        header = re.match(r'^\s*(private\s+)?fn\s+(\w+)', lines[index])
+        header = re.match(r'^\s*(private\s+)?(?:(?:no)?inline\s+)?fn\s+(\w+)', lines[index])
         if not header:
             index += 1
             continue

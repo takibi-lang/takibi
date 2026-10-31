@@ -29,7 +29,7 @@ SOURCE = ROOT / "kernel" / "kernel" / "syscall.tkb"
 PRODUCER = re.compile(
     r"return\b[^;]*\b(SyscallAction::WaitInterrupt|SyscallIoResult::InterruptWait"
     r"|SyscallDeadlineResult::WaitInterrupt)\b")
-FUNCTION = re.compile(r"^(?:private\s+)?fn\s+([A-Za-z_0-9]+)")
+FUNCTION = re.compile(r"^(?:private\s+)?(?:(?:no)?inline\s+)?fn\s+([A-Za-z_0-9]+)")
 
 # function -> (count, reason)
 ALLOWED = {
@@ -49,8 +49,12 @@ ALLOWED = {
     "syscall_io_action_nosignal": (
         1, "pass-through: hands a send's own InterruptWait to "
            "syscall_io_action unchanged (#1113)"),
-    "syscall_execve_current": (
-        2, "pass-through of an exit with no successor"),
+    "syscall_readv_current": (
+        1, "pass-through: hands a segment's own InterruptWait to "
+           "syscall_io_action unchanged"),
+    "syscall_writev_current": (
+        1, "pass-through: hands a segment's own InterruptWait to "
+           "syscall_io_action unchanged"),
     "syscall_signal_deliver": (
         1, "pass-through of an exit with no successor"),
 }

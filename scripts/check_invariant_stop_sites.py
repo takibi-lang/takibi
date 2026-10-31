@@ -41,7 +41,7 @@ EXCLUDED_PARTS = {"build", "_build", "tests"}
 CLASSES = ("frame", "unmodelled", "ladder")
 
 CALL = re.compile(r"(?<![\w])(?<!fn )kernel_invariant_stop(?:_with_frame)?\s*\(")
-FUNCTION = re.compile(r"^\s*(?:private\s+)?(?:noinline\s+)?fn\s+(\w+)", re.M)
+FUNCTION = re.compile(r"^\s*(?:private\s+)?(?:(?:no)?inline\s+)?fn\s+(\w+)", re.M)
 ISSUE = re.compile(r"^#\d+$")
 
 

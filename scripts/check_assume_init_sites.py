@@ -37,7 +37,7 @@ TREES = ("kernel", "linux_user")
 EXCLUDED_PARTS = {"build", "_build"}
 
 CALL = re.compile(r"\bassume_init\s*\(")
-FUNCTION = re.compile(r"^\s*(?:private\s+)?(?:noinline\s+)?fn\s+(\w+)", re.M)
+FUNCTION = re.compile(r"^\s*(?:private\s+)?(?:(?:no)?inline\s+)?fn\s+(\w+)", re.M)
 LISTED = re.compile(r"`((?:kernel|linux_user)/[\w./-]+\.tkb):(\w+)`")
 
 

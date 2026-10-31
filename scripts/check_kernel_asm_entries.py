@@ -26,7 +26,7 @@ BUILD = KERNEL / "build"
 OPERAND = re.compile(
     r"^\s*(?:bl|b|adr|adrp|ldr)\s+(?:x[0-9]+,\s*)?=?([A-Za-z_][A-Za-z0-9_]*)",
     re.M)
-FUNCTION = re.compile(r"^\s*(?:private\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)", re.M)
+FUNCTION = re.compile(r"^\s*(?:private\s+)?(?:(?:no)?inline\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)", re.M)
 ENTRIES = re.compile(r"^KERNEL_ASM_ENTRIES\s*:=((?:.*\\\n)*.*)$", re.M)
 
 
