@@ -28242,6 +28242,61 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
     (Monomorphize.run (Dma_fixed_record.run
       (Publish_record.run (primitives @ boundary @ issuers @ mutations @ harness)))))
 
+(* #1164: DDB's lock-free NIC RX-pending look takes the whole-machine stop in
+   both drivers. Each case compiles the driver's real signature, so dropping
+   the authority there fails it; the raw body itself stays trusted. *)
+let production_nic_rx_look_tests =
+  let signature_of file =
+    let path = List.find Sys.file_exists ["../" ^ file; file] in
+    let channel = open_in_bin path in
+    let source = Fun.protect ~finally:(fun () -> close_in channel)
+        (fun () -> really_input_string channel (in_channel_length channel)) in
+    let start = Option.get (substring_position source
+        "\nfn kernel_net_rx_frame_pending(") in
+    let tail = String.sub source start (String.length source - start) in
+    let finish = String.index_from tail
+        (Option.get (substring_position tail "!{")) '}' in
+    "variant NetPendingState { Unknown; No; Yes; }\n"
+    ^ String.sub tail 0 (finish + 1) ^ " { return NetPendingState::No; }\n" in
+  let expect_rejected file name message code =
+    Alcotest.test_case (file ^ ": " ^ name) `Quick (fun () ->
+      let matches message' = contains_substring message' message in
+      match infer_production_machine_boundary (signature_of file ^ code) with
+      | _ -> Alcotest.fail "NIC RX-pending look accepted outside the full stop"
+      | exception Types.TypeError (_, message') ->
+          if not (matches message') then
+            Alcotest.failf "expected %s, received %s" message message'
+      | exception Types.MultiTypeError errors ->
+          if not (List.exists (fun (_, message') -> matches message') errors) then
+            Alcotest.failf "expected %s, received %s" message
+              (String.concat "; " (List.map snd errors))) in
+  List.concat_map (fun file -> [
+    Alcotest.test_case (file ^ ": full stop admits the look") `Quick (fun () ->
+      ignore (infer_production_machine_boundary (signature_of file ^ {|
+        fn probe() !{unsafe} { match world_stop_machine_begin(20) {
+          MachineStopResult::Busy => {}
+          MachineStopResult::Partial(partial) => { machine_stop_partial_release(partial, &kernel_world_stop); }
+          MachineStopResult::Complete(stopped) => {
+            let state = kernel_net_rx_frame_pending(stopped);
+            machine_stop_release(stopped, &kernel_world_stop);
+          }
+        } }
+      |})));
+    expect_rejected file "look with no stop" "argument" {|
+      fn probe() !{unsafe} { let state = kernel_net_rx_frame_pending(); }
+    |};
+    expect_rejected file "look under a subset stop" "MachineStopped" {|
+      fn probe() !{unsafe} { match world_stop_begin(&kernel_world_stop, 1, 20) {
+        WorldStopResult::Busy => {}
+        WorldStopResult::Partial(partial) => { world_stop_partial_release(partial, &kernel_world_stop); }
+        WorldStopResult::Complete(stopped) => {
+          let state = kernel_net_rx_frame_pending(stopped);
+          world_stop_release(stopped, &kernel_world_stop);
+        }
+      } }
+    |};
+  ]) ["kernel/drivers/net/virtio_net.tkb"; "kernel/drivers/net/rp1_gem.tkb"]
+
 let production_machine_boundary_tests =
   let good name code = Alcotest.test_case name `Quick
       (fun () -> ignore (infer_production_machine_boundary code)) in
@@ -30478,6 +30533,7 @@ let named_groups_unisolated = [
   "production-peer-clock", production_peer_clock_tests;
   "production-stop-boundary", production_stop_boundary_tests;
   "production-machine-boundary", production_machine_boundary_tests;
+  "production-nic-rx-look", production_nic_rx_look_tests;
   "region-inspection", region_inspection_tests;
   "protocol-declarations", protocol_tests;
   "device-protocols", device_protocol_tests;

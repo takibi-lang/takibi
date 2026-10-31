@@ -42,6 +42,7 @@ use "kernel/lib/atomic_word.tkb";
 use "kernel/drivers/virtio_ring.tkb";
 use "kernel/drivers/net/virtio_net_tx_wait.tkb";
 use "kernel/drivers/net/virtio_net_tx_dma.tkb";
+use "kernel/lib/occupancy.tkb";
 
 
 
@@ -345,12 +346,14 @@ fn net_init() -> NetInitResult {
 }
 
 // GitHub issue #959: DDB's lock-free reading of RX pending, under the
-// debug stop (#920): no ring owner, no lock and no cache maintenance. Once
+// debug stop (#920), which the borrowed MachineStopped makes a compile-time
+// requirement (#1164); the raw read itself stays trusted: no ring owner, no lock and no cache maintenance. Once
 // the queue is live only the device writes the used ring, and a virtio
 // device is the hypervisor writing guest RAM through its own coherent
 // caches, so the index loaded with acquire ordering is current. It is
 // compared with the driver's shadow as the stopped core left it.
-fn kernel_net_rx_frame_pending() -> NetPendingState !{unsafe} {
+fn kernel_net_rx_frame_pending(stopped: borrow MachineStopped[&kernel_world_stop])
+        -> NetPendingState !{unsafe} {
     if (atomic_word_load(&virtio_net_ready) == 0) { return NetPendingState::No; }
     let address: usize = virtio_net_used_addr[0];
     if (address == 0) { return NetPendingState::Unknown; }

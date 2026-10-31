@@ -2849,7 +2849,8 @@ private fn kernel_ddb_enter_stopped(
     ddb_snapshot.uart_tx_state = kernel_log_tx_ddb_state();
     // GitHub issue #959: the driver's lock-free reading; DDB takes no lock
     // and no ring owner (#920).
-    let frame_pending: NetPendingState = kernel_net_rx_frame_pending();
+    let frame_pending: NetPendingState =
+        kernel_net_rx_frame_pending(stopped_world);
     ddb_snapshot.net_rx_frame = net_pending_state_code(frame_pending);
     let connection_pending = kernel_tcp_ddb_connection_pending();
     ddb_snapshot.net_rx_connection = net_pending_state_code(connection_pending);

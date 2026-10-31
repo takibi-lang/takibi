@@ -546,3 +546,7 @@ condition below applies, and reports the land afterwards.
 ## 2026-10-30 security configurations and #1227 fallback
 - #1227: when /chosen/rng-seed is missing, (A2): derive the key from counter-timing jitter and warn loudly in the boot log; TCP keeps working, as on Linux and the BSDs.
 - Configurations: the goal now is A (boot and work without special devices). Every degraded-security fallback goes through one named policy point, `security_floor`, which records each fallback taken (boot log and /proc/takibi); #1227 (A2) is its first consumer. A strict configuration B (require every security device, refuse degraded paths) is deferred; if wanted (for example for a FPGA RISC-V port), it is a const flip of security_floor that removes the fallback code, not a second build tree, plus a build check and one lane.
+
+## 2026-10-30 #1164 stopped observation and #1032 reference
+- #1164: (C) both `kernel_net_rx_frame_pending` functions borrow `MachineStopped[&kernel_world_stop]`, so a read outside the stop is a compile error; the two raw reads and their RAW_MINT_FILES rows stay. The `observe ... stopped` construct waits until #1006 takes up #777 and #789; #1164 stays open.
+- #1032: the GPL Linux bcm2712-iommu driver may be read as a register-layout reference; the clone stays under ~/.takibi-sessions, outside the repository, and no code is copied.

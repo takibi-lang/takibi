@@ -14,6 +14,7 @@ use "kernel/lib/init_once.tkb";
 use "kernel/drivers/net/gem_tx_wait.tkb";
 use "kernel/drivers/net/rp1_gem_desc.tkb";
 use "kernel/drivers/dma_address.tkb";
+use "kernel/lib/occupancy.tkb";
 
 const RP1_GEM_BASE: usize = 0x1F00100000;
 const RP1_CLOCKS_BASE: usize = 0x1F00018000;
@@ -430,7 +431,8 @@ fn net_init() -> NetInitResult !{unsafe} {
 }
 
 // GitHub issue #959: DDB's lock-free reading of RX pending, under the
-// debug stop (#920): no ring owner and no lock. The CPU may hold the
+// debug stop (#920), which the borrowed MachineStopped makes a compile-time
+// requirement (#1164); the raw read itself stays trusted: no ring owner and no lock. The CPU may hold the
 // descriptor line dirty while the ring is Ready, so DDB must not merely
 // invalidate it; it cleans and invalidates the line (dc civac, safe
 // whichever side owns it, #1095) and then loads the word with acquire
@@ -438,7 +440,8 @@ fn net_init() -> NetInitResult !{unsafe} {
 // current answer: No. The bit is trusted only while gem_rx_pkt names the
 // posted buffer, which gem_rearm_rx sets after the new descriptor is armed
 // and net_rx_acquire clears after the take.
-fn kernel_net_rx_frame_pending() -> NetPendingState !{unsafe} {
+fn kernel_net_rx_frame_pending(stopped: borrow MachineStopped[&kernel_world_stop])
+        -> NetPendingState !{unsafe} {
     if (atomic_word_load(&rp1_gem_net_ready) == 0) { return NetPendingState::No; }
     if (gem_rx_pkt >= GEM_PKTS) { return NetPendingState::No; }
     if (gem_rx_ring_cpu_address == 0) { return NetPendingState::Unknown; }

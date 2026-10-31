@@ -479,7 +479,10 @@ rules globally.
   `dsb ish`, `ret`; the compiler has no builtin for it), and that
   clean+invalidate is safe whichever side owns the line. Its one caller is
   fixed by `scripts/buildcheck_allowed_callers.py`; the `debug_stopped`
-  effect check still keeps the look lock-free.
+  effect check still keeps the look lock-free. Statically excluded (#1164):
+  calling it outside the stop, since both drivers' look borrows
+  `MachineStopped[&kernel_world_stop]`. Still trusted: the raw reads
+  themselves, which nothing ties to the protocol's ring.
 - ext2's operation scratch is a pool of `KERNEL_MAX_CORES` slots, each
   reached only through a linear `Ext2Slot` (#638). The compiler checks that
   an operation releases its slot on every path, never twice, and never uses
