@@ -217,6 +217,8 @@ else
         echo "land: FAIL keeping the green lane receipts on $tested" >&2
         exit 1
     fi
+    # GitHub issue #1287: one line of this run's figures. Never stops a land.
+    python3 scripts/land_figures.py record "$tested" "$log" || true
 fi
 
 # The check built from the working tree, not from the commit: a tracked file
