@@ -218,9 +218,9 @@ trap cleanup EXIT INT TERM HUP
 # left behind, since a test should not permanently edit the host's network
 # state.
 #
-# GitHub issue #1297: the pin goes in BEFORE the board is reset, not after the
+# GitHub issue #1297: the pin goes in BEFORE the kernel is loaded, not after the
 # link gate. A green run leaves orphaned TCP sockets to the board (LAST-ACK,
-# CLOSING on :8080) retransmitting FINs for over a minute. The reset's carrier
+# CLOSING on :8080) retransmitting FINs for over a minute. The board's carrier
 # loss flushes their neighbour entry, so each retransmit becomes a who-has for
 # the board. Its RX ring holds one from PHY link-up on, and the kernel answers
 # it the moment it prints `link ready`, before any later pin could help; the

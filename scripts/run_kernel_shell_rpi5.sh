@@ -61,13 +61,53 @@ reset_started="$(date +%s%N)"
 "$REPO_ROOT/scripts/rpi5_jtag_reset.sh" --resident-image-unchanged
 reset_finished="$(date +%s%N)"
 echo "[kernel/rpi5] reset completed in $(( (reset_finished - reset_started) / 1000000 )) ms"
+NETWORK_PEER_PID=""
+PINNED_NEIGH=""
+cleanup() {
+    if [ -n "$NETWORK_PEER_PID" ]; then
+        kill "$NETWORK_PEER_PID" 2>/dev/null || true
+        wait "$NETWORK_PEER_PID" 2>/dev/null || true
+    fi
+    if [ -n "$PINNED_NEIGH" ]; then
+        sudo -n ip neigh del "${ETH_TEST_SUBNET}.2" dev "$ETH_TEST_IFACE" \
+            2>/dev/null || true
+    fi
+}
+# GitHub issue #877: a failing run's capture -- UART log, gdb log, verdict --
+# was overwritten by the next run before anyone read it. Snapshot it on any
+# nonzero exit, after cleanup has stopped everything that writes into it.
+cleanup_and_archive() {
+    local status=$?
+    cleanup
+    if [ "$status" -ne 0 ]; then
+        KERNEL_QEMU_LABEL="kernel-shell-rpi5" KERNEL_QEMU_ELF="${ELF:-unknown}" \
+            bash "$REPO_ROOT/scripts/archive_kernel_failure.sh" "$ARTIFACT_DIR" \
+            "$REPO_ROOT/_build/kernel-shell-rpi5-failures" "exit status $status" || true
+    fi
+    return "$status"
+}
+trap cleanup_and_archive EXIT
+trap 'cleanup; exit 130' INT TERM HUP
+# GitHub issue #1303: the same race as the hardware lane's (#1297, whose comment
+# in run_kernel_hwtest_rpi5.sh has the measurement). This image also answers
+# exactly one ARP request, and its host peer below is the one that must get it,
+# so an orphaned socket from an earlier run must not make the host stack ask
+# first. Only with that peer: without it there is no reply to protect. A failed
+# pin warns rather than refuses, because the console is still useful.
+if [ "${KERNEL_RPI5_SHELL_NETWORK_PEER:-1}" = 1 ]; then
+    if sudo -n ip neigh replace "${ETH_TEST_SUBNET}.2" lladdr "$ETH_TEST_MAC" \
+            dev "$ETH_TEST_IFACE" nud permanent; then
+        PINNED_NEIGH=1
+    else
+        echo "[kernel/rpi5] warning: could not pin the board's neighbour entry; the host may spend its one ARP reply" >&2
+    fi
+fi
 echo "[kernel/rpi5] loading kernel over SWD"
 load_started="$(date +%s%N)"
 "$REPO_ROOT/scripts/rpi5_jtag_load.sh" "$ELF"
 load_finished="$(date +%s%N)"
 echo "[kernel/rpi5] load completed in $(( (load_finished - load_started) / 1000000 )) ms"
 
-NETWORK_PEER_PID=""
 NETWORK_PEER_LOG="${RPI5_SHELL_NETWORK_LOG:-$ARTIFACT_DIR/network-peer.log}"
 if [ "${KERNEL_RPI5_SHELL_NETWORK_PEER:-1}" = 1 ]; then
     mkdir -p "$(dirname "$NETWORK_PEER_LOG")"
@@ -101,25 +141,4 @@ echo "[kernel/rpi5] starting UART console on $SERIAL_DEV"
 export KERNEL_SHELL_PLATFORM=rpi5
 export KERNEL_SHELL_LAUNCH_NS="$SHELL_LAUNCH_NS"
 export KERNEL_SHELL_TRANSCRIPT="$TRANSCRIPT"
-cleanup() {
-    if [ -n "$NETWORK_PEER_PID" ]; then
-        kill "$NETWORK_PEER_PID" 2>/dev/null || true
-        wait "$NETWORK_PEER_PID" 2>/dev/null || true
-    fi
-}
-# GitHub issue #877: a failing run's capture -- UART log, gdb log, verdict --
-# was overwritten by the next run before anyone read it. Snapshot it on any
-# nonzero exit, after cleanup has stopped everything that writes into it.
-cleanup_and_archive() {
-    local status=$?
-    cleanup
-    if [ "$status" -ne 0 ]; then
-        KERNEL_QEMU_LABEL="kernel-shell-rpi5" KERNEL_QEMU_ELF="${ELF:-unknown}" \
-            bash "$REPO_ROOT/scripts/archive_kernel_failure.sh" "$ARTIFACT_DIR" \
-            "$REPO_ROOT/_build/kernel-shell-rpi5-failures" "exit status $status" || true
-    fi
-    return "$status"
-}
-trap cleanup_and_archive EXIT
-trap 'cleanup; exit 130' INT TERM HUP
 python3 "$REPO_ROOT/scripts/run_kernel_shell_console.py" "$SERIAL_DEV" 115200
