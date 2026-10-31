@@ -122,10 +122,10 @@ owners are TaskMutex, the spare stack stays masked). #980
    `kernel/RAW_MINT_FILES` -- `rp1_gem`, `virtio_net`
    (`drivers/block/memory` left 2026-10-26: a checked slice, `virtio_blk`
    2026-10-29 (#1161, #1162); `virtio_net` and `rp1_gem` are each down to
-   their DDB ring read, #1164 (rp1_gem's RP1 clock and GPIO registers are
+   their DDB ring read, deferred (rp1_gem's RP1 clock and GPIO registers are
    IoHandles since 2026-10-29, #1163); device-visible addresses have
    one mint, `drivers/dma_address.tkb`, since 2026-10-29, #1162; next
-   #1032, then #1164) -- leaves through device protocols and
+   #1032) -- leaves through device protocols and
    `IoHandle` as `usb_xhci` did (#720), which is also "drivers out of the
    frame" in #1017; then section regions (#777, awaiting its decision) take
    `stack_poison.tkb`'s last integer ranges and the DTB blob. The frame API
