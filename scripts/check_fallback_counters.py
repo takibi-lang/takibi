@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """A dead-slot fallback must be counted, and its count must be able to fail.
 
-Several accessors in this kernel answer with a shared record when the handle
-they were given names nothing live -- an image record, a target root, an
-address-space backing, an fd record, a process record, a TCP connection or
-frame. The fallback exists so that sixty-odd call sites need no error path
-they could not act on, and the counter beside it is what keeps it from being
-silent.
+Several accessors in this kernel count a handle that names nothing live -- an
+image record, a target root, an address-space backing, an fd record, a process
+record, a TCP frame -- where no caller can take a closed answer. None answers
+with a shared record any more (GitHub issue #1308; scripts/check_no_record_sink.py
+refuses one). The counter is what keeps the remaining cases from being silent.
 
 Two things went wrong with that, and this refuses both (GitHub issue #410).
 

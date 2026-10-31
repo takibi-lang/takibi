@@ -256,6 +256,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_run_kernel_uart_driver_controls.py` | UART timeout diagnosis, final-report and fresh post-settings prompt gates, and exact ash echo normalization |
 | `check_slot_proof_dropped_to_index.py` | a slot liveness proof dropped to a bare index is declared with a reason, so #569's shape is a decision rather than a line |
 | `check_slot_proof_dropped_to_index_controls.py` | Controls for the slot-proof-to-index check, in both directions |
+| `check_no_record_sink.py` | no lookup answers absence with a shared writable object: a pool payload has no other static instance, and an absent-case arm does not answer the boot root |
+| `check_no_record_sink_controls.py` | Controls for the no-record-sink check, in both directions |
 | `check_process_slot_zero.py` | no process is slot 0: the static bootstrap's names stay gone, placement, stack-run, record and root selection branch on no slot, and no per-process call is given slot 0 (#831) |
 | `check_process_slot_zero_controls.py` | Controls for the process-slot-zero check, in both directions |
 | `check_single_dune_invocation.py` | exactly one rule runs `dune build`, so no second make invocation races its lock |

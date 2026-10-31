@@ -1416,8 +1416,13 @@ fn syscall_madvise_anonymous(root: usize, index: usize) -> bool !{unsafe} {
         index < (heap_limit - USER_TEXT_VA) / PAGE_SIZE) {
         return true;
     }
-    return index >= process_image_record_read(root).stack_low_page &&
-           index <= process_stack_top_page();
+    match process_image_record_ensure(root) {
+        ProcessImageRecordReady::Missing => { return false; }
+        ProcessImageRecordReady::Ready(evidence) => {
+            return index >= process_image_record_read(root, evidence).stack_low_page &&
+                   index <= process_stack_top_page();
+        }
+    }
 }
 
 // madvise(addr, len, advice), as Linux's: the advice and the alignment are

@@ -3151,10 +3151,17 @@ fn scheduled_process_address_space_root_owned(
 }
 
 // A caller already holding the run guard derives the root from that guard.
+// A slot with no record answers a root whose backing handle names nothing, so
+// each operation on it answers Missing or not-live. It must never answer the
+// boot root (#1308): that root is real and shared, and a stale slot's writes
+// would land in it, the #270 hazard.
 fn scheduled_process_address_space_root_locked(
         guard: borrow ProcessRunGuard[lock], slot: ProcessSlot) -> AddressSpaceRoot !{unsafe} {
     let ProcessRecordLookup::Found(found) = scheduled_process_record_locked(guard, slot) else {
-        ProcessRecordLookup::Absent => { return address_space_boot_root(); }
+        ProcessRecordLookup::Absent => {
+            let mut words: ProcessPoolHandleWords = { 0, 0 };
+            return address_space_root_mint(slot, words);
+        }
     };
     let record: &mut ProcessRecord = scheduled_process_record_found(found, guard);
     if (record.kernel_thread) {
@@ -12013,10 +12020,12 @@ fn kernel_process_handle_el0_data_abort(esr: usize, fault_address: usize)
 }
 
 fn kernel_process_current_root(current_authority: borrow ProcessCurrent[current_process, current_phase]) -> AddressSpaceRoot !{unsafe} {
-    if (execution_state[execution_cpu_index()].current_live) {
-        return scheduled_process_address_space_root_current(current_authority);
+    // The witness says a process is running here, so an idle CPU holding one
+    // is a wrong witness; the boot root would be a shared answer for it (#1308).
+    if (execution_state[execution_cpu_index()].current_live == false) {
+        kernel_invariant_stop();
     }
-    return address_space_boot_root();
+    return scheduled_process_address_space_root_current(current_authority);
 }
 
 // Finish an exit handoff after the successor has been reserved as Running.

@@ -196,11 +196,11 @@ private let mut process_image_pool: RegionPool(ProcessImageRecord);
 // One page per chunk: a record is a dozen words.
 const PROCESS_IMAGE_CHUNK_PAGES: usize = 1;
 
-// Reached only when a record is needed and the page allocator cannot
-// provide one (or a handle is stale). Genuine exhaustion has nowhere to be
-// reported from sixty-odd field accesses, so it is COUNTED, and the count
-// is printed at the end of the boot suite; a missing record reads as all
-// zero and its writes are dropped.
+// A record that could not be provided answers Missing from
+// process_image_record_ensure. What is counted here is what has no caller to
+// answer: a reap whose handle names nothing, a bitmap handle gone stale, a slot
+// the pool does not recognize. The count is printed at the end of the boot
+// suite. No shared record stands in for a missing one (#1308).
 private let mut process_image_record_missing_count: AtomicWord;
 
 private fn process_image_record_missing_note() {
@@ -339,32 +339,34 @@ private fn process_image_record_pin_words(
     return pinned;
 }
 
-// The same, allocating a record first if this root has none.
-//
-// Allocating on access rather than only at process creation is what keeps
-// the array's own contract: a root that anyone names has a record, whether
-// or not a scheduler slot was ever allocated for it. Probes name roots
-// directly, and the clone paths name a destination root before it is
-// anybody's process. scheduled_process_alloc still ensures one up front,
-// so ordinary process creation reports exhaustion where it can roll back.
-private fn process_image_record_pin_ensured(
-        pool: *RegionPool(ProcessImageRecord) @ images, root: usize)
-        -> RegionPinned(ProcessImageRecord)[images] !{unsafe} {
-    match process_image_record_ensure(root) {
-        ProcessImageRecordReady::Missing => {
-            let mut absent: ProcessPoolHandleWords = { 0, 0 };
-            return process_image_record_pin_words(pool, absent);
-        }
-        ProcessImageRecordReady::Ready(evidence) => {
-            return process_image_record_pin(pool, root);
-        }
-    }
+// process_image_record_ensure allocates a record for a root that has none,
+// which keeps the contract that a root anyone names has a record, whether or
+// not a scheduler slot was ever allocated for it: probes name roots directly,
+// and the clone paths name a destination root before it is anybody's process.
+// scheduled_process_alloc still ensures one up front, so ordinary process
+// creation reports exhaustion where it can roll back.
+
+// The evidence says this root's record exists, and process ownership keeps it
+// there while the evidence is borrowed. A pin that finds nothing means that
+// ownership is wrong, and carrying on would drop a write or read a zero as
+// fact: stop (#1308).
+private fn process_image_record_lost() {
+    kernel_invariant_stop();
 }
 
-// A root's record as a value copy; all zero when it is missing (counted).
-fn process_image_record_read(root: usize) -> ProcessImageRecord !{unsafe} {
-    return process_image_record_value(
-        process_image_record_pin_ensured(&process_image_pool, root), true);
+// An ensured root's record as a value copy.
+fn process_image_record_read(root: usize @ identity,
+        evidence: borrow ProcessImageRecordExists[identity])
+        -> ProcessImageRecord !{unsafe} {
+    match process_image_record_pin(&process_image_pool, root) {
+        RegionPinned(ProcessImageRecord)::Stale => { kernel_invariant_stop(); }
+        RegionPinned(ProcessImageRecord)::Pinned(pin) => {
+            let record: &mut ProcessImageRecord = region_pin_record(pin);
+            let mut value: ProcessImageRecord = process_image_record_copy(record);
+            process_image_record_unpin(pin);
+            return value;
+        }
+    }
 }
 
 // The copy itself, from a pin however it was obtained; a missing record is
@@ -439,12 +441,17 @@ fn process_image_active_page_count_stopped(
 }
 
 // One field of the ensured root's record, written under a fresh pin. The
-// erased evidence prevents unensured calls; a stale pin still detects a
-// violation of process ownership's lifetime contract (and is counted).
+// erased evidence prevents unensured calls; a stale pin is a violation of
+// process ownership's lifetime contract, and stops.
 fn process_image_set_active_page_count(root: usize @ identity,
         evidence: borrow ProcessImageRecordExists[identity], value: usize) !{unsafe} {
-    process_image_set_active_page_count_pinned(
-        process_image_record_pin(&process_image_pool, root), value);
+    let RegionPinned(ProcessImageRecord)::Pinned(pin) =
+            process_image_record_pin(&process_image_pool, root) else {
+        RegionPinned(ProcessImageRecord)::Stale => { process_image_record_lost(); return; }
+    };
+    let record: &mut ProcessImageRecord = region_pin_record(pin);
+    record.active_page_count = value;
+    process_image_record_unpin(pin);
 }
 
 private fn process_image_set_active_page_count_pinned(
@@ -463,8 +470,13 @@ private fn process_image_set_active_page_count_pinned(
 
 fn process_image_set_stack_lowest_l3(root: usize @ identity,
         evidence: borrow ProcessImageRecordExists[identity], value: usize) !{unsafe} {
-    process_image_set_stack_lowest_l3_pinned(
-        process_image_record_pin(&process_image_pool, root), value);
+    let RegionPinned(ProcessImageRecord)::Pinned(pin) =
+            process_image_record_pin(&process_image_pool, root) else {
+        RegionPinned(ProcessImageRecord)::Stale => { process_image_record_lost(); return; }
+    };
+    let record: &mut ProcessImageRecord = region_pin_record(pin);
+    record.stack_lowest_l3 = value;
+    process_image_record_unpin(pin);
 }
 
 private fn process_image_set_stack_lowest_l3_pinned(
@@ -483,8 +495,13 @@ private fn process_image_set_stack_lowest_l3_pinned(
 
 fn process_image_set_stack_growth_active(root: usize @ identity,
         evidence: borrow ProcessImageRecordExists[identity], value: bool) !{unsafe} {
-    process_image_set_stack_growth_active_pinned(
-        process_image_record_pin(&process_image_pool, root), value);
+    let RegionPinned(ProcessImageRecord)::Pinned(pin) =
+            process_image_record_pin(&process_image_pool, root) else {
+        RegionPinned(ProcessImageRecord)::Stale => { process_image_record_lost(); return; }
+    };
+    let record: &mut ProcessImageRecord = region_pin_record(pin);
+    record.stack_growth_active = value;
+    process_image_record_unpin(pin);
 }
 
 private fn process_image_set_stack_growth_active_pinned(
@@ -505,10 +522,7 @@ fn process_image_set_stack_top_page(root: usize @ identity,
         evidence: borrow ProcessImageRecordExists[identity], value: usize) !{unsafe} {
     let RegionPinned(ProcessImageRecord)::Pinned(pin) =
             process_image_record_pin(&process_image_pool, root) else {
-        RegionPinned(ProcessImageRecord)::Stale => {
-            process_image_record_missing_note();
-            return;
-        }
+        RegionPinned(ProcessImageRecord)::Stale => { process_image_record_lost(); return; }
     };
     let record: &mut ProcessImageRecord = region_pin_record(pin);
     record.stack_top_page = value;
@@ -519,10 +533,7 @@ fn process_image_set_stack_low_page(root: usize @ identity,
         evidence: borrow ProcessImageRecordExists[identity], value: usize) !{unsafe} {
     let RegionPinned(ProcessImageRecord)::Pinned(pin) =
             process_image_record_pin(&process_image_pool, root) else {
-        RegionPinned(ProcessImageRecord)::Stale => {
-            process_image_record_missing_note();
-            return;
-        }
+        RegionPinned(ProcessImageRecord)::Stale => { process_image_record_lost(); return; }
     };
     let record: &mut ProcessImageRecord = region_pin_record(pin);
     record.stack_low_page = value;
@@ -533,10 +544,7 @@ fn process_image_set_heap_page_count(root: usize @ identity,
         evidence: borrow ProcessImageRecordExists[identity], value: usize) !{unsafe} {
     let RegionPinned(ProcessImageRecord)::Pinned(pin) =
             process_image_record_pin(&process_image_pool, root) else {
-        RegionPinned(ProcessImageRecord)::Stale => {
-            process_image_record_missing_note();
-            return;
-        }
+        RegionPinned(ProcessImageRecord)::Stale => { process_image_record_lost(); return; }
     };
     let record: &mut ProcessImageRecord = region_pin_record(pin);
     record.heap_page_count = value;
@@ -545,8 +553,13 @@ fn process_image_set_heap_page_count(root: usize @ identity,
 
 fn process_image_set_exec_image_installed(root: usize @ identity,
         evidence: borrow ProcessImageRecordExists[identity], value: bool) !{unsafe} {
-    process_image_set_exec_image_installed_pinned(
-        process_image_record_pin(&process_image_pool, root), value);
+    let RegionPinned(ProcessImageRecord)::Pinned(pin) =
+            process_image_record_pin(&process_image_pool, root) else {
+        RegionPinned(ProcessImageRecord)::Stale => { process_image_record_lost(); return; }
+    };
+    let record: &mut ProcessImageRecord = region_pin_record(pin);
+    record.exec_image_installed = value;
+    process_image_record_unpin(pin);
 }
 
 private fn process_image_set_exec_image_installed_pinned(
@@ -565,8 +578,13 @@ private fn process_image_set_exec_image_installed_pinned(
 
 fn process_image_set_exec_image_page_count(root: usize @ identity,
         evidence: borrow ProcessImageRecordExists[identity], value: usize) !{unsafe} {
-    process_image_set_exec_image_page_count_pinned(
-        process_image_record_pin(&process_image_pool, root), value);
+    let RegionPinned(ProcessImageRecord)::Pinned(pin) =
+            process_image_record_pin(&process_image_pool, root) else {
+        RegionPinned(ProcessImageRecord)::Stale => { process_image_record_lost(); return; }
+    };
+    let record: &mut ProcessImageRecord = region_pin_record(pin);
+    record.exec_image_page_count = value;
+    process_image_record_unpin(pin);
 }
 
 private fn process_image_set_exec_image_page_count_pinned(
@@ -587,10 +605,7 @@ fn process_image_set_clone_vm_outstanding(root: usize @ identity,
         evidence: borrow ProcessImageRecordExists[identity], value: bool) !{unsafe} {
     let RegionPinned(ProcessImageRecord)::Pinned(pin) =
             process_image_record_pin(&process_image_pool, root) else {
-        RegionPinned(ProcessImageRecord)::Stale => {
-            process_image_record_missing_note();
-            return;
-        }
+        RegionPinned(ProcessImageRecord)::Stale => { process_image_record_lost(); return; }
     };
     let record: &mut ProcessImageRecord = region_pin_record(pin);
     record.clone_vm_outstanding = value;
@@ -601,10 +616,7 @@ fn process_image_set_clone_vm_source_root(root: usize @ identity,
         evidence: borrow ProcessImageRecordExists[identity], value: usize) !{unsafe} {
     let RegionPinned(ProcessImageRecord)::Pinned(pin) =
             process_image_record_pin(&process_image_pool, root) else {
-        RegionPinned(ProcessImageRecord)::Stale => {
-            process_image_record_missing_note();
-            return;
-        }
+        RegionPinned(ProcessImageRecord)::Stale => { process_image_record_lost(); return; }
     };
     let record: &mut ProcessImageRecord = region_pin_record(pin);
     record.clone_vm_source_root = value;
@@ -615,10 +627,7 @@ fn process_image_set_clone_vm_page_count(root: usize @ identity,
         evidence: borrow ProcessImageRecordExists[identity], value: usize) !{unsafe} {
     let RegionPinned(ProcessImageRecord)::Pinned(pin) =
             process_image_record_pin(&process_image_pool, root) else {
-        RegionPinned(ProcessImageRecord)::Stale => {
-            process_image_record_missing_note();
-            return;
-        }
+        RegionPinned(ProcessImageRecord)::Stale => { process_image_record_lost(); return; }
     };
     let record: &mut ProcessImageRecord = region_pin_record(pin);
     record.clone_vm_page_count = value;
@@ -1040,10 +1049,16 @@ fn process_image_clone_vm_begin(source_space: AddressSpaceRoot,
     // leaked by overwriting its bookkeeping. It cannot happen (a root
     // belongs to one process, and that process cannot fork into itself),
     // and refusing says so rather than assuming it.
-    if (process_image_record_read(dest).clone_vm_outstanding) {
+    let evidence = match process_image_record_ensure(dest) {
+        ProcessImageRecordReady::Missing => { return ProcessCloneVmResult::OutOfMemory; }
+        ProcessImageRecordReady::Ready(ready) => { ready }
+    };
+    if (process_image_record_read(dest, evidence).clone_vm_outstanding) {
         return ProcessCloneVmResult::OutOfMemory;
     }
-    let evidence = match process_image_record_ensure(dest) {
+    let clone_src: usize =
+        process_image_narrow_root(source);
+    let source_evidence = match process_image_record_ensure(clone_src) {
         ProcessImageRecordReady::Missing => { return ProcessCloneVmResult::OutOfMemory; }
         ProcessImageRecordReady::Ready(ready) => { ready }
     };
@@ -1060,13 +1075,11 @@ fn process_image_clone_vm_begin(source_space: AddressSpaceRoot,
     process_image_set_stack_lowest_l3(dest, evidence, process_stack_top_page());
     // GitHub issue #258 step 2: a child inherits the parent's layout, not a
     // global constant -- which is the whole point of the layout being data.
-    let clone_src: usize =
-        process_image_narrow_root(source);
     process_image_set_stack_top_page(dest, evidence, process_stack_top_page());
     process_image_set_stack_low_page(dest, evidence,
-        process_image_record_read(clone_src).stack_low_page);
+        process_image_record_read(clone_src, source_evidence).stack_low_page);
     process_image_set_heap_page_count(dest, evidence,
-        process_image_record_read(clone_src).heap_page_count);
+        process_image_record_read(clone_src, source_evidence).heap_page_count);
     // GitHub issue #1151: the child holds the parent's mmap pages.
     if (mmap_region_clone(clone_src, dest, evidence) == false) {
         process_clone_vm_rollback(dest_space);
@@ -1149,7 +1162,7 @@ fn process_image_clone_vm_begin(source_space: AddressSpaceRoot,
                     }
                     clone_page_count = clone_page_count + 1;
                     if (l3_index >=
-                            process_image_record_read(clone_src).stack_low_page &&
+                            process_image_record_read(clone_src, source_evidence).stack_low_page &&
                         l3_index < process_stack_top_page() &&
                         l3_index < clone_stack_lowest_l3) {
                         clone_stack_lowest_l3 = l3_index;
@@ -1236,10 +1249,14 @@ fn process_image_clone_vm_reap(dest_space: AddressSpaceRoot) -> ProcessCloneVmRe
         return ProcessCloneVmReapResult::Missing;
     }
     let dest: usize = process_image_narrow_root(dest_root);
-    if (process_image_record_read(dest).clone_vm_outstanding == false) {
+    let evidence = match process_image_record_ensure(dest) {
+        ProcessImageRecordReady::Missing => { return ProcessCloneVmReapResult::Missing; }
+        ProcessImageRecordReady::Ready(ready) => { ready }
+    };
+    if (process_image_record_read(dest, evidence).clone_vm_outstanding == false) {
         return ProcessCloneVmReapResult::Missing;
     }
-    let source: usize = process_image_record_read(dest).clone_vm_source_root;
+    let source: usize = process_image_record_read(dest, evidence).clone_vm_source_root;
     // The caller remains the logical current process throughout this
     // non-preemptible EL1 span. Activate the retained source before releasing
     // mappings from a destination that may still be installed in TTBR0.
@@ -1469,7 +1486,12 @@ fn process_image_pages_discard(pages: sink ProcessImagePages[image]) {}
 // image's page-table entries have already been overwritten.
 fn process_image_exec_image_installed(root: usize) -> bool !{unsafe} {
     if (address_space_root_key_valid(root) == false) { return false; }
-    return process_image_record_read(root).exec_image_installed;
+    match process_image_record_ensure(root) {
+        ProcessImageRecordReady::Missing => { return false; }
+        ProcessImageRecordReady::Ready(evidence) => {
+            return process_image_record_read(root, evidence).exec_image_installed;
+        }
+    }
 }
 
 // GitHub issue #516: NoTarget is the third outcome. Installing with no target
@@ -1499,16 +1521,16 @@ fn process_image_exec_install(
             process_image_root_index(target)
         }
     };
-    if (process_image_record_read(root).exec_image_installed) {
+    let evidence = match process_image_record_ensure(root) {
+        ProcessImageRecordReady::Missing => { process_image_unmap(pages); return ProcessImageExecInstallResult::OutOfMemory; }
+        ProcessImageRecordReady::Ready(ready) => { ready }
+    };
+    if (process_image_record_read(root, evidence).exec_image_installed) {
         // Unchanged: the INCOMING image is the one unmapped, and the
         // already-installed one is left alone.
         process_image_unmap(pages);
         return ProcessImageExecInstallResult::AlreadyInstalled;
     }
-    let evidence = match process_image_record_ensure(root) {
-        ProcessImageRecordReady::Missing => { process_image_unmap(pages); return ProcessImageExecInstallResult::OutOfMemory; }
-        ProcessImageRecordReady::Ready(ready) => { ready }
-    };
     process_image_set_exec_image_page_count(root, evidence,
         process_image_page_count(pages));
     process_image_set_exec_image_installed(root, evidence, true);
@@ -2092,29 +2114,29 @@ fn process_image_handle_data_abort(target: AddressSpaceRoot, esr: usize,
     // (0x07). A stack expansion into an unpopulated lazy-L3 branch faults
     // one level earlier (0x06); both are valid only after the range checks
     // below prove this is the current process's reserved stack.
-    if (process_image_record_read(root).stack_growth_active == false ||
+    let evidence = match process_image_record_ensure(root) {
+        ProcessImageRecordReady::Missing => { return false; }
+        ProcessImageRecordReady::Ready(ready) => { ready }
+    };
+    if (process_image_record_read(root, evidence).stack_growth_active == false ||
         exception_class != 0x24 ||
         (fault_status != 0x06 && fault_status != 0x07)) {
         return false;
     }
     let stack_start: usize = USER_TEXT_VA +
-        process_image_record_read(root).stack_low_page * PAGE_SIZE;
+        process_image_record_read(root, evidence).stack_low_page * PAGE_SIZE;
     let stack_top: usize = USER_TEXT_VA + process_stack_top_page() * PAGE_SIZE;
     if (fault_address < stack_start || fault_address >= stack_top) {
         return false;
     }
     let fault_index: usize = (fault_address - USER_TEXT_VA) / PAGE_SIZE;
-    if (fault_index < process_image_record_read(root).stack_low_page ||
-        fault_index >= process_image_record_read(root).stack_lowest_l3) {
+    if (fault_index < process_image_record_read(root, evidence).stack_low_page ||
+        fault_index >= process_image_record_read(root, evidence).stack_lowest_l3) {
         return false;
     }
-    let evidence = match process_image_record_ensure(root) {
-        ProcessImageRecordReady::Missing => { return false; }
-        ProcessImageRecordReady::Ready(ready) => { ready }
-    };
     for l3_index: usize in
-            fault_index..<process_image_record_read(root).stack_lowest_l3 {
-        if (process_image_record_read(root).active_page_count >= USER_SPACE_PAGE_COUNT ||
+            fault_index..<process_image_record_read(root, evidence).stack_lowest_l3 {
+        if (process_image_record_read(root, evidence).active_page_count >= USER_SPACE_PAGE_COUNT ||
             process_image_pte_read(target, l3_index) != 0) {
             return false;
         }
@@ -2128,7 +2150,7 @@ fn process_image_handle_data_abort(target: AddressSpaceRoot, esr: usize,
                     return false;
                 }
                 process_image_set_active_page_count(root, evidence,
-        process_image_record_read(root).active_page_count + 1);
+        process_image_record_read(root, evidence).active_page_count + 1);
             }
         }
     }
@@ -2154,8 +2176,8 @@ private fn process_image_unmap_pages(target: AddressSpaceRoot, count: usize) {
                 }
                 ProcessImageRecordReady::Ready(ready) => { ready }
             };
-            if (process_image_record_read(root_index).stack_growth_active ||
-                process_image_record_read(root_index).active_page_count > count) {
+            if (process_image_record_read(root_index, evidence).stack_growth_active ||
+                process_image_record_read(root_index, evidence).active_page_count > count) {
                 process_image_set_stack_growth_active(root_index, evidence, false);
                 process_image_set_active_page_count(root_index, evidence, 0);
                 process_image_set_stack_lowest_l3(root_index, evidence,
@@ -2324,7 +2346,7 @@ private fn process_image_pair_probe(slot: borrow ProcessImageSlot[0],
                         (combined_extent + PAGE_SIZE - 1) / PAGE_SIZE;
                     let heap_last_page: usize =
                         heap_first_page +
-                        process_image_record_read(root).heap_page_count;
+                        process_image_record_read(root, evidence).heap_page_count;
                     // GitHub issue #1151: as the static path's region.
                     mmap_region_clear(root, evidence);
                     // The exact page counts that used to be asserted here
@@ -2333,7 +2355,7 @@ private fn process_image_pair_probe(slot: borrow ProcessImageSlot[0],
                     // is checked, and the boot's httpd_loader view keeps
                     // the measured numbers for that pair.
                     if (heap_last_page > MMAP_REGION_FIRST_PAGE ||
-                        process_image_record_read(root).stack_low_page >=
+                        process_image_record_read(root, evidence).stack_low_page >=
                             process_stack_top_page() -
                             PROCESS_DYNAMIC_STACK_INITIAL_PAGES) {
                         process_image_cleanup_root(target);
@@ -2421,7 +2443,7 @@ private fn process_image_pair_probe(slot: borrow ProcessImageSlot[0],
                         }
                     }
                     if (mapped == total +
-                            process_image_record_read(root).heap_page_count +
+                            process_image_record_read(root, evidence).heap_page_count +
                             PROCESS_DYNAMIC_STACK_INITIAL_PAGES) {
                         let image: usize @ 1 = 1;
                         let entry: usize = USER_TEXT_VA + interpreter_bias +
@@ -2522,14 +2544,14 @@ private fn process_image_map_current(slot: borrow ProcessImageSlot[0],
     }
     let heap_first_page: usize = (plan.extent + PAGE_SIZE - 1) / PAGE_SIZE;
     let heap_last_page: usize =
-        heap_first_page + process_image_record_read(root).heap_page_count;
+        heap_first_page + process_image_record_read(root, evidence).heap_page_count;
     // GitHub issue #1151: a fresh image has no mmap; the old image's region
     // pages went with its root's mappings. The heap ends below the region
     // (process_layout_assumption for the largest image DISTRO_ELF_SPAN_MAX
     // admits; checked here as well, since a refusal costs one compare).
     mmap_region_clear(root, evidence);
     if (heap_last_page > MMAP_REGION_FIRST_PAGE ||
-        process_image_record_read(root).stack_low_page >=
+        process_image_record_read(root, evidence).stack_low_page >=
             process_stack_top_page()) {
         process_image_cleanup_root(target);
         return ProcessImageMapResult::OutOfMemory;
@@ -2956,10 +2978,7 @@ fn process_image_set_mmap_bitmap(root: usize @ identity,
         value: ProcessPoolHandleWords) !{unsafe} {
     let RegionPinned(ProcessImageRecord)::Pinned(pin) =
             process_image_record_pin(&process_image_pool, root) else {
-        RegionPinned(ProcessImageRecord)::Stale => {
-            process_image_record_missing_note();
-            return;
-        }
+        RegionPinned(ProcessImageRecord)::Stale => { process_image_record_lost(); return; }
     };
     let record: &mut ProcessImageRecord = region_pin_record(pin);
     record.mmap_bitmap = value.address;
@@ -2968,7 +2987,16 @@ fn process_image_set_mmap_bitmap(root: usize @ identity,
 }
 
 private fn mmap_region_words_of(root: usize) -> ProcessPoolHandleWords !{unsafe} {
-    let mut value: ProcessImageRecord = process_image_record_read(root);
+    let mut none: ProcessPoolHandleWords = { 0, 0 };
+    let evidence = match process_image_record_ensure(root) {
+        // No record, so no bitmap: every caller reads that as no mmap.
+        ProcessImageRecordReady::Missing => {
+            process_image_record_missing_note();
+            return none;
+        }
+        ProcessImageRecordReady::Ready(ready) => { ready }
+    };
+    let mut value: ProcessImageRecord = process_image_record_read(root, evidence);
     let mut words: ProcessPoolHandleWords = {
         value.mmap_bitmap, value.mmap_bitmap_generation
     };
