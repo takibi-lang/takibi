@@ -21,98 +21,98 @@ kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_backtrace_test_enable
 kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_breakpoint_test_enabled	read-by kernel_ddb_breakpoint_test_checkpoint: 2026-10-31 retain-abi: debugger-set arm of the breakpoint checkpoint, false on an ordinary boot
 kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_console_hold_armed	read-by workload_peer_console_progress: 2026-10-31 retain-abi: debugger-set by scripts/kernel_console_hold_check.py after its prerequisites; the peer writer polls it
 kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_console_test_enabled	read-by workload_peer_console_progress: 2026-10-31 retain-abi: debugger-set arm that keeps the peer writer alive after its verdict in DDB lanes
-kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_log_test_enabled	unreviewed
+kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_log_test_enabled	read-by kernel_ddb_enter_stopped,scripts/run_kernel_ddb_qemutest.sh: 2026-10-31 retain-abi: debugger-set arm of DDB logtest, false on an ordinary boot
 kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_memory_access	read-by kernel_ddb_memory_access_here: 2026-10-31 retain-abi: DDB's guarded read, through a pointer to the calling core's element, or to element 0 if cpu_id is out of range
 kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_memory_fault_test_enabled	read-by kernel_ddb_enter_stopped: 2026-10-31 retain-abi: debugger-set arm of the memory-fault case
 kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_wait_test_enabled	read-by kernel_ddb_enter_stopped: 2026-10-31 retain-abi: debugger-set arm of ddb_render_wait_test
-kernel/arch/arm64/kernel/gicv2.tkb	gicc	unreviewed
-kernel/arch/arm64/kernel/gicv2.tkb	gicd	unreviewed
+kernel/arch/arm64/kernel/gicv2.tkb	gicc	read-by gic_irq_dispatch,platform_irq_cpu_interface_init: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after; GICC is banked per core, so sharing the word is correct
+kernel/arch/arm64/kernel/gicv2.tkb	gicd	read-by gic_enable_words,gic_intid_enable,gic_spi_priorities_init: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after; the ICFGR read-modify-write in gic_intid_edge runs in boot routing, an order nothing checks
 kernel/arch/arm64/kernel/platform_uart_common.tkb	uart_rx_handler	read-by uart_rx_drain: 2026-10-31 retain-singleton: the UART receive path calls it; uart_init and uart_set_rx_handler store it at boot before the IRQ is unmasked, an order nothing checks
 kernel/arch/arm64/kernel/secondary.tkb	kernel_online_cores	read-by kernel_online_core_count,kernel_online_core_note_cpu_on: 2026-10-31 retain-partition: every online-prefix walk; only core 0's boot writes it, with the range rechecked at each read (outside 1..=max reads as 1)
 kernel/arch/arm64/mm/asid.tkb	asid_bits	read-by asid_width_bits: 2026-10-31 written once by asid_init with the MMU off, where the compiler refuses an atomic call; read lock-free after
 kernel/arch/arm64/mm/asid.tkb	asid_last	read-by asid_highest_value,asid_assign_locked: 2026-10-31 written once by asid_init with the MMU off, where the compiler refuses an atomic call; read lock-free after
-kernel/drivers/block/block_cache.tkb	block_cache_backend	unreviewed; 2026-10-06 candidate-context: one read cache per CPU / bounded caller-supplied CPU; release/acquire write epoch; local synchronous access
-kernel/drivers/block/block_cache.tkb	block_cache_block	unreviewed; 2026-10-06 candidate-context: one read cache per CPU / bounded caller-supplied CPU; release/acquire write epoch; local synchronous access
-kernel/drivers/block/block_cache.tkb	block_cache_data	unreviewed; 2026-10-06 candidate-context: one read cache per CPU / bounded caller-supplied CPU; release/acquire write epoch; local synchronous access
-kernel/drivers/block/block_cache.tkb	block_cache_epoch	unreviewed; 2026-10-06 candidate-context: one read cache per CPU / bounded caller-supplied CPU; release/acquire write epoch; local synchronous access
-kernel/drivers/block/block_cache.tkb	block_cache_hits	unreviewed; 2026-10-06 candidate-context: one read cache per CPU / bounded caller-supplied CPU; release/acquire write epoch; local synchronous access
-kernel/drivers/block/block_cache.tkb	block_cache_tick	unreviewed; 2026-10-06 candidate-context: one read cache per CPU / bounded caller-supplied CPU; release/acquire write epoch; local synchronous access
-kernel/drivers/block/block_cache.tkb	block_cache_used	unreviewed; 2026-10-06 candidate-context: one read cache per CPU / bounded caller-supplied CPU; release/acquire write epoch; local synchronous access
-kernel/drivers/block/block_cache.tkb	block_cache_valid	unreviewed; 2026-10-06 candidate-context: one read cache per CPU / bounded caller-supplied CPU; release/acquire write epoch; local synchronous access
-kernel/drivers/block/memory.tkb	block_run_backend	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
-kernel/drivers/block/memory.tkb	block_run_count	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
-kernel/drivers/block/memory.tkb	block_run_data	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
-kernel/drivers/block/memory.tkb	block_run_epoch	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
-kernel/drivers/block/memory.tkb	block_run_first	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
-kernel/drivers/block/memory.tkb	block_run_next	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
-kernel/drivers/block/memory.tkb	block_run_next_backend	unreviewed; 2026-10-06 candidate-context: one read-ahead stream/cache per CPU / CPU-selected synchronous operation; device lock only for transfer; write-epoch checks
-kernel/drivers/block/virtio_blk.tkb	virtio_blk_base	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
-kernel/drivers/block/virtio_blk.tkb	virtio_blk_disabled	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
-kernel/drivers/block/virtio_blk.tkb	virtio_blk_queue	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
-kernel/drivers/block/virtio_blk.tkb	virtio_blk_ready	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
-kernel/drivers/block/virtio_blk.tkb	virtio_blk_regs	unreviewed
-kernel/drivers/block/virtio_blk.tkb	virtio_blk_timeout_first	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
-kernel/drivers/block/virtio_blk.tkb	virtio_blk_timeout_last	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
-kernel/drivers/block/virtio_blk.tkb	virtio_blk_used_seen	unreviewed; 2026-10-06 review-device-layout: one virtio block controller / boot DTB; command TaskMutex; fixed DMA receive authority and reset ownership
-kernel/drivers/block/virtio_blk_dma.tkb	virtio_blk_used_claimed	unreviewed
-kernel/drivers/net/rp1_gem.tkb	gem	unreviewed
-kernel/drivers/net/rp1_gem.tkb	gem_pkt_kept_len	unreviewed
-kernel/drivers/net/rp1_gem.tkb	gem_rx_pkt	unreviewed
-kernel/drivers/net/rp1_gem.tkb	gem_rx_ring_cpu_address	unreviewed
-kernel/drivers/net/rp1_gem.tkb	gem_tx_next	unreviewed; 2026-10-06 review-device-layout: one GEM network controller / InitOnce; linear RX/TX capabilities; boot MMIO configuration; DMA publication
-kernel/drivers/net/rp1_gem.tkb	net_init_once	unreviewed; 2026-10-06 review-device-layout: one GEM network controller / InitOnce; linear RX/TX capabilities; boot MMIO configuration; DMA publication
-kernel/drivers/net/rp1_gem.tkb	rp1_clocks	unreviewed
-kernel/drivers/net/rp1_gem.tkb	rp1_gpio_ctrl	unreviewed
-kernel/drivers/net/rp1_gem.tkb	rp1_gpio_pads	unreviewed
-kernel/drivers/net/rp1_gem.tkb	rp1_gpio_rio	unreviewed
-kernel/drivers/net/rp1_gem_desc.tkb	gem_pkt_addr	unreviewed
-kernel/drivers/net/rp1_gem_desc.tkb	gem_pkt_rx_seen	unreviewed
-kernel/drivers/net/rp1_gem_desc.tkb	gem_pkt_tx_seen	unreviewed
-kernel/drivers/net/rp1_gem_desc.tkb	gem_rx_seen_filled	unreviewed
-kernel/drivers/net/rp1_gem_desc.tkb	gem_tx_seen_used	unreviewed
-kernel/drivers/net/virtio_net.tkb	net_init_once	unreviewed; 2026-10-06 review-device-layout: one virtio network controller / InitOnce; linear RX/TX capabilities; IRQ publication and queue indices
-kernel/drivers/net/virtio_net.tkb	rx_avail_idx	unreviewed; 2026-10-06 review-device-layout: one virtio network controller / InitOnce; linear RX/TX capabilities; IRQ publication and queue indices
-kernel/drivers/net/virtio_net.tkb	rx_desc_pkt	unreviewed
-kernel/drivers/net/virtio_net.tkb	rx_used_seen	unreviewed; 2026-10-06 review-device-layout: one virtio network controller / InitOnce; linear RX/TX capabilities; IRQ publication and queue indices
-kernel/drivers/net/virtio_net.tkb	tx_avail_idx	unreviewed; 2026-10-06 review-device-layout: one virtio network controller / InitOnce; linear RX/TX capabilities; IRQ publication and queue indices
-kernel/drivers/net/virtio_net.tkb	tx_used_seen	unreviewed; 2026-10-06 review-device-layout: one virtio network controller / InitOnce; linear RX/TX capabilities; IRQ publication and queue indices
-kernel/drivers/net/virtio_net.tkb	virtio_base	unreviewed; 2026-10-06 review-device-layout: one virtio network controller / InitOnce; linear RX/TX capabilities; IRQ publication and queue indices
-kernel/drivers/net/virtio_net.tkb	virtio_net_gic_intid	unreviewed; 2026-10-06 review-device-layout: one virtio network controller / InitOnce; linear RX/TX capabilities; IRQ publication and queue indices
-kernel/drivers/net/virtio_net.tkb	virtio_net_queues	unreviewed
-kernel/drivers/net/virtio_net.tkb	virtio_net_regs	unreviewed
-kernel/drivers/net/virtio_net.tkb	virtio_net_used_addr	unreviewed
-kernel/drivers/net/virtio_net.tkb	virtio_pkt_kept_len	unreviewed
-kernel/drivers/net/virtio_net_tx_dma.tkb	virtio_pkt_addr	unreviewed
-kernel/drivers/net/virtio_net_tx_dma.tkb	virtio_pkt_rx_seen	unreviewed
-kernel/drivers/serial/pl011.tkb	uart	unreviewed
-kernel/drivers/virtio_used.tkb	virtio_used_reset_confirmed	unreviewed
-kernel/fs/ext2/ext2.tkb	ext2_fence_pending	unreviewed; 2026-10-06 candidate-mount: writable filesystem mount / mutation admission; boot fixture single writer; explicit recovery
-kernel/fs/ext2/ext2.tkb	ext2_fence_pending_count	unreviewed; 2026-10-06 candidate-mount: writable filesystem mount / mutation admission; boot fixture single writer; explicit recovery
-kernel/fs/ext2/ext2.tkb	ext2_scratch	unreviewed; 2026-10-06 candidate-mount: per-CPU operations and one writable root mount / non-preemptible per-CPU scratch; mutation admission for recovery/fence state
-kernel/fs/ext2/ext2.tkb	ext2_undo_rows	unreviewed
-kernel/fs/ext2/ext2.tkb	ext2_write_blocks	unreviewed; 2026-10-06 candidate-mount: per-CPU operations and one writable root mount / non-preemptible per-CPU scratch; mutation admission for recovery/fence state
-kernel/init/ext2_fixture.tkb	ext2_release_fenced	unreviewed
-kernel/init/ext2_fixture.tkb	ext2_release_first	unreviewed
-kernel/init/ext2_fixture.tkb	ext2_release_second	unreviewed
+kernel/drivers/block/block_cache.tkb	block_cache_backend	read-by block_cache_find,block_cache_victim: 2026-10-31 slot: a set is owned by the linear BlockSlot its index came from, kept across preemption; nothing else names it
+kernel/drivers/block/block_cache.tkb	block_cache_block	read-by block_cache_find,block_cache_victim: 2026-10-31 slot: as block_cache_backend, the holder of the BlockSlot alone
+kernel/drivers/block/block_cache.tkb	block_cache_data	read-by block_cache_read,block_cache_store: 2026-10-31 slot: 1 KiB copies in and out by the BlockSlot holder; no pointer leaves the file
+kernel/drivers/block/block_cache.tkb	block_cache_epoch	read-by block_cache_find,block_cache_victim: 2026-10-31 slot: the BlockSlot holder compares it with the atomic write counts, which decide staleness
+kernel/drivers/block/block_cache.tkb	block_cache_hits	unreviewed; 2026-10-31 migrate to AtomicWord: block_cache_hit_total sums other slots' plain words while holders add
+kernel/drivers/block/block_cache.tkb	block_cache_tick	read-by block_cache_touch: 2026-10-31 slot: the LRU clock of the BlockSlot holder, indexed by that slot
+kernel/drivers/block/block_cache.tkb	block_cache_used	read-by block_cache_victim: 2026-10-31 slot: LRU stamps of the BlockSlot holder
+kernel/drivers/block/block_cache.tkb	block_cache_valid	read-by block_cache_find,block_cache_victim: 2026-10-31 slot: the BlockSlot holder; written last in block_cache_store
+kernel/drivers/block/memory.tkb	block_run_backend	read-by block_run_hit_here: 2026-10-31 slot: the read-ahead run of the BlockSlot holder, retired by the atomic epoch
+kernel/drivers/block/memory.tkb	block_run_count	read-by block_run_hit_here: 2026-10-31 slot: as block_run_backend; zeroed before a refill by the same holder
+kernel/drivers/block/memory.tkb	block_run_data	read-by block_run_take,block_run_transfer_locked: 2026-10-31 slot: bytes of the BlockSlot holder; the device writes them under block_device_lock
+kernel/drivers/block/memory.tkb	block_run_epoch	read-by block_run_hit_here: 2026-10-31 slot: epoch taken by the BlockSlot holder before its device read
+kernel/drivers/block/memory.tkb	block_run_first	read-by block_run_hit_here,block_run_take: 2026-10-31 slot: first block of the BlockSlot holder's run
+kernel/drivers/block/memory.tkb	block_run_next	read-by block_run_wanted: 2026-10-31 slot: the BlockSlot holder's sequential-read hint
+kernel/drivers/block/memory.tkb	block_run_next_backend	read-by block_run_wanted: 2026-10-31 slot: backend of that hint, same holder
+kernel/drivers/block/virtio_blk.tkb	virtio_blk_base	read-by virtio_blk_init,main: 2026-10-31 boot: set by the DTB device map on core 0 before the first init; never written after
+kernel/drivers/block/virtio_blk.tkb	virtio_blk_disabled	read-by virtio_blk_init: 2026-10-31 lock: set by a failed reset; after boot the only callers hold block_device_lock, a premise the signature does not carry
+kernel/drivers/block/virtio_blk.tkb	virtio_blk_queue	read-by virtio_blk_submit_owned,virtio_blk_setup_queue: 2026-10-31 lock: one request at a time under block_device_lock, a TaskMutex a preempted holder keeps
+kernel/drivers/block/virtio_blk.tkb	virtio_blk_ready	read-by virtio_blk_init: 2026-10-31 lock: as virtio_blk_disabled; QEMU init reaches it unlocked only on core 0 before userspace
+kernel/drivers/block/virtio_blk.tkb	virtio_blk_regs	read-by virtio_blk_capacity_sectors,virtio_blk_init,virtio_blk_submit_owned: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
+kernel/drivers/block/virtio_blk.tkb	virtio_blk_timeout_first	read-by virtio_blk_timeout_first_snapshot: 2026-10-31 lock: written under block_device_lock on the first timeout; DDB reads it with the world stopped and may catch a stopped writer mid-record, a diagnostic
+kernel/drivers/block/virtio_blk.tkb	virtio_blk_timeout_last	read-by virtio_blk_timeout_last_snapshot: 2026-10-31 lock: as virtio_blk_timeout_first, for the latest timeout
+kernel/drivers/block/virtio_blk.tkb	virtio_blk_used_seen	read-by virtio_blk_used_pending,virtio_blk_receive_settle_used,virtio_blk_submit_owned: 2026-10-31 lock: the driver shadow of used.idx, under block_device_lock
+kernel/drivers/block/virtio_blk_dma.tkb	virtio_blk_used_claimed	read-by virtio_blk_used_claim: 2026-10-31 lock: one-shot reached from virtio_blk_init only
+kernel/drivers/net/rp1_gem.tkb	gem	read-by gem_halt,gem_irq_handler,gem_mdio_read: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
+kernel/drivers/net/rp1_gem.tkb	gem_pkt_kept_len	read-by net_packet_kept_claim: 2026-10-31 token: written before the Kept packet is parked in its slot and read after a claim takes it out of the slot's lock
+kernel/drivers/net/rp1_gem.tkb	gem_rx_pkt	read-by net_rx_acquire,gem_rearm_rx,kernel_net_rx_frame_pending: 2026-10-31 token: under the one NetRxCanAcquire token, kept across preemption; DDB reads it with the world stopped
+kernel/drivers/net/rp1_gem.tkb	gem_rx_ring_cpu_address	read-by kernel_net_rx_frame_pending: 2026-10-31 boot: recorded when the ring is programmed in net_init; DDB reads it stopped
+kernel/drivers/net/rp1_gem.tkb	gem_tx_next	read-by gem_tx_next_slot: 2026-10-31 token: next TX descriptor, under the one NetRxCanAcquire token
+kernel/drivers/net/rp1_gem.tkb	net_init_once	read-by net_init: 2026-10-31 protocol: InitOnce's own operations gate the one boot init
+kernel/drivers/net/rp1_gem.tkb	rp1_clocks	read-by net_init: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
+kernel/drivers/net/rp1_gem.tkb	rp1_gpio_ctrl	read-by gem_phy_reset: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
+kernel/drivers/net/rp1_gem.tkb	rp1_gpio_pads	read-by gem_phy_reset: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
+kernel/drivers/net/rp1_gem.tkb	rp1_gpio_rio	read-by rpi5_gem_attach_bootstrap: 2026-10-31 handle: attach is the one non-write use; gem_phy_reset writes through it at boot; one handle word attached once at boot before its interrupt or first use; only registers change after
+kernel/drivers/net/rp1_gem_desc.tkb	gem_pkt_addr	read-by gem_pkt_published_address: 2026-10-31 token: address handed from a post to its descriptor write, under the one NetRxCanAcquire token
+kernel/drivers/net/rp1_gem_desc.tkb	gem_pkt_rx_seen	read-by gem_pkt_received: 2026-10-31 token: observation handed to the generated transition, under the one NetRxCanAcquire token
+kernel/drivers/net/rp1_gem_desc.tkb	gem_pkt_tx_seen	read-by gem_pkt_sent: 2026-10-31 token: as gem_pkt_rx_seen, for transmit
+kernel/drivers/net/rp1_gem_desc.tkb	gem_rx_seen_filled	read-by gem_rx_ring_filled: 2026-10-31 token: what the latest ring snapshot showed, under the one NetRxCanAcquire token
+kernel/drivers/net/rp1_gem_desc.tkb	gem_tx_seen_used	read-by gem_tx_ring_used: 2026-10-31 token: as gem_rx_seen_filled, for transmit
+kernel/drivers/net/virtio_net.tkb	net_init_once	read-by net_init: 2026-10-31 protocol: InitOnce's own operations gate the one boot init
+kernel/drivers/net/virtio_net.tkb	rx_avail_idx	read-by net_init,virtio_net_rx_refill: 2026-10-31 token: RX avail shadow, under the one NetRxCanAcquire token; net_init at boot
+kernel/drivers/net/virtio_net.tkb	rx_desc_pkt	read-by net_rx_acquire,virtio_net_rx_refill: 2026-10-31 token: buffer per RX descriptor, under the one NetRxCanAcquire token
+kernel/drivers/net/virtio_net.tkb	rx_used_seen	read-by net_rx_acquire,kernel_net_rx_frame_pending: 2026-10-31 token: RX used shadow, under the one NetRxCanAcquire token; DDB reads it with the world stopped
+kernel/drivers/net/virtio_net.tkb	tx_avail_idx	read-by virtio_net_tx_ring: 2026-10-31 token: TX avail shadow, under the one NetRxCanAcquire token
+kernel/drivers/net/virtio_net.tkb	tx_used_seen	read-by virtio_net_tx_finish,virtio_net_tx_used_pending: 2026-10-31 token: TX used shadow, under the one NetRxCanAcquire token
+kernel/drivers/net/virtio_net.tkb	virtio_base	read-by virtio_net_find,main: 2026-10-31 boot: set by the DTB device map on core 0; never written after
+kernel/drivers/net/virtio_net.tkb	virtio_net_gic_intid	read-by virtio_net_find,irq_source_code: 2026-10-31 boot: set once by the DTB device map before the SPI is enabled; IRQ dispatch compares it on any core
+kernel/drivers/net/virtio_net.tkb	virtio_net_queues	read-by virtio_queue_setup: 2026-10-31 token: descriptor and avail writes under the one NetRxCanAcquire token; the device reads them; the setup address is boot only
+kernel/drivers/net/virtio_net.tkb	virtio_net_regs	read-by net_init,virtio_net_irq_handler,net_read_mac: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
+kernel/drivers/net/virtio_net.tkb	virtio_net_used_addr	read-by kernel_net_rx_frame_pending: 2026-10-31 boot: written by virtio_queue_setup; DDB reads it stopped
+kernel/drivers/net/virtio_net.tkb	virtio_pkt_kept_len	read-by net_packet_kept_claim: 2026-10-31 token: written before the Kept packet is parked and read after a claim takes it out of the slot's lock
+kernel/drivers/net/virtio_net_tx_dma.tkb	virtio_pkt_addr	read-by virtio_pkt_published_address: 2026-10-31 token: address from a post to its descriptor, both under the one NetRxCanAcquire token
+kernel/drivers/net/virtio_net_tx_dma.tkb	virtio_pkt_rx_seen	read-by virtio_pkt_received: 2026-10-31 token: used-ring observation consumed once, under the one NetRxCanAcquire token
+kernel/drivers/serial/pl011.tkb	uart	read-by uart_rx_ready,uart_isr_getc,uart_debug_putc: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
+kernel/drivers/virtio_used.tkb	virtio_used_reset_confirmed	read-by virtio_used_quiet: 2026-10-31 lock: set just before its one read in virtio_used_reclaim_after_reset; the block driver is the only caller, under block_device_lock or on core 0 at boot
+kernel/fs/ext2/ext2.tkb	ext2_fence_pending	read-by ext2_recover_with: 2026-10-31 lock: mutators under ext2_mutation_lock, a TaskMutex (scripts/buildcheck_ext2_mutation_guard.py checks the callers); recover runs in the boot fixture
+kernel/fs/ext2/ext2.tkb	ext2_fence_pending_count	read-by ext2_fence_pending_add,ext2_recover_with: 2026-10-31 lock: as ext2_fence_pending
+kernel/fs/ext2/ext2.tkb	ext2_scratch	read-by ext2_byte,ext2_bitmap_fill: 2026-10-31 slot: per operation by the linear Ext2Slot, held across preemption and sleep; no CPU selects it
+kernel/fs/ext2/ext2.tkb	ext2_undo_rows	read-by ext2_undo_put_back,ext2_undo_write: 2026-10-31 lock: one mutation at a time under ext2_mutation_lock, by the same build check
+kernel/fs/ext2/ext2.tkb	ext2_write_blocks	read-by ext2_write_allocations_block: 2026-10-31 slot: rows of the Ext2Slot holder
+kernel/init/ext2_fixture.tkb	ext2_release_fenced	read-by ext2_release_case,ext2_release_failure_check: 2026-10-31 retain-fixture: the boot ext2 fixture, core 0 before userspace
+kernel/init/ext2_fixture.tkb	ext2_release_first	read-by ext2_release_names_are,ext2_release_run: 2026-10-31 retain-fixture: the boot ext2 fixture's inode, core 0 before userspace
+kernel/init/ext2_fixture.tkb	ext2_release_second	read-by ext2_release_names_are,ext2_release_setup: 2026-10-31 retain-fixture: as ext2_release_first
 kernel/init/ext2_fixture.tkb	ext2_write_fixture_bitmap	read-by ext2_io_bitmap_matches,ext2_write_indirect_check: 2026-10-31 retain-fixture: the boot ext2 fixture's own checks, core 0 before userspace
 kernel/init/ext2_fixture.tkb	ext2_write_fixture_readback	read-by ext2_io_file_is,ext2_exhaustion_mode: 2026-10-31 retain-fixture: the boot ext2 fixture's read-back comparisons, core 0 before userspace
 kernel/init/ext2_fixture.tkb	ext2_write_fixture_source	read-by ext2_io_file_is,ext2_release_full_file: 2026-10-31 retain-fixture: the boot ext2 fixture compares what it wrote against this, core 0 before userspace
 kernel/init/test_driver.tkb	address_space_baseline	read-by kernel_init_boot_fixture_poll: 2026-10-31 retain-fixture: the deferred end-of-fixture leak report; taken in kernel_test_driver_run and kernel_init_process_start
-kernel/init/test_driver.tkb	boot_exec_windows	unreviewed
-kernel/init/test_driver.tkb	boot_execution	unreviewed
+kernel/init/test_driver.tkb	boot_exec_windows	read-by kernel_test_driver_run: 2026-10-31 boot: the loader check's windows, core 0 once before any exec
+kernel/init/test_driver.tkb	boot_execution	read-by kernel_process_child_exec_prepare_with,kernel_exec_primary_is_busybox_extras: 2026-10-31 boot: written by the boot thread before PID 1 runs, read-only for every later exec; BootOnce would fit but reads as a two-field record
 kernel/init/test_driver.tkb	clone_growth_probe_ok	read-by kernel_init_script_success_evidence: 2026-10-31 retain-fixture: prints the vm fork child stack growth line a lane reads
-kernel/init/test_driver.tkb	exec_windows	unreviewed
+kernel/init/test_driver.tkb	exec_windows	read-by kernel_process_child_exec_prepare: 2026-10-31 slot: by the linear ExecWindowSlot, held across ext2 sleeps; no CPU selects it
 kernel/init/test_driver.tkb	ext2_read_fixture	read-by ext2_create_check,ext2_io_file_is: 2026-10-31 retain-fixture: the boot ext2 fixture reads file bytes here and compares them, core 0 before userspace
 kernel/init/test_driver.tkb	ext2_symlink_fixture	read-by kernel_ext2_fixture_run: 2026-10-31 retain-fixture: the boot ext2 fixture's symlink target buffer
 kernel/init/test_driver.tkb	fd_context_baseline	read-by kernel_init_boot_fixture_poll: 2026-10-31 retain-fixture: the deferred end-of-fixture leak report; taken once in kernel_test_driver_run
 kernel/init/test_driver.tkb	image_record_baseline	read-by kernel_init_boot_fixture_poll: 2026-10-31 retain-fixture: the deferred end-of-fixture leak report
 kernel/init/test_driver.tkb	init_boot_fixture_pending	read-by kernel_init_boot_fixture_poll: 2026-10-31 retain-fixture: one-shot gate of the deferred report, polled on the syscall path; the pid 1 test leaves one process as the taker, by check then clear rather than a swap
 kernel/init/test_driver.tkb	init_boot_fixture_reported	read-by kernel_init_boot_fixture_reaped: 2026-10-31 retain-fixture: whether the deferred report ran, read when PID 1's fixture child is reaped
-kernel/init/test_driver.tkb	init_boot_fixture_status	unreviewed
-kernel/init/test_driver.tkb	kernel_exec_reserve_undercount	unreviewed
+kernel/init/test_driver.tkb	init_boot_fixture_status	read-by kernel_init_script_success_evidence: 2026-10-31 retain-fixture: stored when PID 1 reaps the fixture child, printed after by PID 1
+kernel/init/test_driver.tkb	kernel_exec_reserve_undercount	unreviewed; 2026-10-31 migrate to AtomicWord: a plain add from any exec on any core, lost today
 kernel/init/test_driver.tkb	kernel_test_init_script	read-by kernel_test_driver_run: 2026-10-31 retain-fixture: main's choice of init script, one read on the boot path
 kernel/init/test_driver.tkb	page_baseline	read-by kernel_init_boot_fixture_poll: 2026-10-31 retain-fixture: the deferred end-of-fixture page-leak report
-kernel/init/test_driver.tkb	page_baseline_init_root	unreviewed
+kernel/init/test_driver.tkb	page_baseline_init_root	read-by kernel_init_mmap_region_pages: 2026-10-31 retain-fixture: PID 1's root key, set before PID 1 runs; the leak report reads it
 kernel/init/test_driver.tkb	process_pool_baseline	read-by kernel_init_boot_fixture_poll: 2026-10-31 retain-fixture: the deferred end-of-fixture process-pool report (#270)
 kernel/init/test_driver.tkb	rootfs_metadata	read-by kernel_test_driver_run: 2026-10-31 retain-boot: the boot read of the image's metadata; the exec plan borrows this permanent buffer afterward
 kernel/kernel/fd_table.tkb	fd_refcount_probe_handle	read-by fd_refcount_probe_cycle,fd_refcount_contention_probe: 2026-10-31 retain-fixture: the contention probe's two cores; published before the rendezvous, an order the probe keeps by hand
@@ -122,47 +122,47 @@ kernel/kernel/freelist_contention_evidence.tkb	freelist_probe	read-by freelist_p
 kernel/kernel/freelist_contention_evidence.tkb	freelist_probe_ready	read-by freelist_probe_init: 2026-10-31 retain-fixture: first-run guard of the probe, core 0
 kernel/kernel/init_once_contention_evidence.tkb	init_once_probe_gate	read-by init_once_probe_locked_attempt: 2026-10-31 retain-fixture: the probe's locked phase on both cores, through InitOnce's own operations
 kernel/kernel/init_once_contention_evidence.tkb	init_once_probe_naive_complete	read-by init_once_contention_probe,init_once_contention_secondary_run: 2026-10-31 retain-fixture: the deliberately unlocked phase: racing on it is what the probe measures
-kernel/kernel/log_storm_evidence.tkb	log_storm_last_round	unreviewed
-kernel/kernel/log_storm_evidence.tkb	log_storm_trace_rounds	unreviewed
-kernel/kernel/nic_irq_affinity.tkb	nic_irq_evidence_intid	unreviewed
-kernel/kernel/nic_irq_affinity.tkb	nic_irq_phase_start	unreviewed
+kernel/kernel/log_storm_evidence.tkb	log_storm_last_round	read-by log_storm_is_armed,log_storm_secondary_run: 2026-10-31 retain-fixture: each secondary's own element, in its idle loop
+kernel/kernel/log_storm_evidence.tkb	log_storm_trace_rounds	read-by log_storm_trace_probe: 2026-10-31 retain-fixture: round count of the core 0 probe, one calling process
+kernel/kernel/nic_irq_affinity.tkb	nic_irq_evidence_intid	read-by nic_irq_evidence_pin_end,nic_irq_evidence_unpin: 2026-10-31 retain-fixture: the pinned SPI of the boot fixture, core 0
+kernel/kernel/nic_irq_affinity.tkb	nic_irq_phase_start	read-by nic_irq_phase_taken: 2026-10-31 retain-fixture: core 0's snapshot of the atomic counts at a phase
 kernel/kernel/occupancy_drain_evidence.tkb	occupancy_probe_teardowns	read-by occupancy_drain_report,occupancy_probe_teardown: 2026-10-31 retain-fixture: the probe's printed total
 kernel/kernel/occupancy_drain_evidence.tkb	world_stop_probe_inspections	read-by world_stop_probe,world_stop_probe_inspect: 2026-10-31 retain-fixture: the probe's verdict that the stopped inspection ran
 kernel/kernel/occupancy_drain_evidence.tkb	world_stop_stale_probe_controller	read-by world_stop_probe: 2026-10-31 retain-fixture: a second controller, for the stale-token case; WorldStop's own operations reach it
-kernel/kernel/pool_contention_evidence.tkb	contention_pool_grown	unreviewed
+kernel/kernel/pool_contention_evidence.tkb	contention_pool_grown	read-by pool_contention_probe: 2026-10-31 retain-fixture: set in init and read by the probe, core 0
 kernel/kernel/pool_contention_evidence.tkb	contention_pool_ready	read-by contention_pool_init: 2026-10-31 retain-fixture: first-run guard of the probe, core 0
-kernel/kernel/pool_lock_wait.tkb	pool_lock_wait_cores	unreviewed
-kernel/kernel/pool_walk_contention_evidence.tkb	pool_walk_floor	unreviewed
+kernel/kernel/pool_lock_wait.tkb	pool_lock_wait_cores	unreviewed; 2026-10-31 migrate to AtomicWord: a plain add on a cpu_id element before the lock; preemption loses counts. FLIP BREAKS FIRST
+kernel/kernel/pool_walk_contention_evidence.tkb	pool_walk_floor	read-by pool_walk_init,pool_walk_once: 2026-10-31 retain-fixture: set by core 0 before the rendezvous words publish the round; the walker compares only
 kernel/kernel/pool_walk_contention_evidence.tkb	pool_walk_ready	read-by pool_walk_init: 2026-10-31 retain-fixture: first-run guard of the probe, core 0
 kernel/kernel/process.tkb	execution_state	read-by kernel_process_cpu_current_pid,kernel_process_block_current: 2026-10-31 retain-partition: each core's scheduler on its own element, selected by execution_cpu_index; DDB through kernel_process_cpu_current_pid and the protocol observation under the run lock read other cores' elements
 kernel/kernel/process.tkb	kernel_activity	read-by kernel_activity_of,kernel_activity_code_here: 2026-10-31 retain-partition: DDB's per-CPU view with the world stopped (kernel_activity_of) and the running core itself; the partition is by execution_cpu_index, not by type
 kernel/kernel/process.tkb	kernel_crash_trace	read-by kernel_process_crash_trace_copy: 2026-10-31 retain-abi: the DDB and crash snapshots, and the boot trace probes; each core writes its own segment
 kernel/kernel/process.tkb	kernel_crash_trace_next	read-by kernel_process_trace_record: 2026-10-31 retain-abi: its own core's next slot; the only other use is the reset, and the report reads the ring, not this
 kernel/kernel/process.tkb	kernel_process_exec_failure_reason	read-by kernel_process_exec_failure_render: 2026-10-31 retain-abi: the oops text of a failed exec; it is one word shared by every core, so a report shows the last failure's reason, not necessarily the crashing process's
-kernel/kernel/process.tkb	kernel_process_trace_probe_child_frame	unreviewed; 2026-10-31 label retain-abi does not hold: a boot probe's stand-in frame, no debugger or retained-evidence reader; fixture shape, read by kernel_process_trace_block_wake_probe
-kernel/kernel/process.tkb	kernel_process_trace_probe_parent_frame	unreviewed; 2026-10-31 label retain-abi does not hold: a boot probe's stand-in frame, no debugger or retained-evidence reader; fixture shape, read by kernel_process_scheduler_probe_frame_a
+kernel/kernel/process.tkb	kernel_process_trace_probe_child_frame	read-by kernel_process_trace_block_wake_probe,kernel_process_scheduler_probe_frame_b: 2026-10-31 retain-fixture: stand-in frame of the boot trace probes, boot thread before userspace
+kernel/kernel/process.tkb	kernel_process_trace_probe_parent_frame	read-by kernel_process_trace_block_wake_probe,kernel_process_scheduler_probe_frame_a: 2026-10-31 retain-fixture: as the child frame
 kernel/kernel/process.tkb	scheduled_process_freed_site	read-by scheduled_process_freed_site_value: 2026-10-31 retain-abi: the boot report of the first read of a freed record; the writer has won the compare-and-swap of the first-occurrence word
 kernel/kernel/process.tkb	scheduled_process_missing_site	read-by scheduled_process_missing_site_value: 2026-10-31 retain-abi: the boot report of the first missing record; the writer has won the first-occurrence compare-and-swap
 kernel/kernel/process_test_evidence.tkb	process_test_evidence	read-by process_test_evidence_clone_calls,process_test_evidence_exit_42_seen: 2026-10-31 retain-evidence: the boot evidence predicates, kernel_process_*_evidence, and the log lines they gate; a record path can run on any core, so its counts are evidence, not exact totals
-kernel/kernel/profile_samples.tkb	profile_sample_active	unreviewed; 2026-10-06 candidate-diagnostics: named PMU sampling interval / one sampling CPU; per-CPU prefix buffers; local IRQ observation limits
-kernel/kernel/profile_samples.tkb	profile_sample_available	unreviewed; 2026-10-06 candidate-diagnostics: named PMU sampling interval / one sampling CPU; per-CPU prefix buffers; local IRQ observation limits
-kernel/kernel/profile_samples.tkb	profile_sample_checked	unreviewed; 2026-10-06 candidate-diagnostics: named PMU sampling interval / one sampling CPU; per-CPU prefix buffers; local IRQ observation limits
-kernel/kernel/profile_samples.tkb	profile_sample_cores	unreviewed; 2026-10-06 candidate-diagnostics: named PMU sampling interval / one sampling CPU; per-CPU prefix buffers; local IRQ observation limits
-kernel/kernel/profile_samples.tkb	profile_sample_end_counter	unreviewed; 2026-10-06 candidate-diagnostics: named PMU sampling interval / one sampling CPU; per-CPU prefix buffers; local IRQ observation limits
-kernel/kernel/profile_samples.tkb	profile_sample_end_gic	unreviewed; 2026-10-06 candidate-diagnostics: named PMU sampling interval / one sampling CPU; per-CPU prefix buffers; local IRQ observation limits
-kernel/kernel/profile_samples.tkb	profile_sample_end_pending	unreviewed; 2026-10-06 candidate-diagnostics: named PMU sampling interval / one sampling CPU; per-CPU prefix buffers; local IRQ observation limits
-kernel/kernel/profile_samples.tkb	profile_sample_end_state	unreviewed; 2026-10-06 candidate-diagnostics: named PMU sampling interval / one sampling CPU; per-CPU prefix buffers; local IRQ observation limits
-kernel/kernel/profile_session.tkb	irqsoff_core	unreviewed
-kernel/kernel/profile_session.tkb	irqsoff_standing	unreviewed
-kernel/kernel/profile_session.tkb	profile_core_state	unreviewed
-kernel/kernel/profile_session.tkb	profile_session_depth	unreviewed
-kernel/kernel/profile_session.tkb	profile_session_period	unreviewed
-kernel/kernel/profile_session.tkb	profile_session_started	unreviewed
-kernel/kernel/profile_session.tkb	profile_session_stopped	unreviewed
-kernel/kernel/profile_timeline.tkb	profile_timeline_active	unreviewed; 2026-10-06 candidate-diagnostics: named busy-pair timeline / world-stopped start/finish; IRQ-masked per-CPU writers; frozen filters
-kernel/kernel/profile_timeline.tkb	profile_timeline_cores	unreviewed; 2026-10-06 candidate-diagnostics: named busy-pair timeline / world-stopped start/finish; IRQ-masked per-CPU writers; frozen filters
-kernel/kernel/profile_timeline.tkb	profile_timeline_pid_a	unreviewed; 2026-10-06 candidate-diagnostics: named busy-pair timeline / world-stopped start/finish; IRQ-masked per-CPU writers; frozen filters
-kernel/kernel/profile_timeline.tkb	profile_timeline_pid_b	unreviewed; 2026-10-06 candidate-diagnostics: named busy-pair timeline / world-stopped start/finish; IRQ-masked per-CPU writers; frozen filters
+kernel/kernel/profile_samples.tkb	profile_sample_active	read-by profile_sample_irq,profile_sample_interval_active,profile_sample_finish: 2026-10-31 stop: written under the workload interval's MachineStopped; read whole by the PMU IRQ and the session start
+kernel/kernel/profile_samples.tkb	profile_sample_available	read-by profile_sample_report,profile_sample_start: 2026-10-31 stop: set once at the first interval start, under the stop
+kernel/kernel/profile_samples.tkb	profile_sample_checked	read-by profile_sample_start: 2026-10-31 stop: first-start guard, under the stop
+kernel/kernel/profile_samples.tkb	profile_sample_cores	read-by profile_sample_report,profile_sample_store: 2026-10-31 partition: each core's PMU IRQ on its own element; start resets and the report reads outside the interval
+kernel/kernel/profile_samples.tkb	profile_sample_end_counter	read-by profile_sample_report: 2026-10-31 stop: captured by the finish under the stop, printed after
+kernel/kernel/profile_samples.tkb	profile_sample_end_gic	read-by profile_sample_report: 2026-10-31 stop: as profile_sample_end_counter
+kernel/kernel/profile_samples.tkb	profile_sample_end_pending	read-by profile_sample_report: 2026-10-31 stop: as profile_sample_end_counter
+kernel/kernel/profile_samples.tkb	profile_sample_end_state	read-by profile_sample_report: 2026-10-31 stop: as profile_sample_end_counter
+kernel/kernel/profile_session.tkb	irqsoff_core	unreviewed; 2026-10-31 migrate to per_cpu, cross-core reads under a stop: procfs reads a live core's longest and its sites, so a task sees a mismatched pair
+kernel/kernel/profile_session.tkb	irqsoff_standing	unreviewed; 2026-10-31 migrate to per_cpu, cross-core reads under a stop: the boot report prints live peers' tables, as its comment admits
+kernel/kernel/profile_session.tkb	profile_core_state	unreviewed; 2026-10-31 migrate to lock (profile_core_store's buffer mutex, which already exists): a task allocates and releases any core's fields while that core's tick and IRQ use them
+kernel/kernel/profile_session.tkb	profile_session_depth	unreviewed; 2026-10-31 migrate to lock, with profile_session_period: procfs and the sample IRQ read a pair the start writes in several stores
+kernel/kernel/profile_session.tkb	profile_session_period	unreviewed; 2026-10-31 migrate to lock (a session control mutex): written by /proc/takibi/profile writers, no lock, the file comment saying DDB only is stale; two writers race today
+kernel/kernel/profile_session.tkb	profile_session_started	unreviewed; 2026-10-31 migrate to lock, with profile_session_period
+kernel/kernel/profile_session.tkb	profile_session_stopped	unreviewed; 2026-10-31 migrate to lock, with profile_session_period: started and stopped are one record
+kernel/kernel/profile_timeline.tkb	profile_timeline_active	read-by profile_timeline_note: 2026-10-31 stop: written under the workload interval's stop; tested with IRQs masked
+kernel/kernel/profile_timeline.tkb	profile_timeline_cores	read-by profile_timeline_note,profile_timeline_report: 2026-10-31 partition: own element with IRQs masked, so no preemption between cpu_id and the store; the report reads after the interval
+kernel/kernel/profile_timeline.tkb	profile_timeline_pid_a	read-by profile_timeline_pid_relevant: 2026-10-31 stop: set by the start under the stop, before the flag
+kernel/kernel/profile_timeline.tkb	profile_timeline_pid_b	read-by profile_timeline_pid_relevant: 2026-10-31 stop: as profile_timeline_pid_a
 kernel/kernel/protocol_trace.tkb	protocol_trace_active	read-by protocol_trace_is_active: 2026-10-31 retain-protocol: the observers' gate; opened and closed under the run lock
 kernel/kernel/protocol_trace.tkb	protocol_trace_cores	read-by protocol_trace_observe_core,protocol_trace_commit_open: 2026-10-31 retain-protocol: the observation's diff of each core's current and stack, under the run lock
 kernel/kernel/protocol_trace.tkb	protocol_trace_events	read-by protocol_trace_report: 2026-10-31 retain-protocol: the closed window's report, consumed by scripts/validate_protocol_trace.py
@@ -191,7 +191,7 @@ kernel/kernel/workload_evidence.tkb	workload_busy_starve_injection_ticks	read-by
 kernel/kernel/workload_evidence.tkb	workload_busy_starve_remaining	read-by workload_busy_starve_skips,workload_busy_note_tick_locked: 2026-10-31 retain-fixture: ticks left of the injection, in the next-ready walk
 kernel/kernel/workload_evidence.tkb	workload_busy_starve_worker	read-by workload_busy_starve_skips,workload_busy_note_tick_locked: 2026-10-31 retain-fixture: which worker the injection passes over
 kernel/kernel/workload_evidence.tkb	workload_busy_waits	read-by workload_busy_waits_report,workload_busy_wait_pick: 2026-10-31 retain-fixture: the busy pair's wait report, and the next-ready pick
-kernel/kernel/workload_evidence.tkb	workload_ddb_hold_park_since	unreviewed
+kernel/kernel/workload_evidence.tkb	workload_ddb_hold_park_since	read-by workload_peer_console_progress: 2026-10-31 lock: under the run lock, by its one function
 kernel/kernel/workload_evidence.tkb	workload_peer_exec_control	read-by workload_peer_exec_report: 2026-10-31 retain-fixture: the /bin/peer-exec verdict: an exec on core 0 was reported first
 kernel/kernel/workload_evidence.tkb	workload_peer_exec_cpu	read-by workload_peer_exec_report: 2026-10-31 retain-fixture: the /bin/peer-exec verdict: which CPU committed
 kernel/kernel/workload_evidence.tkb	workload_peer_exec_pid	read-by workload_peer_exec_report,workload_exec_commit_note: 2026-10-31 retain-fixture: the /bin/peer-exec verdict, and the filter that takes only that process's exec
@@ -202,10 +202,10 @@ kernel/kernel/workload_evidence.tkb	workload_peer_mutation_pid	read-by workload_
 kernel/kernel/workload_evidence.tkb	workload_peer_mutation_seen	read-by workload_peer_mutation_report,workload_peer_mutation_note: 2026-10-31 retain-fixture: the set of mutations /bin/peer-mutate's verdict requires
 kernel/kernel/workload_evidence.tkb	workload_peer_net_wake_block_requested	read-by workload_peer_net_wake_progress: 2026-10-31 retain-fixture: one-shot of the NetRx publication test, tag-6 syscall
 kernel/kernel/workload_evidence.tkb	workload_peer_net_wake_pid	read-by workload_peer_net_wake_progress: 2026-10-31 retain-fixture: the one process owning that test
-kernel/kernel/workload_evidence.tkb	workload_peer_sleep_armed	unreviewed
-kernel/kernel/workload_evidence.tkb	workload_peer_sleep_done	unreviewed
-kernel/kernel/workload_evidence.tkb	workload_peer_sleep_finished	unreviewed
-kernel/kernel/workload_evidence.tkb	workload_peer_sleep_pid	unreviewed
+kernel/kernel/workload_evidence.tkb	workload_peer_sleep_armed	read-by workload_peer_sleep_progress: 2026-10-31 lock: retain-fixture under the run lock
+kernel/kernel/workload_evidence.tkb	workload_peer_sleep_done	read-by workload_peer_sleep_progress: 2026-10-31 retain-fixture: one-shot of /bin/peer-sleep's single step 1 caller; a second caller is not excluded by its type
+kernel/kernel/workload_evidence.tkb	workload_peer_sleep_finished	read-by workload_peer_sleep_progress: 2026-10-31 lock: retain-fixture written and read under the run lock
+kernel/kernel/workload_evidence.tkb	workload_peer_sleep_pid	read-by workload_peer_sleep_progress: 2026-10-31 lock: retain-fixture under the run lock
 kernel/kernel/workload_evidence.tkb	workload_peer_wait_blocked	read-by workload_peer_wait_report: 2026-10-31 retain-fixture: /bin/peer-mutate's wait4 verdict: it blocked on CPU 1
 kernel/kernel/workload_evidence.tkb	workload_peer_wait_pid	read-by workload_peer_wait_report,workload_peer_wait_note: 2026-10-31 retain-fixture: that verdict and its pid filter
 kernel/kernel/workload_evidence.tkb	workload_peer_wait_reaped	read-by workload_peer_wait_report: 2026-10-31 retain-fixture: /bin/peer-mutate's wait4 verdict: it reaped on CPU 1
@@ -216,68 +216,68 @@ kernel/lib/diagnostic_ring.tkb	diagnostic_trace_records	read-by diagnostic_trace
 kernel/lib/diagnostic_ring.tkb	diagnostic_trace_test_enabled	read-by diagnostic_trace_record: 2026-10-31 retain-protocol: debugger-set arm of the ring's activation test
 kernel/lib/occupancy.tkb	kernel_world_stop	read-by world_stop_machine_begin_kind,cpu_start_reserve: 2026-10-31 retain-owner: the one machine stop; its address is the type index, and the protocol is linear tokens and generation acknowledgements on its AtomicWords, with one plain field keeping this row listed
 kernel/mm/address_space.tkb	address_space_backing_root0	read-by address_space_backing_read_checked,kernel_mmu_init,address_space_diagnostic_snapshot: 2026-10-31 retain-partition: root 0's page-table backing, the one that exists before the allocator; never released; each MMU init reads it
-kernel/mm/process_image.tkb	process_image_root0_record	unreviewed
-kernel/mm/process_image.tkb	process_image_staging	unreviewed
+kernel/mm/process_image.tkb	process_image_root0_record	read-by process_image_record_handle_of_root: 2026-10-31 boot: two words written by the first ensure on the boot thread, never released; BootOnce would fit
+kernel/mm/process_image.tkb	process_image_staging	read-by process_image_load_page,process_image_load_page_ext2: 2026-10-31 slot: by the linear ProcessImageSlot, held across ext2 sleeps; no CPU selects it
 kernel/mm/process_image.tkb	process_image_zero_page	read-by process_image_load_page,process_image_load_page_ext2: 2026-10-31 retain-context: zero bytes to compare and copy; no use writes it, though `cast` could, and its type does not say read-only
 kernel/net/socket_capability.tkb	network_capability_store	read-by network_capability_take,network_capability_ddb_stored: 2026-10-31 retain-owner: one RX admission owner exchanged under its mutex, and DDB's look with the world stopped
 kernel/net/tcp.tkb	pending_tcp_probe_frame	read-by pending_tcp_chain_probe_body: 2026-10-31 retain-fixture: the chain probe's segments copy these bytes; only the chain is checked
 kernel/net/tcp.tkb	pin_sharing_handles	read-by pin_sharing_cycles,pin_sharing_cleanup: 2026-10-31 retain-fixture: the fixture's handles; set up by core 0 before the cycles
 kernel/net/tcp.tkb	pin_sharing_page	read-by pin_sharing_cleanup: 2026-10-31 retain-fixture: the fixture's page, released at the end
-kernel/platform/rpi5/intc.tkb	mip0	unreviewed
-kernel/platform/rpi5/intc.tkb	rp1_msix	unreviewed
-kernel/platform/rpi5/intc.tkb	rp1_msix_cfg_set	unreviewed
-kernel/platform/rpi5/pcie.tkb	bcm_reset	unreviewed
-kernel/platform/rpi5/pcie.tkb	pcie2	unreviewed
-kernel/platform/rpi5/pcie.tkb	pcie_rescal	unreviewed
-kernel/platform/rpi5/system_timer_dtb.tkb	rpi5_system_timer	unreviewed
+kernel/platform/rpi5/intc.tkb	mip0	read-by rp1_vector_route: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after; routed on core 0 at boot
+kernel/platform/rpi5/intc.tkb	rp1_msix	read-by rpi5_irq_windows_attach_bootstrap: 2026-10-31 handle: attach is the one non-write use; rp1_vector_route writes through it at boot; one handle word attached once at boot before its interrupt or first use; only registers change after
+kernel/platform/rpi5/intc.tkb	rp1_msix_cfg_set	read-by rpi5_irq_windows_attach_bootstrap: 2026-10-31 handle: attach is the one non-write use; rp1_vector_iack writes through it in the IRQ path; one handle word attached once at boot before its interrupt or first use; only registers change after
+kernel/platform/rpi5/pcie.tkb	bcm_reset	read-by rpi5_pcie_windows_attach: 2026-10-31 handle: attach is the one non-write use; pcie2_bridge_reset writes through it at boot; one handle word attached once at boot before its interrupt or first use; only registers change after
+kernel/platform/rpi5/pcie.tkb	pcie2	read-by pcie2_link_up,pcie2_config_read32: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
+kernel/platform/rpi5/pcie.tkb	pcie_rescal	read-by pcie_rescal_reset: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
+kernel/platform/rpi5/system_timer_dtb.tkb	rpi5_system_timer	read-by rpi5_system_timer_verify_boot_dtb: 2026-10-31 handle: read at the boot DTB check; one handle word attached once at boot before its interrupt or first use; only registers change after
 kernel/platform/rpi5/usb_provision.tkb	usb_provision_batch	read-by usb_provision_rootfs,usb_provision_rootfs_verify: 2026-10-31 retain-boot: synchronous on core 0 at boot, RPi5 only
 kernel/platform/rpi5/usb_provision.tkb	usb_provision_expanded	read-by usb_provision_rootfs,usb_provision_rootfs_verify: 2026-10-31 retain-boot: one expanded chunk of the embedded image; synchronous on core 0 at boot, RPi5 only
-kernel/platform/rpi5/usb_xhci.tkb	msc_tag	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	rp1_xhci_cap	unreviewed
-kernel/platform/rpi5/usb_xhci.tkb	rp1_xhci_db	unreviewed
-kernel/platform/rpi5/usb_xhci.tkb	rp1_xhci_op	unreviewed
-kernel/platform/rpi5/usb_xhci.tkb	rp1_xhci_rt	unreviewed
-kernel/platform/rpi5/usb_xhci.tkb	xhci_bulk_in_cycle	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	xhci_bulk_in_dci	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	xhci_bulk_in_enq	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	xhci_bulk_out_cycle	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	xhci_bulk_out_dci	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	xhci_bulk_out_enq	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	xhci_cmd_cycle	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	xhci_cmd_enq	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	xhci_dcbaa	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	xhci_ep0_cycle	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	xhci_ep0_enq	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	xhci_evt_cycle	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	xhci_evt_idx	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	xhci_foreign_events	unreviewed
-kernel/platform/rpi5/usb_xhci.tkb	xhci_init_description	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	xhci_last_evt_dw3	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_bulk_in_burst	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_bulk_in_ep	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_bulk_in_mps	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_bulk_out_burst	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_bulk_out_ep	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_bulk_out_mps	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_config_value	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_interface_num	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci.tkb	xhci_slot_id	unreviewed; 2026-10-06 review-device-layout: one USB host controller and mass-storage transport / boot DTB; fixed DMA authorities; command rings/indices; fail-stop device state
-kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_await_cc	unreviewed
-kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_await_timeout	unreviewed
-kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_await_want	unreviewed
-kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_cmd_completions	unreviewed
-kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_doorbell_target	unreviewed
-kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_doorbell_value	unreviewed
-kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_events_claimed	unreviewed
-kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_input_published_at	unreviewed
-kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_output_claimed	unreviewed
-kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_rings_claimed	unreviewed
-kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_rings_quiesced	unreviewed
-kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_tables_claimed	unreviewed
-kernel/printk/log.tkb	kernel_log_core_state	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
-kernel/printk/log.tkb	kernel_log_snapshots	unreviewed; 2026-10-06 candidate-diagnostics: retained log, per-CPU peer mailboxes and terminal TX / atomic ring publication; peer/core0 split; console guard for tagged TX; emergency bypass
-kernel/printk/log.tkb	kernel_log_storm_found	unreviewed
-kernel/printk/log_ring_trace.tkb	log_ring_trace_cpus	unreviewed
-kernel/printk/log_ring_trace.tkb	log_ring_trace_from	unreviewed
-kernel/printk/log_ring_trace.tkb	log_ring_trace_reader_begun	unreviewed
-kernel/printk/log_ring_trace.tkb	log_ring_trace_reader_cpu	unreviewed
+kernel/platform/rpi5/usb_xhci.tkb	msc_tag	read-by msc_cbw_header,msc_csw_receive_attempt: 2026-10-31 lock: the BOT tag, under block_device_lock after boot and core 0 before
+kernel/platform/rpi5/usb_xhci.tkb	rp1_xhci_cap	read-by rpi5_xhci_attach_bootstrap: 2026-10-31 handle: read at attach for the capability values; one handle word attached once at boot before its interrupt or first use; only registers change after
+kernel/platform/rpi5/usb_xhci.tkb	rp1_xhci_db	read-by rpi5_xhci_attach_bootstrap: 2026-10-31 handle: attach is the one non-write use; xhci_ring_doorbell writes through it; one handle word attached once at boot before its interrupt or first use; only registers change after
+kernel/platform/rpi5/usb_xhci.tkb	rp1_xhci_op	read-by xhci_address_device,xhci_halt_and_reset: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
+kernel/platform/rpi5/usb_xhci.tkb	rp1_xhci_rt	read-by xhci_irq_handler,xhci_setup_rings_and_start: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
+kernel/platform/rpi5/usb_xhci.tkb	xhci_bulk_in_cycle	read-by usb_bulk_xfer,xhci_recover_bulk_stall: 2026-10-31 lock: USB transport state, disk I/O after boot only under memory.tkb's block_device_lock (a TaskMutex), core 0 before; disk_* carries no guard, so this is by reading
+kernel/platform/rpi5/usb_xhci.tkb	xhci_bulk_in_dci	read-by msc_csw_receive_attempt,usb_bulk_xfer: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after
+kernel/platform/rpi5/usb_xhci.tkb	xhci_bulk_in_enq	read-by usb_bulk_xfer,xhci_recover_bulk_stall: 2026-10-31 lock: USB transport state, disk I/O after boot only under memory.tkb's block_device_lock (a TaskMutex), core 0 before; disk_* carries no guard, so this is by reading
+kernel/platform/rpi5/usb_xhci.tkb	xhci_bulk_out_cycle	read-by usb_bulk_xfer,xhci_recover_bulk_stall: 2026-10-31 lock: USB transport state, disk I/O after boot only under memory.tkb's block_device_lock (a TaskMutex), core 0 before; disk_* carries no guard, so this is by reading
+kernel/platform/rpi5/usb_xhci.tkb	xhci_bulk_out_dci	read-by usb_bulk_xfer: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after
+kernel/platform/rpi5/usb_xhci.tkb	xhci_bulk_out_enq	read-by usb_bulk_xfer,xhci_recover_bulk_stall: 2026-10-31 lock: USB transport state, disk I/O after boot only under memory.tkb's block_device_lock (a TaskMutex), core 0 before; disk_* carries no guard, so this is by reading
+kernel/platform/rpi5/usb_xhci.tkb	xhci_cmd_cycle	read-by xhci_cmd_advance,xhci_run_command: 2026-10-31 lock: USB transport state, disk I/O after boot only under memory.tkb's block_device_lock (a TaskMutex), core 0 before; disk_* carries no guard, so this is by reading
+kernel/platform/rpi5/usb_xhci.tkb	xhci_cmd_enq	read-by xhci_cmd_advance,xhci_run_command: 2026-10-31 lock: USB transport state, disk I/O after boot only under memory.tkb's block_device_lock (a TaskMutex), core 0 before; disk_* carries no guard, so this is by reading
+kernel/platform/rpi5/usb_xhci.tkb	xhci_dcbaa	read-by xhci_address_device,xhci_dcbaa_clean: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after; the controller reads it by DMA
+kernel/platform/rpi5/usb_xhci.tkb	xhci_ep0_cycle	read-by usb_ctrl_xfer: 2026-10-31 lock: USB transport state, disk I/O after boot only under memory.tkb's block_device_lock (a TaskMutex), core 0 before; disk_* carries no guard, so this is by reading
+kernel/platform/rpi5/usb_xhci.tkb	xhci_ep0_enq	read-by usb_ctrl_xfer: 2026-10-31 lock: USB transport state, disk I/O after boot only under memory.tkb's block_device_lock (a TaskMutex), core 0 before; disk_* carries no guard, so this is by reading
+kernel/platform/rpi5/usb_xhci.tkb	xhci_evt_cycle	read-by xhci_evt_poll,xhci_evt_poll_release: 2026-10-31 lock: USB transport state, disk I/O after boot only under memory.tkb's block_device_lock (a TaskMutex), core 0 before; disk_* carries no guard, so this is by reading
+kernel/platform/rpi5/usb_xhci.tkb	xhci_evt_idx	read-by xhci_event_next,xhci_evt_poll_release: 2026-10-31 lock: USB transport state, disk I/O after boot only under memory.tkb's block_device_lock (a TaskMutex), core 0 before; disk_* carries no guard, so this is by reading
+kernel/platform/rpi5/usb_xhci.tkb	xhci_foreign_events	read-by usb_await_event: 2026-10-31 lock: USB transport state, disk I/O after boot only under memory.tkb's block_device_lock (a TaskMutex), core 0 before; disk_* carries no guard, so this is by reading
+kernel/platform/rpi5/usb_xhci.tkb	xhci_init_description	read-by usb_disk_init_last_report: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after
+kernel/platform/rpi5/usb_xhci.tkb	xhci_last_evt_dw3	read-by xhci_enable_slot: 2026-10-31 lock: written by usb_await_event at each event, disk I/O after boot only under memory.tkb's block_device_lock (a TaskMutex), core 0 before; its one reader is boot bring-up
+kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_bulk_in_burst	read-by xhci_configure_endpoint: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after
+kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_bulk_in_ep	read-by msc_csw_receive_attempt,msc_recover_transport: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after
+kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_bulk_in_mps	read-by xhci_configure_endpoint: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after
+kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_bulk_out_burst	read-by xhci_configure_endpoint: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after
+kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_bulk_out_ep	read-by msc_recover_transport: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after
+kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_bulk_out_mps	read-by xhci_configure_endpoint: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after
+kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_config_value	read-by xhci_configure_endpoint: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after
+kernel/platform/rpi5/usb_xhci.tkb	xhci_msc_interface_num	read-by msc_bulk_only_reset: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after
+kernel/platform/rpi5/usb_xhci.tkb	xhci_slot_id	read-by usb_bulk_xfer,usb_ctrl_xfer: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_await_cc	read-by xhci_ring_event,xhci_ring_submit: 2026-10-31 lock: USB transport state, disk I/O after boot only under memory.tkb's block_device_lock (a TaskMutex), core 0 before; disk_* carries no guard, so this is by reading
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_await_timeout	read-by xhci_ring_event: 2026-10-31 lock: USB transport state, disk I/O after boot only under memory.tkb's block_device_lock (a TaskMutex), core 0 before; disk_* carries no guard, so this is by reading
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_await_want	read-by xhci_ring_event: 2026-10-31 lock: USB transport state, disk I/O after boot only under memory.tkb's block_device_lock (a TaskMutex), core 0 before; disk_* carries no guard, so this is by reading
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_cmd_completions	read-by xhci_input_used,xhci_ring_submit: 2026-10-31 lock: USB transport state, disk I/O after boot only under memory.tkb's block_device_lock (a TaskMutex), core 0 before; disk_* carries no guard, so this is by reading
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_doorbell_target	read-by xhci_ring_publish: 2026-10-31 lock: USB transport state, disk I/O after boot only under memory.tkb's block_device_lock (a TaskMutex), core 0 before; disk_* carries no guard, so this is by reading
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_doorbell_value	read-by xhci_ring_publish: 2026-10-31 lock: USB transport state, disk I/O after boot only under memory.tkb's block_device_lock (a TaskMutex), core 0 before; disk_* carries no guard, so this is by reading
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_events_claimed	read-by xhci_events_start: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_input_published_at	read-by xhci_input_used: 2026-10-31 lock: USB transport state, disk I/O after boot only under memory.tkb's block_device_lock (a TaskMutex), core 0 before; disk_* carries no guard, so this is by reading
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_output_claimed	read-by xhci_output_start: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_rings_claimed	read-by xhci_rings_claim: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_rings_quiesced	read-by xhci_ring_reset_seen,xhci_evt_reset: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after apart from a reset under the same lock
+kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_tables_claimed	read-by xhci_tables_start: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after
+kernel/printk/log.tkb	kernel_log_core_state	unreviewed; 2026-10-31 migrate to per_cpu or a task-owned line (#613 option b): task-context kernel_log_core_here takes cpu_id with IRQs on; a preempted writer continues another CPU's line. FLIP BREAKS FIRST
+kernel/printk/log.tkb	kernel_log_snapshots	unreviewed; 2026-10-31 migrate to Place by slot token: syslog builds and copies a snapshot chosen by cpu_id over a whole syscall; a preempted reader on one CPU has it overwritten or continues on another. FLIP BREAKS FIRST
+kernel/printk/log.tkb	kernel_log_storm_found	read-by kernel_log_storm_check,kernel_log_storm_found_mask: 2026-10-31 retain-fixture: core 0 verifier after every writer of the round finished
+kernel/printk/log_ring_trace.tkb	log_ring_trace_cpus	unreviewed; 2026-10-31 migrate to per_cpu under preempt_off: log_ring_trace_store fills one event over several stores on a cpu_id element in task context. FLIP BREAKS FIRST
+kernel/printk/log_ring_trace.tkb	log_ring_trace_from	read-by log_ring_trace_reader,log_ring_trace_report: 2026-10-31 retain-fixture: written by core 0 before the window opens, read-only inside it
+kernel/printk/log_ring_trace.tkb	log_ring_trace_reader_begun	unreviewed; 2026-10-31 migrate to Place, with log_ring_trace_reader_cpu: one state with it. FLIP BREAKS FIRST
+kernel/printk/log_ring_trace.tkb	log_ring_trace_reader_cpu	unreviewed; 2026-10-31 migrate to Place, naming the traced task and not a CPU: compared with cpu_id; a migrated reader stops being traced. FLIP BREAKS FIRST

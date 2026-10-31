@@ -147,7 +147,42 @@ same image as everything else; `retain-fixture` means the code's purpose is a
 fixture, not that an ordinary boot cannot reach it.
 
 A row whose 2026-10-06 label stopped describing the global stays `unreviewed`
-with a dated note saying so, even when it has a reader.
+with a dated note saying so, even when it has a reader, until a review gives it
+a why that does describe the global.
+
+## Classification of the remaining rows, 2026-10-31
+
+Each of the 164 rows then unreviewed was read in the code and the uses table. 148
+now name a reader, by what their why rests on; none of it is checked:
+
+| rests on | rows | premise a later change could falsify |
+| --- | --- | --- |
+| lock | 34 | every access under a named lock (`block_device_lock`, `ext2_mutation_lock`, the run lock), or core 0 at boot; a `TaskMutex` is kept across preemption |
+| boot | 27 | written on core 0 before userspace, read-only after |
+| handle | 21 | an `IoHandle` word attached once at boot; a register's own read-modify-write is not covered |
+| slot | 18 | a linear slot token (`BlockSlot`, `Ext2Slot`, `ExecWindowSlot`, `ProcessImageSlot`), kept by the task; `cpu_id()` does not select the element |
+| token | 17 | the one `NetRxCanAcquire`, or a packet's slot lock |
+| fixture | 17 | one boot fixture, a debugger arm, or one calling process |
+| stop | 10 | written under `MachineStopped` |
+| partition | 2 | own element with IRQs masked or in the IRQ itself |
+| protocol | 2 | `InitOnce`'s own operations |
+
+16 rows stay `unreviewed`, because a task-context reader or writer can see them
+inconsistent. Their cells name the owner they should migrate to:
+
+| owner | rows |
+| --- | --- |
+| lock | `profile_session_period`, `_depth`, `_started`, `_stopped`, `profile_core_state` |
+| per_cpu | `kernel_log_core_state`, `log_ring_trace_cpus`, `irqsoff_core`, `irqsoff_standing` |
+| Place | `kernel_log_snapshots`, `log_ring_trace_reader_cpu`, `log_ring_trace_reader_begun` |
+| AtomicWord | `pool_lock_wait_cores`, `block_cache_hits`, `kernel_exec_reserve_undercount` |
+| dead | `scheduled_process_record_absent` |
+
+The preemption flip breaks first the six that select an element or a role by
+`cpu_id()` in task context with IRQs on: `kernel_log_core_state`,
+`kernel_log_snapshots`, `log_ring_trace_cpus`, `log_ring_trace_reader_cpu`,
+`log_ring_trace_reader_begun`, `pool_lock_wait_cores`. The other ten are
+already racy without preemption, and the flip widens their windows.
 
 ## Measured, 2026-10-29
 
