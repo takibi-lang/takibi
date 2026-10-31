@@ -13,6 +13,8 @@ fixture never calls. The native support file declares that name.
 import argparse
 from pathlib import Path
 
+from layout_text import AnchorCountError, layout_replace_once
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -20,15 +22,16 @@ def main():
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
     source = args.source.read_text()
-    anchor = "    interrupt_notify();"
-    if source.count(anchor) != 1:
-        raise SystemExit("virtio-net native fixture: expected exactly one IRQ notify anchor")
-    occupancy = 'use "kernel/lib/occupancy.tkb";\n'
-    if source.count(occupancy) != 1:
-        raise SystemExit("virtio-net native fixture: expected exactly one occupancy import")
-    source = source.replace(occupancy, "")
+    try:
+        source = layout_replace_once(source, "    interrupt_notify();", "    virtio_fixture_notify();")
+    except AnchorCountError:
+        raise SystemExit("virtio-net native fixture: expected exactly one IRQ notify anchor") from None
+    try:
+        source = layout_replace_once(source, 'use "kernel/lib/occupancy.tkb";\n', "")
+    except AnchorCountError:
+        raise SystemExit("virtio-net native fixture: expected exactly one occupancy import") from None
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(source.replace(anchor, "    virtio_fixture_notify();"))
+    args.output.write_text(source)
 
 
 if __name__ == "__main__":

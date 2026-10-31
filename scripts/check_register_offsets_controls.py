@@ -22,9 +22,6 @@ PCIE = "kernel/platform/rpi5/pcie.tkb"
 
 
 def planted(base: dict[str, str], path: str, old: str, new: str) -> dict[str, str]:
-    if old not in base[path]:
-        raise SystemExit(f"FAIL register-offsets-controls: {path} no longer "
-                         f"holds {old!r}; update the control")
     changed = dict(base)
     changed[path] = replace_once(base[path], old, new)
     return changed

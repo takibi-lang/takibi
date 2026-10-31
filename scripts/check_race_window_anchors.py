@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 
 from build_qemu_race_window import WINDOWS, spin
+from layout_text import AnchorCountError, layout_replace_once
 from pass_line import report_pass
 
 
@@ -19,11 +20,10 @@ def validate(sources, windows):
         checks = window["check"]
         changes.extend([checks] if isinstance(checks, tuple) else checks)
         for file, before, after in changes:
-            count = edited[file].count(before)
-            if count != 1:
+            try:
+                edited[file] = layout_replace_once(edited[file], before, after)
+            except AnchorCountError as count:
                 errors.append(f"{name}: kernel/{file}: expected one anchor, found {count}")
-                continue
-            edited[file] = edited[file].replace(before, after)
     return errors
 
 
@@ -48,7 +48,7 @@ def main():
     if not validate(sources, {"633": stale}):
         errors.append("control: the obsolete per-CPU accessor was accepted")
     for mutation, replacement in (("absent", ""), ("duplicate", before + before)):
-        changed = {**sources, file: sources[file].replace(before, replacement)}
+        changed = {**sources, file: layout_replace_once(sources[file], before, replacement)}
         if not validate(changed, {"633": WINDOWS["633"]}):
             errors.append(f"control: {mutation} anchor was accepted")
     if errors:

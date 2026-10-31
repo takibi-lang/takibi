@@ -6,12 +6,16 @@ import os
 from pathlib import Path
 import shutil
 
+from layout_text import AnchorCountError, layout_replace_once
+
 
 def replace_once(path, before, after):
     text = path.read_text(encoding="ascii")
-    if text.count(before) != 1:
-        raise ValueError(f"GEM fixture anchor must occur once in {path}: {before!r}")
-    path.write_text(text.replace(before, after), encoding="ascii")
+    try:
+        edited = layout_replace_once(text, before, after)
+    except AnchorCountError:
+        raise ValueError(f"GEM fixture anchor must occur once in {path}: {before!r}") from None
+    path.write_text(edited, encoding="ascii")
 
 
 # The window-closed mode's additions to the fixture. The runner, not this code,
@@ -360,7 +364,9 @@ def main():
             text = driver.read_text(encoding="ascii")
             start = text.index("io struct Rp1GemRegs {")
             end = text.index("\n}", start)
-            fields = re.findall(r"    (\w+): u32 at (0x[0-9A-F]+);", text[start:end])
+            fields = re.findall(r"(\w+):\s*u32\s+at\s+(0x[0-9A-F]+);", text[start:end])
+            if not fields:
+                raise ValueError("GEM fixture: no register fields in Rp1GemRegs")
             fields = [(name, 0x600 if name == "ier" else int(offset, 16)) for name, offset in fields]
             block = "io struct Rp1GemRegs {\n" + "\n".join(
                 f"    {name}: u32 at 0x{offset:02X};" for name, offset in sorted(fields, key=lambda field: field[1]))

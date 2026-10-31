@@ -8,7 +8,12 @@ new call instead. replace_once refuses an anchor that does not occur
 exactly once, naming it, so the control fails at its own anchor rather
 than proving something else. scripts/check_control_replace_once.py
 requires every control to patch through here.
+
+An anchor is found by layout_text (#1311), so moving a newline or an indent in
+the source does not unmoor a control.
 """
+
+from layout_text import AnchorCountError, layout_count, layout_replace_once
 
 
 class ControlAnchorError(RuntimeError):
@@ -16,9 +21,9 @@ class ControlAnchorError(RuntimeError):
 
 
 def replace_once(text: str, old: str, new: str, where: str = "") -> str:
-    count = text.count(old)
-    if count != 1:
+    try:
+        return layout_replace_once(text, old, new)
+    except AnchorCountError as error:
         place = f" in {where}" if where else ""
         raise ControlAnchorError(
-            f"control anchor occurs {count} times{place}, not once: {old!r}")
-    return text.replace(old, new, 1)
+            f"control anchor occurs {error} times{place}, not once: {old!r}") from None

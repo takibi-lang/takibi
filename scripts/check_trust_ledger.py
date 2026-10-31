@@ -78,7 +78,7 @@ JUDGE = "judge"   # should only rise; a fall needs a reason
 # category -> (kind, what it counts)
 CATEGORIES = {
     "raw_mint_files": (TRUST, "files in kernel/RAW_MINT_FILES (the frame, #1017)"),
-    "frame_lines": (TRUST, "lines of the RAW_MINT_FILES files"),
+    "frame_lines": (TRUST, "non-blank lines of the RAW_MINT_FILES files"),
     "device_semantics_files": (TRUST, "files in kernel/DEVICE_SEMANTICS_FILES"),
     "raw_deref_plain": (TRUST, "plain raw dereference budget, kernel files"),
     "raw_deref_io": (TRUST, "io raw dereference budget, kernel files"),
@@ -143,6 +143,7 @@ RULES = {
     "BootOnce": "#1013",
     "code removed": "dead code deleted with no replacement",
     "category split": "the sites moved to another category; none left the base",
+    "counted again": "#1311: the same files, a count that ignores layout",
 }
 
 ISSUE = re.compile(r"#\d+")
@@ -212,7 +213,8 @@ def measure_tree():
     mints = mint_list(KERNEL / "RAW_MINT_FILES")
     counts["raw_mint_files"] = len(mints)
     counts["frame_lines"] = sum(
-        len((ROOT / m).read_text().splitlines()) for m in mints)
+        sum(1 for line in (ROOT / m).read_text().splitlines() if line.strip())
+        for m in mints)
     counts["device_semantics_files"] = len(
         mint_list(KERNEL / "DEVICE_SEMANTICS_FILES"))
 

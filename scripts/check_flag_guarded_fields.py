@@ -19,7 +19,7 @@ commit reports it; running it one commit later does not.
 WHAT COUNTS AS GUARDED
 
   * `has_X` is mentioned anywhere in the function before the read, or
-  * `has_X` is mentioned within two lines after it.
+  * `has_X` is mentioned within the two statements after it.
 
 The second is the read-then-decide shape this tree uses on purpose:
 
@@ -43,9 +43,10 @@ import sys
 import pathlib
 
 from pass_line import report_pass
+from source_scan import code_skeleton, per_file
 from source_scan import function_header
 
-READ_THEN_CHECK_LINES = 3
+READ_THEN_CHECK_ENDS = 3  # the read's own statement and the next two
 FUNCTION = function_header()
 
 
@@ -62,8 +63,9 @@ def struct_flag_pairs(text):
 
 
 def functions(text):
-    """(name, first line index, body lines) for each `fn` in the file."""
-    lines = text.split("\n")
+    """(name, first line index, body lines) for each `fn` in the file, with
+    comments and strings blanked, so neither a brace nor a flag in one counts."""
+    lines = code_skeleton(text).split("\n")
     found, index = [], 0
     while index < len(lines):
         header = FUNCTION.match(lines[index])
@@ -83,11 +85,20 @@ def functions(text):
     return found
 
 
-def findings_for(path):
-    text = path.read_text()
+def after_read(lines):
+    """The text from the read's line up to the end of the second statement
+    after it, so the read-then-decide shape does not depend on line breaks.
+    Each of `;`, `{` and `}` ends a statement; a blank line ends none."""
+    text = "\n".join(lines)
+    ends = list(re.finditer(r"[;{}]", text))
+    return text if len(ends) < READ_THEN_CHECK_ENDS else text[:ends[READ_THEN_CHECK_ENDS - 1].end()]
+
+
+@per_file
+def findings_for_text(path, text):
     pairs = struct_flag_pairs(text)
     if not pairs:
-        return []
+        return ()
     out = []
     for name, start, body in functions(text):
         for field in pairs:
@@ -106,11 +117,10 @@ def findings_for(path):
                 (i for i, line in enumerate(body) if flag.search(line)), None)
             if first_flag is not None and first_flag <= first_read:
                 continue
-            if any(flag.search(line) for line in
-                   body[first_read:first_read + READ_THEN_CHECK_LINES]):
+            if flag.search(after_read(body[first_read:])):
                 continue
             out.append((path, start + 1 + first_read, name, field))
-    return out
+    return tuple(out)
 
 
 def main(argv):
@@ -120,7 +130,7 @@ def main(argv):
     for root in roots:
         for path in sorted(root.rglob("*.tkb")):
             files += 1
-            findings.extend(findings_for(path))
+            findings.extend(findings_for_text(path, path.read_text()))
     for path, line, function, field in findings:
         print("  %s:%d: %s() reads .%s before asking has_%s"
               % (path, line, function, field, field))

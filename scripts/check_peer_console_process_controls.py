@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Keep the peer-console view tied to real admitted EL0 shared-queue writes."""
 
+from layout_text import LayoutSource
 from control_patch import replace_once
 from pathlib import Path
 
@@ -34,6 +35,7 @@ def sources() -> dict[str, str]:
 
 
 def problems(tree: dict[str, str]) -> list[str]:
+    tree = {name: LayoutSource(text) for name, text in tree.items()}
     payload = tree["kernel/arch/arm64/kernel/peer_read.tkb"]
     evidence = tree["kernel/kernel/workload_evidence.tkb"]
     process = tree["kernel/kernel/process.tkb"]

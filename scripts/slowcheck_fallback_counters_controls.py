@@ -40,7 +40,6 @@ def run(root: pathlib.Path):
 def planted(root: pathlib.Path, path: str, old: str, new: str) -> None:
     target = root / path
     text = target.read_text(encoding="ascii")
-    assert text.count(old) == 1, f"{path}: {old!r} is not a unique anchor"
     target.write_text(replace_once(text, old, new), encoding="ascii")
 
 

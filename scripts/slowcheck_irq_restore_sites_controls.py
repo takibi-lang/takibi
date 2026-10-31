@@ -66,7 +66,6 @@ def planted(path, old, new):
     def plant(root):
         target = root / path
         text = target.read_text(encoding="ascii")
-        assert text.count(old) == 1, f"{path}: {old!r} is not a unique anchor"
         target.write_text(replace_once(text, old, new), encoding="ascii")
     return plant
 

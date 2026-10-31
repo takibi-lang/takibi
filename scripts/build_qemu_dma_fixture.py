@@ -5,12 +5,16 @@ from pathlib import Path
 import shutil
 import sys
 
+from layout_text import AnchorCountError, layout_replace_once
+
 
 def replace_once(path, before, after):
     text = path.read_text(encoding="ascii")
-    if text.count(before) != 1:
-        raise SystemExit(f"DMA fixture anchor must occur once in {path}: {before!r}")
-    path.write_text(text.replace(before, after), encoding="ascii")
+    try:
+        edited = layout_replace_once(text, before, after)
+    except AnchorCountError:
+        raise SystemExit(f"DMA fixture anchor must occur once in {path}: {before!r}") from None
+    path.write_text(edited, encoding="ascii")
 
 
 def main():

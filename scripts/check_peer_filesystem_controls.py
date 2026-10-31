@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Keep the peer-filesystem verdict tied to real cross-CPU exclusion."""
 
+from layout_text import LayoutSource
 from control_patch import replace_once
 from pathlib import Path
 
@@ -25,6 +26,7 @@ def sources() -> dict[str, str]:
 
 
 def problems(tree: dict[str, str]) -> list[str]:
+    tree = {name: LayoutSource(text) for name, text in tree.items()}
     memory = tree["kernel/drivers/block/memory.tkb"]
     evidence = tree["kernel/kernel/workload_evidence.tkb"]
     syscall = tree["kernel/kernel/syscall.tkb"]

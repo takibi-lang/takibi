@@ -71,7 +71,6 @@ def edit(relative, old, new):
     def plant(root):
         target = root / relative
         text = target.read_text(encoding="ascii")
-        assert text.count(old) == 1, f"{old!r} is not a unique anchor"
         target.write_text(replace_once(text, old, new), encoding="ascii")
     return plant
 

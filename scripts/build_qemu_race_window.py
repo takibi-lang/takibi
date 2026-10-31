@@ -21,6 +21,8 @@ from pathlib import Path
 import shutil
 import sys
 
+from layout_text import AnchorCountError, layout_replace_once
+
 
 def spin(label: str, peer_only: bool) -> str:
     # About 31 ms (the counter frequency over 32). A window that opens on a
@@ -363,11 +365,12 @@ STALL_PROBE_ON = "const KERNEL_STALL_PROBES: usize = 1;\n"
 
 def replace_once(path: Path, before: str, after: str) -> None:
     source = path.read_text(encoding="ascii")
-    count = source.count(before)
-    if count != 1:
+    try:
+        edited = layout_replace_once(source, before, after)
+    except AnchorCountError as count:
         raise SystemExit(
-            f"expected exactly one race-window edit in {path}, found {count}")
-    path.write_text(source.replace(before, after), encoding="ascii")
+            f"expected exactly one race-window edit in {path}, found {count}") from None
+    path.write_text(edited, encoding="ascii")
 
 # GitHub issue #1211/#1216: the RX handler's line end has woken the reader
 # and queued the echo under the run lock; the echo leaves only in

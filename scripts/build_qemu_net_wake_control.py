@@ -7,12 +7,16 @@ import shutil
 import sys
 
 
+from layout_text import AnchorCountError, layout_replace_once
+
+
 def replace_once(path: Path, before: str, after: str) -> None:
     source = path.read_text(encoding="ascii")
-    count = source.count(before)
-    if count != 1:
-        raise SystemExit(f"expected exactly one control edit in {path}, found {count}")
-    path.write_text(source.replace(before, after), encoding="ascii")
+    try:
+        edited = layout_replace_once(source, before, after)
+    except AnchorCountError as count:
+        raise SystemExit(f"expected exactly one control edit in {path}, found {count}") from None
+    path.write_text(edited, encoding="ascii")
 
 
 # The two sources the control rewrites; every other input is a symlink.

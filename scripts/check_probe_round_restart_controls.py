@@ -5,6 +5,7 @@ import contextlib
 import io
 
 import check_probe_round_restart as checker
+from control_patch import replace_once
 from build_qemu_race_window import WINDOWS
 from pass_line import CaseCount, report_pass
 
@@ -26,8 +27,7 @@ def main():
     # The run-loop edit; #860 put the arming edit before it.
     path, corrected, previous = WINDOWS['678']['check'][-1]
     path = 'kernel/' + path
-    assert sources[path].count(corrected) == 1
-    old = sources[path].replace(corrected, previous)
+    old = replace_once(sources[path], corrected, previous)
     for source in (old, old.replace('for round:', 'for iteration:').replace(
             'false, round + 1', 'false, iteration + 1')):
         check({**sources, path: source}, 1,
