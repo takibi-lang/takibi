@@ -1180,7 +1180,10 @@ fn scheduled_process_record_of_locked(
 // Slot zero is permanent; non-running boot fixtures keep their existing guards.
 private linear view ProcessCurrent[process: usize, phase: ProcessState];
 
+// Idle: no process is current on this CPU, as after an exit with no successor.
+// There is nothing a witness could name, so none is minted (#1307).
 must_use variant ProcessRunningHere {
+    Idle;
     Running(exists process: usize. ProcessCurrent[process, ProcessState::Running]);
 }
 
@@ -1210,6 +1213,9 @@ private inline fn process_constructing_new(generation: usize @ process)
 }
 
 inline fn process_running_here() -> ProcessRunningHere !{unsafe} {
+    if (execution_state[execution_cpu_index()].current_live == false) {
+        return ProcessRunningHere::Idle;
+    }
     return ProcessRunningHere::Running(
         process_running_new(execution_state[execution_cpu_index()].current_handle.generation));
 }
@@ -8069,7 +8075,9 @@ fn kernel_process_timer_schedule(current: sink FrameRef[process, ExceptionLevel:
     }
     execution_state[execution_cpu_index()].reschedule_pending = false;
     kernel_process_spread_timer_enter(current);
-    let ProcessRunningHere::Running(current_authority) = process_running_here() else {};
+    let ProcessRunningHere::Running(current_authority) = process_running_here() else {
+        ProcessRunningHere::Idle => { return TimerSwitch::Resume(current); }
+    };
     let has_relative: bool = kernel_process_current_has_relative(current_authority);
     process_current_end(current_authority);
     if (has_relative) {
@@ -8138,7 +8146,9 @@ fn kernel_process_syscall_return_schedule(current: borrow FrameRef[process, leve
         return FrameSwitch::Stay;
     }
     execution_state[execution_cpu_index()].reschedule_pending = false;
-    let ProcessRunningHere::Running(current_authority) = process_running_here() else {};
+    let ProcessRunningHere::Running(current_authority) = process_running_here() else {
+        ProcessRunningHere::Idle => { return FrameSwitch::Stay; }
+    };
     let has_relative: bool = kernel_process_current_has_relative(current_authority);
     process_current_end(current_authority);
     if (has_relative == false) {
@@ -10508,7 +10518,9 @@ fn kernel_process_trace_block_wake_probe() -> bool !{unsafe} {
     let mut setup_ok: bool = false;
     // The boot context's pid, 0 since #831, and its first child's.
     let parent_pid: usize = kernel_process_current_pid();
-    let ProcessRunningHere::Running(parent_authority) = process_running_here() else {};
+    let ProcessRunningHere::Running(parent_authority) = process_running_here() else {
+        ProcessRunningHere::Idle => { return false; }
+    };
     match kernel_process_clone_begin(parent_authority, 0x11, 0) {
         ProcessCloneResult::Invalid(retained) => { process_current_end(retained); }
         ProcessCloneResult::ResourceExhausted(retained) => { process_current_end(retained); }
@@ -10523,6 +10535,7 @@ fn kernel_process_trace_block_wake_probe() -> bool !{unsafe} {
                 kernel_process_scheduler_probe_stack_depart() &&
                 kernel_process_scheduler_probe_stack_arrive()) {
                 let mut progress: ProcessUartProgressResult = match process_running_here() {
+                    ProcessRunningHere::Idle => { ProcessUartProgressResult::Invalid }
                     ProcessRunningHere::Running(current_authority) => {
                         let mut result: ProcessUartProgressResult = kernel_process_uart_record_parent_progress(current_authority);
                         process_current_end(current_authority);
@@ -10637,7 +10650,9 @@ fn kernel_process_fanout_probe() -> bool !{changes_witness_ProcessCurrent, unsaf
     // them siblings rather than a chain, and it is the sequence the old
     // ceiling made impossible to write.
     for i: usize in 0..<3 {
-        let ProcessRunningHere::Running(parent_authority) = process_running_here() else {};
+        let ProcessRunningHere::Running(parent_authority) = process_running_here() else {
+        ProcessRunningHere::Idle => { return false; }
+    };
         match kernel_process_clone_begin(parent_authority, 0x11, 0) {
             ProcessCloneResult::Invalid(retained) => { process_current_end(retained); return false; }
             ProcessCloneResult::ResourceExhausted(retained) => { process_current_end(retained); return false; }
@@ -10665,7 +10680,9 @@ fn kernel_process_fanout_probe() -> bool !{changes_witness_ProcessCurrent, unsaf
     let live_before_rollback: usize = scheduled_process_pool_live_count();
     let clones_before_rollback: usize = process_test_evidence_clone_calls();
     let mut cancelled_pid: usize = 0;
-    let ProcessRunningHere::Running(parent_authority) = process_running_here() else {};
+    let ProcessRunningHere::Running(parent_authority) = process_running_here() else {
+        ProcessRunningHere::Idle => { return false; }
+    };
     match kernel_process_clone_begin(parent_authority, 0x11, 0) {
         ProcessCloneResult::Invalid(retained) => { process_current_end(retained); return false; }
         ProcessCloneResult::ResourceExhausted(retained) => { process_current_end(retained); return false; }
@@ -10728,6 +10745,7 @@ fn kernel_process_fanout_probe() -> bool !{changes_witness_ProcessCurrent, unsaf
     if (kernel_process_child_waitable_pid_probe(pids[1]) == false) { return false; }
     if (syscall_status_shell_code(kernel_process_child_wait_status_pid(pids[1])) != 41) { return false; }
     let reaped_pid: usize = match process_running_here() {
+        ProcessRunningHere::Idle => { 0 }
         ProcessRunningHere::Running(current_authority) => {
             let value: usize = kernel_process_last_reaped_pid(current_authority);
             process_current_end(current_authority);
@@ -10763,7 +10781,9 @@ private fn kernel_process_exit_waiter_probe(parent: ProcessHandle) -> bool {
         }
     }
     process_run_unlock(guard);
-    let ProcessRunningHere::Running(current_authority) = process_running_here() else {};
+    let ProcessRunningHere::Running(current_authority) = process_running_here() else {
+        ProcessRunningHere::Idle => { return false; }
+    };
     if (arranged == false ||
         kernel_process_current_exit_has_waiter(current_authority) == false) {
         process_current_end(current_authority); return false;
@@ -10867,6 +10887,18 @@ fn kernel_process_scheduler_probe() -> bool !{changes_witness_ProcessCurrent} {
     if (atomic_word_load(&scheduled_process_peer_dispatch_enabled) != 0) { return false; }
     let root_pid: usize = kernel_process_current_pid();
     let mut root_handle: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
+    // #1307: with no process current here, no witness is minted.
+    let live_before: bool = execution_state[execution_cpu_index()].current_live;
+    execution_state[execution_cpu_index()].current_live = false;
+    let idle_refused: bool = match process_running_here() {
+        ProcessRunningHere::Idle => { true }
+        ProcessRunningHere::Running(minted) => {
+            process_current_end(minted);
+            false
+        }
+    };
+    execution_state[execution_cpu_index()].current_live = live_before;
+    if (idle_refused == false) { return false; }
     // The boot thread has no EL0 frame while the boot probes run (#831).
     // Prove no peer selector can take it before exercising normal tasks: its
     // own mask names only the CPU that runs boot.
@@ -10883,7 +10915,9 @@ fn kernel_process_scheduler_probe() -> bool !{changes_witness_ProcessCurrent} {
     }
     process_run_unlock(probe_guard);
     if (bootstrap_peer_refused == false) { return false; }
-    let ProcessRunningHere::Running(parent_authority) = process_running_here() else {};
+    let ProcessRunningHere::Running(parent_authority) = process_running_here() else {
+        ProcessRunningHere::Idle => { return false; }
+    };
     match kernel_process_clone_begin(parent_authority, 0x11, 0) {
         ProcessCloneResult::Invalid(retained) => { process_current_end(retained); return false; }
         ProcessCloneResult::ResourceExhausted(retained) => { process_current_end(retained); return false; }

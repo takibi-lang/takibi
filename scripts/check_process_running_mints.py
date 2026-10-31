@@ -27,7 +27,8 @@ ALLOWED = {
         "kernel_process_timer_schedule": 1,
         "kernel_process_syscall_return_schedule": 1,
         "kernel_process_exit_waiter_probe": 1,
-        "kernel_process_scheduler_probe": 1,
+        # 1307: one more, the negative control with no process current.
+        "kernel_process_scheduler_probe": 2,
         "kernel_syscall_block_return": 1,
         "kernel_syscall_child_exec_return": 1,
         "kernel_syscall_dispatch_action": 1,

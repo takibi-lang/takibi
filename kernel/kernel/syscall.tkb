@@ -4681,7 +4681,9 @@ fn kernel_syscall_uart_block_prepare(frame: borrow FrameRef[process, ExceptionLe
 // one -- whichever syscall handler decided to return SyscallAction::Block
 // records which reason first.
 fn kernel_syscall_block_return(frame_sp: usize) {
-    let ProcessRunningHere::Running(current_authority) = process_running_here() else {};
+    let ProcessRunningHere::Running(current_authority) = process_running_here() else {
+        ProcessRunningHere::Idle => { kernel_invariant_stop(); return; }
+    };
     let frame =
         frame_ref_from_el0_entry(frame_sp, kernel_process_entry_generation());
     let mut switch: BlockSwitch = BlockSwitch::Retry;
@@ -4917,7 +4919,13 @@ fn kernel_syscall_clone_child_return(parent_frame_sp: usize, child_pid: usize)
 // el0_context_resume or a fail-stop.
 fn kernel_syscall_child_exec_return(frame: FrameRef[process, ExceptionLevel::El0],
         args_page: sink PageOwner[page]) !{unsafe} {
-    let ProcessRunningHere::Running(current_authority) = process_running_here() else {};
+    let ProcessRunningHere::Running(current_authority) = process_running_here() else {
+        ProcessRunningHere::Idle => {
+            page_free(args_page);
+            kernel_invariant_stop();
+            return;
+        }
+    };
     kernel_process_exec_failure_clear();
     let result: KernelChildExecPrepareResult =
         kernel_process_child_exec_prepare(current_authority, args_page);
@@ -6648,7 +6656,9 @@ private fn signal_handler_enter(current_authority: borrow ProcessCurrent[current
 //   SVC: the syscall there would end the process at its entry anyway.
 // - A caught signal whose frame cannot be written: Linux forces SIGSEGV.
 fn kernel_signal_return_deliver(frame: borrow FrameRef[process, ExceptionLevel::El0]) !{unsafe} {
-    let ProcessRunningHere::Running(current_authority) = process_running_here() else {};
+    let ProcessRunningHere::Running(current_authority) = process_running_here() else {
+        ProcessRunningHere::Idle => { return; }
+    };
     match kernel_process_current_termination_signal_take() {
         ProcessSignalPendingResult::Missing => {}
         ProcessSignalPendingResult::Pending(ending) => {
@@ -7741,7 +7751,9 @@ private fn syscall_uname(current_authority: borrow ProcessCurrent[process, Proce
 fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usize,
                            x2: usize, x3: usize, x4: usize, frame: MaybeFrame)
         -> SyscallAction !{unsafe} {
-    let ProcessRunningHere::Running(current_authority) = process_running_here() else {};
+    let ProcessRunningHere::Running(current_authority) = process_running_here() else {
+        ProcessRunningHere::Idle => { return SyscallAction::Unreachable; }
+    };
     let exception_class: usize = (esr >> 26) & 0x3F;
     if (exception_class != 0x15) { return syscall_finish_current(frame, SyscallAction::Unreachable, current_authority); }
     // GitHub issue #9: the migration gate, before this syscall touches any
@@ -9179,7 +9191,9 @@ fn syscall_vectored_prefix_wait_probe(address: usize, slot: usize,
             tcp_connection_put(owner);
         }
     }
-    let ProcessRunningHere::Running(probe_current) = process_running_here() else {};
+    let ProcessRunningHere::Running(probe_current) = process_running_here() else {
+        ProcessRunningHere::Idle => { return false; }
+    };
     match user_range_check_write(probe_current, address, 32) {
         UserWriteRangeResult::Fault => { process_current_end(probe_current); return false; }
         UserWriteRangeResult::Ok(range) => {
@@ -9195,6 +9209,7 @@ fn syscall_vectored_prefix_wait_probe(address: usize, slot: usize,
     }
     process_current_end(probe_current);
     let prior_wait: ProcessWaitReason = match process_running_here() {
+        ProcessRunningHere::Idle => { ProcessWaitReason::None }
         ProcessRunningHere::Running(current_authority) => {
             let value: ProcessWaitReason = kernel_process_current_pending_block_reason(current_authority);
             process_current_end(current_authority);
@@ -9204,6 +9219,7 @@ fn syscall_vectored_prefix_wait_probe(address: usize, slot: usize,
     let (action, count) = kernel_syscall_dispatch(
         SYSCALL_TRAP_ESR, AARCH64_NR_READV, 1, address, 2, 0, 0, 0);
     let after_wait: ProcessWaitReason = match process_running_here() {
+        ProcessRunningHere::Idle => { ProcessWaitReason::None }
         ProcessRunningHere::Running(current_authority) => {
             let value: ProcessWaitReason = kernel_process_current_pending_block_reason(current_authority);
             process_current_end(current_authority);
@@ -9268,7 +9284,9 @@ fn syscall_vectored_connected_read_probe(address: usize) -> bool !{unsafe} {
         UnifiedOpenResult::Ok => {
             // readv consumes the connected descriptor's RX data. A short
             // first segment must leave the invalid (null) second untouched.
-            let ProcessRunningHere::Running(probe_current) = process_running_here() else {};
+            let ProcessRunningHere::Running(probe_current) = process_running_here() else {
+        ProcessRunningHere::Idle => { return false; }
+    };
             match user_range_check_write(probe_current, address, 32) {
                 UserWriteRangeResult::Fault => { ok = false; }
                 UserWriteRangeResult::Ok(range) => {
@@ -9286,7 +9304,9 @@ fn syscall_vectored_connected_read_probe(address: usize) -> bool !{unsafe} {
             let (read_action, read_count) = kernel_syscall_dispatch(
                 SYSCALL_TRAP_ESR, AARCH64_NR_READV, 1, address, 2, 0, 0, 0);
             if (read_action != 1 || read_count != 2) { ok = false; }
-            let ProcessRunningHere::Running(probe_current) = process_running_here() else {};
+            let ProcessRunningHere::Running(probe_current) = process_running_here() else {
+        ProcessRunningHere::Idle => { return false; }
+    };
             match user_range_check_read(probe_current, address + 64, 2) {
                 UserReadRangeResult::Fault => { ok = false; }
                 UserReadRangeResult::Ok(range) => {
@@ -9540,7 +9560,9 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
 
             // rt_sigaction: a non-null oldact is zero-filled, not left as
             // whatever was already there (poison it first to prove that).
-            let ProcessRunningHere::Running(probe_current) = process_running_here() else {};
+            let ProcessRunningHere::Running(probe_current) = process_running_here() else {
+        ProcessRunningHere::Idle => { return false; }
+    };
             match user_range_check_write(probe_current, oldact_va, 32) {
                 UserWriteRangeResult::Fault => { ok = false; }
                 UserWriteRangeResult::Ok(range) => {
@@ -9554,7 +9576,9 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
             let (action4, value4) = kernel_syscall_dispatch(
                 SYSCALL_TRAP_ESR, 134, 1, 0, oldact_va, 0, 0, 0);
             if (action4 != 1 || value4 != 0) { ok = false; }
-            let ProcessRunningHere::Running(probe_current) = process_running_here() else {};
+            let ProcessRunningHere::Running(probe_current) = process_running_here() else {
+        ProcessRunningHere::Idle => { return false; }
+    };
             match user_range_check_read(probe_current, oldact_va, 1) {
                 UserReadRangeResult::Fault => { ok = false; }
                 UserReadRangeResult::Ok(range) => {
