@@ -4776,12 +4776,9 @@ struct ExecutionState {
 }
 
 private let mut execution_state: [ExecutionState; KERNEL_MAX_CORES];
-// Hardware affinity is checked once at the state boundary. Preserve the
-// bounded core-zero fallback for an affinity outside the maintained layout.
+// cpu_id's refined result is the bound; no fallback can alias core 0's state.
 private fn execution_cpu_index() -> {0..<KERNEL_MAX_CORES as usize} {
-    let core: usize = cpu_id();
-    if (core < KERNEL_MAX_CORES) { return core; }
-    return 0;
+    return cpu_id();
 }
 
 // The generation an assembly entry gives frame_ref_from_entry: the process

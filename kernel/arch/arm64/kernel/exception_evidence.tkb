@@ -127,21 +127,20 @@ private fn crash_fault_order_address() -> usize {
 // payload and loaded with acquire before any field is read -- the same
 // arrangement kernel/lib/diagnostic_ring.tkb uses, and the same one DDB's own
 // snapshot uses through ddb_snapshot_published_sequence.
-private fn crash_snapshot_valid_address(core: usize) -> usize {
+private fn crash_snapshot_valid_address(core: {0..<KERNEL_MAX_CORES as usize})
+        -> usize {
     return (&crash_snapshot_of(core).valid) as usize;
 }
 
-private fn crash_snapshot_of(core: usize) -> *CrashSnapshot {
+private fn crash_snapshot_of(core: {0..<KERNEL_MAX_CORES as usize})
+        -> *CrashSnapshot {
     let base: *CrashSnapshot = crash_snapshot_per_core;
-    if (core >= KERNEL_MAX_CORES) { return base; }
     return base + (core as isize);
 }
 
 private fn crash_snapshot_capturing_here() -> *bool {
     let base: *bool = crash_snapshot_capturing_per_core;
-    let core: usize = cpu_id();
-    if (core >= KERNEL_MAX_CORES) { return base; }
-    return base + (core as isize);
+    return base + (cpu_id() as isize);
 }
 
 const CRASH_CONSOLE_LINE_BYTES: usize = 32;
@@ -345,9 +344,7 @@ fn ddb_guarded_fault_is_ours(active: bool, armed_address: usize,
 
 private fn kernel_ddb_memory_access_here() -> *DdbGuardedRead {
     let base: *DdbGuardedRead = kernel_ddb_memory_access;
-    let core: usize = cpu_id();
-    if (core >= KERNEL_MAX_CORES) { return base; }
-    return base + (core as isize);
+    return base + (cpu_id() as isize);
 }
 
 fn kernel_ddb_breakpoint_test_checkpoint() {
@@ -1105,9 +1102,9 @@ struct DdbStoppedRoot {
 
 private let mut ddb_stopped_root: [DdbStoppedRoot; KERNEL_MAX_CORES];
 
-private fn ddb_stopped_sequence_address(core: usize) -> usize {
+private fn ddb_stopped_sequence_address(core: {0..<KERNEL_MAX_CORES as usize})
+        -> usize {
     let base: *DdbStoppedRoot = ddb_stopped_root;
-    if (core >= KERNEL_MAX_CORES) { return (&(base).sequence) as usize; }
     return (&(base + (core as isize)).sequence) as usize;
 }
 
@@ -1125,7 +1122,7 @@ fn kernel_ddb_stopped_root_publish(frame_sp: usize, pid: usize,
     // Odd first: a reader arriving now sees "being written" rather than the
     // previous stop's frame, which would still look entirely plausible.
     unsafe {
-        atomic_store_release(ddb_stopped_sequence_address(raw_cpu),
+        atomic_store_release(ddb_stopped_sequence_address(core),
                              settled + 1);
     }
     ddb_stopped_root[core].cpu = raw_cpu;
@@ -1133,7 +1130,7 @@ fn kernel_ddb_stopped_root_publish(frame_sp: usize, pid: usize,
     ddb_stopped_root[core].frame_sp = frame_sp;
     ddb_stopped_root[core].claimed = claimed;
     unsafe {
-        atomic_store_release(ddb_stopped_sequence_address(raw_cpu),
+        atomic_store_release(ddb_stopped_sequence_address(core),
                              settled + 2);
     }
 }
@@ -1171,7 +1168,7 @@ fn kernel_ddb_stopped_root_retire() !{interrupt, unsafe} {
     let core: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
     ddb_stopped_root[core].frame_sp = 0;
     unsafe {
-        atomic_store_release(ddb_stopped_sequence_address(raw_cpu),
+        atomic_store_release(ddb_stopped_sequence_address(core),
                              ddb_stopped_root[core].sequence + 1);
     }
 }
@@ -1212,11 +1209,11 @@ private fn ddb_stopped_unwind_root(core: usize) -> DdbStoppedRootResult
     if (core >= KERNEL_MAX_CORES) { return DdbStoppedRootResult::NotStopped; }
     let bounded: {0..<KERNEL_MAX_CORES as usize} = core;
     let before: usize =
-        unsafe { atomic_load_acquire(ddb_stopped_sequence_address(core)) };
+        unsafe { atomic_load_acquire(ddb_stopped_sequence_address(bounded)) };
     let frame_sp: usize = ddb_stopped_root[bounded].frame_sp;
     let pid: usize = ddb_stopped_root[bounded].pid;
     let after: usize =
-        unsafe { atomic_load_acquire(ddb_stopped_sequence_address(core)) };
+        unsafe { atomic_load_acquire(ddb_stopped_sequence_address(bounded)) };
     match ddb_stopped_root_check(before, after, frame_sp) {
         DdbStoppedCheck::Unstopped => {
             return DdbStoppedRootResult::NotStopped;
@@ -1250,11 +1247,11 @@ private fn ddb_claimed_pid(core: usize) -> usize !{unsafe} {
     if (core >= KERNEL_MAX_CORES) { return 0; }
     let bounded: {0..<KERNEL_MAX_CORES as usize} = core;
     let before: usize =
-        unsafe { atomic_load_acquire(ddb_stopped_sequence_address(core)) };
+        unsafe { atomic_load_acquire(ddb_stopped_sequence_address(bounded)) };
     let frame_sp: usize = ddb_stopped_root[bounded].frame_sp;
     let claimed: usize = ddb_stopped_root[bounded].claimed;
     let after: usize =
-        unsafe { atomic_load_acquire(ddb_stopped_sequence_address(core)) };
+        unsafe { atomic_load_acquire(ddb_stopped_sequence_address(bounded)) };
     match ddb_stopped_root_check(before, after, frame_sp) {
         DdbStoppedCheck::Unstopped => { return 0; }
         DdbStoppedCheck::Moved => { return 0; }
@@ -3206,10 +3203,14 @@ private fn crash_snapshot_render_every_core() !{unsafe} {
                 best_order = order;
             }
         }
-        if (best_core == KERNEL_MAX_CORES) { break; }
-        previous = best_order;
-        rendered = rendered + 1;
-        crash_snapshot_render_core(best_core);
+        let chosen: usize = best_core;
+        if (chosen < KERNEL_MAX_CORES) {
+            previous = best_order;
+            rendered = rendered + 1;
+            crash_snapshot_render_core(chosen);
+        } else {
+            break;
+        }
     }
     ddb_puts("oops: cores reported=");
     ddb_put_udec(rendered);
@@ -3322,7 +3323,8 @@ fn crash_snapshot_render() !{unsafe} {
 }
 
 // One named core's published record, for the reader that walks them all.
-private fn crash_snapshot_render_core(core: usize) !{unsafe} {
+private fn crash_snapshot_render_core(core: {0..<KERNEL_MAX_CORES as usize})
+        !{unsafe} {
     crash_snapshot_render_from(crash_snapshot_of(core),
                                crash_snapshot_of(core).root_slot);
 }

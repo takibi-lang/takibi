@@ -124,9 +124,7 @@ private let mut kernel_log_snapshots: [KernelLogSnapshot; KERNEL_MAX_CORES];
 
 private fn kernel_log_snapshot_here() -> *KernelLogSnapshot {
     let base: *KernelLogSnapshot = kernel_log_snapshots;
-    let core: usize = cpu_id();
-    if (core >= KERNEL_MAX_CORES) { return base; }
-    return base + (core as isize);
+    return base + (cpu_id() as isize);
 }
 
 // The word stores and loads the protocol above is made of.
