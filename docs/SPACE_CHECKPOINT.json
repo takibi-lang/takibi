@@ -2,8 +2,8 @@
   "date": "2026-10-31",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "a96b03d44a29b150f771de653c5d19f07ec4d1c83aefec1d75f34247f4e5a7af",
-  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 002ebbc4: this branch's review, rebound to the merged sources (upstream's record was 2026-10-31 incremental/reuse). Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 8bf275f2: this branch's review, rebound to the merged sources (upstream's record was 2026-10-31 incremental/measured). #1289 step 2: scalar_snapshot and record_stopped answer a closed variant. Measured with scripts/space_delta.py origin/main: text 768168 -> 768608 B qemu, 4133280 -> 4133752 B rpi5; data, BSS and usable RAM start unchanged.",
+  "source_sha256": "82aa4a33a0ab90ffe4545d5bda51b4654b0495a1a12d0315e6d7a55bc76a2058",
+  "workload": "#1289 step 1: the two witness record lookups stop on Stale, one KernelActivity value. Measured with scripts/space_delta.py origin/main: text 769752 -> 769816 B qemu, 4134856 -> 4134936 B rpi5; data and BSS unchanged, no data/BSS symbol changed size, usable RAM start unchanged. Previous: Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 002ebbc4: this branch's review, rebound to the merged sources (upstream's record was 2026-10-31 incremental/reuse). Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 8bf275f2: this branch's review, rebound to the merged sources (upstream's record was 2026-10-31 incremental/measured). #1289 step 2: scalar_snapshot and record_stopped answer a closed variant. Measured with scripts/space_delta.py origin/main: text 768168 -> 768608 B qemu, 4133280 -> 4133752 B rpi5; data, BSS and usable RAM start unchanged.",
   "evidence": [
     "docs/AGGREGATE_MERGE_SPACE_2026-10-23.md",
     "docs/IRQ_PRIORITY_MASK_SPACE_2026-10-23.md",
@@ -14,6 +14,6 @@
     "docs/VERIFICATION_DESIGN.md",
     "kernel/MEMORY_MAP.md"
   ],
-  "assessment": "About 450 B of text for the explicit Absent arms; no storage or allocator change. Accepted.",
+  "assessment": "64 to 80 B of text; no allocation or capacity change. Adopted. Previous: About 450 B of text for the explicit Absent arms; no storage or allocator change. Accepted.",
   "next_trigger": "A second security_floor member. Previous: A new RP1 DMA object that overflows the 256 KiB arena (a link error), or a per-device IOMMU replacing the arena. Previous: #1087 (holes) if it changes the write path's scratch. Previous: #638 stage 8 (the EL1 switch) or #1000's delivery index on FrameRef. Previous: #1172: a load-qemu sample with many armed timers, if the per-tick fire walk shows in a profile. Previous: The PAN slice of #1032 or any change to the identity mapping granularity. Previous: Unchanged by #1166. Previous: A load-qemu stress-ng sample of region occupancy per process, or a change to MMAP_REGION_PAGES or the eager MAP_SHARED population. Previous: A load-qemu stress-ng sample of region occupancy per process, or a change to MMAP_REGION_PAGES or the eager MAP_SHARED population. Previous: A captured pool sample with the pipe row in use (ash transcript or hackbench), or a change to the pipe buffer size or SharedObject layout. The RPi5 lane's SWD load time measured in the land (coordinator), or the next program added to the fixture rootfs (shrink /pad first). A change to the release pass pipeline or split_aggregate_merges, a compact variant union layout, or the next change to process record storage."
 }
