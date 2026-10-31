@@ -2,6 +2,12 @@ use "kernel/kernel/process.tkb";
 use "kernel/lib/byte_slice.tkb";
 use "kernel/kernel/security_floor.tkb";
 
+// Kernel timer ticks as the USER_HZ of 100 that /proc/<pid>/stat is in.
+private fn procfs_clock_ticks(ticks: usize) -> usize {
+    return (ticks / PROCESS_CPU_TICKS_PER_SECOND) * 100 +
+        (ticks % PROCESS_CPU_TICKS_PER_SECOND) * 100 / PROCESS_CPU_TICKS_PER_SECOND;
+}
+
 // Read-only Linux-shaped process diagnostics for the pinned BusyBox ps
 // applet. This is intentionally not a general virtual-filesystem registry.
 // A node is reconstructed from its path and PID; no procfs object retains a
@@ -375,10 +381,18 @@ fn procfs_render_file(inode: usize, output: borrow uninit [u8; 1024..])
     // Fields 14 through 24: utime, stime, child times, priority, nice,
     // thread count, itrealvalue, starttime, vsize and rss. Fields 25 through
     // 39 are consumed (though mostly discarded) by Alpine's enabled
-    // FEATURE_TOP_SMP_PROCESS parser. Zero is an honest value until the
-    // scheduler and VM expose accounted counters.
+    // FEATURE_TOP_SMP_PROCESS parser. Times are in USER_HZ (GitHub issue
+    // #1309); zero is an honest value until the VM exposes accounted counters.
+    offset = procfs_put_byte(output, offset, 0x20);
+    offset = procfs_put_usize(output, offset, procfs_clock_ticks(snapshot.cpu.user_ticks));
+    offset = procfs_put_byte(output, offset, 0x20);
+    offset = procfs_put_usize(output, offset, procfs_clock_ticks(snapshot.cpu.system_ticks));
+    offset = procfs_put_byte(output, offset, 0x20);
+    offset = procfs_put_usize(output, offset, procfs_clock_ticks(snapshot.cpu_children.user_ticks));
+    offset = procfs_put_byte(output, offset, 0x20);
+    offset = procfs_put_usize(output, offset, procfs_clock_ticks(snapshot.cpu_children.system_ticks));
     offset = procfs_put_text(output, offset,
-        bs" 0 0 0 0 0 0 1 0 ");
+        bs" 0 0 1 0 ");
     offset = procfs_put_usize(output, offset, snapshot.start_time_ticks);
     offset = procfs_put_byte(output, offset, 0x20);
     offset = procfs_put_usize(output, offset,

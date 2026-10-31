@@ -417,6 +417,18 @@ struct ProcessRecord {
     itimer_real_due: usize;
     itimer_real_interval_ticks: usize;
     itimer_real_interval_us: usize;
+    // GitHub issue #1309: CPU time for getrusage and /proc/<pid>/stat, in
+    // timer ticks (PROCESS_CPU_TICKS_PER_SECOND). Sampled: the tick charges
+    // whichever process it interrupted, by the level it interrupted, so a
+    // process that runs between ticks is charged nothing and one a tick
+    // lands on is charged the whole tick, as Linux's tick accounting does.
+    // The child pair is what the children that have exited used, added when
+    // each exits. All under the process-run lock. A zeroed record has used
+    // nothing, so a fork child starts at zero; execve keeps them.
+    cpu_user_ticks: usize;
+    cpu_system_ticks: usize;
+    cpu_children_user_ticks: usize;
+    cpu_children_system_ticks: usize;
     // GitHub issue #1176: the process's ids. Read and written only by the
     // process itself (the uid/gid syscalls) and copied into a fork child
     // while it is Constructing, so no lock; execve keeps them (there are
@@ -1593,6 +1605,11 @@ variant ProcessSlotCursor {
     At(ProcessSlot);
 }
 
+struct ProcessCpuTime {
+    user_ticks: usize;
+    system_ticks: usize;
+}
+
 struct ProcessDiagnosticSnapshot {
     pid: usize;
     ppid: usize;
@@ -1600,6 +1617,8 @@ struct ProcessDiagnosticSnapshot {
     state: u8;
     resident_pages: usize;
     start_time_ticks: usize;
+    cpu: ProcessCpuTime;
+    cpu_children: ProcessCpuTime;
     command_line: [u8; 512];
     command_line_length: usize;
 }
@@ -2768,6 +2787,10 @@ private fn scheduled_process_diagnostic_record_fill(
     snapshot.resident_pages = resident_pages;
     snapshot.start_time_ticks =
         record.start_time_ticks;
+    snapshot.cpu.user_ticks = record.cpu_user_ticks;
+    snapshot.cpu.system_ticks = record.cpu_system_ticks;
+    snapshot.cpu_children.user_ticks = record.cpu_children_user_ticks;
+    snapshot.cpu_children.system_ticks = record.cpu_children_system_ticks;
     snapshot.command_line_length =
         record.command_line_length &
         PROCESS_COMMAND_LENGTH_MASK;
@@ -3608,6 +3631,10 @@ private fn scheduled_process_record_reset(guard: borrow ProcessRunGuard[lock],
     record.itimer_real_due = 0;
     record.itimer_real_interval_ticks = 0;
     record.itimer_real_interval_us = 0;
+    record.cpu_user_ticks = 0;
+    record.cpu_system_ticks = 0;
+    record.cpu_children_user_ticks = 0;
+    record.cpu_children_system_ticks = 0;
     let mut root: ProcessCredentials = { 0, 0, 0, 0, 0, 0 };
     record.credentials = root;
     record.sigsuspend_saved_mask = 0;
@@ -8744,6 +8771,50 @@ fn kernel_process_block_net(current: borrow FrameRef[process, level])
         current, ProcessWaitReason::NetRx, 3);
 }
 
+// GitHub issue #1309: the tick rate timer_tick_rearm programs (the counter
+// frequency shifted right by 6).
+const PROCESS_CPU_TICKS_PER_SECOND: usize = 64;
+
+// One tick of CPU time to the process this CPU runs, if any: idle has no
+// current process, and one that has stopped being Running has finished using
+// CPU. The run lock masks interrupts, so this core cannot interrupt its own
+// holder, as kernel_process_tick_wake_if_due relies on too.
+fn kernel_process_tick_charge(user: bool) !{interrupt, unsafe} {
+    if (execution_state[execution_cpu_index()].current_live == false) { return; }
+    let mut current: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
+    let guard = process_run_lock();
+    if (scheduled_process_handle_matches(current) &&
+        scheduled_process_state_of_locked(guard, current) == ProcessSlotState::Running) {
+        let record: &mut ProcessRecord = scheduled_process_record_live_locked(guard, current);
+        if (user) {
+            record.cpu_user_ticks = record.cpu_user_ticks + 1;
+        } else {
+            record.cpu_system_ticks = record.cpu_system_ticks + 1;
+        }
+    }
+    process_run_unlock(guard);
+}
+
+// What getrusage reports for the process running here: its own use, or that
+// of its children that have exited.
+fn kernel_process_current_cpu_time(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+                                   children: bool) -> ProcessCpuTime !{unsafe} {
+    let mut time: ProcessCpuTime = { 0, 0 };
+    if (execution_state[execution_cpu_index()].current_live == false) { return time; }
+    let mut current: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
+    let guard = process_run_lock();
+    let record: &mut ProcessRecord = scheduled_process_record_live_locked(guard, current);
+    if (children) {
+        time.user_ticks = record.cpu_children_user_ticks;
+        time.system_ticks = record.cpu_children_system_ticks;
+    } else {
+        time.user_ticks = record.cpu_user_ticks;
+        time.system_ticks = record.cpu_system_ticks;
+    }
+    process_run_unlock(guard);
+    return time;
+}
+
 fn kernel_process_current_arm_deadline(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], deadline_ticks: usize,
                                        result: usize) {
     if (execution_state[execution_cpu_index()].current_live) {
@@ -12276,6 +12347,25 @@ fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, Pro
     let mut auto_reap: bool = false;
     if (scheduled_process_handle_matches(parent)) {
         auto_reap = scheduled_process_record_live_locked(exit_guard, parent).sigchld_ignored;
+        // GitHub issue #1309: here and not at the reap, which a parent woken
+        // below can outrun: its wait4 returns while this CPU still stands on
+        // the child's stack, and its next getrusage must already see the
+        // child. A child whose parent ignores SIGCHLD is never waited for,
+        // and Linux does not count it.
+        if (auto_reap == false) {
+            let child_record: &mut ProcessRecord =
+                scheduled_process_record_live_locked(exit_guard, child);
+            let user_used: usize =
+                child_record.cpu_user_ticks + child_record.cpu_children_user_ticks;
+            let system_used: usize =
+                child_record.cpu_system_ticks + child_record.cpu_children_system_ticks;
+            let parent_record: &mut ProcessRecord =
+                scheduled_process_record_live_locked(exit_guard, parent);
+            parent_record.cpu_children_user_ticks =
+                parent_record.cpu_children_user_ticks + user_used;
+            parent_record.cpu_children_system_ticks =
+                parent_record.cpu_children_system_ticks + system_used;
+        }
     }
     // Signal state and a possible blocked-to-ready transition are part of
     // the same exit scheduling decision. In particular, a peer scheduler

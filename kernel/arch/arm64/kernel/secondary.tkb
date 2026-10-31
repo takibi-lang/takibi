@@ -355,9 +355,11 @@ fn kernel_tick(frame: sink FrameRef[process, level])
     match frame_level(frame) {
         LeveledFrame::El0(user_frame) => {
             kernel_stack_guard_check_interrupt(frame_ref_address(user_frame));  // issue #375
+            kernel_process_tick_charge(true);
             return kernel_process_timer_schedule(user_frame);
         }
         LeveledFrame::El1(kernel_frame) => {
+            kernel_process_tick_charge(false);
             kernel_process_request_reschedule();
             return TimerSwitch::Resume(kernel_frame);
         }

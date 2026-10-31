@@ -1372,6 +1372,29 @@ const MAP_SHARED_ANONYMOUS: usize = 0x21;
 const MAP_PRIVATE_ANONYMOUS: usize = 0x22;
 const SHARED_PROBE_LENGTH: usize = 8192;
 
+// ru_utime plus ru_stime, in microseconds.
+fn rusage_total(usage_base: *u8, who: usize) -> usize !{unsafe} {
+    fail_if(svc5(GETRUSAGE_SYSCALL, who, ptr_of(usage_base, 0), 0, 0, 0) != 0);
+    return (payload_read_u64(usage_base, 0) + payload_read_u64(usage_base, 16)) * 1000000 +
+        payload_read_u64(usage_base, 8) + payload_read_u64(usage_base, 24);
+}
+
+// Spin in user mode and in the kernel until this process's time moves, for at
+// most ten seconds of the monotonic clock.
+fn rusage_burn_until_charged() !{unsafe} {
+    let mut usage: [u8; 144];
+    let usage_base: *u8 = usage as *u8;
+    let mut now: [u8; 16];
+    let now_base: *u8 = now as *u8;
+    let start_total: usize = rusage_total(usage_base, 0);
+    fail_if(svc5(113, 1, ptr_of(now_base, 0), 0, 0, 0) != 0);
+    let deadline: usize = payload_read_u64(now_base, 0) + 10;
+    while (rusage_total(usage_base, 0) == start_total) {
+        fail_if(svc5(113, 1, ptr_of(now_base, 0), 0, 0, 0) != 0);
+        fail_if(payload_read_u64(now_base, 0) > deadline);
+    }
+}
+
 fn shared_mapping_probe_alone() !{unsafe} {
     shared_mapping_probe();
     svc5(93, 0, 0, 0, 0, 0);
@@ -1445,6 +1468,20 @@ fn shared_mapping_probe() !{unsafe} {
     fail_if(svc5(GETRUSAGE_SYSCALL, 0xFFFFFFFFFFFFFFFF, ptr_of(usage_base, 0), 0, 0, 0) != 0);
     fail_if(svc5(GETRUSAGE_SYSCALL, 5, ptr_of(usage_base, 0), 0, 0, 0) != EINVAL_RC);
     fail_if(svc5(GETRUSAGE_SYSCALL, 0, 1, 0, 0, 0) != EFAULT_RC);
+    // GitHub issue #1309: CPU used shows in RUSAGE_SELF, and a child's in
+    // RUSAGE_CHILDREN once it has been waited for. Each burns until the kernel
+    // reports it, so the check does not depend on how a tick lands; a kernel
+    // that reports no time runs into the bound.
+    let before: usize = rusage_total(usage_base, 0xFFFFFFFFFFFFFFFF);
+    rusage_burn_until_charged();
+    let burner: usize = svc5(220, SIGCHLD, 0, 0, 0, 0);
+    if (burner == 0) {
+        rusage_burn_until_charged();
+        svc5(93, 0, 0, 0, 0, 0);
+    }
+    fail_if(burner >= 0x8000000000000000);
+    fail_if(svc5(260, burner, 0, 0, 0, 0) != burner);
+    fail_if(rusage_total(usage_base, 0xFFFFFFFFFFFFFFFF) <= before);
 
     let mut fs: [u8; 120];
     let fs_base: *u8 = fs as *u8;

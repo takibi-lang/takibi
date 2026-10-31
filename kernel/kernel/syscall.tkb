@@ -1476,10 +1476,11 @@ fn syscall_madvise(current_authority: borrow ProcessCurrent[current_process, Pro
     return SyscallAction::Resume(0);
 }
 
-// GitHub issue #1147: getrusage(2). This kernel accounts no CPU time,
-// faults, I/O or context switches per process, so every field of the
-// 144-byte struct rusage is 0, as Linux reports a field it does not keep;
-// `who` is checked as Linux checks it.
+// GitHub issue #1147: getrusage(2). This kernel accounts no faults, I/O or
+// context switches per process, so every field of the 144-byte struct rusage
+// but the first two is 0, as Linux reports a field it does not keep; `who` is
+// checked as Linux checks it. ru_utime and ru_stime are the sampled CPU time
+// (GitHub issue #1309).
 fn syscall_getrusage(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
                      who: usize, usage: usize) -> usize {
     // RUSAGE_SELF 0, RUSAGE_THREAD 1, RUSAGE_CHILDREN -1 (an int).
@@ -1490,12 +1491,25 @@ fn syscall_getrusage(current_authority: borrow ProcessCurrent[current_process, P
     match user_range_check_write(current_authority, usage, 144) {
         UserWriteRangeResult::Fault => { return LINUX_EFAULT; }
         UserWriteRangeResult::Ok(range) => {
-            match user_zero_fill(range) {
+            let mut time: ProcessCpuTime = kernel_process_current_cpu_time(
+                current_authority, who_word == 0xFFFFFFFF);
+            let mut written = user_zero_fill(range);
+            written = user_write_join(written, getrusage_write_timeval(range, 0, time.user_ticks));
+            written = user_write_join(written, getrusage_write_timeval(range, 16, time.system_ticks));
+            match written {
                 UserWriteResult::Fault => { return LINUX_EFAULT; }
                 UserWriteResult::Written => { return 0; }
             }
         }
     }
+}
+
+private fn getrusage_write_timeval(range: borrow UserWriteRange[process], offset: usize,
+                                   ticks: usize) -> UserWriteResult !{unsafe} {
+    let seconds: usize = ticks / PROCESS_CPU_TICKS_PER_SECOND;
+    let micros: usize = (ticks % PROCESS_CPU_TICKS_PER_SECOND) * (MICROS_PER_SECOND / PROCESS_CPU_TICKS_PER_SECOND);
+    let written = user_write_u64(range, offset, seconds as u64);
+    return user_write_join(written, user_write_u64(range, offset + 8, micros as u64));
 }
 
 // GitHub issue #1147: statfs(2), struct statfs as arm64's generic 64-bit
