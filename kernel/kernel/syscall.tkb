@@ -8534,8 +8534,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // afterwards, which another child's exit on a peer can overwrite.
         match kernel_process_current_zombie_pick(selecting, requested_pid) {
             ProcessChildZombieResult::Missing => {
-                // Decided collectable above, and only this process reaps
-                // its own zombies, so this does not happen; ask again.
+                // Decided collectable above, in an earlier hold; a deferred
+                // reap of an ignored child can have taken it since. Ask again.
                 return syscall_finish_current(frame, SyscallAction::WaitInterrupt, current_authority);
             }
             ProcessChildZombieResult::Found(picked) => {

@@ -190,10 +190,10 @@ model, not of the kernel.
 | `Wait4Block` | the wait4 arm of `kernel_syscall_dispatch_action`, `kernel_process_block_to_idle` | a parent blocks before its child exits, with no successor | the #550 window -- modelled elsewhere: `Wait4Block.Wait4Decide` | `8d206bd0b093` |
 | `Nap` | `kernel_process_block_to_idle` | a process blocks for anything but a child's exit, with no successor | what it waits for -- irrelevant to `StackSafety`: every other wait reason blocks and wakes the same way | `b69dd3aa57b4` |
 | `Wake` | `kernel_process_tick_wake_scan` | a napping process becomes Ready wherever its stack is | the other wakers (UART, network, signal) -- irrelevant to `StackSafety`: each makes a Blocked process Ready and moves no stack | `babe945aa54b` |
-| `ChildExit` | `kernel_process_child_exit`, `kernel_syscall_exit_current_process`, `signal_return_exit` | the child becomes a zombie and wakes a Blocked parent, leaving it Ready with its continuation; the core still stands on the zombie's stack. The exit runs from a syscall or, since #949, from the return-to-EL0 hook after `SwitchComplete` has settled the core on the process's stack: the same `Settled` state the action requires | zombie draining -- guarded: `scheduled_process_exited_take` fail-stops with `reap-on-owned-stack`; SIGCHLD -- irrelevant to `StackSafety`: it moves no stack and no core's current process; the init-child exit log line (#887) -- irrelevant to `StackSafety`: it only reads the record under the run lock and writes the log | `a03b6fda546b` |
+| `ChildExit` | `kernel_process_child_exit`, `kernel_syscall_exit_current_process`, `signal_return_exit` | the child becomes a zombie and wakes a Blocked parent, leaving it Ready with its continuation; the core still stands on the zombie's stack. The exit runs from a syscall or, since #949, from the return-to-EL0 hook after `SwitchComplete` has settled the core on the process's stack: the same `Settled` state the action requires | zombie draining -- guarded: `scheduled_process_exited_take` fail-stops with `reap-on-owned-stack`; SIGCHLD -- irrelevant to `StackSafety`: it moves no stack and no core's current process; the init-child exit log line (#887) -- irrelevant to `StackSafety`: it only reads the record under the run lock and writes the log | `32a6105d600c` |
 | `ChildExitStart` | `kernel_process_child_exit` | the same exit reserving the woken parent for this core at once, only when no core owns the parent's stack; `Commit` makes it current | affinity -- irrelevant to `StartsOnFreeStack`: it only forbids some starts, and the model already allows each one it forbids | `e50f8f38411e` |
 | `IdleEnter` | `kernel_process_stack_idle_complete`, `kernel_process_stack_idle_blocked` | a core with no current process moves to its idle stack and releases the one it stood on | nothing | `3151a0ca2353` |
-| `Wait4Reap` | `kernel_syscall_wait4_deliver` | the parent reaps once the child's stack is free | which process reaps (a deferred reap, an exiting parent's drain) -- guarded: `scheduled_process_exited_take` fail-stops with `reap-on-owned-stack` | `e5296b3f3dac` |
+| `Wait4Reap` | `kernel_syscall_wait4_deliver` | the parent reaps once the child's stack is free | which process reaps (a deferred reap, an exiting parent's drain) -- guarded: `scheduled_process_exited_take` fail-stops with `reap-on-owned-stack` | `013b300079bc` |
 | `LeaveBegin` | `kernel_process_core0_leave_excluded`, `kernel_process_migrate_current` | a running process stops being its core's current process and stays Running | why it leaves (affinity, a refused syscall, the tick) -- irrelevant to `StackSafety`: the model lets a running process leave at any step, which covers every reason | `4f045bdabc54` |
 | `LeaveComplete` | `kernel_process_stack_idle_yield` | on the idle stack, the process the core stood on is made Ready and its stack released | nothing | `d9dad47d4287` |
 | `InterruptDepart` | `kernel_process_stack_interrupt_depart` | an interrupt from EL0 moves the core to its IRQ stack and releases the interrupted process's stack; the process stays current and Running, and `SwitchComplete` takes it back at the return | which interrupt it was -- irrelevant to `StackSafety`: every lower-EL IRQ enters through the same hook | `cee90a827978` |
@@ -359,14 +359,14 @@ Properties:
 
 ## RecordLifetime.tla -- a process record read while another CPU reaps it (#482)
 
-One record, one reader, one reaper, and the process's own execve. The
+One record, one reader, two reapers, and the process's own execve. The
 reader is a scheduler walk, an interrupt-side wake or procfs's snapshot: it
 holds the process-run lock, probes the record live, lets the pool's view
 go, and reads through the pointer. The reaper tears down what the exited
 process owned, then removes the record from the pool. execve rewrites the
 live record's command line, which the snapshot copies (#618).
 
-Four variants:
+Six variants:
 
 - `REMOVE_UNDER_LOCK = FALSE` is the kernel before #482. The removal ran
   outside the run lock, and TLC finds a read of a freed record in five
@@ -382,12 +382,19 @@ Four variants:
 - `EXEC_WRITES_UNDER_LOCK = FALSE` is execve rewriting the command line
   outside the run lock. The rewrite is then two steps, and a locked reader
   copies between them: TLC reports `NoTornRead` in three steps.
+- `TAKE_EXCLUSIVE = FALSE` is the kernel before #1294: the take leaves the
+  record Exited, a second reaper takes it in the gap before the first one's
+  removal, and TLC reports `TeardownOnce`. The `takesharedfree` variant is the
+  same kernel with that invariant left out: TLC goes on to `FreesOnlyItsOwn`,
+  the second removal freeing the slot's next occupant.
 
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |
 | `ReaderProbe`, `ReaderMiss`, `ReaderRead` | `kernel_process_secondary_start`, `kernel_process_next_ready`, `kernel_process_tick_wake_scan`, `scheduled_process_diagnostic_snapshot`, `kernel_process_session_get`, via `scheduled_process_record_locked` (including the snapshot under the same run lock) | the probe retains its pool view, transfers the record-reference loan to the existing run guard, and releases the view; the read comes later under that same guard | which reader reads and what it reads besides the command line -- irrelevant to `ReadsOnlyLiveRecords`: the property depends only on whether the record was freed before the read; the monitor's `ps` and `proc`, which read with no lock -- irrelevant to `ReadsOnlyLiveRecords`: they run with every other CPU stopped, so no reap can land during the read; the snapshot's resident page count, read since #1071 after the run unlock from process-image handle words copied under it -- irrelevant to `ReadsOnlyLiveRecords`: it reads the image pool through a generation-checked pin, never the process record, and a freed image reads as 0 | `6e9e59f11b32` |
-| `ReaperTeardown` | `scheduled_process_reap_teardown` | frees what only the exited process owned; no lock | nothing | `bc1b5b838038` |
-| `ReaperRemove` | `scheduled_process_reap_remove`, `scheduled_process_slot_remove` | resets and removes the record, under the run-lock guard since #482; since #745 the removal takes the record's Held permission back out of its RegionPool slot (once; a second removal finds it not Held), scrubs and frees it | releasing the placement pin (#686), and (#672) taking the stack run's permission out of the record's `stack` place under the pool lock before the record goes -- irrelevant to `RecordInvariants`: both end a token held in the live record and read or free no other record | `d1f8203feae2` |
+| `ReaperTake`, `ReaperMiss`, `SecondReaperTake`, `SecondReaperMiss` | `scheduled_process_exited_take`, `kernel_process_reap_zombie` | the take under the run lock, moving the record to Reaping since #1294, with the unlink in the same hold; a reaper whose take finds no Exited record does nothing | the search that found the zombie, in an earlier hold -- irrelevant to `TeardownOnce`: both reapers are modelled as already holding its handle, which is the worst case; the stack-owner fail-stop in the take -- modelled elsewhere: `StackOwnership.Wait4Reap` | `17279d90e714` |
+| `SlotReuse` | `scheduled_process_alloc` | the pool hands the freed slot to a new process, with a new generation | everything else of allocation -- irrelevant to `FreesOnlyItsOwn`: only that the slot has a new occupant matters | `bc311045f360` |
+| `ReaperTeardown`, `SecondReaperTeardown` | `scheduled_process_reap_teardown` | frees what only the exited process owned; no lock | nothing | `bc1b5b838038` |
+| `ReaperRemove`, `SecondReaperRemove` | `scheduled_process_reap_remove`, `scheduled_process_slot_remove` | resets and removes the record, under the run-lock guard since #482; since #745 the removal takes the record's Held permission back out of its RegionPool slot (once; a second removal finds it not Held), scrubs and frees it | releasing the placement pin (#686), and (#672) taking the stack run's permission out of the record's `stack` place under the pool lock before the record goes -- irrelevant to `RecordInvariants`: both end a token held in the live record and read or free no other record | `d1f8203feae2` |
 | `Exit` | `kernel_process_child_exit` | the process becomes a zombie | the rest of exit -- irrelevant to `ReadsOnlyLiveRecords`: only the zombie state lets a reaper start, and nothing else in exit frees the record | `e50f8f38411e` |
 | `ExecWrite`, `ExecWriteEnd` | `syscall_execve_current_with`, `scheduled_process_set_command_line` | the live process's command line is replaced in one critical section under the run lock; `ExecWriteEnd` is the second half only the unfixed variant takes | the argument count, inode and pending flag written in the same hold -- irrelevant to `NoTornRead`: no reader copies them | `3e695faae708` |
 

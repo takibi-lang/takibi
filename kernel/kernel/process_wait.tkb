@@ -15,6 +15,10 @@
 //                      CPU settles the continuation; a refused start yields
 //                      it back to ReadyWait4, so no other CPU reaps the
 //                      child while its exit is still on its kernel stack
+//   Reaping            an Exited record one reaper has taken. It stays held
+//                      through the teardown, outside the run lock, and only
+//                      that reaper removes it, so a second take finds no
+//                      Exited record and mints nothing (#1294)
 //
 // Readers ask through process_state_kind and process_wait_reason, which
 // answer as the two fields did: ReadyWait4 is Ready and Resuming is
@@ -40,7 +44,8 @@ enum ProcessWaitReason: u8 {
 }
 
 // The kind of state, as readers compare it.
-enum ProcessSlotState: u8 { Free; Ready; Running; Blocked; Exited; Constructing; }
+// Reaping is last so the codes the reports print for the others are unchanged.
+enum ProcessSlotState: u8 { Free; Ready; Running; Blocked; Exited; Constructing; Reaping; }
 
 // Free is first: a zeroed record is a free one.
 variant ProcessRecordState {
@@ -52,6 +57,7 @@ variant ProcessRecordState {
     Constructing;
     ReadyWait4(usize);
     Resuming(usize);
+    Reaping;
 }
 
 struct ProcessStateCell {
@@ -75,6 +81,7 @@ fn process_state_kind(cell: &ProcessStateCell) -> ProcessSlotState {
         }
         ProcessRecordState::ReadyWait4(_) => { return ProcessSlotState::Ready; }
         ProcessRecordState::Resuming(_) => { return ProcessSlotState::Running; }
+        ProcessRecordState::Reaping => { return ProcessSlotState::Reaping; }
     }
 }
 
@@ -133,6 +140,12 @@ fn process_state_run(cell: &mut ProcessStateCell) {
 
 fn process_state_exit(cell: &mut ProcessStateCell) {
     (*cell).value = ProcessRecordState::Exited;
+}
+
+// One reaper takes the record: scheduled_process_exited_take, which has just
+// read Exited under the run lock.
+fn process_state_reap(cell: &mut ProcessStateCell) {
+    (*cell).value = ProcessRecordState::Reaping;
 }
 
 // A CPU takes a Ready process. A pending wait4 continuation goes with it

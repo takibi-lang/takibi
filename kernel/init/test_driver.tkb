@@ -814,6 +814,17 @@ fn kernel_init_boot_fixture_poll(current_authority: borrow ProcessCurrent[curren
     kernel_boot_log("process reap: unlinked=");
     uart_put_udec(kernel_process_reap_unlinked_count_value());
     kernel_boot_log("\n");
+    // GitHub issue #1294: the table probe's second reaper, placed in the gap
+    // between a take and its removal.
+    kernel_boot_log("process reap: second reaper refused=");
+    if (scheduled_process_second_reaper_refused_value() != 0) {
+        kernel_boot_log("yes");
+    } else {
+        kernel_boot_log("no");
+    }
+    kernel_boot_log(" minted=");
+    uart_put_udec(scheduled_process_second_reaper_minted_value());
+    kernel_boot_log("\n");
     // GitHub issue #579: which cores carried an EL0 process this boot, under
     // the `smp bringup:` prefix its per-platform view already captures. That
     // view says which cores STARTED; a core that starts and runs nothing

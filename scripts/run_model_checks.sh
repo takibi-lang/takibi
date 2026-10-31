@@ -144,7 +144,9 @@ check_model RecordLifetime RecordInvariants 6 \
     fixed:CInitFixed:pass:ok \
     unfixed:CInitUnfixed:ReadsOnlyLiveRecords:violated \
     readerunlocked:CInitReaderUnlocked:ReadsOnlyLiveRecords:violated \
-    execunlocked:CInitExecUnlocked:NoTornRead:violated
+    execunlocked:CInitExecUnlocked:NoTornRead:violated \
+    takeshared:CInitTakeShared:TeardownOnce:violated \
+    takesharedfree:CInitTakeShared:FreesOnlyItsOwn:violated
 
 check_model ConsoleTx Safety 10 \
     fixed:CInitFixed:pass:ok \

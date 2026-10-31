@@ -2469,6 +2469,7 @@ private fn ddb_state_name(state: usize) -> *u8 {
         3 => { return "blocked"; }
         4 => { return "exited"; }
         5 => { return "constructing"; }
+        6 => { return "reaping"; }
         _ => { return "unknown"; }
     }
 }

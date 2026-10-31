@@ -172,7 +172,12 @@ stack another CPU owns (`StartsOnFreeStack` in
 while the CPU that ran its exit still stands on its stack: the zombie
 searches skip it, and wait4 waits for an interrupt and asks again;
 `scheduled_process_exited_take`, which every reap passes, fail-stops with
-activity `reap-on-owned-stack` if a path does not.
+activity `reap-on-owned-stack` if a path does not. The take is also
+exclusive (GitHub issue #1294): it moves the record from Exited to Reaping
+under the run lock, so of two reapers that found one zombie under earlier holds
+-- a deferred reap of an ignored child and its parent in wait4 or its exit
+drain -- the second gets Missing and does nothing
+(`kernel/models/RecordLifetime.tla`).
 
 `kernel_process_block_would_miss` is where every wait reason answers the
 decide-then-sleep question (GitHub issue #550): a wait decides in one

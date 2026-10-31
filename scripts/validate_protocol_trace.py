@@ -37,7 +37,7 @@ this window is one the model has. It does not claim the model is right, and
 it says nothing about paths the window did not run.
 
 The kernel's state codes: 1 Ready, 2 Running, 3 Blocked, 4 Exited,
-5 Constructing; a Blocked process whose wait reason is 2 (ChildExit) is the
+5 Constructing (a record a reaper took is still reported as 4); a Blocked process whose wait reason is 2 (ChildExit) is the
 model's "Blocked", any other is "Napping". A removed record is "Reaped"; a
 pid first seen mid-window as a fresh Constructing record (allocation is
 ordered by the pool lock, not the run lock) is Constructing from the start;

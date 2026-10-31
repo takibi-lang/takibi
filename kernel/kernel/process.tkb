@@ -1608,6 +1608,7 @@ private fn scheduled_process_ddb_record(
         ProcessSlotState::Blocked => { result.state = 3; }
         ProcessSlotState::Exited => { result.state = 4; }
         ProcessSlotState::Constructing => { result.state = 5; }
+        ProcessSlotState::Reaping => { result.state = 6; }
     }
     match process_wait_reason(&record.state) {
         ProcessWaitReason::None => { result.wait_reason = 0; }
@@ -1724,6 +1725,9 @@ fn scheduled_process_fd_context_handle_stopped(
 // core's current process and the stack it stands on.
 const PROTOCOL_TRACE_PROBE_BUDGET: usize = 256;
 
+// The protocol models stop at Exited: to them a record is Exited until it is
+// removed, and who took it is RecordLifetime.tla's question. So Reaping is
+// reported as Exited here, and validate_protocol_trace.py's codes stand.
 private fn kernel_process_protocol_state(state: ProcessSlotState) -> usize {
     match state {
         ProcessSlotState::Free => { return 0; }
@@ -1732,6 +1736,7 @@ private fn kernel_process_protocol_state(state: ProcessSlotState) -> usize {
         ProcessSlotState::Blocked => { return 3; }
         ProcessSlotState::Exited => { return 4; }
         ProcessSlotState::Constructing => { return 5; }
+        ProcessSlotState::Reaping => { return 4; }
     }
 }
 
@@ -2493,6 +2498,7 @@ private fn scheduled_process_diagnostic_record_fill(
         ProcessSlotState::Blocked => { snapshot.state = 0x53; }
         ProcessSlotState::Exited => { snapshot.state = 0x5A; }
         ProcessSlotState::Constructing => { snapshot.state = 0x49; }
+        ProcessSlotState::Reaping => { snapshot.state = 0x5A; }
     }
     snapshot.resident_pages = resident_pages;
     snapshot.start_time_ticks =
@@ -4119,6 +4125,12 @@ fn scheduled_process_exited_take(guard: borrow ProcessRunGuard[lock],
         kernel_activity_set(KernelActivity::ReapOnOwnedStack);
         kernel_invariant_stop();
     }
+    // GitHub issue #1294: the take is exclusive. Every reaper drops the run
+    // lock for the teardown and takes it again for the removal; left Exited,
+    // the record could be taken again in that gap, with a second owner, a
+    // second teardown, and a removal that re-derives the slot by address and
+    // frees whoever occupies it by then.
+    process_state_reap(&scheduled_process_record_of_locked(guard, handle).state);
     let owner = scheduled_process_owner_new(handle.pool_index,
                                             handle.generation);
     let state = scheduled_process_reapable_state(owner);
@@ -4541,6 +4553,7 @@ fn scheduled_process_probe_cycle(handle: ProcessHandle) -> bool !{unsafe} {
         ScheduledProcessExitedTakeResult::Exited(resources) => {
             let (owner, exited) = resources;
             process_run_unlock(guard);
+            scheduled_process_probe_second_reaper(handle);
             scheduled_process_reap_teardown(owner);
             let remove_guard = process_run_lock();
             scheduled_process_reap_remove(remove_guard, owner, exited);
@@ -4548,6 +4561,44 @@ fn scheduled_process_probe_cycle(handle: ProcessHandle) -> bool !{unsafe} {
             return true;
         }
     }
+}
+
+// GitHub issue #1294: a second reaper arrives in the gap between a take and
+// the removal, the window two CPUs can meet in, placed there deterministically
+// on this one: through the whole reap entry, as a parent's wait4 or exit drain
+// would, and then asking the take directly. Neither may get the record. On a
+// take that left it Exited this runs a whole second reap here, and the first
+// reaper's teardown then frees a released record.
+private let mut scheduled_process_second_reaper_refused: AtomicWord;
+private let mut scheduled_process_second_reaper_minted: AtomicWord;
+
+fn scheduled_process_second_reaper_refused_value() -> usize {
+    return atomic_word_load(&scheduled_process_second_reaper_refused);
+}
+
+fn scheduled_process_second_reaper_minted_value() -> usize {
+    return atomic_word_load(&scheduled_process_second_reaper_minted);
+}
+
+private fn scheduled_process_probe_second_reaper(handle: ProcessHandle)
+        !{unsafe} {
+    let mut slot: RegionHeld(ProcessRecord) = handle.pool_index;
+    let generation: usize = handle.generation;
+    let second_status: ProcessEnd = kernel_process_reap_zombie(handle, handle);
+    let guard = process_run_lock();
+    match scheduled_process_exited_take(guard,
+            process_handle_new(slot, generation)) {
+        ScheduledProcessExitedTakeResult::Missing => {
+            atomic_word_fetch_add(&scheduled_process_second_reaper_refused, 1);
+        }
+        ScheduledProcessExitedTakeResult::Exited(minted) => {
+            let (owner, state) = minted;
+            atomic_word_fetch_add(&scheduled_process_second_reaper_minted, 1);
+            scheduled_process_state_drop(state);
+            scheduled_process_owner_drop(owner);
+        }
+    }
+    process_run_unlock(guard);
 }
 
 private fn scheduled_process_probe_cycle_locked(
@@ -5912,7 +5963,8 @@ fn kernel_process_schedulable_count() -> usize !{unsafe} {
                 let state: ProcessSlotState =
                     scheduled_process_record_state_locked(guard, slot);
                 if (state != ProcessSlotState::Free &&
-                    state != ProcessSlotState::Exited) {
+                    state != ProcessSlotState::Exited &&
+                    state != ProcessSlotState::Reaping) {
                     live = live + 1;
                 }
                 cursor = scheduled_process_next_slot(slot);
@@ -8864,7 +8916,8 @@ fn kernel_process_itimer_fire_if_due() !{interrupt, unsafe} {
                 let armed: usize = scheduled_process_record_locked(guard, slot).itimer_real_due;
                 if (state != ProcessSlotState::Free &&
                     state != ProcessSlotState::Constructing &&
-                    state != ProcessSlotState::Exited && armed != 0) {
+                    state != ProcessSlotState::Exited &&
+                    state != ProcessSlotState::Reaping && armed != 0) {
                     let mut rearmed: usize = armed;
                     if (now >= armed) {
                         match scheduled_process_handle_of_slot(guard, slot) {
@@ -9112,7 +9165,8 @@ private fn kernel_process_signal_deliver_traced(
         -> ProcessSignalSendResult !{unsafe} {
     if (signum == 0 || signum > 64 ||
         scheduled_process_handle_matches(target) == false ||
-        scheduled_process_state_of_locked(guard, target) == ProcessSlotState::Exited) {
+        scheduled_process_state_of_locked(guard, target) == ProcessSlotState::Exited ||
+        scheduled_process_state_of_locked(guard, target) == ProcessSlotState::Reaping) {
         return ProcessSignalSendResult::Missing;
     }
     let bit: usize = 1 << (signum - 1);
@@ -11432,6 +11486,7 @@ fn kernel_process_crash_state() -> usize !{unsafe} {
         ProcessSlotState::Blocked => { return 3; }
         ProcessSlotState::Exited => { return 4; }
         ProcessSlotState::Constructing => { return 5; }
+        ProcessSlotState::Reaping => { return 6; }
     }
 }
 
@@ -11704,8 +11759,9 @@ fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, Pro
     // obtain one is scheduled_process_exited_take() on a record whose
     // state IS Exited. Moving the take from here to the wait path turns
     // the zombie window from an instant into a state the checker can see
-    // -- reaping something still Running has no token to pass, and reaping
-    // twice cannot re-mint one.
+    // -- reaping something still Running has no token to pass, and a second
+    // reaper cannot re-mint one, because the take moves the record out of
+    // Exited under the run lock (#1294).
     // GitHub issue #437: reap this process's OWN zombies before it becomes
     // one. Nobody can wait for them any more -- their only waiter is the
     // process exiting on this line -- so leaving them costs a pool record
@@ -11968,9 +12024,14 @@ private fn kernel_process_pending_wait4_child(guard: borrow ProcessRunGuard[lock
 //
 // This is where the reap lives now. The linear pair comes from
 // scheduled_process_exited_take, which only produces one for a record
-// whose state is Exited -- so this cannot reap a running process for want
-// of a token, and cannot reap the same one twice because the take will not
-// mint a second pair.
+// whose state is Exited and moves it out of Exited -- so this cannot reap a
+// running process for want of a token, and two reapers cannot reap the same
+// one: two can meet (a deferred reap of an ignored child, and its parent in
+// wait4 or its exit drain, each having found it under an earlier hold), and
+// the loser's take answers Missing, so it does nothing (#1294). The take comes
+// first, and everything this reads of the child and its parent's list is
+// under the same hold, because a loser's child may already be gone.
+// Answers the child's status, or Exited(0) for a reaper that lost.
 // The parent as a HANDLE. GitHub issue #492: every read of the parent's
 // record below -- the unlink walk over its child list, and the pid it
 // remembers afterwards -- went through a bare slot, so a parent whose slot
@@ -12019,35 +12080,71 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
             has_resume_root = true;
         }
     }
-    // Move away from any root the reap may release before teardown starts.
-    // The current process remains Running throughout this kernel-only span.
-    if (has_resume_root) {
-        kernel_process_activate_stable_root(resume_root);
-    }
-    // GitHub issue #693 step 3: the child's record is read under the run
-    // lock, like every other read of another process's record. Its exit
-    // status is settled by now, but its stack owner is cleared by the CPU
-    // that leaves its stack, under this lock.
-    let read_guard = process_run_lock();
-    let status: ProcessEnd =
-        scheduled_process_record_of_locked(read_guard, child).exit_status;
-    let stack_unowned: bool =
-        scheduled_process_record_of_locked(read_guard, child).stack_owner_cpu ==
-            PROCESS_STACK_UNOWNED;
-    process_run_unlock(read_guard);
-    let pid: usize = scheduled_process_pid_of_handle(child);
-    workload_busy_peer_exit_reaped(
-        pid, scheduled_process_pid_of_handle(parent), stack_unowned);
-    workload_peer_read_reaped(pid);
-    // GitHub issue #589: the unlink and the Exited take under the
+    // GitHub issue #589: the Exited take and the unlink under the
     // process-run lock. Peer schedulers walk these same sibling links under
-    // it, and the take now requires its guard. The teardown itself
+    // it, and the take requires its guard. The teardown itself
     // (scheduled_process_reap_teardown) stays outside: it frees roots and pages, and
     // a world stop reached from there needs every peer free to acknowledge
     // its SGI, which a peer spinning on this IRQ-masking lock is not.
     let unlink_guard = process_run_lock();
-    // Unlink first: the record is about to be handed back, and its
-    // next_sibling has to be read while it is still ours to read.
+    let taken = scheduled_process_exited_take(unlink_guard, child);
+    match taken {
+        ScheduledProcessExitedTakeResult::Missing => {
+            // Another reaper has it; that reaper unlinked it in the hold
+            // that took it.
+            process_run_unlock(unlink_guard);
+            return ProcessEnd::Exited(0);
+        }
+        ScheduledProcessExitedTakeResult::Exited(done) => {
+            let (exited_owner, exited_state) = done;
+            let status: ProcessEnd =
+                scheduled_process_record_owned(exited_owner).exit_status;
+            let pid: usize = scheduled_process_pid_of_handle(child);
+            let parent_pid: usize = scheduled_process_pid_of_handle(parent);
+            kernel_process_unlink_child(unlink_guard, parent, child);
+            // GitHub issue #693 step 5: through the owner the take handed
+            // back, not looked up again.
+            scheduled_process_record_owned(exited_owner).has_parent = false;
+            scheduled_process_record_owned(exited_owner).has_next_sibling =
+                false;
+            process_run_unlock(unlink_guard);
+            // Move away from any root the reap may release before teardown
+            // starts. The current process remains Running throughout this
+            // kernel-only span.
+            if (has_resume_root) {
+                kernel_process_activate_stable_root(resume_root);
+            }
+            // The take refused a stack still stood on, so it is free here.
+            workload_busy_peer_exit_reaped(pid, parent_pid, true);
+            workload_peer_read_reaped(pid);
+            // The teardown outside the lock, as before; the removal under
+            // it (#482, see scheduled_process_reap_teardown).
+            scheduled_process_reap_teardown(exited_owner);
+            let removal_guard = process_run_lock();
+            scheduled_process_reap_remove(removal_guard, exited_owner,
+                                          exited_state);
+            process_run_unlock(removal_guard);
+            parent = process_handle_new(parent_slot, parent_generation);
+            let reaped_guard = process_run_lock();
+            scheduled_process_record_of_locked(reaped_guard, parent).last_reaped_pid =
+                pid;
+            process_run_unlock(reaped_guard);
+            // scheduled_process_reap_teardown may clear the per-CPU process-image target while
+            // tearing down the child. Recommit the reaper's root so a later COW fault
+            // consults the same address space that TTBR0 already names.
+            if (has_resume_root) {
+                kernel_process_activate_stable_root(resume_root);
+            }
+            return status;
+        }
+    }
+}
+
+// Unlink a child being reaped from its parent's list, in the hold that took
+// it: its next_sibling has to be read while it is still ours to read.
+private fn kernel_process_unlink_child(
+        unlink_guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+        parent: ProcessHandle, child: ProcessHandle) !{unsafe} {
     let mut following: ProcessHandle =
         scheduled_process_record_of_locked(unlink_guard, child).next_sibling;
     let has_following: bool =
@@ -12099,38 +12196,6 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
         }
     }
     }
-    let taken = scheduled_process_exited_take(unlink_guard, child);
-    process_run_unlock(unlink_guard);
-    match taken {
-        ScheduledProcessExitedTakeResult::Missing => {}
-        ScheduledProcessExitedTakeResult::Exited(done) => {
-            let (exited_owner, exited_state) = done;
-            // GitHub issue #693 step 5: through the owner the take handed
-            // back, not looked up again.
-            scheduled_process_record_owned(exited_owner).has_parent = false;
-            scheduled_process_record_owned(exited_owner).has_next_sibling =
-                false;
-            // The teardown outside the lock, as before; the removal under
-            // it (#482, see scheduled_process_reap_teardown).
-            scheduled_process_reap_teardown(exited_owner);
-            let removal_guard = process_run_lock();
-            scheduled_process_reap_remove(removal_guard, exited_owner,
-                                          exited_state);
-            process_run_unlock(removal_guard);
-            parent = process_handle_new(parent_slot, parent_generation);
-        }
-    }
-    let reaped_guard = process_run_lock();
-    scheduled_process_record_of_locked(reaped_guard, parent).last_reaped_pid =
-        pid;
-    process_run_unlock(reaped_guard);
-    // scheduled_process_reap_teardown may clear the per-CPU process-image target while
-    // tearing down the child. Recommit the reaper's root so a later COW fault
-    // consults the same address space that TTBR0 already names.
-    if (has_resume_root) {
-        kernel_process_activate_stable_root(resume_root);
-    }
-    return status;
 }
 
 // Does this slot have a child that has not exited? The zombie walk's
@@ -12307,8 +12372,8 @@ fn kernel_process_child_wait_status_pid(pid: usize) -> ProcessEnd !{unsafe} {
     let mut parent: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
     // GitHub issue #693 step 3: the search walks other processes' records,
     // so it runs under the run lock; the reap takes that lock itself, so it
-    // runs after. Only the parent reaps its own zombies, so the one found is
-    // still there.
+    // runs after. A deferred reap of an ignored child can take the one found
+    // first, and then the reap answers as a reaper that lost (#1294).
     let search_guard = process_run_lock();
     let found = kernel_process_zombie_of_pid(search_guard, parent, pid);
     process_run_unlock(search_guard);
@@ -12327,9 +12392,10 @@ fn kernel_process_child_wait_status_pid(pid: usize) -> ProcessEnd !{unsafe} {
 // last_child_pid read afterwards. A child exiting on another CPU writes that
 // field too, so the pid returned could name a child that was not the one
 // reaped, and the shell never heard of the one that was: it waited in
-// rt_sigsuspend for a child it had already lost. Only the parent reaps its
-// own zombies, so the one named here is still there for
-// kernel_process_current_reap_pid.
+// rt_sigsuspend for a child it had already lost. A deferred reap of an
+// ignored child may take the one named here before
+// kernel_process_current_reap_pid does, which does nothing then; the pid and
+// status named are still that child's (#1294).
 must_use variant ProcessChildZombieResult { Missing; Found((usize, u32)); }
 
 fn kernel_process_current_zombie_pick(selecting: bool, pid: usize)
