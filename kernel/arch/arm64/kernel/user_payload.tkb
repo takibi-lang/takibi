@@ -1541,10 +1541,12 @@ fn mmap_region_probe() !{unsafe} {
     payload_write_u64(shared_base, 0, 0x1151A);
     payload_write_u64(own_base, 0, 0x1151B);
     // A syscall writes an untouched private page first: getrusage's 144
-    // bytes land in the middle of the mapping.
+    // bytes land in the middle of the mapping. Read back ru_ixrss, which is 0
+    // here and under Linux; ru_utime is real CPU time (#1309), and a slow build
+    // has used a second of it by now.
     let middle: usize = REGION_PRIVATE_LENGTH / 2;
     fail_if(svc5(GETRUSAGE_SYSCALL, 0, own + middle, 0, 0, 0) != 0);
-    fail_if(payload_read_u64(own_base, middle) != 0);
+    fail_if(payload_read_u64(own_base, middle + 40) != 0);
     let child: usize = svc5(220, SIGCHLD, 0, 0, 0, 0);
     if (child == 0) {
         let mut code: usize = 1;
