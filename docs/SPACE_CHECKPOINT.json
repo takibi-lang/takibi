@@ -1,9 +1,9 @@
 {
   "date": "2026-10-31",
   "event": "incremental",
-  "decision": "measured",
-  "source_sha256": "553b52bb1178d8c02aed73e9b11bbe9db6bcdf87912c0c7a75f1f3a8dbb556d4",
-  "workload": "#1288: one preempt_off region in irq_save, region helpers and cpu_id inline. Measured with scripts/space_delta.py origin/main: text 768168 -> 769312 B qemu, 4133280 -> 4134384 B rpi5; data and BSS unchanged, no data/BSS symbol changed size, usable_ram_start unchanged. Previous: #1294: the reap's take moves the record to a new Reaping state, with two boot-probe counters. Measured with scripts/space_delta.py origin/main: text 767224 -> 768168 B qemu, 4132320 -> 4133280 B rpi5; data 4800 -> 4816 B on qemu, 6016 -> 6032 B rpi5; BSS 1503232 unchanged qemu, 1933312 -> 1929216 B rpi5 (alignment); usable RAM start unchanged.",
+  "decision": "reuse",
+  "source_sha256": "993960f9026ce9d3614ca5ee5e3cc160d87d161800b1f0c47a48329215406028",
+  "workload": "#1283: overload-key text built without Printf in the compiler. All 90 kernel build outputs compared byte-identical by sha256 before and after, so no image changed. Previous: #1288: one preempt_off region in irq_save, region helpers and cpu_id inline. Measured with scripts/space_delta.py origin/main: text 768168 -> 769312 B qemu, 4133280 -> 4134384 B rpi5; data and BSS unchanged, no data/BSS symbol changed size, usable_ram_start unchanged. Previous: #1294: the reap's take moves the record to a new Reaping state, with two boot-probe counters. Measured with scripts/space_delta.py origin/main: text 767224 -> 768168 B qemu, 4132320 -> 4133280 B rpi5; data 4800 -> 4816 B on qemu, 6016 -> 6032 B rpi5; BSS 1503232 unchanged qemu, 1933312 -> 1929216 B rpi5 (alignment); usable RAM start unchanged.",
   "evidence": [
     "docs/AGGREGATE_MERGE_SPACE_2026-10-23.md",
     "docs/IRQ_PRIORITY_MASK_SPACE_2026-10-23.md",
@@ -14,6 +14,6 @@
     "docs/VERIFICATION_DESIGN.md",
     "kernel/MEMORY_MAP.md"
   ],
-  "assessment": "About 1.1 KiB of text on each kernel to take 40 ns off every uncontended lock pair; no allocation or capacity change. Adopted. Previous: About 1 KiB of text for the state's consumers and the probe, two evidence words. ProcessRecord does not grow: Reaping is a payload-free case of the existing variant. Accepted.",
+  "assessment": "No image change: measured identical. Previous: About 1.1 KiB of text on each kernel to take 40 ns off every uncontended lock pair; no allocation or capacity change. Adopted. Previous: About 1 KiB of text for the state's consumers and the probe, two evidence words. ProcessRecord does not grow: Reaping is a payload-free case of the existing variant. Accepted.",
   "next_trigger": "A second security_floor member. Previous: A new RP1 DMA object that overflows the 256 KiB arena (a link error), or a per-device IOMMU replacing the arena. Previous: #1087 (holes) if it changes the write path's scratch. Previous: #638 stage 8 (the EL1 switch) or #1000's delivery index on FrameRef. Previous: #1172: a load-qemu sample with many armed timers, if the per-tick fire walk shows in a profile. Previous: The PAN slice of #1032 or any change to the identity mapping granularity. Previous: Unchanged by #1166. Previous: A load-qemu stress-ng sample of region occupancy per process, or a change to MMAP_REGION_PAGES or the eager MAP_SHARED population. Previous: A load-qemu stress-ng sample of region occupancy per process, or a change to MMAP_REGION_PAGES or the eager MAP_SHARED population. Previous: A captured pool sample with the pipe row in use (ash transcript or hackbench), or a change to the pipe buffer size or SharedObject layout. The RPi5 lane's SWD load time measured in the land (coordinator), or the next program added to the fixture rootfs (shrink /pad first). A change to the release pass pipeline or split_aggregate_merges, a compact variant union layout, or the next change to process record storage."
 }
