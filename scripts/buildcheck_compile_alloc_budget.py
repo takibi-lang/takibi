@@ -30,7 +30,9 @@ from pass_line import report_pass
 # on repeated runs; the budget is that plus about 25%. The pre-#917 compile
 # used about 6.6e9. Re-measured 471,083,467 after #996; #997 profiled the
 # scope Hashtbl.copy calls (0.01% of compile CPU) and left them, so the
-# budget stays that plus about 25%.
+# budget stays that plus about 25%. #1283 measured 585,166,850 before removing
+# a Printf per character from overload keys and 522,242,895 after; the budget
+# did not change.
 BUDGET_WORDS = {
     "qemu": 589_000_000,
 }

@@ -10975,7 +10975,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         let source = Types.to_string (Types.of_ast t) in
         let b = Buffer.create (1 + String.length source * 2) in
         Buffer.add_char b 'x';
-        String.iter (fun c -> Buffer.add_string b (Printf.sprintf "%02x" (Char.code c))) source;
+        (* Lower-case hex by hand: overload keys are built for every overloaded
+           call and definition, and a Printf per character was 11% of the QEMU
+           compile's allocation (#1283). *)
+        String.iter (fun c ->
+          let code = Char.code c in
+          Buffer.add_char b "0123456789abcdef".[code lsr 4];
+          Buffer.add_char b "0123456789abcdef".[code land 15]) source;
         Buffer.contents b
   in
   let add_signature m name params =
