@@ -1164,6 +1164,30 @@
         "frame_lines": "#1294 the DDB names the Reaping state",
         "unprotected_globals": "typed protection: #1290 made the TCP window global a constant; first recorded here"
       }
+    },
+    {
+      "date": "2026-10-31",
+      "head": "2c27aa53",
+      "counts": {
+        "raw_mint_files": 14,
+        "frame_lines": 12517,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 214,
+        "raw_deref_io": 7,
+        "raw_deref_builtin_region": 113,
+        "unsafe_blocks": 151,
+        "extern_fns": 61,
+        "invariant_stop_sites": 121,
+        "assembly_lines": 2503,
+        "per_cpu_ordinary_arrays": 66,
+        "per_cpu_stores": 7,
+        "raw_cpu_id_calls": 147,
+        "unprotected_globals": 276,
+        "frame_api_ratchet": 7
+      },
+      "changes": {
+        "invariant_stop_sites": "#1289 step 1: the current and owned record lookups stop on Stale instead of the sink"
+      }
     }
   ]
 }
