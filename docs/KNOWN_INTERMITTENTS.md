@@ -42,6 +42,7 @@ whether a row has gone quiet or has merely stopped being looked for.
 | `network init contention: failed` | 1 of 2 local allcheck aggregates on 563cb5f0, in `pool_contention`, with no counts line; 0 of 3 standalone | #654 | 2026-09-30 |
 | `the shell did not answer an empty line before the phase` | 1 of 2 local allcheck aggregates on 563cb5f0, in race-window 633's churn; 0 of 3 standalone; again on 655f9c49, the console lock's first stage; 2 of 4 land.sh aggregates on 2026-10-02, 0 of 3 standalone each time; 1 land.sh aggregate on 65848844; recorded again in race-window 633 armed on bd067a38 under the QEMU timing policy | #655 | 2026-10-05 |
 | `workload: settings wake FAILED: the reader is still asleep` | 1 local allcheck aggregate on 8f289250, in the peer_tty/settings_wake views; 0 of 11 armed-suite runs under host load | #667 | 2026-09-30 |
+| `RPi5 hung-core BREAK: no DDB session completed` | log ends in garbled bytes where the prompt belongs: 2 of 4 runs on one #1288 head, 0 of 6 on its rebased head, 0 of 6 on main | #1300 | 2026-10-31 |
 
 ## Reading a row
 
