@@ -2,8 +2,8 @@
   "date": "2026-10-31",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "cf6216fdbc463a8a0dee0d46774419b161446cdda7eee6fe66c4dea136ac8740",
-  "workload": "#1290 and #1292: the TCP window global becomes a constant and the per-core fallbacks go. Measured with scripts/space_delta.py origin/main: text 767448 -> 767224 B qemu, 4132536 -> 4132320 B rpi5; data 4816 -> 4800 B qemu, 6032 -> 6016 B rpi5; BSS unchanged.",
+  "source_sha256": "56e0be3e995e364a3d454118e2a3254c54323b025865186d943a0cd20e65cae1",
+  "workload": "#1294: the reap's take moves the record to a new Reaping state, with two boot-probe counters. Measured with scripts/space_delta.py origin/main: text 767224 -> 768168 B qemu, 4132320 -> 4133280 B rpi5; data 4800 -> 4816 B on qemu, 6016 -> 6032 B rpi5; BSS 1503232 unchanged qemu, 1933312 -> 1929216 B rpi5 (alignment); usable RAM start unchanged.",
   "evidence": [
     "docs/AGGREGATE_MERGE_SPACE_2026-10-23.md",
     "docs/IRQ_PRIORITY_MASK_SPACE_2026-10-23.md",
@@ -14,6 +14,6 @@
     "docs/VERIFICATION_DESIGN.md",
     "kernel/MEMORY_MAP.md"
   ],
-  "assessment": "A small reduction from removed branches and one global; no storage or allocator change. Adopted.",
+  "assessment": "About 1 KiB of text for the state's consumers and the probe, two evidence words. ProcessRecord does not grow: Reaping is a payload-free case of the existing variant. Accepted.",
   "next_trigger": "A second security_floor member. Previous: A new RP1 DMA object that overflows the 256 KiB arena (a link error), or a per-device IOMMU replacing the arena. Previous: #1087 (holes) if it changes the write path's scratch. Previous: #638 stage 8 (the EL1 switch) or #1000's delivery index on FrameRef. Previous: #1172: a load-qemu sample with many armed timers, if the per-tick fire walk shows in a profile. Previous: The PAN slice of #1032 or any change to the identity mapping granularity. Previous: Unchanged by #1166. Previous: A load-qemu stress-ng sample of region occupancy per process, or a change to MMAP_REGION_PAGES or the eager MAP_SHARED population. Previous: A load-qemu stress-ng sample of region occupancy per process, or a change to MMAP_REGION_PAGES or the eager MAP_SHARED population. Previous: A captured pool sample with the pipe row in use (ash transcript or hackbench), or a change to the pipe buffer size or SharedObject layout. The RPi5 lane's SWD load time measured in the land (coordinator), or the next program added to the fixture rootfs (shrink /pad first). A change to the release pass pipeline or split_aggregate_merges, a compact variant union layout, or the next change to process record storage."
 }
