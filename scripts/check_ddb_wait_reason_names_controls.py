@@ -89,7 +89,7 @@ def main() -> int:
     status, report = run(REPO)
     if status != 0:
         failures.append(f"the repository itself does not pass: {report.strip()!r}")
-    elif "14 process state and wait reason(s)" not in report:
+    elif "15 process state and wait reason(s)" not in report:
         failures.append(f"the repository passed about an unexpected "
                         f"vocabulary size: {report.strip()!r}")
 
