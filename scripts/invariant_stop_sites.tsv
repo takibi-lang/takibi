@@ -55,6 +55,8 @@ kernel/kernel/cpu_authority.tkb	preempt_assert_blockable	ladder	1	-	#638	blockin
 kernel/kernel/process.tkb	scheduled_process_pin_release	ladder	1	-	#652	a pin released while a CPU owns the stack: StackOwnership.tla states the rule; trace conformance (#652) would take it over
 kernel/kernel/syscall.tkb	kernel_syscall_block_return	frame	1	-	#1017	the block return reached with no current process: no caller exists to take an answer, and the entry path had a process
 kernel/kernel/syscall.tkb	kernel_syscall_child_exec_return	frame	1	-	#1017	the exec return reached with no current process: no caller exists to take an answer, and the entry path had a process
+kernel/kernel/process.tkb	scheduled_process_record_live_locked	ladder	1	-	#1289	a handle shown live under this hold has no record: removal takes the run lock, so the caller's proof is wrong; the classification of callers is on #1289
+kernel/kernel/process.tkb	scheduled_process_command_line	ladder	1	-	#1289	the command line of the process running here has no record: all four callers ask for the current slot, whose process is not reaped while it runs
 kernel/kernel/process.tkb	scheduled_process_record_current	ladder	1	-	#1289	the record of the process running here left the pool: reap needs Exited, a witness cannot outlive current; the audit is on #1289
 kernel/kernel/process.tkb	scheduled_process_record_owned	ladder	1	-	#1289	an owner's record left the pool: reserved Running, exclusive Reapable and unpublished creating owners exclude any other remover; the audit is on #1289
 kernel/kernel/process.tkb	scheduled_process_exited_take	ladder	1	-	#652	a reap of a zombie whose stack a CPU still stands on (#609): StackOwnership.tla states the rule

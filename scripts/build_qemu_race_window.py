@@ -126,7 +126,7 @@ WINDOWS = {
                  "    let core: usize = cpu_id();\n",
                  True),
         "check": ("kernel/process.tkb",
-                  "    if (scheduled_process_record_locked(guard, process_slot_of(owner.pool_index)).stack_owner_cpu !=\n"
+                  "    if (scheduled_process_record_owned(owner).stack_owner_cpu !=\n"
                   "            PROCESS_STACK_UNOWNED) {\n"
                   "        return ScheduledProcessStartCheck::Standing(state);\n"
                   "    }\n"
@@ -220,7 +220,7 @@ WINDOWS = {
              "    execution_state[execution_cpu_index()].last_exited_child_pid =\n"
              "        scheduled_process_pid_of_handle(child);\n"
              "    let reverted_guard = process_run_guard_forge_unlocked();\n"
-             "    scheduled_process_record_of_locked(reverted_guard, parent).last_reaped_pid =\n"
+             "    scheduled_process_record_live_locked(reverted_guard, parent).last_reaped_pid =\n"
              "        scheduled_process_pid_of_handle(child);\n"
              "    process_run_guard_discard_unlocked(reverted_guard);\n"),
         ],

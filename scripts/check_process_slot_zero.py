@@ -61,7 +61,7 @@ PLACEMENT = {
     "kernel_process_spread_timer_progress", "kernel_stack_run_depth",
     "kernel_stack_bottom", "kernel_process_frame_belongs_to",
     "kernel_process_crash_frame_usable", "scheduled_process_record_locked",
-    "scheduled_process_record_current", "scheduled_process_record_owned",
+    "scheduled_process_record_live_locked", "scheduled_process_record_current", "scheduled_process_record_owned",
     "scheduled_process_record_stopped", "scheduled_process_scalar_snapshot",
     "scheduled_process_first_slot", "scheduled_process_next_slot",
     "scheduled_process_handle_matches", "scheduled_process_slot_valid",
