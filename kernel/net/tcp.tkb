@@ -575,7 +575,8 @@ let mut tcp_retx_pass_hold_until_recovered: AtomicWord;
 let mut tcp_injected_data_retransmitted: AtomicWord;
 let mut tcp_injected_data_recovery_observed: AtomicWord;
 let mut tcp_drop_next_fin: AtomicWord;
-let mut tcp_advertised_window: u16 = 65535;
+// The window every segment advertises: the largest an unscaled header carries.
+const TCP_ADVERTISED_WINDOW: u16 = 65535;
 
 must_use variant KernelTcpResult {
     TimedOut(NetRxCanAcquire);
@@ -1798,10 +1799,6 @@ fn kernel_tcp_inject_drop_next_fin() !{unsafe} {
     kernel_tcp_clear_injection_markers();
 }
 
-fn kernel_tcp_restore_stream_policy() {
-    tcp_advertised_window = 65535;
-}
-
 fn retx_lock(m: *TaskMutex @ address) -> RetxGuard[address]
         !{may_block, acquires_lock_30_retx, lock_guard_30_retx} {
     task_mutex_acquire(m);
@@ -2854,7 +2851,7 @@ fn build_syn_ack(conn: borrow &mut TcpConnection,
     tcp_hdr.ack = conn.rcv_nxt as u32be;
     tcp_hdr.data_offset = (5 << 4) as u8; // 20-byte header, no options
     tcp_hdr.flags = TCP_FLAG_SYN | TCP_FLAG_ACK;
-    tcp_hdr.window = tcp_advertised_window as u16be;
+    tcp_hdr.window = TCP_ADVERTISED_WINDOW as u16be;
     tcp_hdr.urgent = 0;
 
     fix_tcp_checksum(ip, tcp);
@@ -2949,7 +2946,7 @@ fn build_fin_ack(conn: borrow &mut TcpConnection,
     tcp_hdr.ack = conn.rcv_nxt as u32be;
     tcp_hdr.data_offset = (5 << 4) as u8;
     tcp_hdr.flags = TCP_FLAG_FIN | TCP_FLAG_ACK;
-    tcp_hdr.window = tcp_advertised_window as u16be;
+    tcp_hdr.window = TCP_ADVERTISED_WINDOW as u16be;
     tcp_hdr.urgent = 0;
 
     fix_tcp_checksum(ip, tcp);
@@ -2982,7 +2979,7 @@ fn build_receive_ack(conn: borrow &mut TcpConnection,
     tcp_hdr.ack = conn.rcv_nxt as u32be;
     tcp_hdr.data_offset = (5 << 4) as u8;
     tcp_hdr.flags = TCP_FLAG_ACK;
-    tcp_hdr.window = tcp_advertised_window as u16be;
+    tcp_hdr.window = TCP_ADVERTISED_WINDOW as u16be;
     tcp_hdr.urgent = 0;
     fix_tcp_checksum(ip, tcp);
 }

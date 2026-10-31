@@ -224,7 +224,6 @@ kernel/net/socket_capability.tkb	network_capability_store	read-by network_capabi
 kernel/net/tcp.tkb	pending_tcp_probe_frame	read-by pending_tcp_chain_probe_body: 2026-10-31 retain-fixture: the chain probe's segments copy these bytes; only the chain is checked
 kernel/net/tcp.tkb	pin_sharing_handles	read-by pin_sharing_cycles,pin_sharing_cleanup: 2026-10-31 retain-fixture: the fixture's handles; set up by core 0 before the cycles
 kernel/net/tcp.tkb	pin_sharing_page	read-by pin_sharing_cleanup: 2026-10-31 retain-fixture: the fixture's page, released at the end
-kernel/net/tcp.tkb	tcp_advertised_window	unreviewed; 2026-10-31 label retain-pools does not hold: no pool or guard reaches it; its one write stores the value it starts with, so build_syn_ack, build_receive_ack and build_fin_ack always read 65535
 kernel/platform/rpi5/intc.tkb	mip0	unreviewed
 kernel/platform/rpi5/intc.tkb	rp1_msix	unreviewed
 kernel/platform/rpi5/intc.tkb	rp1_msix_cfg_set	unreviewed

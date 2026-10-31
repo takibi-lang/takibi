@@ -1135,7 +1135,6 @@ fn kernel_init_script_success_evidence(current_authority: borrow ProcessCurrent[
     if (clone_growth_probe_ok) {
         kernel_boot_log("vm fork: child stack growth ok\n");
     }
-    kernel_tcp_restore_stream_policy();
     let (exec_reaps, exec_reaps_clean, exec_stack_growths) =
         process_image_exec_reap_evidence();
     if (exec_reaps >= 1 && exec_reaps_clean == exec_reaps) {
