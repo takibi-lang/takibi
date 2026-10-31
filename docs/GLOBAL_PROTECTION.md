@@ -221,4 +221,4 @@ file's comment lines are not rows.
   `ProcessRunGuard[&scheduled_process_run_lock]`, so the lock is now public. Each
   core's tick times and the process trace's switches become `AtomicWord`; the
   omitted pid and its flag become one word, pid plus 1, so a reader cannot pair one
-  pid with another's flag. 303 -> 288 unprotected.
+  pid with another's flag. 292 -> 277 unprotected.
