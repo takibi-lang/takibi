@@ -30503,7 +30503,96 @@ fn pick(s: Slot) -> usize { if (s == 0) { return 1; } return s.word; }");
           fn same(s: Slot, t: Slot) -> bool { return s.word == t.word; }");
   ]
 
+(* GitHub issue #1010: the oracle `takibi fmt` will have to meet. *)
+let surface_of src =
+  match Surface_tokens.of_string src with
+  | Ok surface -> surface
+  | Error message -> Alcotest.fail message
+
+let surface_sample =
+  "// header\n\n\nstruct no_copy S { x: usize; } // after the brace\n\n\
+   /* block\n   comment */\n\
+   fn f(a: borrow  init  S) -> usize {\n\
+  \  let s = bs\"a//b\"; /* one */ /* two */\n\
+  \  let t = \"quote\\\" /* not a comment */\";\n\
+  \  let c = '/';\n\
+  \  x += 0x10 + [u8; 4 * 2]; // tail\n\
+  \  // before the brace\n\
+   }\n\n// end\n"
+
+let surface_tests =
+  let same a b = Surface_tokens.same_surface (surface_of a) (surface_of b) in
+  let check_differs name edited =
+    Alcotest.test_case ("surface differs: " ^ name) `Quick (fun () ->
+      Alcotest.(check bool) name false (same surface_sample edited))
+  in
+  let replace_once what by =
+    match Text_search.find_sub surface_sample 0 what with
+    | -1 -> Alcotest.fail ("the sample lost " ^ what)
+    | i ->
+        String.sub surface_sample 0 i ^ by
+        ^ String.sub surface_sample (i + String.length what)
+            (String.length surface_sample - i - String.length what)
+  in
+  [
+    Alcotest.test_case "the sample keeps its surface under relayout" `Quick (fun () ->
+      match Surface_tokens.check_round_trip surface_sample with
+      | Ok _ -> ()
+      | Error message -> Alcotest.fail message);
+    Alcotest.test_case "comments attach where they were written" `Quick (fun () ->
+      let open Surface_tokens in
+      let surface = surface_of surface_sample in
+      let token spelling = List.find (fun t -> t.spelling = spelling) surface.tokens in
+      Alcotest.(check int) "header and two blank lines lead the first token" 2
+        (List.length (token "struct").leading);
+      (match (token "struct").leading with
+       | [Comment { text = "// header"; _ }; Blank_lines 2] -> ()
+       | _ -> Alcotest.fail "the header trivia");
+      (match (List.find (fun t -> t.spelling = "}") surface.tokens).trailing with
+       | [{ text = "// after the brace"; kind = Line_comment }] -> ()
+       | _ -> Alcotest.fail "the same-line comment");
+      (match surface.eof_leading with
+       | [Blank_lines 1; Comment { text = "// end"; _ }] -> ()
+       | _ -> Alcotest.fail "the trivia after the last token"));
+    Alcotest.test_case "spellings are whole, and literal text is not trivia" `Quick (fun () ->
+      let open Surface_tokens in
+      let spellings = List.map (fun t -> t.spelling) (surface_of surface_sample).tokens in
+      List.iter (fun s ->
+        Alcotest.(check bool) s true (List.mem s spellings))
+        ["borrow init"; "bs\"a//b\""; "\"quote\\\" /* not a comment */\""; "'/'"; "0x10"; "+="]);
+    Alcotest.test_case "layout alone is not a difference" `Quick (fun () ->
+      Alcotest.(check bool) "indentation and same-line breaks" true
+        (same "fn f() {\n  return 1;\n}\n" "fn   f()\n{ return\n1;\n}"));
+    check_differs "a lost modifier the AST does not hold" (replace_once "no_copy " "");
+    check_differs "a respelled literal the AST does not hold" (replace_once "0x10" "16");
+    check_differs "a desugared compound assignment" (replace_once "x += " "x = x + ");
+    check_differs "a dropped comment" (replace_once "// tail" "");
+    check_differs "an edited comment" (replace_once "// tail" "// tale");
+    check_differs "a comment moved off its line" (replace_once " // tail" "\n// tail");
+    check_differs "a dropped blank line" (replace_once "\n\n// end" "\n// end");
+    Alcotest.test_case "a snippet that does not parse is still a surface" `Quick (fun () ->
+      Alcotest.(check bool) "tokens only" true
+        (Result.is_ok (Surface_tokens.check_round_trip "let let ) // x\n")));
+    Alcotest.test_case "what the lexer rejects is an error naming the place" `Quick (fun () ->
+      match Surface_tokens.of_string ~fname:"f.tkb" "x\n/* open" with
+      | Error message ->
+          Alcotest.(check bool) message true
+            (String.starts_with ~prefix:"f.tkb:" message)
+      | Ok _ -> Alcotest.fail "accepted an unterminated comment");
+    Alcotest.test_case "the census counts how things were written" `Quick (fun () ->
+      let open Surface_tokens in
+      let counts = census Counts.empty (surface_of surface_sample) in
+      let count key = Option.value (Counts.find_opt key counts) ~default:0 in
+      Alcotest.(check int) "hex" 1 (count "literal:hex");
+      Alcotest.(check int) "char" 1 (count "literal:char");
+      Alcotest.(check int) "byte string" 1 (count "literal:byte-string");
+      Alcotest.(check int) "no_copy" 1 (count "no_copy");
+      Alcotest.(check int) "same-line line comments" 2 (count "comment:trailing:line");
+      Alcotest.(check int) "same-line block comments" 2 (count "comment:trailing:block"));
+  ]
+
 let named_groups_unisolated = [
+  "surface-tokens", surface_tests;
   "operator-kinds", operator_kind_tests;
   "readonly-literals", readonly_literal_tests;
   "private-default-construction", private_default_construction_tests;

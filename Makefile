@@ -268,6 +268,20 @@ cli-flags-control: build
 	fi; \
 	echo "PASS cli-flags-control: CLI.md matches the flag table in bin/main.ml"
 
+# GitHub issue #1010: every tracked .tkb, read by the compiler's own lexer,
+# keeps its tokens, comments and blank lines under a total relayout. This is
+# the oracle `takibi fmt` will have to meet; it reformats nothing.
+.PHONY: fmt-surface-control
+fmt-surface-control: build
+	@tmp=`mktemp`; trap 'rm -f "$$tmp"' EXIT; \
+	if ! git ls-files '*.tkb' | xargs $(NICE_HEAVY) $(TAKIBI) --internal-surface-check > "$$tmp"; then \
+		echo "FAIL fmt-surface-control: a tracked .tkb does not survive relayout" >&2; exit 1; \
+	fi; \
+	if ! grep -q '^ident	' "$$tmp"; then \
+		echo "FAIL fmt-surface-control: the census is empty, so nothing was checked" >&2; exit 1; \
+	fi; \
+	echo "PASS fmt-surface-control: `git ls-files '*.tkb' | wc -l` tracked .tkb files keep their surface under relayout"
+
 # GitHub issue #526: the fast gate's membership rule, expressed as a number.
 # The slowest legitimate member measured about 0.8s standalone
 # (check_process_running_mints_controls.py, 2026-10-17, after #808 moved the
@@ -292,7 +306,7 @@ CHECK_CPU_BUDGET_REFS    := 18
 # CHECK_TIMEOUT_SECONDS, which is what makes "the fast gate is for checks
 # that read tracked files" a mechanism instead of a sentence: a member that
 # waits is killed and this lane goes red.
-langcheck: unused-function-control forbid-unsafe-control effect-matrix-control language-words-control cli-flags-control pool-liveness-control wont-compile-control regions-flag-control range-obligation-compile-control
+langcheck: unused-function-control forbid-unsafe-control effect-matrix-control language-words-control cli-flags-control fmt-surface-control pool-liveness-control wont-compile-control regions-flag-control range-obligation-compile-control
 	@bash scripts/lane_timing.sh begin langcheck
 	@bash scripts/run_check_lane.sh check $(CHECK_TIMEOUT_SECONDS) $(CHECK_CPU_BUDGET_MS) $(CHECK_CPU_BUDGET_REFS)
 # -I skips binary files. Without it a build directory left in the worktree

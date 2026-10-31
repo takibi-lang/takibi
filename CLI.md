@@ -2,7 +2,7 @@
 
 # Compiler command line
 
-`takibi <file.tkb>... [flags]`: 23 flags, from the table in `bin/main.ml`. GitHub issue #1027 plans their consolidation.
+`takibi <file.tkb>... [flags]`: 24 flags, from the table in `bin/main.ml`. GitHub issue #1027 plans their consolidation.
 
 ## Target and output (5)
 
@@ -47,7 +47,7 @@
 | --- | --- | --- |
 | `--generate` | `effects\|words\|cli\|tla <dir>\|protocol-source <dir>` | print EFFECTS.md, WORDS.md or CLI.md, or write each protocol's TLA+ model or generated source into <dir>, and exit |
 
-## Compiler development (5)
+## Compiler development (6)
 
 | Flag | Argument | Meaning |
 | --- | --- | --- |
@@ -55,6 +55,7 @@
 | `--internal-trace-init-flow` | `<function>` | print a function's init state after each statement |
 | `--internal-region-table-last-generation` | `<n>` | retire a region table slot freed at generation n |
 | `--internal-range-obligation-fault-control` | - | plant known-unsound range rules (z3 check's failing control) |
+| `--internal-surface-check` | - | check that each input file's tokens, comments and blank lines survive relayout, print a census, and exit |
 | `--internal-allow-unused` | - | accept a function nothing reachable uses (rejected by default) |
 
 ## Fact files (13)

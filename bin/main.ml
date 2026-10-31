@@ -100,6 +100,7 @@ let () =
   let facts_dir = ref "" in
   let generate = ref None in
   let tla_omit = ref None in
+  let surface_check = ref false in
   let set r = Cli_flags.Arg (fun v -> r := v) in
   let add r = Cli_flags.Arg (fun v -> r := v :: !r) in
   let on r = Cli_flags.No_arg (fun () -> r := true) in
@@ -186,6 +187,9 @@ let () =
          Takibi.Range_obligation.fault_overlay_short := true;
          Takibi.Range_obligation.fault_type_size := true))
       "plant known-unsound range rules (z3 check's failing control)";
+    (* GitHub issue #1010: what `takibi fmt` will have to preserve. *)
+    flag "--internal-surface-check" Development (on surface_check)
+      "check that each input file's tokens, comments and blank lines survive relayout, print a census, and exit";
     flag "--internal-allow-unused" Development (off reject_unused_functions)
       "accept a function nothing reachable uses (rejected by default)";
   ] in
@@ -209,6 +213,19 @@ let () =
     Printf.printf "takibi %s\n" version;
     exit 0
   );
+
+  if !surface_check then begin
+    let census, failed =
+      List.fold_left (fun (census, failed) file ->
+        let source = In_channel.with_open_bin file In_channel.input_all in
+        match Surface_tokens.check_round_trip ~fname:file source with
+        | Ok surface -> (Surface_tokens.census census surface, failed)
+        | Error message -> Printf.eprintf "Error: %s\n" message; (census, true))
+        (Surface_tokens.Counts.empty, false) input_files
+    in
+    Surface_tokens.Counts.iter (Printf.printf "%s\t%d\n") census;
+    exit (if failed then 1 else 0)
+  end;
 
   (match !generate with
    | Some ("effects", _) -> print_string (Effect_rules.markdown ()); exit 0

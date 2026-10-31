@@ -23,6 +23,12 @@ let int64_of_digits ~(base : int) (s : string) : Int64.t =
     (fun acc c -> Int64.add (Int64.mul acc base64) (Int64.of_int (digit_val c)))
     0L s
 
+(* Where the string literal just read opened (GitHub issue #1010). A string
+   token's lexeme is only its closing quote, because read_string restarts the
+   match; Surface_tokens needs the whole span. Recorded beside the lexbuf
+   rather than written into lex_start_p, so that no token location changes. *)
+let last_string_start = ref 0
+
 (* Keep token construction local (so Language_words does not depend on the
    generated Parser module), but make the accepted key set authoritative: the
    identifier rule calls this only for Language_words.hard_keywords, and this
@@ -133,13 +139,15 @@ rule read = parse
   | '\'' ([^ '\'' '\\' '\n'] as c) '\'' { INT (Int64.of_int (Char.code c)) }
 
   | '_' { UNDERSCORE }  (* wildcard for match. Longest-match: _foo -> IDENT, _ alone -> UNDERSCORE *)
-  | "bs\"" { read_string (fun s -> BS_STRING s) (Buffer.create 32) lexbuf }
+  | "bs\"" { last_string_start := Lexing.lexeme_start lexbuf;
+             read_string (fun s -> BS_STRING s) (Buffer.create 32) lexbuf }
 
   | ['a'-'z' 'A'-'Z' '_' ] ['a'-'z' 'A'-'Z' '0'-'9' '_' ]* as id
     { if Language_words.is_hard_keyword id then hard_keyword_token id
       else IDENT id }
 
-  | '"' { read_string (fun s -> STRING s) (Buffer.create 32) lexbuf }
+  | '"' { last_string_start := Lexing.lexeme_start lexbuf;
+          read_string (fun s -> STRING s) (Buffer.create 32) lexbuf }
 
   | eof { EOF }
 
