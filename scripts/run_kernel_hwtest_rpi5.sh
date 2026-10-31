@@ -25,6 +25,7 @@ UART_TIMING_LOG="$ARTIFACT_DIR/uart-timing.log"
 RESET_LOG="$ARTIFACT_DIR/reset.log"
 LOADER_LOG="$ARTIFACT_DIR/loader.log"
 ARP_LOG="$ARTIFACT_DIR/arp.log"
+ARP_CAPTURE_LOG="$ARTIFACT_DIR/arp-capture.log"
 ICMP_LOG="$ARTIFACT_DIR/icmp.log"
 TCP_LOG="$ARTIFACT_DIR/tcp.log"
 HTTPD_LOG="$ARTIFACT_DIR/httpd-curl.log"
@@ -152,9 +153,28 @@ archive_reason=""
 archive_failure() {
     local status="$1"
     [ "$status" -ne 0 ] || return 0
+    python3 "$REPO_ROOT/scripts/rpi5_arp_link_delta.py" "$UART_TIMING_LOG" \
+        >"$ARTIFACT_DIR/arp-link-delta.txt" 2>&1 || true
     bash "$REPO_ROOT/scripts/archive_kernel_failure.sh" "$ARTIFACT_DIR" \
         "$REPO_ROOT/_build/kernel-hwtest-rpi5-failures" \
         "${archive_reason:-exit status $status}" || true
+}
+# GitHub issue #1302: every ARP frame on the link, on the host's clock, for the
+# failure archive. #1297's cause, the host stack asking for the board first,
+# needed this capture taken by hand and a failure to wait for. Evidence only: a
+# capture that does not start says so in its log and does not stop the lane.
+arp_capture_pid=""
+arp_capture_start() {
+    rm -f "$ARP_CAPTURE_LOG"
+    sudo -n tcpdump -i "$ETH_TEST_IFACE" -n -e -l -tt --immediate-mode arp \
+        </dev/null >"$ARP_CAPTURE_LOG" 2>&1 &
+    arp_capture_pid=$!
+}
+arp_capture_stop() {
+    [ -n "$arp_capture_pid" ] || return 0
+    kill "$arp_capture_pid" 2>/dev/null || true
+    wait "$arp_capture_pid" 2>/dev/null || true
+    arp_capture_pid=""
 }
 # GitHub issue #869: a step that fails while the kernel runs used to kill the
 # driver at once, so a boot that never reached a readiness marker left no
@@ -185,6 +205,7 @@ cleanup() {
         kill "$uart_driver_pid" 2>/dev/null || true
         wait "$uart_driver_pid" 2>/dev/null || true
     fi
+    arp_capture_stop
     archive_failure "$status"
     if [ -n "${pinned_neigh:-}" ]; then
         sudo ip neigh del "${ETH_TEST_SUBNET}.2" dev "$ETH_TEST_IFACE" \
@@ -228,6 +249,7 @@ trap cleanup EXIT INT TERM HUP
 # `rp1 gem: icmp timeout`. Measured with no build between runs: 4 of 8 runs
 # failed, each directly after a green one; 0 of 12 with this pin. It survives the
 # carrier loss, and the orphans' frames are TCP, which the ARP step ignores.
+arp_capture_start
 echo "[kernel/rpi5] pinning the board's neighbour entry so the host does not ARP for it"
 sudo ip neigh replace "${ETH_TEST_SUBNET}.2" lladdr "$ETH_TEST_MAC" \
     dev "$ETH_TEST_IFACE" nud permanent
