@@ -12,6 +12,9 @@ let mut packet: [u8; 1514];
 fn virtio_fixture_notify() {}
 fn mutex_irq_save() -> usize { return 0; }
 fn mutex_irq_restore(flags: usize) {}
+// The driver's DDB look names the stop authority (#1164); nothing here calls it.
+linear struct MachineStopped[stop: addr] { private owner: usize; }
+let mut kernel_world_stop: usize;
 fn gic_intid_clear_pending(intid: u32) {}
 fn gic_intid_enable(intid: u32) {}
 fn gic_intid_target(intid: u32, cpu: u32) {}
