@@ -1671,8 +1671,21 @@ private fn scheduled_process_ddb_copy_one(
 fn kernel_process_current_stopped_record(
         stopped: borrow MachineStopped[&kernel_world_stop]) -> ProcessDdbRecord {
     let mut slot: ProcessSlot = kernel_process_current_slot();
-    return scheduled_process_ddb_record(stopped, slot,
-        scheduled_process_record_stopped(stopped, stopped, slot));
+    match scheduled_process_record_stopped(stopped, stopped, slot) {
+        ProcessRecordStopped::Absent => {
+            let mut absent: ProcessDdbRecord;
+            zero_fill(&absent);
+            absent.root_slot = slot.word;
+            return absent;
+        }
+        ProcessRecordStopped::Present(inspected) => {
+            let record = scheduled_process_stopped_transfer(inspected, stopped);
+            let mut result: ProcessDdbRecord =
+                scheduled_process_ddb_record(stopped, slot, record);
+            scheduled_process_stopped_view_drop(inspected);
+            return result;
+        }
+    }
 }
 
 // Diagnostic context is readable only in the current live allocation's
@@ -1701,10 +1714,17 @@ fn kernel_process_crash_frame_usable(
 fn kernel_process_current_stopped_crash_detail(
         stopped: borrow MachineStopped[&kernel_world_stop]) -> (usize, usize) {
     if (execution_state[execution_cpu_index()].current_live == false) { return (0, 0); }
-    let record = scheduled_process_record_stopped(stopped, stopped, kernel_process_current_slot());
-    let mut image: usize = 0;
-    if (record.exec_image_live) { image = 1; }
-    return (record.wait4_status_ptr, image);
+    match scheduled_process_record_stopped(stopped, stopped, kernel_process_current_slot()) {
+        ProcessRecordStopped::Absent => { return (0, 0); }
+        ProcessRecordStopped::Present(inspected) => {
+            let record = scheduled_process_stopped_transfer(inspected, stopped);
+            let mut image: usize = 0;
+            if (record.exec_image_live) { image = 1; }
+            let status_ptr: usize = record.wait4_status_ptr;
+            scheduled_process_stopped_view_drop(inspected);
+            return (status_ptr, image);
+        }
+    }
 }
 
 fn kernel_process_stopped_metadata_busy(
@@ -1715,8 +1735,19 @@ fn kernel_process_stopped_metadata_busy(
 fn scheduled_process_fd_context_handle_stopped(
         stopped: borrow MachineStopped[&kernel_world_stop], key: usize)
         -> ProcessPoolHandleWords !{unsafe} {
-    return process_fd_context_words(scheduled_process_record_stopped(
-        stopped, stopped, process_slot_from_pool(key)));
+    match scheduled_process_record_stopped(
+            stopped, stopped, process_slot_from_pool(key)) {
+        ProcessRecordStopped::Absent => {
+            let mut words: ProcessPoolHandleWords = { 0, 0 };
+            return words;
+        }
+        ProcessRecordStopped::Present(inspected) => {
+            let record = scheduled_process_stopped_transfer(inspected, stopped);
+            let mut words: ProcessPoolHandleWords = process_fd_context_words(record);
+            scheduled_process_stopped_view_drop(inspected);
+            return words;
+        }
+    }
 }
 
 // GitHub issue #606: one diff pass of kernel/kernel/protocol_trace.tkb,
@@ -1857,22 +1888,28 @@ fn kernel_process_protocol_trace_close() -> usize {
 // `scope` is the same stop as `stopped`, passed again so the record's
 // lifetime can name it: a return lifetime names a parameter's static, and
 // the inspection mint takes the production stop by its global address.
+//
+// Absent is an answer of its own (#1289): no slot, or one the stop found busy
+// or stale. It used to be a pointer to the shared fallback record.
+must_use variant ProcessRecordStopped[stop: addr] {
+    Absent;
+    Present(ProcessRecordStoppedView[stop, &scheduled_process_pool]);
+}
+
 private fn scheduled_process_record_stopped(
         stopped: borrow MachineStopped[&kernel_world_stop],
         scope: borrow MachineStopped[stop], slot: ProcessSlot)
-        -> &mut ProcessRecord @ stop !{unsafe} {
-    if (atomic_word_load(&scheduled_process_pool_ready) == 0) { return &scheduled_process_record_absent; }
+        -> ProcessRecordStopped[stop] !{unsafe} {
+    if (atomic_word_load(&scheduled_process_pool_ready) == 0) { return ProcessRecordStopped::Absent; }
     let generation: usize = region_pool_generation_unproven__ProcessRecord(
         &scheduled_process_pool, slot.word);
-    if (generation == 0) { return &scheduled_process_record_absent; }
+    if (generation == 0) { return ProcessRecordStopped::Absent; }
     match process_record_inspect_stopped(stopped, &scheduled_process_pool, slot.word, generation) {
-        RegionInspectionProbe(ProcessRecord)::Busy => { return &scheduled_process_record_absent; }
-        RegionInspectionProbe(ProcessRecord)::Stale => { return &scheduled_process_record_absent; }
+        RegionInspectionProbe(ProcessRecord)::Busy => { return ProcessRecordStopped::Absent; }
+        RegionInspectionProbe(ProcessRecord)::Stale => { return ProcessRecordStopped::Absent; }
         RegionInspectionProbe(ProcessRecord)::Inspected(inspected) => {
             let source = scheduled_process_stopped_view_new(inspected, scope);
-            let record = scheduled_process_stopped_transfer(source, scope);
-            scheduled_process_stopped_view_drop(source);
-            return record;
+            return ProcessRecordStopped::Present(source);
         }
     }
 }
@@ -1913,10 +1950,25 @@ private inline fn scheduled_process_stopped_view_drop(
 }
 
 
+// The pid in a slot under the stop; 0, which no process has, for no record.
+private fn scheduled_process_pid_stopped(
+        stopped: borrow MachineStopped[&kernel_world_stop],
+        slot: ProcessSlot) -> usize !{unsafe} {
+    match scheduled_process_record_stopped(stopped, stopped, slot) {
+        ProcessRecordStopped::Absent => { return 0; }
+        ProcessRecordStopped::Present(inspected) => {
+            let record = scheduled_process_stopped_transfer(inspected, stopped);
+            let pid: usize = record.pid;
+            scheduled_process_stopped_view_drop(inspected);
+            return pid;
+        }
+    }
+}
+
 private fn scheduled_process_parent_pid_stopped(
         stopped: borrow MachineStopped[&kernel_world_stop],
         parent: ProcessHandle) -> usize !{unsafe} {
-    return scheduled_process_record_stopped(stopped, stopped, process_slot_of(parent.pool_index)).pid;
+    return scheduled_process_pid_stopped(stopped, process_slot_of(parent.pool_index));
 }
 
 fn scheduled_process_address_space_root_stopped(
@@ -1926,9 +1978,20 @@ fn scheduled_process_address_space_root_stopped(
         RootOwner::Kernel => { return address_space_boot_root(); }
         RootOwner::Process(process) => { process }
     };
-    let record = scheduled_process_record_stopped(stopped, stopped, slot);
-    if (record.kernel_thread) { return address_space_boot_root(); }
-    return address_space_root_mint(slot, process_backing_words(record));
+    match scheduled_process_record_stopped(stopped, stopped, slot) {
+        ProcessRecordStopped::Absent => {
+            let mut words: ProcessPoolHandleWords = { 0, 0 };
+            return address_space_root_mint(slot, words);
+        }
+        ProcessRecordStopped::Present(inspected) => {
+            let record = scheduled_process_stopped_transfer(inspected, stopped);
+            let kernel_thread: bool = record.kernel_thread;
+            let mut words: ProcessPoolHandleWords = process_backing_words(record);
+            scheduled_process_stopped_view_drop(inspected);
+            if (kernel_thread) { return address_space_boot_root(); }
+            return address_space_root_mint(slot, words);
+        }
+    }
 }
 
 // Fixed work for interrupt-safe DDB entry: at most 64 physical pool slots
@@ -2317,30 +2380,40 @@ private inline fn scheduled_process_scalar_copy(record: borrow &mut ProcessRecor
     return snapshot;
 }
 
+// Absent is an answer of its own (#1289): each reader below says what it
+// reports for a record that is gone.
+must_use variant ProcessScalarSnapshot {
+    Absent;
+    Present(ProcessRecordScalarSnapshot);
+}
+
 private fn scheduled_process_scalar_snapshot(slot: ProcessSlot)
-        -> ProcessRecordScalarSnapshot !{unsafe} {
+        -> ProcessScalarSnapshot !{unsafe} {
     if (atomic_word_load(&scheduled_process_pool_ready) == 0) {
-        return scheduled_process_scalar_copy(&scheduled_process_record_absent);
+        return ProcessScalarSnapshot::Absent;
     }
     let pool_guard = process_pool_lock();
     let mut held: RegionHeld(ProcessRecord) = region_held_at(pool_guard, slot.word);
     match region_probe_held(pool_guard, held) {
         RegionHeldProbe(ProcessRecord)::Stale => {
             process_pool_unlock(pool_guard);
-            return scheduled_process_scalar_copy(&scheduled_process_record_absent);
+            return ProcessScalarSnapshot::Absent;
         }
         RegionHeldProbe(ProcessRecord)::Held(slot_view) => {
             let mut snapshot: ProcessRecordScalarSnapshot = scheduled_process_scalar_copy(
                 region_held_record(slot_view));
             region_held_view_drop(slot_view);
             process_pool_unlock(pool_guard);
-            return snapshot;
+            return ProcessScalarSnapshot::Present(snapshot);
         }
     }
 }
 
 fn scheduled_process_pid_of_slot(slot: ProcessSlot) -> usize !{unsafe} {
-    return scheduled_process_scalar_snapshot(slot).pid;
+    match scheduled_process_scalar_snapshot(slot) {
+        ProcessScalarSnapshot::Absent => { return 0; }
+        ProcessScalarSnapshot::Present(snapshot) => { return snapshot.pid; }
+    }
 }
 
 // The same tolerance for the other three fields a trace or a crash report
@@ -2349,16 +2422,25 @@ fn scheduled_process_pid_of_slot(slot: ProcessSlot) -> usize !{unsafe} {
 // count -- these do not, because "the subject was reaped" is a normal
 // answer to a diagnostic and an abnormal one to the scheduler.
 fn scheduled_process_peek_state(slot: ProcessSlot) -> ProcessSlotState !{unsafe} {
-    return scheduled_process_scalar_snapshot(slot).state;
+    match scheduled_process_scalar_snapshot(slot) {
+        ProcessScalarSnapshot::Absent => { return ProcessSlotState::Free; }
+        ProcessScalarSnapshot::Present(snapshot) => { return snapshot.state; }
+    }
 }
 
 fn scheduled_process_peek_wait_reason(slot: ProcessSlot) -> ProcessWaitReason
         !{unsafe} {
-    return scheduled_process_scalar_snapshot(slot).wait_reason;
+    match scheduled_process_scalar_snapshot(slot) {
+        ProcessScalarSnapshot::Absent => { return ProcessWaitReason::None; }
+        ProcessScalarSnapshot::Present(snapshot) => { return snapshot.wait_reason; }
+    }
 }
 
 fn scheduled_process_peek_saved_sp(slot: ProcessSlot) -> usize !{unsafe} {
-    return scheduled_process_scalar_snapshot(slot).saved_sp;
+    match scheduled_process_scalar_snapshot(slot) {
+        ProcessScalarSnapshot::Absent => { return 0; }
+        ProcessScalarSnapshot::Present(snapshot) => { return snapshot.saved_sp; }
+    }
 }
 
 fn scheduled_process_pid_of_handle(handle: ProcessHandle) -> usize
@@ -2406,8 +2488,8 @@ private fn scheduled_process_slot_for_pid_stopped(
     }
     let mut slot: usize = process_pool_first_slot();
     while (slot != 0) {
-        if (scheduled_process_record_stopped(stopped, stopped,
-                process_slot_from_pool(slot)).pid == pid) {
+        if (scheduled_process_pid_stopped(stopped,
+                process_slot_from_pool(slot)) == pid) {
             return ProcessSlotForPidResult::Found(process_slot_from_pool(slot));
         }
         slot = process_pool_next_slot(slot);
@@ -2469,18 +2551,42 @@ private fn scheduled_process_diagnostic_copy(
         ProcessSlotForPidResult::Missing => { return ProcessStoppedDiagnosticResult::Missing; }
         ProcessSlotForPidResult::Found(found) => { found }
     };
-    let record = scheduled_process_record_stopped(stopped, stopped, slot);
+    match scheduled_process_record_stopped(stopped, stopped, slot) {
+        ProcessRecordStopped::Absent => { return ProcessStoppedDiagnosticResult::Stale; }
+        ProcessRecordStopped::Present(inspected) => {
+            let record = scheduled_process_stopped_transfer(inspected, stopped);
+            let mut snapshot: ProcessDiagnosticSnapshot;
+            let filled: ProcessImageDiagnosticCount =
+                scheduled_process_diagnostic_fill_stopped(stopped, record, &snapshot);
+            scheduled_process_stopped_view_drop(inspected);
+            match filled {
+                ProcessImageDiagnosticCount::Busy => { return ProcessStoppedDiagnosticResult::Busy; }
+                ProcessImageDiagnosticCount::Stale => { return ProcessStoppedDiagnosticResult::Stale; }
+                ProcessImageDiagnosticCount::Ready(pages) => {
+                    return ProcessStoppedDiagnosticResult::Found(snapshot);
+                }
+            }
+        }
+    }
+}
+
+// Fills the caller's snapshot unless the image count is refused, which it
+// answers with; the snapshot is one copy, not a second one by value.
+private fn scheduled_process_diagnostic_fill_stopped(
+        stopped: borrow MachineStopped[&kernel_world_stop],
+        record: borrow &mut ProcessRecord,
+        snapshot: borrow &mut ProcessDiagnosticSnapshot)
+        -> ProcessImageDiagnosticCount !{unsafe} {
     let mut words: ProcessPoolHandleWords = process_image_record_words(record);
     let pages: usize = match process_image_active_page_count_stopped(stopped, words) {
-        ProcessImageDiagnosticCount::Busy => { return ProcessStoppedDiagnosticResult::Busy; }
-        ProcessImageDiagnosticCount::Stale => { return ProcessStoppedDiagnosticResult::Stale; }
+        ProcessImageDiagnosticCount::Busy => { return ProcessImageDiagnosticCount::Busy; }
+        ProcessImageDiagnosticCount::Stale => { return ProcessImageDiagnosticCount::Stale; }
         ProcessImageDiagnosticCount::Ready(count) => { count }
     };
     let mut parent_pid: usize = 0;
     if (record.has_parent) { parent_pid = scheduled_process_parent_pid_stopped(stopped, record.parent); }
-    let mut snapshot: ProcessDiagnosticSnapshot;
-    scheduled_process_diagnostic_record_fill(record, parent_pid, pages, &snapshot);
-    return ProcessStoppedDiagnosticResult::Found(snapshot);
+    scheduled_process_diagnostic_record_fill(record, parent_pid, pages, snapshot);
+    return ProcessImageDiagnosticCount::Ready(pages);
 }
 
 // Fill caller-owned storage: returning another 600-byte snapshot overflowed
@@ -2541,8 +2647,8 @@ private fn scheduled_process_diagnostic_next_pid_stopped(
             region_pool_lock_is_held(&scheduled_process_pool)) { return next; }
     let mut slot: usize = process_pool_first_slot();
     while (slot != 0) {
-        let pid: usize = scheduled_process_record_stopped(stopped, stopped,
-            process_slot_from_pool(slot)).pid;
+        let pid: usize = scheduled_process_pid_stopped(stopped,
+            process_slot_from_pool(slot));
         if (pid > after && (next == 0 || pid < next)) { next = pid; }
         slot = process_pool_next_slot(slot);
     }
@@ -2618,7 +2724,18 @@ fn kernel_process_monitor_proc(stopped: borrow MachineStopped[&kernel_world_stop
     ddb_puts(" ppid="); ddb_put_udec(snapshot.ppid);
     ddb_puts(" state="); uart_debug_putc(snapshot.state);
     ddb_puts(" wait=");
-    match process_wait_reason(&scheduled_process_record_stopped(stopped, stopped, slot).state) {
+    let mut wait_reason: ProcessWaitReason = ProcessWaitReason::None;
+    let mut saved_sp: usize = 0;
+    match scheduled_process_record_stopped(stopped, stopped, slot) {
+        ProcessRecordStopped::Absent => {}
+        ProcessRecordStopped::Present(inspected) => {
+            let record = scheduled_process_stopped_transfer(inspected, stopped);
+            wait_reason = process_wait_reason(&record.state);
+            saved_sp = record.saved_sp;
+            scheduled_process_stopped_view_drop(inspected);
+        }
+    }
+    match wait_reason {
         ProcessWaitReason::None => { ddb_put_udec(0); }
         ProcessWaitReason::UartRx => { ddb_put_udec(1); }
         ProcessWaitReason::ChildExit => { ddb_put_udec(2); }
@@ -2629,7 +2746,7 @@ fn kernel_process_monitor_proc(stopped: borrow MachineStopped[&kernel_world_stop
         ProcessWaitReason::Pipe => { ddb_put_udec(7); }
     }
     ddb_puts(" saved_sp=");
-    ddb_put_hex(scheduled_process_record_stopped(stopped, stopped, slot).saved_sp);
+    ddb_put_hex(saved_sp);
     ddb_puts(" pages="); ddb_put_udec(snapshot.resident_pages);
     ddb_puts(" command=");
     kernel_process_monitor_put_command(snapshot);
@@ -2963,7 +3080,10 @@ private fn kernel_stack_run_depth(slot: ProcessSlot, offset: usize, count: usize
 
 private fn kernel_stack_bottom(slot: ProcessSlot)
         -> usize !{unsafe} {
-    let base: usize = scheduled_process_scalar_snapshot(slot).stack_run;
+    let base: usize = match scheduled_process_scalar_snapshot(slot) {
+        ProcessScalarSnapshot::Absent => { 0 }
+        ProcessScalarSnapshot::Present(snapshot) => { snapshot.stack_run }
+    };
     if (kernel_stack_run_usable(base) == false) { return 0; }
     return base + KERNEL_PROCESS_STACK_SIZE;
 }
@@ -7508,8 +7628,10 @@ private fn kernel_stack_owner_name(sp: usize) -> *u8 {
         match cursor {
             ProcessSlotCursor::Done => { walking = false; }
             ProcessSlotCursor::At(slot) => {
-                let base: usize =
-                    scheduled_process_scalar_snapshot(slot).stack_run;
+                let base: usize = match scheduled_process_scalar_snapshot(slot) {
+                    ProcessScalarSnapshot::Absent => { 0 }
+                    ProcessScalarSnapshot::Present(snapshot) => { snapshot.stack_run }
+                };
                 if (base != 0 && sp >= base &&
                     sp < base + KERNEL_STACK_RUN_BYTES) {
                     return "below a process kernel stack" as *u8;
