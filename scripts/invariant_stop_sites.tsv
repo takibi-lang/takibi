@@ -53,6 +53,8 @@ kernel/kernel/cpu_authority.tkb	preempt_off_enter	unmodelled	2	-	#638	TPIDR_EL1 
 kernel/kernel/cpu_authority.tkb	preempt_off_exit	ladder	1	-	#638	an exit with no open region: the compiler emits enter/exit pairs, so the count is balanced by construction and the stop restates a compile-time fact
 kernel/kernel/cpu_authority.tkb	preempt_assert_blockable	ladder	1	-	#638	blocking inside a preempt_off region: the may_block effect inside a preempt_off block could be refused by the compiler
 kernel/kernel/process.tkb	scheduled_process_pin_release	ladder	1	-	#652	a pin released while a CPU owns the stack: StackOwnership.tla states the rule; trace conformance (#652) would take it over
+kernel/kernel/process.tkb	scheduled_process_record_current	ladder	1	-	#1289	the record of the process running here left the pool: reap needs Exited, a witness cannot outlive current; the audit is on #1289
+kernel/kernel/process.tkb	scheduled_process_record_owned	ladder	1	-	#1289	an owner's record left the pool: reserved Running, exclusive Reapable and unpublished creating owners exclude any other remover; the audit is on #1289
 kernel/kernel/process.tkb	scheduled_process_exited_take	ladder	1	-	#652	a reap of a zombie whose stack a CPU still stands on (#609): StackOwnership.tla states the rule
 kernel/kernel/process.tkb	scheduled_process_start	ladder	1	-	#652	a start on a stack another CPU owns (#609): StackOwnership.tla states the rule
 kernel/kernel/process.tkb	kernel_process_root_authorities_check	frame	1	-	#1017	the root authorities disagree with TTBR0 at EL0 return: checked at the frame, the saved frame is the report

@@ -432,7 +432,15 @@ The checker-only `changes_witness_ProcessCurrent` contract rejects a context
 change or departure from Running/Constructing with any remaining live current
 witness, even without a retained record pointer. Boot-only calls with no live
 process retain the existing current-live
-gates and the boot thread; the view does not prove a process exists.
+gates and the boot thread. The view proves nothing by itself; that the record
+exists is an audited premise (below), which `scheduled_process_record_current`
+and `scheduled_process_record_owned` stop on rather than absorb (GitHub issue
+#1289). Records leave the pool by a Reapable owner's removal, by an unpublished
+record's own rollback, by a probe's own slot, and by the boot table reset, which
+runs before dispatch opens. An owner outlives a run-lock hold only as a reserved
+Running take (only the process itself exits, and it runs nowhere yet), as the
+exclusive Reapable take, or while the record is being created and no handle
+exists; Ready and Blocked owners end in the hold or become Running first.
 The source check inventories entry and transition mints and requires
 that contract on every current-handle/current-live writer and state-writing
 primitive that consumes Running or Constructing. The synthetic early-Ready

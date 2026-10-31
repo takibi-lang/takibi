@@ -1614,9 +1614,16 @@ fn process_image_exec_teardown(target: AddressSpaceRoot,
 // kernel_process_current_root() is already correct here, not a fixed
 // root 0.
 fn process_image_exec_resume_root() {
-    let ProcessRunningHere::Running(current_authority) = process_running_here() else {};
-    kernel_process_activate_stable_root(kernel_process_current_root(current_authority));
-    process_current_end(current_authority);
+    // An exit that found no successor reaches here with current_live false
+    // (GitHub issue #1289): no process is current, so no witness is minted.
+    match kernel_process_current_root_here() {
+        CurrentRootHere::Idle => {
+            kernel_process_activate_stable_root(address_space_boot_root());
+        }
+        CurrentRootHere::Root(current_root) => {
+            kernel_process_activate_stable_root(current_root);
+        }
+    }
 }
 
 // A flat, NUL-terminated argv blob is deliberately used instead of an array

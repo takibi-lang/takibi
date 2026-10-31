@@ -1256,6 +1256,12 @@ private inline fn scheduled_process_current_view_drop(
     region_held_view_drop(source.live);
 }
 
+// GitHub issue #1289 step 1: the Stale arm stops. The process a ProcessCurrent
+// names is running here, so it is neither Exited nor Reapable, and only those
+// are removed. The mints are the EL0 entries and the boot fixtures on the boot
+// thread; every path that clears current_live or moves current_handle
+// is marked changes_witness_ProcessCurrent, so no witness outlives it. Only the
+// boot table reset removes a record otherwise, before dispatch opens.
 fn scheduled_process_record_current(running: borrow ProcessCurrent[process, phase])
         -> &mut ProcessRecord @ process !{unsafe} {
     let mut handle: ProcessHandle = process_current_handle(running);
@@ -1267,7 +1273,8 @@ fn scheduled_process_record_current(running: borrow ProcessCurrent[process, phas
             if (atomic_word_compare_exchange(&scheduled_process_missing_first_slot, 0, region_held_address(handle.pool_index))) {
                 atomic_word_store(&scheduled_process_missing_reason, 2);
             }
-            return &scheduled_process_record_absent;
+            kernel_activity_set(KernelActivity::WitnessRecordStale);
+            kernel_invariant_stop();
         }
         RegionHeldProbe(ProcessRecord)::Held(live) => {
             let source = scheduled_process_current_view_new(live, running);
@@ -1370,6 +1377,10 @@ enum KernelActivity: u8 {
     // The same for scheduled_process_exited_take: a zombie reaped while a
     // CPU still stands on its stack (#609).
     ReapOnOwnedStack;
+    // The same for scheduled_process_record_current and _owned: the record a
+    // ProcessCurrent or a ScheduledProcessOwner stands for has left the pool
+    // (#1289), which those witnesses exclude.
+    WitnessRecordStale;
 }
 
 fn kernel_activity_name(activity: KernelActivity) -> *u8 {
@@ -1388,6 +1399,9 @@ fn kernel_activity_name(activity: KernelActivity) -> *u8 {
         }
         KernelActivity::ReapOnOwnedStack => {
             return "reap-on-owned-stack" as *u8;
+        }
+        KernelActivity::WitnessRecordStale => {
+            return "witness-record-stale" as *u8;
         }
     }
 }
@@ -1461,6 +1475,7 @@ fn kernel_activity_name_for_code(code: usize) -> *u8 {
         KernelActivity::IdleLoop => { return kernel_activity_name(KernelActivity::IdleLoop); }
         KernelActivity::StartOnOwnedStack => { return kernel_activity_name(KernelActivity::StartOnOwnedStack); }
         KernelActivity::ReapOnOwnedStack => { return kernel_activity_name(KernelActivity::ReapOnOwnedStack); }
+        KernelActivity::WitnessRecordStale => { return kernel_activity_name(KernelActivity::WitnessRecordStale); }
         miss => { return "unknown" as *u8; }
     }
     return "unknown" as *u8;
@@ -3244,6 +3259,13 @@ private inline fn scheduled_process_transfer_owned_loan(
     return region_held_record(source.live);
 }
 
+// GitHub issue #1289 step 1: the Stale arm stops. An owner outlives a run-lock
+// hold in three shapes only, each of which keeps the record from any other
+// remover: a take of Running reserved by this CPU (only the process itself
+// exits, and it is not running anywhere), the Reapable take (#1294: exclusive,
+// and this holder is the remover), and a record still being created (no
+// handle to it exists). Ready and Blocked owners are released in the hold that
+// took them, or made Running first. See kernel/CONCURRENCY.md.
 fn scheduled_process_record_owned(owner: borrow ScheduledProcessOwner[process])
         -> &mut ProcessRecord @ process !{unsafe} {
     let pool_guard = process_pool_lock();
@@ -3254,7 +3276,8 @@ fn scheduled_process_record_owned(owner: borrow ScheduledProcessOwner[process])
             if (atomic_word_compare_exchange(&scheduled_process_missing_first_slot, 0, region_held_address(owner.pool_index))) {
                 atomic_word_store(&scheduled_process_missing_reason, 2);
             }
-            return &scheduled_process_record_absent;
+            kernel_activity_set(KernelActivity::WitnessRecordStale);
+            kernel_invariant_stop();
         }
         RegionHeldProbe(ProcessRecord)::Held(live) => {
             let source = scheduled_process_owned_view_new(live, owner);
