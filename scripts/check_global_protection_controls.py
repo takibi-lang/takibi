@@ -9,9 +9,12 @@ another format and an unknown class must each be refused or handled as the
 docstring there says. The --drop/--prune rewrite (#1201) must refuse a drop
 or a write that loses an unprotected global's row. A reviewed row's named
 reader must be a real non-write use or a file naming the global. The tracked
-allow-list is also read for shape.
+allow-list is also read for shape. The compiler's format_version, this reader's
+FORMAT and the first line docs/GLOBAL_PROTECTION.md quotes must be one number.
 """
 
+import pathlib
+import re
 import sys
 
 import buildcheck_global_protection as g
@@ -131,6 +134,15 @@ def main():
     expect("a missing script is refused", reader("read-by scripts/no_such_file: because") != [])
     expect("unreviewed rows are counted", g.unreviewed_count(
         {("a", "x"): "unreviewed", ("a", "y"): "read-by f: why"}) == 1)
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    compiler = re.search(r"^let format_version = (\d+)$",
+                         (root / "lib/global_protection.ml").read_text(encoding="utf-8"), re.M)
+    documented = re.search(r"^    # takibi globals, format (\d+);",
+                           (root / "docs/GLOBAL_PROTECTION.md").read_text(encoding="utf-8"), re.M)
+    expect("compiler, reader and document name one format",
+           compiler and documented
+           and int(compiler[1]) == int(documented[1]) == g.FORMAT)
 
     tracked, shape = g.parse_allowlist(g.ALLOWLIST.read_text(encoding="utf-8"))
     expect("tracked allow-list is well formed", shape == [])

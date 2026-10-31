@@ -9,13 +9,16 @@ classification is the compiler's (`lib/global_protection.ml`): it reads the
 `per_cpu`, `dma_fixed`, `guarded_by` and region registries and the
 generated protocol and region-pool names, not `.tkb` text.
 
-## Format, version 2
+## Format, version 3
 
 The first line is
 
-    # takibi globals, format 2; see docs/GLOBAL_PROTECTION.md
+    # takibi globals, format 3; see docs/GLOBAL_PROTECTION.md
 
-and the second names the columns:
+A reader refuses any other version. Format 2 added the uses table below;
+format 3 changed no column and added the kinds `load`, `atomic_load` and
+`atomic_store` to it (`read`, `index`, `cast` and `address` used to cover them),
+so a reader of format 2 would misjudge a use. The second line names the columns:
 
 | column | content |
 | --- | --- |
@@ -27,7 +30,7 @@ and the second names the columns:
 | `type` | the declared type, spelled compactly (`[AtomicWord;4]`, `LockedCell(usize)`) |
 | `protection` | one class below |
 
-## The uses table (format 3, GitHub issues #769 and #1275)
+## The uses table (GitHub issues #769 and #1275)
 
 After the globals' rows, a line `# uses` and a column header start a
 second table: one row per use of a global anywhere in the program,
