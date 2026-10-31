@@ -37,6 +37,7 @@ POOL_FIELD = re.compile(r"(\w+)=(\d+)")
 ALLOC_LINE = re.compile(
     r"PASS compile-alloc-budget: (\w+) main\.o compile allocated ([\d,]+) words")
 BOOT_LINE = re.compile(r"PASS kernel/(\w+) dmesg: .*?\bboot=([\d.]+) s")
+COST_LINE = re.compile(r"RECORDED pool lock wait cost: pairs=\d+ plain=(\d+) ")
 TCP_LINE = re.compile(r"PASS kernel-tcp-throughput: .*?(\d+)-(\d+) KiB/s")
 
 
@@ -55,6 +56,8 @@ def pool_figures(uart_text):
     pools = {f"pool_{name}": int(count)
              for name, count in POOL_FIELD.findall(found[-1])}
     pools["pool_lock_wait_sum"] = sum(pools.values())
+    cost = COST_LINE.findall(uart_text)
+    pools["lock_pair_ticks"] = int(cost[-1]) if cost else None
     return pools
 
 

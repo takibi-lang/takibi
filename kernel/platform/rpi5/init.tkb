@@ -33,7 +33,7 @@ extern fn kernel_boot_is_warm() -> usize;
 //
 // The field choice is the whole reason this is per-platform; see
 // kernel/platform/qemu/init.tkb's copy.
-fn cpu_id() -> {0..<KERNEL_MAX_CORES as usize} {
+inline fn cpu_id() -> {0..<KERNEL_MAX_CORES as usize} {
     return (mrs_mpidr_el1() >> 8) & 3;
 }
 

@@ -54,6 +54,10 @@ CASES = (
                               cost_line(5417, 5417 + 221)], None),
     ("#953 cost over", [page_line(534), pool_line(2000),
                         cost_line(5417, 5417 + 222)], 953),
+    ("#1288 pair just under", [page_line(534), pool_line(2000),
+                               cost_line(22118, 22118)], None),
+    ("#1288 pair over", [page_line(534), pool_line(2000),
+                         cost_line(22119, 22119)], 1288),
     ("#953 cost missing", [page_line(534), pool_line(2000)], 953),
 )
 

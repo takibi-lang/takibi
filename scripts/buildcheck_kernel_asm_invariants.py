@@ -574,11 +574,13 @@ def check_mutex_masks_before_taking(insns):
         if take_at is None and ("<spin_lock>" in text or "<spin_trylock>" in text):
             take_at = addr
     saver = [text for _, text, fn in insns if fn == "mutex_irq_save"]
-    # GitHub issue #920: the save is irq_save, which masks (disable_irq,
-    # the GIC priority mask) only when IRQs were not already masked. It
-    # counts only if it does call disable_irq.
+    # GitHub issue #920: the save is irq_save, which masks only when IRQs were
+    # not already masked. It counts only if it reaches both masks: the GIC
+    # priority mask and the DAIF fallback. GitHub issue #1288: it holds them
+    # itself, one preempt_off region rather than disable_irq's second one.
     irq_save = [text for _, text, fn in insns if fn == "irq_save"]
-    irq_save_masks = any("<disable_irq>" in x for x in irq_save)
+    irq_save_masks = (any("<irq_priority_mask_write>" in x for x in irq_save)
+                      and any("DAIFSet" in x for x in irq_save))
     if saver and not any("<disable_irq>" in x or "DAIFSet" in x
                          or ("<irq_save>" in x and irq_save_masks)
                          for x in saver):

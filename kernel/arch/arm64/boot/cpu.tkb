@@ -103,26 +103,30 @@ fn disable_irq() !{masks_irq} {
     msr_daifset_irq();
 }
 
-// 1 if ordinary IRQs are masked on this core by either mask, 0 if they can
-// be taken. What a save records: DAIF.I is set inside the stop's handler and
-// on the way into and out of every exception, the priority mask everywhere
-// else.
-fn irq_mask_state() -> usize {
-    let daif_masked: usize = (mrs_daif() >> 7) & 1;
-    let mut pmr_masked: usize = 0;
-    preempt_off (cpu) {
-        pmr_masked = irq_pmr[cpu].masked;
-    } else { }
-    return daif_masked | pmr_masked;
-}
-
+// What a save records: 1 if ordinary IRQs are masked on this core by either
+// mask, 0 if they can be taken. DAIF.I is set inside the stop's handler and on
+// the way into and out of every exception, the priority mask everywhere else.
+//
 // The local_irq_save half: masks only when IRQs were not already masked, and
 // returns what it found for mutex_irq_restore. Masking again when DAIF.I is
 // what masks -- an exception path -- would raise the priority mask with no
 // restore to lower it.
+//
+// One region for the read and the raise, not irq_mask_state then disable_irq:
+// this runs in every outermost lock acquire, and a second region cost about
+// 21 ns on RPi5 (GitHub issue #1288).
 fn irq_save() -> usize {
-    let flags: usize = irq_mask_state();
-    if (flags == 0) { disable_irq(); }
+    let mut flags: usize = (mrs_daif() >> 7) & 1;
+    let mut pmr: bool = false;
+    preempt_off (cpu) {
+        flags = flags | irq_pmr[cpu].masked;
+        if (flags == 0 && irq_pmr[cpu].ready != 0) {
+            irq_pmr[cpu].masked = 1;
+            irq_priority_mask_write(true);
+            pmr = true;
+        }
+    } else { }
+    if (flags == 0 && pmr == false) { msr_daifset_irq(); }
     return flags;
 }
 

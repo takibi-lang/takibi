@@ -53,6 +53,11 @@ COUNTER_CEILING_NS. Measured 2026-10-24: +0.1..0.2 ns per pair (24.5 ns
 pair); counting every acquire had cost +6.1 ns, an out-of-line held check
 +2.6 ns. This is not a parked issue: it fails naming #953.
 
+Cost ceiling of the pair itself (#1288): comparing P with C cannot see a
+cost both wrappers share, and #638 stage 4 raised both from 81 to 121 ns
+unnoticed. Fail when P / N / F exceeds PAIR_CEILING_NS. Measured 2026-10-31:
+81 ns. The ceiling is RPi5 only because this script reads only that lane.
+
 Controls: scripts/check_parked_triggers_controls.py.
 """
 
@@ -68,6 +73,7 @@ from pass_line import report_pass
 BASELINE_680 = 2739
 
 COUNTER_CEILING_NS = 1.0
+PAIR_CEILING_NS = 100.0
 COST_LINE = re.compile(
     r"RECORDED pool lock wait cost: pairs=(\d+) plain=(\d+) counted=(\d+) "
     r"freq=(\d+)\s*$")
@@ -131,6 +137,14 @@ def counter_cost(lines):
                 f"measurement ({error})"]
     if pairs == 0 or freq == 0 or plain == 0:
         return ["FAIL pool-lock-counter-cost (#953): pairs, plain or freq is 0"]
+    pair_ns = plain * 1e9 / freq / pairs
+    if pair_ns > PAIR_CEILING_NS:
+        return [f"FAIL pool-lock-pair-cost (#1288): the pool lock "
+                f"costs {pair_ns:.1f} ns per uncontended lock pair, over "
+                f"{PAIR_CEILING_NS} ns (plain="
+                f"{plain} pairs={pairs} freq={freq}). Every lock and IRQ mask "
+                f"pays this; find what the mask path gained "
+                f"(kernel/arch/arm64/boot/cpu.tkb, kernel/lib/pool_lock.tkb)."]
     extra_ns = (counted - plain) * 1e9 / freq / pairs
     if extra_ns > COUNTER_CEILING_NS:
         return [f"FAIL pool-lock-counter-cost (#953): the pool lock wait "

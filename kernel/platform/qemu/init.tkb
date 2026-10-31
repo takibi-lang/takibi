@@ -44,7 +44,7 @@ private fn qemu_psci_cpu_on(start: borrow CpuStart[&kernel_world_stop])
 // be indexed by this value with no check. entry_qemu.S parks any core whose
 // Aff0 is above 3 before it runs Takibi code, so for every core that gets here
 // the mask changes nothing. That gate is the one trusted step.
-fn cpu_id() -> {0..<KERNEL_MAX_CORES as usize} {
+inline fn cpu_id() -> {0..<KERNEL_MAX_CORES as usize} {
     return mrs_mpidr_el1() & 3;
 }
 

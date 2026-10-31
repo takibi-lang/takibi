@@ -38,7 +38,7 @@ def problems():
                   "boot_s_qemu": 70.7, "boot_s_rpi5": 38.3, "tcp_kib_s_low": 1715}:
         out.append(f"log figures read wrongly: {logged}")
     if f.pool_figures(UART) != {"pool_process": 10, "pool_fd_block": 5,
-                                "pool_lock_wait_sum": 15}:
+                                "pool_lock_wait_sum": 15, "lock_pair_ticks": 1}:
         out.append(f"pool figures read wrongly: {f.pool_figures(UART)}")
     with tempfile.TemporaryDirectory() as name:
         root = pathlib.Path(name)
