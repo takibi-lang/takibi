@@ -23,7 +23,7 @@ from apt and opam.
 ```bash
 # System packages: LLVM 19, QEMU, filesystem tools, Python, Java
 sudo apt install opam cmake llvm-19 llvm-19-dev lld-19 libzstd-dev \
-    qemu-system-arm qemu-user ipxe-qemu gdb-multiarch \
+    qemu-system-arm qemu-user ipxe-qemu gdb-multiarch curl \
     mtools cpio e2fsprogs e2tools python3-serial openjdk-21-jre-headless
 
 # OCaml 5.4 and the project's dependencies
