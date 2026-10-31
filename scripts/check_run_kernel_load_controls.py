@@ -12,13 +12,14 @@ import sys
 from pass_line import report_pass
 from run_kernel_load import (read_reference_text, series_section, PHASES)
 
-SKIPPING = (b"\nload: linux-kernel 6.12.0\nload: begin exec\n"
-            b"stress-ng: info:  [12] skipped: 4: exec (4)\n"
-            b"load: end exec status=0\n"
-            b"load: begin fork\n"
-            b"stress-ng: info:  [13] skipped: 0\n"
-            b"stress-ng: metrc: [13] fork 100 10.00 1.00 2.00 10.00 33.33\n"
-            b"load: end fork status=0\n")
+# A str: the log-expectation check reads bytes literals as lines to wait for.
+SKIPPING = ("\nload: linux-kernel 6.12.0\nload: begin exec\n"
+            "stress-ng: info:  [12] skipped: 4: exec (4)\n"
+            "load: end exec status=0\n"
+            "load: begin fork\n"
+            "stress-ng: info:  [13] skipped: 0\n"
+            "stress-ng: metrc: [13] fork 100 10.00 1.00 2.00 10.00 33.33\n"
+            "load: end fork status=0\n").encode("ascii")
 
 
 def main():
@@ -42,7 +43,7 @@ def main():
     if "no column (no run yet)" not in none or "FAILED: hung" not in none:
         sys.exit("FAIL run-kernel-load-controls: a missing column or failure went unsaid")
     report_pass("run-kernel-load-controls", "skips, Linux transcripts and series tables read as meant",
-                controls=4)
+                tables=text.count("### "))
 
 
 if __name__ == "__main__":
