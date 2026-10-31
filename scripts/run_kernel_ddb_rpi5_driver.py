@@ -49,6 +49,7 @@ import serial
 from await_timing import AwaitTiming
 from ddb_qemu_checks import HUNG_CORE, hung_core_problems
 from typed_marker import typed_marker
+from uart_break import hold_break
 
 # The milestones, in the order the session reaches them.
 MILESTONES = ("wake-sent", "wake-acked", "break-sent", "first-prompt",
@@ -121,7 +122,7 @@ def hung_core_break(uart, log, received: bytearray, elf: str, timeline) -> None:
     # The armed core spins at its next interrupt: a tick.
     time.sleep(HUNG_CORE_ARM_SETTLE_SECONDS)
     offset = len(received)
-    uart.send_break(0.25)
+    hold_break(uart)
     timeline.mark("hang-break-sent")
     deadline = time.monotonic() + HUNG_CORE_BUDGET_SECONDS
     continue_sent = False
@@ -406,7 +407,7 @@ def main() -> int:
             log.flush()
         if b"console lock probe: held for UART BREAK\n" not in received:
             raise timeline.bail("peer did not confirm its held console guard")
-        uart.send_break(0.25)
+        hold_break(uart)
         timeline.mark("break-sent")
         while time.monotonic() < deadline:
             # The read is what paces this loop, at its 0.25s timeout. An

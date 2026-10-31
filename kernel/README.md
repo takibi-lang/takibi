@@ -444,7 +444,7 @@ take none once they have stopped the machine (the compiler's
 To stop a live kernel in DDB from either `make kernelsh-qemu` or
 `make kernelsh-rpi5`, press Ctrl-T and then the ordinary lowercase `b` key.
 Neither key is forwarded to ash. On RPi5 the host sends one automatically
-released 250 ms physical serial BREAK; on QEMU the console asks the PL011
+released 1 s physical serial BREAK; on QEMU the console asks the PL011
 chardev to deliver the equivalent BREAK through a private QMP control socket.
 The existing TCP UART/miniterm data path is unchanged. The kernel prints
 `ddb>` and accepts the following commands.

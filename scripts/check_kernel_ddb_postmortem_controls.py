@@ -123,10 +123,16 @@ class FakeUart:
         self.closed = False
         self.uart_breaks = 0
 
-    def send_break(self, duration):
-        """pyserial's line BREAK, the RPi5 lane's path (GitHub issue #869)."""
-        self.uart_breaks += 1
-        self.broke_in()
+    @property
+    def break_condition(self):
+        return False
+
+    @break_condition.setter
+    def break_condition(self, asserted):
+        """pyserial's line BREAK, the RPi5 lane's path (#869, #1300)."""
+        if asserted:
+            self.uart_breaks += 1
+            self.broke_in()
 
     def broke_in(self):
         """What a delivered serial BREAK does: the debugger prints a prompt."""

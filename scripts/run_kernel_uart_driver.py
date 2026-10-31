@@ -12,6 +12,7 @@ import time
 import serial
 from await_timing import AwaitTiming
 from qmp_wire import qmp_reply
+from uart_break import hold_break
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "kernel/tests/common"))
 from terminal_driver import TerminalScenario
@@ -348,7 +349,7 @@ def send_uart_break(connection) -> str:
     same entry scripts/run_kernel_ddb_rpi5_driver.py proves on every run.
     """
     try:
-        connection.send_break(0.25)
+        hold_break(connection)
     except Exception as error:  # A failed diagnosis must not replace the verdict.
         return f"the UART refused the BREAK: {error}"
     return ""

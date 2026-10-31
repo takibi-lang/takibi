@@ -12,6 +12,7 @@ import serial
 from serial.tools import miniterm
 
 from qmp_wire import qmp_reply
+from uart_break import hold_break
 
 
 # The bounded init.sh fixture emits the first marker while it exercises ash.
@@ -236,8 +237,8 @@ class TimingMiniterm(miniterm.Miniterm):
                     qmp_execute(qmp_socket, "chardev-send-break", {"id": "debug_uart"})
                     print("--- sent QEMU PL011 BREAK for Takibi DDB ---", file=sys.stderr)
                 else:
-                    print("--- sending 250 ms BREAK for Takibi DDB ---", file=sys.stderr)
-                    self.serial.send_break(0.25)
+                    print("--- sending 1 s BREAK for Takibi DDB ---", file=sys.stderr)
+                    hold_break(self.serial)
             except (OSError, RuntimeError, json.JSONDecodeError) as error:
                 print(f"--- could not send Takibi DDB BREAK: {error} ---", file=sys.stderr)
             return

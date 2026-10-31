@@ -15,6 +15,7 @@ import threading
 import time
 
 import rpi5_postmortem
+from uart_break import hold_break
 
 ROOT = Path(__file__).resolve().parent.parent
 MODES = ('confirmed-ready', 'confirmed-reply', 'unconfirmed-ready', 'unconfirmed-reply',
@@ -312,7 +313,7 @@ def run_case(mode, device, directory, interface):
             stop.set()
             reader.join(timeout=1)
             result['postmortem'] = rpi5_postmortem.collect(
-                elf, directory, str(error), send_break=lambda: uart.send_break(0.25),
+                elf, directory, str(error), send_break=lambda: hold_break(uart),
                 write=uart.write, read=lambda: uart.read(4096))
             print(f'[kernel/rpi5 gem-tx] {mode}: {result["postmortem"]}', flush=True)
         raise

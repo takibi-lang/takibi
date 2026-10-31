@@ -52,7 +52,7 @@ class Debugger:
         self.answers = answers
         self.commands = []
 
-    def send_break(self):
+    def deliver_break(self):
         self.events.append("break")
         if self.answers:
             self.pending += b"\r\n" + DDB_PROMPT
@@ -92,7 +92,7 @@ def check_collect():
                               recording_snapshot(board.events, fail=snapshot_fails)):
                 started = clock.now
                 note = rpi5_postmortem.collect(
-                    "fixture.elf", temporary, "fixture reason", send_break=board.send_break,
+                    "fixture.elf", temporary, "fixture reason", send_break=board.deliver_break,
                     write=board.write, read=board.read, clock=clock)
             label = f"answers={answers} snapshot_fails={snapshot_fails}"
             if board.events != ["swd:before-break", "break"]:
@@ -115,7 +115,7 @@ def check_collect():
 
     def refuse():
         raise OSError("fixture: port gone")
-    board.send_break = refuse
+    board.deliver_break = refuse
     with tempfile.TemporaryDirectory() as temporary, \
             patch.object(rpi5_swd_snapshot, "capture", recording_snapshot([])):
         note = rpi5_postmortem.collect("fixture.elf", temporary, "r", send_break=refuse,
@@ -147,8 +147,14 @@ class FakeUart:
     def write(self, data):
         self.board.write(data)
 
-    def send_break(self, _duration):
-        self.board.send_break()
+    @property
+    def break_condition(self):
+        return False
+
+    @break_condition.setter
+    def break_condition(self, asserted):
+        if asserted:
+            self.board.deliver_break()
 
     def close(self):
         pass
@@ -231,7 +237,7 @@ def check_shell_smoke():
                 except socket.timeout:
                     data = b""
                 if data == b"\x14b":
-                    board.send_break()
+                    board.deliver_break()
                 elif data:
                     board.write(data)
                 answer = board.read()
