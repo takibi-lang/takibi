@@ -696,12 +696,21 @@ HEAD it measured and one count per category -- the frame (`RAW_MINT_FILES`
 files and lines, `DEVICE_SEMANTICS_FILES`), the raw dereference budget,
 production `unsafe` blocks, assembly lines, `extern fn`, ordinary per-CPU
 arrays and per_cpu stores, raw `cpu_id()` calls, `kernel_invariant_stop`
-sites, the frame API ratchet, and, with a build, `--facts rawsites.tsv`
-per target and the z3 range obligations -- and, for every count that moved,
+sites, the frame API ratchet, the scripts this document names as carrying trust
+(`scripts/trust_checks.tsv`, each with its successor), the TLA+ review stamps,
+the `static_assert` premises on `KERNEL_PREEMPTIBLE` and the core count, generated
+raw sites apart from kernel files, each second judge's disagreements that became
+defects (`scripts/trust_judge_defects.tsv`), and, with a build, `--facts
+rawsites.tsv` per target and per mint file, the same total without the
+probe-linked `*_evidence.tkb` files (computed from the facts; no such image is
+built), and each judge's obligations -- and, for every count that moved,
 why: a fallen trust count names the rule that retired it (a name from
 `RULES` in `scripts/check_trust_ledger.py`), a risen one the issue that
-accepted it. `make langcheck` refuses an unattributed change and a tree whose
-trust counts exceed the last entry. Append an entry with
+accepted it. `make langcheck` refuses an unattributed change, a tree whose
+trust counts exceed the last entry, and a script named here with no row in
+`scripts/trust_checks.tsv`. `make trustedbasecheck` prints every category with
+its count and date, and the total of discrete premises a trust-relevant change
+is reviewed against (DECISIONS 2026-10-13). Append an entry with
 
 ```sh
 python3 scripts/check_trust_ledger.py --append --build-dir kernel/build \

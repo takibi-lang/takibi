@@ -25,14 +25,26 @@ the check needs no kernel build:
 - the frame API ratchet (check_frame_api.py RATCHET, #1018), when present;
 - the unprotected globals (scripts/global_protection_allowlist.tsv rows,
   which buildcheck_global_protection.py holds to the compiler's
-  --facts globals.tsv tables, #1012).
+  --facts globals.tsv tables, #1012);
+- the premises no ratchet of its own counts (#1157): build checks named in
+  TRUSTED_BASE.md (scripts/trust_checks.tsv, each with its successor), TLA+
+  review stamps in kernel/models/README.md, production static_asserts naming
+  KERNEL_PREEMPTIBLE or the core count;
+- generated raw dereference sites apart from kernel files;
+- each second judge's disagreements that became defects
+  (scripts/trust_judge_defects.tsv).
 
-Build-measured categories (`--facts rawsites.tsv` per target, z3 range
-obligations) are recorded only by `--append --build-dir kernel/build` and are
-not re-measured by the fast check.
+Build-measured categories (`--facts rawsites.tsv` per target and per mint
+file, the same total without the probe-linked `*_evidence.tkb` files, each
+judge's obligations) are recorded only by `--append --build-dir kernel/build`
+and are not re-measured by the fast check. A build row is compared with the
+last entry that has it, so an append without a build skips no attribution.
 
 Modes:
   check_trust_ledger.py                 check the series and the tree
+  check_trust_ledger.py --report [--build-dir DIR]
+                                        every category, its count and its date
+                                        (make trustedbasecheck)
   check_trust_ledger.py --append [--reason CAT=TEXT ...] [--build-dir DIR]
                                         append today's entry
 
@@ -40,7 +52,8 @@ The check refuses: an entry whose changed category has no reason; a fallen
 trust count whose reason names no rule in RULES; a risen trust count whose
 reason cites no issue; dates going backwards; and the tree above the last
 entry in a trust category (or below it in a judge category), which is growth
-the series has not attributed yet. A fall in the tree is not refused: it is
+the series has not attributed yet; and a script TRUSTED_BASE.md names with no
+row in scripts/trust_checks.tsv, or a row with no such mention or no successor. A fall in the tree is not refused: it is
 recorded, with its rule, at the next append.
 """
 
@@ -78,13 +91,37 @@ CATEGORIES = {
     "invariant_stop_sites": (TRUST, "kernel_invariant_stop call sites outside kernel/tests (#1031; containment)"),
     "frame_api_ratchet": (TRUST, "check_frame_api.py RATCHET entries (#1018)"),
     "unprotected_globals": (TRUST, "production let mut globals whose type shows no protection (scripts/global_protection_allowlist.tsv rows, #1012)"),
+    "trust_build_checks": (TRUST, "scripts TRUSTED_BASE.md names as carrying trust (scripts/trust_checks.tsv)"),
+    "tla_review_stamps": (TRUST, "review stamps in kernel/models/README.md"),
+    "static_assert_premises": (TRUST, "production static_asserts naming KERNEL_PREEMPTIBLE or the core count"),
+    "raw_deref_generated": (TRUST, "raw dereference budget of generated <protocol ...> files"),
+    "judge_defects_range": (JUDGE, "z3 over ranges: disagreements that became defects (#952)"),
+    "judge_defects_init": (JUDGE, "z3 over init intervals: disagreements that became defects (#954)"),
+    "judge_defects_region_overlay": (JUDGE, "z3 over regions and overlays: disagreements that became defects (#986 slice 2)"),
     "per_cpu_stores": (JUDGE, "per_cpu store globals (#704, #638)"),
     # Build-measured: recorded by --append --build-dir only.
     "raw_sites_qemu": (TRUST, "--facts rawsites.tsv total, QEMU main.o"),
     "raw_sites_rpi5": (TRUST, "--facts rawsites.tsv total, RPi5 main.o"),
+    "raw_sites_production_qemu": (TRUST, "the same, without *_evidence.tkb: the production image apart from the probe-linked one (from the facts, #986 slice 6 owns a real image)"),
+    "raw_sites_production_rpi5": (TRUST, "the same, RPi5"),
     "range_obligations_qemu": (JUDGE, "z3 range obligations emitted, QEMU main.o (#952)"),
+    "judge_obligations_range": (JUDGE, "z3 over ranges: obligations checked, QEMU main.o (#952)"),
+    "judge_obligations_init": (JUDGE, "z3 over init intervals: obligations checked, QEMU main.o (#954)"),
+    "judge_obligations_region_overlay": (JUDGE, "z3 over regions and overlays: obligations checked, QEMU main.o (#986 slice 2)"),
 }
-BUILD_ONLY = {"raw_sites_qemu", "raw_sites_rpi5", "range_obligations_qemu"}
+BUILD_ONLY = {name for name in CATEGORIES
+              if name.startswith(("raw_sites_", "range_obligations_", "judge_obligations_"))}
+# One build row per mint file, named raw_sites_file:<path>.
+PER_FILE = "raw_sites_file:"
+# Before #1157 a build row was compared only with the entry just before it, so
+# the 46 older entries let falls and rises cross a build-less gap unattributed
+# (raw_sites_qemu 331 -> 312 at entry 15). The series is not rewritten; the
+# comparison holds from the first entry #1157 appended.
+BUILD_ROWS_COMPARED_FROM = 46
+# Rows that add up to the ledger's total: discrete premises, not lines of code
+# (the frame's and the assembly's lines) and not what the judges check.
+NOT_IN_TOTAL = {"frame_lines", "assembly_lines", "raw_sites_qemu", "raw_sites_rpi5",
+                "raw_sites_production_qemu", "raw_sites_production_rpi5"}
 
 # The rules a fallen trust count may be attributed to (#986 comment of
 # 2026-10-25). A new rule is added here with the issue that introduced it.
@@ -105,9 +142,36 @@ RULES = {
     "typed protection": "#1012",
     "BootOnce": "#1013",
     "code removed": "dead code deleted with no replacement",
+    "category split": "the sites moved to another category; none left the base",
 }
 
 ISSUE = re.compile(r"#\d+")
+PREMISE = re.compile(r"\bstatic_assert\s*\(\s*KERNEL_(?:PREEMPTIBLE|ACTIVE_CORES)\b")
+STAMP = re.compile(r"`[0-9a-f]{12}`")
+NAMED_SCRIPT = re.compile(r"\b((?:check|buildcheck|measure|run|lz4)_[a-z0-9_]+\.(?:py|sh))\b")
+TRUST_CHECKS = ROOT / "scripts" / "trust_checks.tsv"
+JUDGE_DEFECTS = ROOT / "scripts" / "trust_judge_defects.tsv"
+
+
+def tsv_rows(path):
+    return [line.split("\t") for line in path.read_text().splitlines()
+            if line.strip() and not line.startswith("#")]
+
+
+def named_check_problems(document, rows):
+    """A script TRUSTED_BASE.md names needs a row with a successor, and only
+    such a script has one (#986 slice 3's rule, on the ledger's list)."""
+    named = {m for m in NAMED_SCRIPT.findall(document)
+             if (ROOT / "scripts" / m).exists()}
+    listed = {row[0] for row in rows}
+    problems = [f"TRUSTED_BASE.md names scripts/{name} with no row in "
+                "scripts/trust_checks.tsv" for name in sorted(named - listed)]
+    problems += [f"scripts/trust_checks.tsv lists {name}, which TRUSTED_BASE.md "
+                 "does not name" for name in sorted(listed - named)]
+    problems += [f"scripts/trust_checks.tsv: {row[0]} has no successor (or "
+                 "'permanent')" for row in rows
+                 if len(row) != 3 or not row[2].strip()]
+    return problems
 
 
 def mint_list(path):
@@ -152,19 +216,22 @@ def measure_tree():
     counts["device_semantics_files"] = len(
         mint_list(KERNEL / "DEVICE_SEMANTICS_FILES"))
 
-    plain = io = builtin = 0
+    plain = io = builtin = generated = 0
     for line in (ROOT / "scripts" / "raw_deref_budget.tsv").read_text().splitlines():
         if not line.strip() or line.startswith("#"):
             continue
         fields = line.split("\t")
         if fields[0] == "<builtin region>":
             builtin += int(fields[1]) + int(fields[2])
+        elif fields[0].startswith("<protocol "):
+            generated += int(fields[1]) + int(fields[2])
         else:
             plain += int(fields[1])
             io += int(fields[2])
     counts["raw_deref_plain"] = plain
     counts["raw_deref_io"] = io
     counts["raw_deref_builtin_region"] = builtin
+    counts["raw_deref_generated"] = generated
 
     sources = kernel_sources()
     unsafe = re.compile(r"\bunsafe\s*\{")
@@ -172,11 +239,13 @@ def measure_tree():
     stop = re.compile(r"\bkernel_invariant_stop(?:_with_frame)?\s*\(")
     counts["unsafe_blocks"] = counts["extern_fns"] = 0
     counts["invariant_stop_sites"] = 0
+    counts["static_assert_premises"] = 0
     for path in sources:
         code = code_only(path.read_text())
         counts["extern_fns"] += len(extern.findall(code))
         if production(path):
             counts["unsafe_blocks"] += len(unsafe.findall(code))
+            counts["static_assert_premises"] += len(PREMISE.findall(code))
             counts["invariant_stop_sites"] += sum(
                 1 for m in stop.finditer(code)
                 if not code[max(0, m.start() - 10):m.start()].rstrip().endswith("fn"))
@@ -194,6 +263,13 @@ def measure_tree():
     counts["raw_cpu_id_calls"] = sum(
         n for n, kind, _ in cpu_id.LISTED.values() if kind != cpu_id.MINT)
 
+    counts["trust_build_checks"] = len(tsv_rows(TRUST_CHECKS))
+    counts["tla_review_stamps"] = len(STAMP.findall(
+        (KERNEL / "models" / "README.md").read_text()))
+    judges = [row[0] for row in tsv_rows(JUDGE_DEFECTS)]
+    for judge in ("range", "init", "region_overlay"):
+        counts[f"judge_defects_{judge}"] = judges.count(judge)
+
     counts["unprotected_globals"] = len(mint_list(
         ROOT / "scripts" / "global_protection_allowlist.tsv"))
 
@@ -208,16 +284,70 @@ def measure_tree():
 
 def measure_build(build_dir):
     counts = {}
+    mints = set(mint_list(KERNEL / "RAW_MINT_FILES"))
     for target in ("qemu", "rpi5"):
         tsv = build_dir / target / "main.o.facts" / "rawsites.tsv"
         if tsv.exists():
-            counts[f"raw_sites_{target}"] = sum(
-                int(line.split("\t")[0])
-                for line in tsv.read_text().splitlines() if line.strip())
+            counts.update(raw_site_counts(target, tsv.read_text(), mints))
     obligations = build_dir / "qemu" / "main.o.facts" / "rangeobl"
     if obligations.is_dir():
-        counts["range_obligations_qemu"] = len(list(obligations.glob("*.smt2")))
+        files = list(obligations.glob("*.smt2"))
+        counts["range_obligations_qemu"] = len(files)
+        counts.update(judge_obligation_counts(f.read_text() for f in files))
     return counts
+
+
+def raw_site_counts(target, text, mints):
+    """rawsites.tsv is `count<TAB>file`, its path as the compiler was given it."""
+    total = production = 0
+    per_mint = {}
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        count, path = line.split("\t")[:2]
+        # The first: kernel/arch/arm64/kernel/ holds a second such component.
+        marker = path.find("/kernel/")
+        relative = path[marker + 1:] if marker >= 0 else path
+        total += int(count)
+        if not relative.endswith("_evidence.tkb"):
+            production += int(count)
+        if relative in mints and int(count):
+            per_mint[f"{PER_FILE}{target}:{relative}"] = int(count)
+    return {f"raw_sites_{target}": total,
+            f"raw_sites_production_{target}": production, **per_mint}
+
+
+def judge_obligation_counts(texts):
+    """One count per judge, read from each obligation's own header and rule."""
+    counts = {"judge_obligations_range": 0, "judge_obligations_init": 0,
+              "judge_obligations_region_overlay": 0}
+    for text in texts:
+        rule = re.search(r"^; rule: (\S+)", text, re.M)
+        name = rule.group(1) if rule else ""
+        if name in ("region", "overlay") or name.startswith("size-"):
+            counts["judge_obligations_region_overlay"] += 1
+        elif text.startswith("; takibi-init-obligation"):
+            counts["judge_obligations_init"] += 1
+        else:
+            counts["judge_obligations_range"] += 1
+    return counts
+
+
+def is_build_row(category):
+    return category in BUILD_ONLY or category.startswith(PER_FILE)
+
+
+def category_kind(category):
+    if category.startswith(PER_FILE):
+        return TRUST
+    return CATEGORIES[category][0] if category in CATEGORIES else None
+
+
+def last_recorded(series, index, category):
+    for entry in reversed(series[:index]):
+        if category in entry["counts"]:
+            return entry["counts"][category]
+    return None
 
 
 def series_problems(series):
@@ -232,7 +362,7 @@ def series_problems(series):
         if problems:
             continue
         for category in entry["counts"]:
-            if category not in CATEGORIES:
+            if category not in CATEGORIES and not category.startswith(PER_FILE):
                 problems.append(f"{where}: unknown category '{category}'")
         if index == 0:
             continue
@@ -242,18 +372,24 @@ def series_problems(series):
         for category in sorted(set(entry["counts"]) | set(before["counts"])):
             old = before["counts"].get(category)
             new = entry["counts"].get(category)
-            if old == new or category not in CATEGORIES:
+            if is_build_row(category):
+                if new is None:
+                    continue  # an append without a build
+                old = last_recorded(series, index, category)
+                if index < BUILD_ROWS_COMPARED_FROM:
+                    continue
+            if old == new or category_kind(category) is None:
                 continue
             if old is None or new is None:
-                if category in BUILD_ONLY:
-                    continue  # a build row present in one entry only
+                if is_build_row(category):
+                    continue  # first recorded here
                 reason = entry["changes"].get(category, "")
                 if not reason.strip():
                     problems.append(f"{where}: {category} appeared or vanished "
                                     "with no reason")
                 continue
             reason = entry["changes"].get(category, "")
-            kind = CATEGORIES[category][0]
+            kind = category_kind(category)
             shrank = new < old
             if not reason.strip():
                 problems.append(f"{where}: {category} {old} -> {new} has no reason")
@@ -283,6 +419,37 @@ def tree_problems(last, tree):
                             f"in the last entry ({last['date']}): append an entry "
                             f"with --reason {category}='#NNN ...'")
     return problems
+
+
+def premise_total(counts):
+    return sum(count for name, count in counts.items()
+               if category_kind(name) == TRUST and name not in NOT_IN_TOTAL
+               and not name.startswith(PER_FILE))
+
+
+def report(args):
+    """Every category with a count and the date it was last recorded."""
+    build_dir = Path(args[1]) if args[:1] == ["--build-dir"] else None
+    series = json.loads(LEDGER.read_text())["series"]
+    now = measure_tree()
+    if build_dir is not None:
+        now.update(measure_build(build_dir))
+    print(f"Trust ledger: {len(series)} entries, last {series[-1]['date']} "
+          f"at {series[-1]['head']}")
+    names = list(CATEGORIES) + sorted(n for n in now if n.startswith(PER_FILE))
+    for name in names:
+        date, recorded = "never", None
+        for entry in reversed(series):
+            if name in entry["counts"]:
+                date, recorded = entry["date"], entry["counts"][name]
+                break
+        moved = "" if now.get(name) == recorded or name not in now or recorded is None else f" (recorded {recorded})"
+        shown = now.get(name, recorded)
+        print(f"  {name:36} {category_kind(name):5} {shown!s:>7}  {date}{moved}")
+    print(f"  {'total premises (DECISIONS 2026-10-13)':42} {premise_total(now):>7}  now, "
+          f"{premise_total(series[-1]['counts'])} at the last entry")
+    for row in tsv_rows(TRUST_CHECKS):
+        print(f"  build check {row[0]}: {row[2]}")
 
 
 def controls():
@@ -324,7 +491,32 @@ def controls():
                                    "a/y.inc": "/* GENERATED by takibi */\n.set A, 8\n",
                                    "build/z.S": "nop\n"}) != 1:
         sys.exit("ERROR trust-ledger: control: generated or build assembly was counted")
-    return len(cases) + 4
+    sites = raw_site_counts("qemu", "3\t/w/kernel/arch/kernel/a.tkb\n2\tkernel/kernel/b_evidence.tkb\n",
+                            {"kernel/arch/kernel/a.tkb"})
+    if sites != {"raw_sites_qemu": 5, "raw_sites_production_qemu": 3,
+                 f"{PER_FILE}qemu:kernel/arch/kernel/a.tkb": 3}:
+        sys.exit(f"ERROR trust-ledger: control: rawsites misread: {sites}")
+    judged = judge_obligation_counts(["; takibi-init-obligation v1\n; rule: init\n",
+                                      "; takibi-range-obligation v2\n; rule: add\n",
+                                      "; takibi-init-obligation v1\n; rule: size-value\n"])
+    if list(judged.values()) != [1, 1, 1]:
+        sys.exit(f"ERROR trust-ledger: control: obligations misjudged: {judged}")
+    rows = [["check_x.py", "t", "#1"]]
+    document = "`scripts/check_x.py` and `scripts/check_trust_ledger.py`"
+    missing = named_check_problems(document, rows)
+    if not any("check_trust_ledger.py with no row" in p for p in missing):
+        sys.exit("ERROR trust-ledger: control: a named check with no row was accepted")
+    if not named_check_problems("no script here", [["check_trust_ledger.py", "t", "p"]]):
+        sys.exit("ERROR trust-ledger: control: a stale check row was accepted")
+    if not named_check_problems("scripts/check_trust_ledger.py", [["check_trust_ledger.py", "t", ""]]):
+        sys.exit("ERROR trust-ledger: control: a row with no successor was accepted")
+    build = dict(base["counts"], raw_sites_qemu=9)
+    gap = [dict(base, counts=build)] + [entry(dict(base["counts"]), {})] * BUILD_ROWS_COMPARED_FROM
+    gap.append(entry(dict(build, raw_sites_qemu=8), {}, date="2026-10-27"))
+    if not series_problems(gap):
+        sys.exit("ERROR trust-ledger: control: a build row's fall across an "
+                 "entry without a build went unattributed")
+    return len(cases) + 10
 
 
 def append(args):
@@ -363,14 +555,19 @@ def main(argv):
     if argv[:1] == ["--append"]:
         append(argv[1:])
         return
+    if argv[:1] == ["--report"]:
+        report(argv[1:])
+        return
     if argv:
-        sys.exit(f"usage: {sys.argv[0]} [--append [--reason CAT=TEXT] "
+        sys.exit(f"usage: {sys.argv[0]} [--report [--build-dir DIR]] [--append [--reason CAT=TEXT] "
                  "[--build-dir DIR] [--date YYYY-MM-DD]]")
     series = json.loads(LEDGER.read_text())["series"]
     problems = series_problems(series)
     tree = measure_tree()
     if not problems:
         problems = tree_problems(series[-1], tree)
+    problems += named_check_problems(
+        (ROOT / "TRUSTED_BASE.md").read_text(), tsv_rows(TRUST_CHECKS))
     if problems:
         for problem in problems:
             print(f"ERROR trust-ledger: {problem}")

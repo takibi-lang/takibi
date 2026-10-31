@@ -1,0 +1,5 @@
+# Disagreements between a second judge and the compiler that became a defect
+# (#986 slice 1). The per-defect verdicts live on #955 and #1043; the ledger
+# keeps the counts. A wrong term z3 agreed with (#983) is not a disagreement.
+# Columns: judge (range, init, region_overlay), issue, the defect.
+range	#952	a u64 literal folded as -1, so a constant division proved {0..<1} and an index went unchecked

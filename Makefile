@@ -2322,6 +2322,7 @@ kernel-debug-layout-check: _kernelbuild _kernelbuild-qemu-debug
 .PHONY: trustedbasecheck
 trustedbasecheck: kernelbuild
 	python3 scripts/measure_trusted_base.py
+	python3 scripts/check_trust_ledger.py --report --build-dir kernel/build
 
 ## RPI5_SERIAL_DEV: empty by default, resolved at runtime by
 ## scripts/rpi5_uart_dev.sh (which picks the ttyACM device out by its
@@ -2780,7 +2781,10 @@ hwcheck-churn-rpi5: kernelbuild-rpi5
 ## finds gets a deterministic lane; its times are RECORDED, never judged on
 ## QEMU. LOAD_SECONDS is each stressor's run, LOAD_JOBS the xargs jobs,
 ## LOAD_LOOPS hackbench's loops. The report lands in
-## _build/kernel-load-<platform>/load-report.txt. Both boot the same rootfs.
+## _build/kernel-load-<platform>/load-report.txt, and each sample is appended
+## to docs/LOAD_SERIES.md beside Linux on the same machine (#1158). Both boot
+## the same rootfs. LOAD_LINUX_TRANSCRIPT is the board's output under Raspberry
+## Pi OS, which no runner here can produce.
 ## Time verdicts are the board's, over repeated samples
 ## (scripts/repeat_kernel_lane.sh N make hwcheck-load-rpi5).
 LOAD_SECONDS ?= 10
@@ -2792,11 +2796,11 @@ LOAD_PHASES ?=
 .PHONY: load-qemu
 load-qemu: kernelbuild-qemu
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) $(KERNEL_SHELL_EXT2_IMAGE)
-	@KERNEL_QEMU_SHELL_SMP=4 python3 scripts/run_kernel_load.py --platform qemu --seconds $(LOAD_SECONDS) --jobs $(LOAD_JOBS) --loops $(LOAD_LOOPS) $(if $(LOAD_PHASES),--phases $(LOAD_PHASES))
+	@KERNEL_QEMU_SHELL_SMP=4 python3 scripts/run_kernel_load.py --platform qemu --seconds $(LOAD_SECONDS) --jobs $(LOAD_JOBS) --loops $(LOAD_LOOPS) --record $(if $(LOAD_PHASES),--phases $(LOAD_PHASES))
 
 .PHONY: hwcheck-load-rpi5
 hwcheck-load-rpi5: kernelbuild-rpi5
-	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" python3 scripts/run_kernel_load.py --platform rpi5 --seconds $(LOAD_SECONDS) --jobs $(LOAD_JOBS) --loops $(LOAD_LOOPS) $(if $(LOAD_PHASES),--phases $(LOAD_PHASES))
+	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" python3 scripts/run_kernel_load.py --platform rpi5 --seconds $(LOAD_SECONDS) --jobs $(LOAD_JOBS) --loops $(LOAD_LOOPS) --record $(if $(LOAD_LINUX_TRANSCRIPT),--linux-transcript $(LOAD_LINUX_TRANSCRIPT)) $(if $(LOAD_PHASES),--phases $(LOAD_PHASES))
 
 ## churn-long-qemu / hwcheck-churn-long-rpi5: the single long boot, for what
 ## only accumulates. Two phases of CHURN_LONG_ROUNDS with DDB `vm` readings

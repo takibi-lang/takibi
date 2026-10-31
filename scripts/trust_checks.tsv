@@ -1,0 +1,22 @@
+# Every script TRUSTED_BASE.md names as carrying trust, with what it stands in
+# for and the rule that would retire it, or "permanent" (#986 slice 1 and 3).
+# scripts/check_trust_ledger.py refuses a named script with no row and a row
+# whose script is no longer named; the row count is the ledger's
+# trust_build_checks. Columns: script, what the kernel trusts it for, successor.
+buildcheck_allowed_callers.py	which functions may call a mint	#1008 module visibility: private constructors
+buildcheck_kernel_asm_invariants.py	properties of handwritten assembly no type sees	permanent (assembly is outside the checker)
+check_assume_init_sites.py	the empty list of assume_init sites	#945 local array tracking, or stays as a zero-ratchet
+check_cpu_authority_mints.py	the one boot-probe mint outside preempt_off	#638 removes the exception
+check_dma_mint_files.py	which functions may call dma_finish_owned_* and what each observes	#720 device protocols absorb the dma_fixed records
+check_el0_raw_deref_audit.py	every EL0 Takibi object stays on the raw dereference gate	permanent (ledger infrastructure)
+check_frame_api.py	a mint file's public API returns capabilities	#1017 frame modules
+check_irq_eoi.py	GICC_EOIR is written only in its named paths	#1017 frame modules: the register leaves public reach
+check_lock_rank_wrappers.py	each lock wrapper's band matches whether it masks	#789 ranked tokens
+check_register_offsets.py	hand-copied register tables against io structs	permanent (a specification is not derivable)
+check_slot_pool_entries.py	one slot per operation, no scheduler sleep while holding	#969 slot holdings in the effect system
+check_stack_proof_states.py	callers of the FrameRef mints; seams where a frame is a bare usize	#777 section regions
+check_trust_ledger.py	the ledger itself	permanent (ledger infrastructure)
+check_xhci_register_offsets.py	hand-copied xHCI register tables	permanent (a specification is not derivable)
+lz4_image.py	the embedded image's bytes, host encoder and decoder	permanent (host tool, checked by its own round trip)
+measure_trusted_base.py	the raw dereference ratchet and the inventory	permanent (ledger infrastructure)
+run_litmus_checks.py	the herd7 tie of orderings to emitted instructions	permanent (ledger infrastructure)

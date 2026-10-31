@@ -91,13 +91,14 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
   stop at --timeout; #1176 (per-process uids and gids, setresuid; done 2026-10-29) runs
   the stressors as a non-root `load` user through BusyBox su, so the exec stressor no longer
   refuses root; it now skips because readlinkat (nr 78) of /proc/self/exe is unimplemented and
-  it cannot name its own executable (to file). The fixture
+  it cannot name its own executable (#1190). The fixture
   rootfs grew from 2816 to 6144 blocks to hold both programs, so QEMU and
   the board boot the same image (maintainer, option b: one board build,
   sized from content; about 18 s more SWD per RPi5 lane run). Each program is recorded beside the same program under Linux
   on the same machine (maintainer, 2026-10-25): a reference column, never
-  a verdict -- the host, natively, on four CPUs, since this tree builds no
-  Linux guest. #1014 (run-lock contention, parked) is measured on this load
+  a verdict, appended to `docs/LOAD_SERIES.md` -- QEMU virt under mainline
+  v6.12 booting the same rootfs (#1158); the RPi5's column waits for a run under
+  Raspberry Pi OS. #1014 (run-lock contention, parked) is measured on this load
   and nowhere else. Stages 2 and 3 (threads: CLONE_VM, futex, TLS, TLB
   shootdown, #202's sibling-thread case) wait for the #638 flip.
 - #584's soak at natural boundaries; #702 (dedicated soak hardware) is the
@@ -206,7 +207,8 @@ next one taken. The done record of the previous queue is in HISTORY.md
    ladder 71); #1018 (the frame API rule as a list-file check; done
    2026-10-25, 8 ratchet entries); #986 slice 1 (the trust ledger as a dated
    checkpoint series, each row attributed to the rule that retired it; done
-   2026-10-25, `docs/TRUST_LEDGER.json`, #986 stays open).
+   2026-10-25, `docs/TRUST_LEDGER.json`; its remaining categories, #1157, done
+   2026-10-31; #986 stays open).
 1. **Verification (#954; B owns the refinement code).** #954 stage 2 done
    2026-10-31 (#1160; docs/VERIFICATION_DESIGN.md, "Stage 2 scope" and "Stage
    3 scope"); #955's evidence log continues from each audit; #986 slice 2 (region arithmetic and overlay length as
