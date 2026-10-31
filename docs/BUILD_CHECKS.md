@@ -140,6 +140,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_gem_tx_fixture_controls.py` | Physical GEM ownership and IRQ evidence refuses stale verdicts, missing or corrupt frames, incorrect authorities, incomplete timestamps and missing or wrong-bank IRQ witnesses |
 | `check_rpi5_dtb_iommu_report_controls.py` | `rpi5_dtb_iommu_report.py report` names IOMMU nodes, resolves `iommus` to them, lists the pcie2 and rp1 subtrees, and refuses a blob that is not an FDT (#1032) |
 | `check_rp1_dma_arena_controls.py` | `buildcheck_rp1_dma_arena.py` refuses an object outside or straddling the arena, a size or base the window cannot encode, and an empty scan. |
+| `check_rpi5_neigh_pin_before_reset.py` | The RPi5 lane pins the board's neighbour entry once, before its board load, so a previous run's orphaned TCP sockets cannot spend the kernel's one ARP reply (#1297); a later pin, a missing pin and a missing load are refused |
 | `check_rpi5_postmortem_controls.py` | The GEM fixture runner and the shell smoke take #869's SWD snapshot before one BREAK and the full DDB walk after a post-load failure (#872), and nothing before the load |
 | `check_rpi5_shell_smoke_controls.py` | Interactive RPi5 shell smoke checks two HTTP responses, fresh HTTPd process snapshots and optional bulk measurement completion; absent readiness, echoed markers, extra workers and bad responses fail |
 | `check_kernel_http_peer_controls.py` | Delayed replies from earlier HTTP phases cannot answer a new handshake; malformed current replies still fail |

@@ -193,6 +193,46 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM HUP
 
+# GitHub issue #387: stop the HOST from asking, because the board can only
+# answer once.
+#
+# kernel/platform/rpi5/init.tkb calls kernel_arp_reply_once(link_ready): the
+# affine RX readiness capability is spent on exactly ONE real ARP request,
+# by design, because spending it once is what the fixture proves. So
+# whichever request arrives first gets the reply -- and the host has its own
+# reason to send one. `ip neigh` keeps an entry for the board from the
+# previous run's TCP and HTTP traffic; it goes STALE between runs and Linux
+# re-probes it unprompted. That probe consumes the board's single reply, and
+# the test's own `who-has 192.168.20.2` then times out against a kernel that
+# has already moved on.
+#
+# Both observed failure shapes are that one cause: the probe's reply landing
+# inside the negative control's window (reported as "unexpected reply for a
+# non-owned IP", though its SPA was the board's OWN address), and the
+# positive test failing outright.
+#
+# A permanent neighbour entry means Linux never asks. It does not weaken
+# either assertion: eth_arp_reply_test.py builds raw frames on AF_PACKET and
+# bypasses the neighbour table entirely, so both its request and the board's
+# reply still traverse the whole path. Removed again on exit rather than
+# left behind, since a test should not permanently edit the host's network
+# state.
+#
+# GitHub issue #1297: the pin goes in BEFORE the board is reset, not after the
+# link gate. A green run leaves orphaned TCP sockets to the board (LAST-ACK,
+# CLOSING on :8080) retransmitting FINs for over a minute. The reset's carrier
+# loss flushes their neighbour entry, so each retransmit becomes a who-has for
+# the board. Its RX ring holds one from PHY link-up on, and the kernel answers
+# it the moment it prints `link ready`, before any later pin could help; the
+# test's own 20 requests then go unanswered and the kernel's ICMP step reports
+# `rp1 gem: icmp timeout`. Measured with no build between runs: 4 of 8 runs
+# failed, each directly after a green one; 0 of 12 with this pin. It survives the
+# carrier loss, and the orphans' frames are TCP, which the ARP step ignores.
+echo "[kernel/rpi5] pinning the board's neighbour entry so the host does not ARP for it"
+sudo ip neigh replace "${ETH_TEST_SUBNET}.2" lladdr "$ETH_TEST_MAC" \
+    dev "$ETH_TEST_IFACE" nud permanent
+pinned_neigh=1
+
 sleep 0.2
 load_started=$SECONDS
 echo "[kernel/rpi5] loading kernel over SWD"
@@ -251,35 +291,6 @@ else
     echo "FAIL kernel/rpi5: $link_reason (see $UART_LOG)" >&2
     exit 1
 fi
-
-# GitHub issue #387: stop the HOST from asking, because the board can only
-# answer once.
-#
-# kernel/platform/rpi5/init.tkb calls kernel_arp_reply_once(link_ready): the
-# affine RX readiness capability is spent on exactly ONE real ARP request,
-# by design, because spending it once is what the fixture proves. So
-# whichever request arrives first gets the reply -- and the host has its own
-# reason to send one. `ip neigh` keeps an entry for the board from the
-# previous run's TCP and HTTP traffic; it goes STALE between runs and Linux
-# re-probes it unprompted. That probe consumes the board's single reply, and
-# the test's own `who-has 192.168.20.2` then times out against a kernel that
-# has already moved on.
-#
-# Both observed failure shapes are that one cause: the probe's reply landing
-# inside the negative control's window (reported as "unexpected reply for a
-# non-owned IP", though its SPA was the board's OWN address), and the
-# positive test failing outright.
-#
-# A permanent neighbour entry means Linux never asks. It does not weaken
-# either assertion: eth_arp_reply_test.py builds raw frames on AF_PACKET and
-# bypasses the neighbour table entirely, so both its request and the board's
-# reply still traverse the whole path. Removed again on exit rather than
-# left behind, since a test should not permanently edit the host's network
-# state.
-echo "[kernel/rpi5] pinning the board's neighbour entry so the host does not ARP for it"
-sudo ip neigh replace "${ETH_TEST_SUBNET}.2" lladdr "$ETH_TEST_MAC" \
-    dev "$ETH_TEST_IFACE" nud permanent
-pinned_neigh=1
 
 # The kernel holds its affine RX readiness capability while waiting for one
 # real ARP request. Exercise the wire path now that the link exists and the
