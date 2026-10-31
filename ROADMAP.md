@@ -207,9 +207,9 @@ next one taken. The done record of the previous queue is in HISTORY.md
    2026-10-25, 8 ratchet entries); #986 slice 1 (the trust ledger as a dated
    checkpoint series, each row attributed to the rule that retired it; done
    2026-10-25, `docs/TRUST_LEDGER.json`, #986 stays open).
-1. **Verification (#954; B owns the refinement code).** The rest of #954
-   stage 2 (docs/VERIFICATION_DESIGN.md, "Stage 2 scope"), then #955's
-   evidence log; #986 slice 2 (region arithmetic and overlay length as
+1. **Verification (#954; B owns the refinement code).** #954 stage 2 done
+   2026-10-31 (#1160; docs/VERIFICATION_DESIGN.md, "Stage 2 scope" and "Stage
+   3 scope"); #955's evidence log continues from each audit; #986 slice 2 (region arithmetic and overlay length as
    z3-checked obligations), #954 stage 3 (C), done 2026-10-30.
 2. **Equivalence oracles.** ext2: tier B (#1034, landed 2026-10-25:
    `kernel/tests/ext2_eq/ops.eq` replayed on host Linux and libext2fs,

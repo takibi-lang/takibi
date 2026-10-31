@@ -289,20 +289,6 @@ lib/runtime_bounds.ml. Stage 2 covers index bounds as well as init.
    exception_evidence counters; about 8-12 B each) need a loop invariant or
    a noreturn call, and loop invariants are not introduced for now.
 
-### Loop invariants (deferred)
-
-Not introduced for now (maintainer, 2026-10-25). A rough estimate: hand
-annotations add about 600-1200 lines plus tests to the ~2600 lines of
-init_flow, init_pred and range_obligation, and inference adds about
-1500-3000; both add a soundness surface around per-iteration havoc, where
-#935, #956, #961 and #983 were found. The six sites above save about
-50-70 B in total.
-
-When they come, the intended direction is: the compiler infers invariants
-by default (interval and linear abstract interpretation with widening; z3's
-CHC engine, Spacer, is a candidate where its cost fits the 5 s budget), and
-the programmer writes an invariant or a proof only where inference fails.
-This is evidence for #955 (proof assistants).
 3. **Follow-up: retire the runtime order graph** for the cases `entails`
    covers, so one checker remains.
    Done (#1007): Init_flow decides every index into an immutable slice
@@ -318,12 +304,31 @@ This is evidence for #955 (proof assistants).
 #799 (static sizeof for enums, refined types and non-packed structs) is not
 in stage 2 and stays off ROADMAP until a site needs it.
 
+### Loop invariants (deferred)
+
+Not introduced for now (maintainer, 2026-10-25). A rough estimate: hand
+annotations add about 600-1200 lines plus tests to the ~2600 lines of
+init_flow, init_pred and range_obligation, and inference adds about
+1500-3000; both add a soundness surface around per-iteration havoc, where
+#935, #956, #961 and #983 were found. The six sites above save about
+50-70 B in total.
+
+When they come, the intended direction is: the compiler infers invariants
+by default (interval and linear abstract interpretation with widening; z3's
+CHC engine, Spacer, is a candidate where its cost fits the 5 s budget), and
+the programmer writes an invariant or a proof only where inference fails.
+This is evidence for #955 (proof assistants).
+
 ### Budget
 
 Index obligations count against the same 5 s cold budget as init
 obligations, with their own line in the budget report
 (`scripts/buildcheck_range_obligations.py`). An obligation is one z3 call of
 about 20 ms cold.
+
+Measured uncached on 2026-10-31 at the head that closed stage 2 (load average
+near 4 on 24 cores): QEMU 1.44 s (29%), RPi5 1.61 s (32%); of that, index
+obligations 0.09 s and 0.21 s.
 
 ### Excluded from stage 2
 
@@ -345,3 +350,35 @@ about 20 ms cold.
   logged on #952 and, as a rule-soundness case, on #955.
 - Goals the checker rejected but a human could prove (nonlinear, induction):
   the object-level candidates.
+
+## Stage 3 scope
+
+Decided by the maintainer on 2026-10-29 (DECISIONS.md). Stage 2's list above
+has no open item: items 1 and 3 are done, item 2 closed by decision. Stage 3
+keeps the same skeleton and the same 5 s cold budget: the checker decides, z3
+re-checks pure arithmetic through #952's channel, and z3 never decides.
+
+### Taken first: contracts beyond init and index bounds (C)
+
+- **Region arithmetic and overlay length (#986 slice 2).** Done: static-term
+  identities and header-overlay lengths write `region` and `overlay`
+  obligations (docs/RANGE_OBLIGATIONS.md).
+- **The other type-size decisions (#1233).** Done, the same way.
+- **Disequality facts (#1231).** Excluded from stage 2 above. Taken when the
+  first consumer needs numeric disequality reasoning (maintainer, 2026-10-30).
+
+### Taken when needed
+
+Neither has a date; each starts from a real site that needs it.
+
+- **Sparse or quantified init through explicit lemmas (D, #109).**
+- **Loop-invariant inference** ("Loop invariants (deferred)" above), under
+  #1055's rule: an engine only proposes, and the proposal is re-checked as
+  quantifier-free obligations. The six guards of stage 2 item 2 are its first
+  candidates.
+
+### Outside stage 3
+
+Type-level init (A), qualifier sugar (B), nonlinear index terms and z3 as a
+decider stay excluded as in stage 2. Proof-assistant work follows #955's
+evidence and #1054, not this list.
