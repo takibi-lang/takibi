@@ -49,7 +49,7 @@ import sys
 from pathlib import Path
 
 from pass_line import report_pass
-from source_scan import code_only
+from source_scan import code_only, function_header
 
 ROOT = Path(__file__).resolve().parent.parent
 # (file, acquire, token, rule): "leaf" -- no function in the file names an
@@ -74,7 +74,7 @@ SLOT_INDEXED = ["block_cache_read", "block_cache_fill",
 SLOT_INDEX_CALLERS = {"kernel/drivers/block/memory.tkb",
                       "kernel/drivers/block/block_cache.tkb",
                       "linux_user/block_cache/block_cache.tkb"}
-FUNCTION = re.compile(r"^(?:private\s+)?(?:(?:no)?inline\s+)?fn\s+(\w+)\s*\(", re.M)
+FUNCTION = function_header(suffix=r"\s*\(")
 
 
 # Shared with every code-property check: blanks `//` and `/* */` comments,

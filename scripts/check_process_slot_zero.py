@@ -44,7 +44,7 @@ import re
 import sys
 
 from pass_line import report_pass
-from source_scan import code_only
+from source_scan import code_only, function_header
 
 KERNEL = pathlib.Path("kernel")
 PROCESS = KERNEL / "kernel" / "process.tkb"
@@ -88,7 +88,7 @@ PROCESS_FIRST = (
 LITERAL_FIRST = re.compile(
     r"\b(" + "|".join(PROCESS_FIRST) + r")\(\s*0\s*[,)]")
 
-FN_RE = re.compile(r"^(?:private )?(?:inline |noinline )?fn (\w+)\(")
+FN_RE = function_header(suffix=r"\(")
 
 
 def problems(root: pathlib.Path):

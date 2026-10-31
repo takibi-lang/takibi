@@ -38,6 +38,7 @@ from pathlib import Path
 
 from function_source import function_body, masked_sources
 from pass_line import report_pass
+from source_scan import function_header
 
 IDLE = 'kernel/arch/arm64/kernel/secondary.tkb'
 CALL = re.compile(r'\b(\w+_is_armed)\s*\(((?:[^()]|\([^()]*\))*)\)')
@@ -62,7 +63,7 @@ PAIR_WINDOW = {
     'console_probe_wait': 'a peer waits on core 0',
     'log_storm_wait_word': 'a secondary waits on core 0',
 }
-DEFINITION = re.compile(r'^(?:private\s+)?(?:inline\s+|noinline\s+)?fn\s+(\w+)\s*\(', re.M)
+DEFINITION = function_header(suffix=r"\s*\(")
 
 
 def sources():

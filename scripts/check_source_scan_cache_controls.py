@@ -13,8 +13,8 @@ def main() -> int:
     modules = tracked_modules()
     assert not problems(modules), problems(modules)
     target = "check_stopped_pool_inspection"
-    uncached = modules[target].replace("from source_scan import code_only, per_file\n",
-                                       "from source_scan import code_only\n") \
+    uncached = modules[target].replace("from source_scan import code_only, function_header, per_file\n",
+                                       "from source_scan import code_only, function_header\n") \
                               .replace("@per_file\n", "")
     assert uncached != modules[target]
     failing = {

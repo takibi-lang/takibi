@@ -38,7 +38,7 @@ import re
 import sys
 
 from pass_line import report_pass
-from source_scan import code_only, code_skeleton
+from source_scan import code_only, code_skeleton, function_header
 
 PLATFORM_ROOT = pathlib.Path("kernel/platform")
 
@@ -63,7 +63,7 @@ ALLOWED = {
         "GitHub issue #472 is actively rewriting both copies from the DTB",
 }
 
-FN_RE = re.compile(r"^(?:private )?(?:inline |noinline )?fn ([A-Za-z0-9_]+)\s*\(")
+FN_RE = function_header(suffix=r"\s*\(")
 
 # GitHub issue #517. The comparison above finds a FUNCTION defined identically
 # in both trees. Duplication written inline -- inside main(), inside a match

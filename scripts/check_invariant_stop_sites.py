@@ -32,7 +32,7 @@ from collections import Counter
 from pathlib import Path
 
 from pass_line import report_pass
-from source_scan import code_only, per_file
+from source_scan import code_only, function_header, per_file
 
 ROOT = Path(__file__).resolve().parent.parent
 LIST = ROOT / "scripts" / "invariant_stop_sites.tsv"
@@ -41,7 +41,7 @@ EXCLUDED_PARTS = {"build", "_build", "tests"}
 CLASSES = ("frame", "unmodelled", "ladder")
 
 CALL = re.compile(r"(?<![\w])(?<!fn )kernel_invariant_stop(?:_with_frame)?\s*\(")
-FUNCTION = re.compile(r"^\s*(?:private\s+)?(?:(?:no)?inline\s+)?fn\s+(\w+)", re.M)
+FUNCTION = function_header()
 ISSUE = re.compile(r"^#\d+$")
 
 

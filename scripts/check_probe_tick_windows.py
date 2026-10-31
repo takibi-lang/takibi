@@ -15,6 +15,7 @@ from pathlib import Path
 
 from function_source import function_body, masked_sources
 from pass_line import report_pass
+from source_scan import function_header
 
 HOLDS = {
     'console_ddb_peer_hold': 'external UART BREAK while the lock masks IRQs',
@@ -24,7 +25,7 @@ HOLDS = {
     'world_stop_probe': 'stopped peer must take no ticks during a real interval',
     'schedule_contention_probe': 'whole-phase collision retry budget',
 }
-DEFINITION = re.compile(r'^(?:private\s+)?(?:inline\s+|noinline\s+)?fn\s+(\w+)\s*\(', re.M)
+DEFINITION = function_header(suffix=r"\s*\(")
 
 
 def sources():

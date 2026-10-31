@@ -27,6 +27,7 @@ import re
 import sys
 
 from pass_line import report_pass
+from source_scan import function_header
 
 ROOTS = (pathlib.Path("kernel"), pathlib.Path("linux_user"))
 DEFINING_FILE = pathlib.Path("linux_user/intrusive_pool/intrusive_pool_lib.tkb")
@@ -38,7 +39,7 @@ DEFINING_FILE = pathlib.Path("linux_user/intrusive_pool/intrusive_pool_lib.tkb")
 # a number that reads as complete.
 ESCAPE_RE = re.compile(
     r"\bintrusive_pool_(?:payload_unproven_of|ref_unproven)\s*\(")
-FN_RE = re.compile(r"^(?:private )?(?:inline |noinline )?fn ([A-Za-z_0-9]+)")
+FN_RE = function_header()
 
 # (file, enclosing function) -> why this caller cannot hold the proof.
 # GitHub issue #482: each entry names what keeps the payload alive after
@@ -50,7 +51,7 @@ ALLOWED = {}
 
 POOL_FILES = (DEFINING_FILE,) + tuple(pathlib.Path("kernel/lib") / name for name in (
     "freelist.tkb", "slotmap.tkb", "refcount_slotmap.tkb", "occupancy.tkb"))
-PUBLIC_FN_RE = re.compile(r"^(?:inline |noinline )?fn ([A-Za-z_0-9]+)\(")
+PUBLIC_FN_RE = function_header(suffix=r"\(", public_only=True)
 # The element type reached by a returned pointer or reference: `T` itself
 # or a generic instance carrying it, e.g. `IntrusiveSlot(T)`.
 PAYLOAD_RETURN_RE = re.compile(

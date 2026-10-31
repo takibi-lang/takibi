@@ -12,7 +12,7 @@ migrations of GitHub issue #567.
 
 import re
 
-from source_scan import FrozenMap, code_skeleton, per_file
+from source_scan import FrozenMap, code_skeleton, function_header, per_file
 
 
 # Unbounded (#808): with maxsize=8 a caller looping over ~170 kernel files
@@ -30,9 +30,7 @@ def function_starts(sources: str) -> FrozenMap:
     """Index the source once, retaining the first definition."""
     code = masked_sources(sources)
     starts = {}
-    for match in re.finditer(
-            r"^(?:private )?(?:inline |noinline )?fn ([a-z][a-z0-9_]*)\(",
-            code, re.M):
+    for match in re.finditer(function_header(suffix=r"\("), code):
         starts.setdefault(match[1], (match.start(), match.end()))
     return FrozenMap(starts)
 

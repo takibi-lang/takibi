@@ -13,7 +13,7 @@ import re
 import sys
 
 from pass_line import report_pass
-from source_scan import code_only
+from source_scan import code_only, function_header, header_is_private
 
 PATH = pathlib.Path("kernel/kernel/process.tkb")
 BUDGET = 0
@@ -44,7 +44,8 @@ PRIVATE = (
     "scheduled_process_locked_view_new",
     "scheduled_process_current_view_new",
 )
-FN_RE = re.compile(r"^(private )?(?:inline |noinline )?fn (\w+)\(")
+FN_RE = function_header(suffix=r"\(")
+CONTRACT_RE = function_header(suffix=r"\([\s\S]*?\)\s*(?:->[^{}]+)?!\{([^}]*)\}")
 CALL_RE = re.compile(r"\bscheduled_process_record_(at|of)\s*\(")
 OWNER_RE = re.compile(r"\bscheduled_process_owner_new\s*\(")
 
@@ -59,9 +60,9 @@ def problems(text: str) -> list[str]:
     for code in text.splitlines():
         match = FN_RE.match(code)
         if match:
-            enclosing = match[2]
+            enclosing = match[1]
             bodies[enclosing] = []
-            if match[1]:
+            if header_is_private(match):
                 private.add(enclosing)
         if enclosing in bodies:
             bodies[enclosing].append(code)
@@ -82,8 +83,8 @@ def problems(text: str) -> list[str]:
             result.append(f"{name} must remain private to its mint module")
     for name, required in CONTRACTS.items():
         body = "\n".join(bodies.get(name, []))
-        header = re.match(r"^(?:private )?(?:inline |noinline )?fn \w+\([\s\S]*?\)\s*(?:->[^{}]+)?!\{([^}]*)\}", body)
-        effects = [] if header is None else [word.strip() for word in header[1].split(",")]
+        header = CONTRACT_RE.match(body)
+        effects = [] if header is None else [word.strip() for word in header[2].split(",")]
         if required not in effects:
             result.append(f"{name} must declare {required} at its reviewed loan boundary")
     return result

@@ -16,12 +16,12 @@ from pathlib import Path
 
 from function_source import function_body, masked_sources
 from pass_line import report_pass
+from source_scan import function_header
 
 DRIVER = 'kernel/arch/arm64/kernel/secondary.tkb'
 # The call passes nothing or the idle loop's core id (GitHub issue #756).
 CALL = re.compile(r'\b(\w+_secondary_run)\s*\(\s*(?:core_id)?\s*\)\s*;')
-DEFINITION = re.compile(
-    r'^(?:private\s+)?(?:inline\s+|noinline\s+)?fn\s+(\w+_secondary_run)\s*\(', re.M)
+DEFINITION = function_header(r"\w+_secondary_run", r"\s*\(")
 LOCAL_ROUNDS = re.compile(
     r'\bfor\s+\w+\s*:\s*usize\s+in\s+0\s*\.\.<\s*[A-Z][A-Z_0-9]*ROUNDS\s*\{')
 

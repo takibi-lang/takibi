@@ -43,8 +43,10 @@ import sys
 import pathlib
 
 from pass_line import report_pass
+from source_scan import function_header
 
 READ_THEN_CHECK_LINES = 3
+FUNCTION = function_header()
 
 
 def struct_flag_pairs(text):
@@ -64,7 +66,7 @@ def functions(text):
     lines = text.split("\n")
     found, index = [], 0
     while index < len(lines):
-        header = re.match(r'^\s*(private\s+)?(?:(?:no)?inline\s+)?fn\s+(\w+)', lines[index])
+        header = FUNCTION.match(lines[index])
         if not header:
             index += 1
             continue
@@ -76,7 +78,7 @@ def functions(text):
             if opened and depth <= 0:
                 break
             cursor += 1
-        found.append((header.group(2), index, lines[index:cursor + 1]))
+        found.append((header.group(1), index, lines[index:cursor + 1]))
         index = cursor + 1
     return found
 

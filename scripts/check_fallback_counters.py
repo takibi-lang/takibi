@@ -42,7 +42,7 @@ import re
 import sys
 
 from pass_line import report_pass
-from source_scan import code_only
+from source_scan import code_only, function_header
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 KERNEL = REPO / "kernel"
@@ -51,7 +51,7 @@ VIEWS = KERNEL / "tests"
 # The one function that sums them, and the report it gates.
 GATE = "dead_slot_fallback_uses"
 
-ACCESSOR = re.compile(r"^fn ([a-z0-9_]*(?:missing|fallback)_uses)\(", re.MULTILINE)
+ACCESSOR = function_header(r"[a-z0-9_]*(?:missing|fallback)_uses", r"\(", public_only=True)
 GATE_BODY = re.compile(
     r"fn " + GATE + r"\(\)[^{]*\{(.*?)\n\}", re.DOTALL)
 CALL = re.compile(r"([a-z0-9_]+)\(\)")

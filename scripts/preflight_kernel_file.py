@@ -32,6 +32,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 from buildcheck_kernel_unused_coverage import makefile_list  # noqa: E402
 from measure_trusted_base import read_raw_deref_budget  # noqa: E402
+from source_scan import function_header
 
 # Tree checks that name a kernel source file, a function in one, or a runner
 # when it is missing from their registry. Each is a langcheck member, so each
@@ -50,7 +51,7 @@ UNUSED_LISTS = ("KERNEL_UNUSED_CHECKED", "KERNEL_UNUSED_CHECKED_QEMU",
 # Tracked files whose mention of an old path is history, not a registry row.
 HISTORICAL = re.compile(r"^(HISTORY\.md|docs/KERNEL_GLOBAL\w*_\d{4}-\d{2}-\d{2}\.tsv)")
 
-FN_RE = re.compile(r"^\s*(?:private\s+)?(?:inline\s+|noinline\s+)?fn\s+(\w+)", re.M)
+FN_RE = function_header()
 
 
 def run_check(root: Path, name: str) -> tuple[int, list[str]]:

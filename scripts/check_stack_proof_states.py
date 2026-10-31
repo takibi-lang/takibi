@@ -45,7 +45,7 @@ import sys
 
 from pass_line import report_pass
 from function_source import masked_sources
-from source_scan import code_only
+from source_scan import code_only, function_header
 
 SOURCE = Path("kernel/kernel/process.tkb")
 
@@ -62,7 +62,7 @@ CONSTRUCTORS = {"scheduled_process_startable_state": STARTABLE_MINTS,
 LITERALS = {"Startable": "scheduled_process_startable_state",
             "Reapable": "scheduled_process_reapable_state"}
 
-FUNCTION_RE = re.compile(r"^(?:private )?(?:inline |noinline )?fn (\w+)\(", re.M)
+FUNCTION_RE = function_header(suffix=r"\(")
 
 # Parameter names that mean "a frame address". As a bare usize they are
 # allowed only here: an assembly ABI seam, or an address compared with a

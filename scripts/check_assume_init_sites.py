@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 
 from pass_line import report_pass
-from source_scan import code_only, per_file
+from source_scan import code_only, function_header, per_file
 
 ROOT = Path(__file__).resolve().parent.parent
 TRUSTED_BASE = ROOT / "TRUSTED_BASE.md"
@@ -37,7 +37,7 @@ TREES = ("kernel", "linux_user")
 EXCLUDED_PARTS = {"build", "_build"}
 
 CALL = re.compile(r"\bassume_init\s*\(")
-FUNCTION = re.compile(r"^\s*(?:private\s+)?(?:(?:no)?inline\s+)?fn\s+(\w+)", re.M)
+FUNCTION = function_header()
 LISTED = re.compile(r"`((?:kernel|linux_user)/[\w./-]+\.tkb):(\w+)`")
 
 

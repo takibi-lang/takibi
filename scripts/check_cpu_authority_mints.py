@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 from pass_line import report_pass
-from source_scan import code_only
+from source_scan import code_only, function_header
 
 ROOT = Path(__file__).resolve().parent.parent
 KERNEL = ROOT / "kernel"
@@ -26,15 +26,14 @@ KERNEL = ROOT / "kernel"
 # function -> {(file, enclosing function)} allowed to call it.
 ALLOWED = {}
 MINT_FILE = KERNEL / "kernel" / "cpu_authority.tkb"
-PUBLIC_MINT = re.compile(
-    r"^\s*(?:noinline\s+|inline\s+)*fn\s+(\w+)\s*\([^)]*\)\s*->\s*CpuHere\b",
-    re.M)
+PUBLIC_MINT = function_header(
+    suffix=r"\s*\([^)]*\)\s*->\s*CpuHere\b", public_only=True)
 
 
 def public_mints(text):
     """Names of the non-private functions in `text` that return CpuHere."""
     return PUBLIC_MINT.findall(code_only(text))
-FUNCTION = re.compile(r"^\s*(?:private\s+)?(?:(?:no)?inline\s+)?fn\s+(\w+)", re.M)
+FUNCTION = function_header()
 
 
 def references(text, name):

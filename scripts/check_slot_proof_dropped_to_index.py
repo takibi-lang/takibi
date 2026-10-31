@@ -35,7 +35,7 @@ import re
 import sys
 
 from pass_line import report_pass
-from source_scan import code_only
+from source_scan import code_only, function_header
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 KERNEL = ROOT / "kernel"
@@ -50,7 +50,7 @@ DEFINING = "lib/intrusive_pool.tkb"
 DROP = "region_held_view_drop("
 GENERATION = "region_held_view_ref("
 
-FUNCTION_RE = re.compile(r"^(?:private )?(?:inline |noinline )?fn ([A-Za-z_0-9]+)")
+FUNCTION_RE = function_header()
 
 # Functions that drop the proof and keep only a slot address, and why that is
 # the right answer there. Each entry is a claim that can stop being true.

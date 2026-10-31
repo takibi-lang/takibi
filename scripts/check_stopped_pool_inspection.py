@@ -10,7 +10,7 @@ import re
 import sys
 
 from pass_line import report_pass
-from source_scan import code_only, per_file
+from source_scan import code_only, function_header, per_file
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MINTS = {
@@ -20,7 +20,7 @@ MINTS = {
     ('kernel/kernel/fd_table.tkb', 'fd_block_inspect_stopped'): 'FdBlock',
     ('kernel/kernel/process.tkb', 'process_record_inspect_stopped'): 'ProcessRecord',
 }
-FUNCTION = re.compile(r'^(?:private )?(?:inline |noinline )?fn (\w+)\(', re.M)
+FUNCTION = function_header(suffix=r"\(")
 MINT = re.compile(r'\bregion_pool_inspect_unproven__(\w+)\b')
 
 

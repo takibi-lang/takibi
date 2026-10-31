@@ -12,7 +12,7 @@ import re
 import sys
 
 from pass_line import report_pass
-from source_scan import code_skeleton, per_file
+from source_scan import code_skeleton, function_header, per_file
 
 ROOT = pathlib.Path("kernel")
 ALLOWED = {
@@ -79,7 +79,7 @@ def closers(code):
 def functions(source):
     code = mask(source)
     close = closers(code)
-    for match in re.finditer(r'^(?:private )?(?:inline |noinline )?fn (\w+)\(', code, re.M):
+    for match in function_header(suffix=r"\(").finditer(code):
         pos = close[match.end() - 1]
         brace = code.index('{', pos)
         if code[brace - 1] == '!':

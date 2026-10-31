@@ -21,12 +21,12 @@ import re
 import sys
 
 from pass_line import report_pass
-from source_scan import code_only
+from source_scan import code_only, function_header
 
 KERNEL = pathlib.Path("kernel")
 TABLE = pathlib.Path("scripts/wall_clock_bounds.tsv")
 CLASSES = {"pending", "protocol", "backstop"}
-FN_RE = re.compile(r"^(?:private )?(?:inline |noinline )?fn (\w+)\(")
+FN_RE = function_header(suffix=r"\(")
 SITE_RE = re.compile(r"read_cntfrq\(\)\s*\*")
 
 

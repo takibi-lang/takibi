@@ -64,6 +64,31 @@ def per_file(function):
     return wrapper
 
 
+# GitHub issue #1296: the one spelling of lib/parser.mly's function header,
+# `private? (inline | noinline)? fn NAME`. Six checks once spelled it without
+# `inline`, so a stop in an inline function counted against the function above
+# it. scripts/check_function_header_parser.py refuses a second spelling.
+_HEADER_PRIVATE = r"(?:private\s+)?"
+_HEADER_REST = r"(?:(?:inline|noinline)\s+)?fn\s+"
+
+
+def function_header(name=r"\w+", suffix="", public_only=False):
+    """The header as a compiled pattern, MULTILINE, with the name as group 1.
+
+    `name` narrows the names matched, `suffix` continues the pattern after the
+    name (its own groups number from 2), and `public_only` refuses a `private`
+    header written on the same line as `fn`. `extern fn` has no body and is not matched. Leading indentation is
+    accepted: the grammar does not care, and a relayout must not change what a
+    check sees.
+    """
+    prefix = "" if public_only else _HEADER_PRIVATE
+    return re.compile(rf"^[ \t]*{prefix}{_HEADER_REST}({name}){suffix}", re.M)
+
+
+def header_is_private(match) -> bool:
+    return match.group(0).lstrip().startswith("private")
+
+
 # GitHub issue #815: a check that claims a CODE property must not pass on a
 # comment that names the code. One lexer-shaped pass, mirroring
 # lib/lexer.mll: `//` to end of line and non-nesting `/* ... */` are

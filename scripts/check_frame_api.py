@@ -33,7 +33,7 @@ import sys
 from pathlib import Path
 
 from pass_line import report_pass
-from source_scan import code_only, per_file
+from source_scan import code_only, function_header, header_is_private, per_file
 
 ROOT = Path(__file__).resolve().parent.parent
 MINT_LIST = ROOT / "kernel" / "RAW_MINT_FILES"
@@ -72,8 +72,7 @@ ADDRESS_NAME = re.compile(
     r"address|physical|phys|_base\b|_base_|_ptr\b|pointer|_pa\b|_sp\b")
 RAW_POINTER = re.compile(r"(?:^|[\s(,\[<])\*")
 USIZE = re.compile(r"\busize\b")
-FN_START = re.compile(
-    r"^[ \t]*(private\s+)?(?:(?:inline|noinline)\s+)?fn\s+(\w+)", re.M)
+FN_START = function_header()
 
 
 def mint_files(text):
@@ -133,9 +132,9 @@ def raw_returns(text):
     code = code_only(text)
     found = []
     for match in FN_START.finditer(code):
-        if match.group(1):
+        if header_is_private(match):
             continue
-        name = match.group(2)
+        name = match.group(1)
         returned = return_type(code, match.end())
         if RAW_POINTER.search(returned):
             found.append((name, returned, "a raw pointer"))

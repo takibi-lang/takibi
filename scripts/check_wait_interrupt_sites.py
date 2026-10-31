@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 from pass_line import report_pass
-from source_scan import code_only
+from source_scan import code_only, function_header
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "kernel" / "kernel" / "syscall.tkb"
@@ -29,7 +29,7 @@ SOURCE = ROOT / "kernel" / "kernel" / "syscall.tkb"
 PRODUCER = re.compile(
     r"return\b[^;]*\b(SyscallAction::WaitInterrupt|SyscallIoResult::InterruptWait"
     r"|SyscallDeadlineResult::WaitInterrupt)\b")
-FUNCTION = re.compile(r"^(?:private\s+)?(?:(?:no)?inline\s+)?fn\s+([A-Za-z_0-9]+)")
+FUNCTION = function_header()
 
 # function -> (count, reason)
 ALLOWED = {

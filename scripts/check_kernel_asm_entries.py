@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 from pass_line import report_pass
+from source_scan import function_header
 
 ROOT = Path(__file__).resolve().parent.parent
 KERNEL = ROOT / "kernel"
@@ -26,7 +27,7 @@ BUILD = KERNEL / "build"
 OPERAND = re.compile(
     r"^\s*(?:bl|b|adr|adrp|ldr)\s+(?:x[0-9]+,\s*)?=?([A-Za-z_][A-Za-z0-9_]*)",
     re.M)
-FUNCTION = re.compile(r"^\s*(?:private\s+)?(?:(?:no)?inline\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)", re.M)
+FUNCTION = function_header()
 ENTRIES = re.compile(r"^KERNEL_ASM_ENTRIES\s*:=((?:.*\\\n)*.*)$", re.M)
 
 

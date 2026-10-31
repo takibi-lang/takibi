@@ -34,7 +34,7 @@ import re
 import sys
 
 from pass_line import report_pass
-from source_scan import code_only
+from source_scan import code_only, function_header
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 KERNEL = REPO_ROOT / "kernel"
@@ -43,7 +43,7 @@ DECL = re.compile(
     r"^\s*(?:private\s+)?let\s+mut\s+(?P<name>[a-z_0-9]+)\s*:\s*RegionPool\((?P<payload>[A-Za-z_0-9]+)\)\s*;(?P<trailing>.*)$"
 )
 OPT_OUT = re.compile(r"//\s*never-released:\s*\S")
-FUNCTION = re.compile(r"^(?:private )?(?:inline |noinline )?fn \w+", re.M)
+FUNCTION = function_header()
 RELEASE = re.compile(r"\bregion_(?:free|retire)\(")
 TYPED = re.compile(
     r"\bRegion(?:PoolGuard|Slot|Pin|Pinned|Take|Retire|ReleaseSlot)\((\w+)\)")

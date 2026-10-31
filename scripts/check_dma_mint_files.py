@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 from pass_line import report_pass
-from source_scan import code_only, per_file
+from source_scan import code_only, function_header, per_file
 
 ROOT = Path(__file__).resolve().parent.parent
 KERNEL = ROOT / "kernel"
@@ -45,7 +45,7 @@ MINT_SITES = {
 EXCLUDED = (KERNEL / "tests" / "debug_return_abi", KERNEL / "build")
 
 RECORD = re.compile(r"^\s*struct\s+dma_fixed\s+(\w+)", re.M)
-FUNCTION = re.compile(r"^\s*(?:private\s+)?(?:(?:no)?inline\s+)?fn\s+(\w+)", re.M)
+FUNCTION = function_header()
 FINISH = re.compile(r"\bdma_finish_owned_(?:rx|tx)\s*\(")
 
 
