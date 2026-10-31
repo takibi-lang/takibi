@@ -13,18 +13,24 @@ from pass_line import report_pass
 from rpi5_arp_link_delta import delta_line
 
 RUNNER = Path(__file__).resolve().parent / "run_kernel_hwtest_rpi5.sh"
-LINK = b"   27.568\trp1 gem: link ready mac=02:00:20:00:00:02\n"
+
+
+def timed(seconds: str, text: bytes) -> bytes:
+    return seconds.encode("ascii") + b"\t" + text + b"\n"
+
+
+LINK = timed("27.568", b"rp1 gem: link ready mac=02:00:20:00:00:02")
+REPLY = b"rp1 gem: arp reply ok ip=192.168.20.2"
 
 
 def main() -> int:
     cases = [
-        (LINK + b"   28.772\trp1 gem: arp reply ok ip=192.168.20.2\n",
-         "link-to-arp-reply: 1.204 s"),
-        (LINK + b"   27.568\trp1 gem: arp reply ok ip=192.168.20.2\n",
+        (LINK + timed("28.772", REPLY), "link-to-arp-reply: 1.204 s"),
+        (LINK + timed("27.568", REPLY),
          "link-to-arp-reply: 0.000 s -- the reply left at once"),
-        (LINK + b"   40.000\trp1 gem: arp timeout\n",
+        (LINK + timed("40.000", b"rp1 gem: arp timeout"),
          "link-to-arp-reply: link ready, no ARP reply line"),
-        (b"   1.000\ttakibi kernel: EL1\n",
+        (timed("1.000", b"takibi kernel: EL1"),
          "link-to-arp-reply: no link-ready line"),
     ]
     for data, expected in cases:
