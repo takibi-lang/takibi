@@ -142,7 +142,6 @@ kernel/kernel/process.tkb	kernel_process_trace_probe_parent_frame	unreviewed; 20
 kernel/kernel/process.tkb	scheduled_process_freed_site	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	scheduled_process_missing_site	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
 kernel/kernel/process.tkb	scheduled_process_record_absent	unreviewed; 2026-10-06 retain-abi: retained scheduler/process evidence / run-path counters, CPU-local error state, trace publication or debugger injection as indexed
-kernel/kernel/process.tkb	kernel_process_trace_enabled	the process trace's gate, read on every scheduler step; a stale answer costs one trace record; an acquire load raised RPi5 pool lock contention past #680's threshold
 kernel/kernel/process_test_evidence.tkb	process_test_evidence	unreviewed; 2026-10-06 retain-evidence: boot process evidence / accessor functions on existing test/dispatch paths
 kernel/kernel/profile_samples.tkb	profile_sample_active	unreviewed; 2026-10-06 candidate-diagnostics: named PMU sampling interval / one sampling CPU; per-CPU prefix buffers; local IRQ observation limits
 kernel/kernel/profile_samples.tkb	profile_sample_available	unreviewed; 2026-10-06 candidate-diagnostics: named PMU sampling interval / one sampling CPU; per-CPU prefix buffers; local IRQ observation limits

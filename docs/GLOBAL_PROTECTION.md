@@ -221,6 +221,4 @@ file's comment lines are not rows.
   `ProcessRunGuard[&scheduled_process_run_lock]`, so the lock is now public. Each
   core's tick times and the process trace's switches become `AtomicWord`; the
   omitted pid and its flag become one word, pid plus 1, so a reader cannot pair one
-  pid with another's flag. `kernel_process_trace_enabled` stays a listed plain
-  bool: as an acquire load it raised the RPi5 contended pool lock count past #680's
-  threshold. 303 -> 289 unprotected.
+  pid with another's flag. 303 -> 288 unprotected.

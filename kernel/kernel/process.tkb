@@ -5294,11 +5294,7 @@ must_use variant KernelChildExecPrepareResult {
     // old image is still intact, so execve answers ENOMEM.
     ReserveOutOfMemory;
 }
-// A plain bool on purpose. Nearly every scheduler step asks it, under the pool
-// and run locks, and the answer orders nothing. As an acquire load (there is no
-// relaxed one) it pushed the RPi5 suite's contended pool lock acquires past #680's
-// threshold; a stale answer costs one trace record more or less.
-private let mut kernel_process_trace_enabled: bool;
+private let mut kernel_process_trace_enabled: AtomicWord;
 // GitHub issue #652: debugger-owned filters, set from DDB (`trace omit N`,
 // `trace pid N`) or GDB, never by kernel code. A long workload's ring is
 // otherwise all AddressSpaceActivate records and one busy process's
@@ -5307,7 +5303,7 @@ private let mut kernel_process_trace_enabled: bool;
 // SUBJECT pid is the omitted pid is dropped (`trace pid none` clears it).
 // Read only after the enabled check, so a disabled trace pays nothing.
 private fn kernel_process_trace_is_enabled() -> bool {
-    return kernel_process_trace_enabled;
+    return atomic_word_load(&kernel_process_trace_enabled) != 0;
 }
 private let mut kernel_process_trace_omit_events: AtomicWord;
 // The omitted pid plus one, so one load sees both whether a pid is omitted and
@@ -5417,14 +5413,14 @@ fn kernel_process_trace_record(event: usize, pid: usize, generation: usize,
     kernel_crash_trace[base + KERNEL_PROCESS_TRACE_SEQUENCE_WORD] = sequence;
 }
 
-fn kernel_process_trace_enable() { kernel_process_trace_enabled = true; }
+fn kernel_process_trace_enable() { atomic_word_store(&kernel_process_trace_enabled, 1); }
 // GitHub issue #652: a probe that switched the trace on for its own evidence
 // hands it back to the boot's setting, not to off. Switching it off here
 // ended a debugger-enabled trace at the first probe, so a boot traced from
 // the start lost everything after the scheduler probe.
 fn kernel_process_trace_disable() {
-    kernel_process_trace_enabled =
-        atomic_word_load(&kernel_process_trace_boot_enabled) != 0;
+    atomic_word_store(&kernel_process_trace_enabled,
+                      atomic_word_load(&kernel_process_trace_boot_enabled));
 }
 
 // GitHub issue #652: the DDB controls. `on` also sets the boot switch, so
@@ -5433,7 +5429,7 @@ fn kernel_process_trace_debugger_set(enabled: bool) {
     let mut word: usize = 0;
     if (enabled) { word = 1; }
     atomic_word_store(&kernel_process_trace_boot_enabled, word);
-    kernel_process_trace_enabled = enabled;
+    atomic_word_store(&kernel_process_trace_enabled, word);
 }
 
 fn kernel_process_trace_debugger_enabled() -> bool {
@@ -5802,8 +5798,8 @@ fn kernel_process_execution_reset() !{changes_witness_ProcessCurrent} {
     scheduled_process_table_clear();
     execution_state[execution_cpu_index()].current_live = false;
     process_test_evidence_reset();
-    kernel_process_trace_enabled =
-        atomic_word_load(&kernel_process_trace_boot_enabled) != 0;
+    atomic_word_store(&kernel_process_trace_enabled,
+                      atomic_word_load(&kernel_process_trace_boot_enabled));
     kernel_process_crash_trace_reset();
     // No per-slot clearing loop: scheduled_process_table_clear above
     // destroyed every pooled record, the previous boot thread included, which
