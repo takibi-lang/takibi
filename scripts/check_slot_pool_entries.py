@@ -52,13 +52,12 @@ linux_user test that plays two writers) may call its slot-indexed functions,
 so every index it is handed belongs to a live BlockSlot.
 """
 
-import functools
 import re
 import sys
 from pathlib import Path
 
 from pass_line import report_pass
-from source_scan import code_only, function_header
+from source_scan import code_only, function_header, per_file
 
 ROOT = Path(__file__).resolve().parent.parent
 # (file, acquire, token, rule): "leaf" -- no function in the file names an
@@ -100,19 +99,23 @@ FUNCTION = function_header(suffix=r"\s*\(")
 strip_comments = code_only
 
 
-@functools.lru_cache(maxsize=None)
 def functions(text):
     """name -> (signature, body) with comments removed."""
+    return dict(function_rows(text))
+
+
+@per_file
+def function_rows(text):
     code = strip_comments(text)
     starts = [(m.start(), m.group(1)) for m in FUNCTION.finditer(code)]
-    out = {}
+    out = []
     for index, (start, name) in enumerate(starts):
         end = starts[index + 1][0] if index + 1 < len(starts) else len(code)
         chunk = code[start:end]
         brace = re.search(r"(?<!!)\{", chunk)
         split = brace.start() if brace else len(chunk)
-        out[name] = (chunk[:split], chunk[split:])
-    return out
+        out.append((name, (chunk[:split], chunk[split:])))
+    return tuple(out)
 
 
 def callees(body, known):
