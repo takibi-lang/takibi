@@ -686,6 +686,14 @@ fn process_image_record_ensure(root: usize @ identity)
         }
         RegionPinned(ProcessImageRecord)::Stale => {}
     }
+    return process_image_record_allocate(root);
+}
+
+// What ensure does once the root was valid and had no record. The root's
+// process can be gone by the time the record is published, so the answer
+// here is still Missing or Ready, never assumed.
+private fn process_image_record_allocate(root: usize @ identity)
+        -> ProcessImageRecordReady[identity] !{unsafe} {
     let guard = process_image_pool_lock(&process_image_pool);
     match region_alloc(guard) {
         RegionPoolAlloc(ProcessImageRecord)::Allocated(fresh) => {
@@ -721,10 +729,50 @@ private fn process_image_record_publish(
         process_image_root0_record.address = region_handle_address(handle);
         process_image_root0_record.generation = region_handle_generation(handle);
     } else {
-        scheduled_process_set_image_record(
-            root, region_handle_address(handle), region_handle_generation(handle));
+        match scheduled_process_set_image_record(
+                root, region_handle_address(handle), region_handle_generation(handle)) {
+            ProcessHandleStore::Stored => {}
+            ProcessHandleStore::Absent => {
+                // Nothing names the record but this handle. Evidence here
+                // would send the caller to a pin that stops the kernel, and
+                // the record would never be released (#1312).
+                let mut words: ProcessPoolHandleWords = {
+                    region_handle_address(handle), region_handle_generation(handle)
+                };
+                process_image_record_discard(pool, words);
+                return ProcessImageRecordReady::Missing;
+            }
+        }
     }
     return ProcessImageRecordReady::Ready(view ProcessImageRecordExists[identity]);
+}
+
+private fn process_image_record_discard(
+        pool: *RegionPool(ProcessImageRecord) @ images,
+        words: ProcessPoolHandleWords) !{unsafe} {
+    match process_image_record_pin_words(pool, words) {
+        RegionPinned(ProcessImageRecord)::Stale => { process_image_record_missing_note(); }
+        RegionPinned(ProcessImageRecord)::Pinned(pin) => {
+            match region_retire(pin) {
+                RegionRetire(ProcessImageRecord)::Pending => {}
+                RegionRetire(ProcessImageRecord)::Retired(record) => {
+                    process_image_record_slot_free(record);
+                }
+            }
+        }
+    }
+}
+
+// #1312: a publish for a process that is gone answers Missing and keeps no
+// record. `absent` names a freed process slot, which ensure itself refuses
+// before it reaches the window this enters directly.
+fn process_image_record_absent_publish_probe(absent: usize) -> bool !{unsafe} {
+    let images: usize = process_image_record_live_count();
+    match process_image_record_allocate(absent) {
+        ProcessImageRecordReady::Ready(evidence) => { return false; }
+        ProcessImageRecordReady::Missing => {}
+    }
+    return process_image_record_live_count() == images;
 }
 
 private fn process_image_pool_grow(
@@ -765,7 +813,11 @@ fn process_image_record_release_words(root: usize,
     if (root == 0) { return; }
     if (words.address == 0) { return; }
     let pinned = process_image_record_pin_words(&process_image_pool, words);
-    scheduled_process_set_image_record(root, 0, 0);
+    match scheduled_process_set_image_record(root, 0, 0) {
+        ProcessHandleStore::Stored => {}
+        // No record left to name the handle being cleared.
+        ProcessHandleStore::Absent => {}
+    }
     match pinned {
         RegionPinned(ProcessImageRecord)::Stale => {
             kernel_boot_log("process image: releasing a stale root record handle\n");

@@ -3094,19 +3094,30 @@ fn scheduled_process_fd_context_handle(key: usize) -> ProcessPoolHandleWords
 // the run lock, which is what the self-locking readers above hold: a reader
 // on another CPU sees the pair before or after the write, never half of it.
 // A writer already holding the run guard is rejected at compile time (#694).
+// Whether the words landed is the answer: a publisher whose process is gone
+// holds the only reference to what it allocated (#1312).
+must_use variant ProcessHandleStore {
+    Stored;
+    Absent;
+}
+
 fn scheduled_process_set_fd_context(key: usize, address: usize,
-                                    generation: usize) !{unsafe} {
+                                    generation: usize) -> ProcessHandleStore !{unsafe} {
     let mut slot: ProcessSlot = process_slot_from_pool(key);
     let guard = process_run_lock();
+    let mut stored: bool = false;
     match scheduled_process_record_locked(guard, slot) {
         ProcessRecordLookup::Absent => {}
         ProcessRecordLookup::Found(found) => {
             let record: &mut ProcessRecord = scheduled_process_record_found(found, guard);
             record.fd_context = address;
             record.fd_context_generation = generation;
+            stored = true;
         }
     }
     process_run_unlock(guard);
+    if (stored) { return ProcessHandleStore::Stored; }
+    return ProcessHandleStore::Absent;
 }
 
 // Reaping reads the handle through its exclusive process owner.
@@ -3141,18 +3152,22 @@ fn scheduled_process_image_record_handle(key: usize) -> ProcessPoolHandleWords
 }
 
 fn scheduled_process_set_image_record(key: usize, address: usize,
-                                      generation: usize) !{unsafe} {
+                                      generation: usize) -> ProcessHandleStore !{unsafe} {
     let mut slot: ProcessSlot = process_slot_from_pool(key);
     let guard = process_run_lock();
+    let mut stored: bool = false;
     match scheduled_process_record_locked(guard, slot) {
         ProcessRecordLookup::Absent => {}
         ProcessRecordLookup::Found(found) => {
             let record: &mut ProcessRecord = scheduled_process_record_found(found, guard);
             record.image_record = address;
             record.image_record_generation = generation;
+            stored = true;
         }
     }
     process_run_unlock(guard);
+    if (stored) { return ProcessHandleStore::Stored; }
+    return ProcessHandleStore::Absent;
 }
 
 // GitHub issue #858: the fd-context and image-record tables

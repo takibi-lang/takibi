@@ -626,6 +626,13 @@ fn unified_fd_context_ensure(process: usize @ identity)
         }
         ProcessFdContextReady::Missing => {}
     }
+    return fd_context_allocate(process);
+}
+
+// What ensure does once the slot was valid and had no context. Its process
+// can be gone by the time the context is published (#1312).
+private fn fd_context_allocate(process: usize @ identity)
+        -> ProcessFdContextReady[identity] !{unsafe} {
     let guard = fd_context_pool_lock(&fd_context_pool);
     match region_alloc(guard) {
         RegionPoolAlloc(ProcessFdContext)::Allocated(fresh) => {
@@ -666,9 +673,44 @@ private fn fd_context_publish(pool: *RegionPool(ProcessFdContext) @ contexts,
     let guard = fd_context_pool_lock(pool);
     let mut handle: RegionHandle(ProcessFdContext) = region_give(guard, fresh);
     fd_context_pool_unlock(guard);
-    scheduled_process_set_fd_context(
-        process, region_handle_address(handle), region_handle_generation(handle));
+    match scheduled_process_set_fd_context(
+            process, region_handle_address(handle), region_handle_generation(handle)) {
+        ProcessHandleStore::Stored => {}
+        ProcessHandleStore::Absent => {
+            // Nothing names the context but this handle (#1312).
+            let mut words: ProcessPoolHandleWords = {
+                region_handle_address(handle), region_handle_generation(handle)
+            };
+            fd_context_discard(pool, words);
+            return ProcessFdContextReady::Missing;
+        }
+    }
     return ProcessFdContextReady::Ready(view ProcessFdContextExists[identity]);
+}
+
+private fn fd_context_discard(pool: *RegionPool(ProcessFdContext) @ contexts,
+                              words: ProcessPoolHandleWords) !{unsafe} {
+    match fd_context_pin_words(pool, words) {
+        RegionPinned(ProcessFdContext)::Stale => {
+            atomic_word_fetch_add(&unified_fd_record_missing_count, 1);
+        }
+        RegionPinned(ProcessFdContext)::Pinned(pin) => {
+            match region_retire(pin) {
+                RegionRetire(ProcessFdContext)::Pending => {}
+                RegionRetire(ProcessFdContext)::Retired(slot) => { fd_context_slot_free(slot); }
+            }
+        }
+    }
+}
+
+// #1312: as process_image_record_absent_publish_probe.
+fn unified_fd_context_absent_publish_probe(absent: usize) -> bool !{unsafe} {
+    let contexts: usize = unified_fd_context_live_count();
+    match fd_context_allocate(absent) {
+        ProcessFdContextReady::Ready(evidence) => { return false; }
+        ProcessFdContextReady::Missing => {}
+    }
+    return unified_fd_context_live_count() == contexts;
 }
 
 private fn fd_context_pool_grow(
@@ -712,7 +754,11 @@ fn unified_fd_context_release_words(process: usize,
     fd_blocks_release(region_pin_record(pin));
     // The record's handle is cleared, so nothing pins the context again by
     // this slot; then it is retired, and the last pin frees it.
-    scheduled_process_set_fd_context(process, 0, 0);
+    match scheduled_process_set_fd_context(process, 0, 0) {
+        ProcessHandleStore::Stored => {}
+        // No record left to name the handle being cleared.
+        ProcessHandleStore::Absent => {}
+    }
     match region_retire(pin) {
         RegionRetire(ProcessFdContext)::Pending => {}
         RegionRetire(ProcessFdContext)::Retired(slot) => { fd_context_slot_free(slot); }
