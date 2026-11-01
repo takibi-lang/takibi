@@ -157,6 +157,11 @@ check_model RecordLifetime RecordInvariants 6 \
     takeshared:CInitTakeShared:TeardownOnce:violated \
     takesharedfree:CInitTakeShared:FreesOnlyItsOwn:violated
 
+check_model OrphanReap Safety 6 \
+    fixed:CInitFixed:pass:ok \
+    separatehold:CInitSeparateHold:NoStranded:violated \
+    leaveblind:CInitLeaveBlind:NoStranded:violated
+
 check_model ConsoleTx Safety 10 \
     fixed:CInitFixed:pass:ok \
     ring:CInitRing:ProgramOrder:violated \

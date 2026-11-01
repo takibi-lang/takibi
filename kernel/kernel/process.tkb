@@ -467,6 +467,9 @@ struct ProcessRecord {
     pipe_wait: usize;
     parent: ProcessHandle;
     has_parent: bool;
+    // GitHub issue #1310: this process had a parent and it has been reaped,
+    // in the hold that took it. has_parent is false, and nobody will wait.
+    orphaned: bool;
     // GitHub issue #437: FIRST child, and the sibling link beside it.
     //
     // This was `child`, one slot, and the name was accurate: a process
@@ -3669,6 +3672,7 @@ private fn scheduled_process_record_reset(guard: borrow ProcessRunGuard[lock],
     record.wait4_pid = 0;
     record.pipe_wait = 0;
     record.has_parent = false;
+    record.orphaned = false;
     record.has_first_child = false;
     record.has_next_sibling = false;
     record.last_reaped_pid = 0;
@@ -5419,12 +5423,51 @@ private fn kernel_activity_handoff_probe(root: ProcessHandle) -> bool {
     return restored;
 }
 
+// GitHub issue #1310: an exited process nobody can wait for. Called in the
+// hold that releases its stack, which is the last moment anyone looks at it
+// unless its parent still can. Its parent is gone or has exited, so this CPU
+// reaps it, through the deferred reap, as for a child whose parent ignores
+// SIGCHLD. A parent that exits later finds it in the drain of its own exit:
+// kernel_process_exit_lock_drained becomes Exited only in a hold that saw no
+// zombie left, so this hold and that one cannot both miss it.
+// Linux hands such a child to init. Nothing here reads who the parent is
+// (getppid answers 0), and init would only collect a status nobody asked for.
+// Answers whether it deferred the reap.
+private fn kernel_process_parent_cannot_wait(
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+        process: ProcessHandle) -> bool !{unsafe} {
+    let record: &mut ProcessRecord = scheduled_process_record_live_locked(guard, process);
+    if (record.orphaned) { return true; }
+    if (record.has_parent == false) { return false; }
+    let mut parent: ProcessHandle = record.parent;
+    let parent_state: ProcessSlotState = scheduled_process_state_of_locked(guard, parent);
+    return parent_state == ProcessSlotState::Exited ||
+        parent_state == ProcessSlotState::Reaping;
+}
+
+private fn kernel_process_orphan_defer(
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+        exited: ProcessHandle) -> bool !{unsafe} {
+    if (execution_state[execution_cpu_index()].deferred_reap_live) { return false; }
+    if (kernel_process_parent_cannot_wait(guard, exited) == false) { return false; }
+    // An orphan has no parent to name; its reap reads none.
+    let mut parent: ProcessHandle = exited;
+    if (scheduled_process_record_live_locked(guard, exited).has_parent) {
+        parent = scheduled_process_record_live_locked(guard, exited).parent;
+    }
+    execution_state[execution_cpu_index()].deferred_reap_handle = exited;
+    execution_state[execution_cpu_index()].deferred_reap_parent = parent;
+    execution_state[execution_cpu_index()].deferred_reap_live = true;
+    return true;
+}
+
 private fn kernel_process_stack_switch_take(frame: borrow FrameRef[process, level]) {
     let core: usize = cpu_id();
     if (core >= KERNEL_MAX_CORES) {
         kernel_invariant_stop_with_frame(frame);
     }
     let guard = process_run_lock();
+    let mut orphan_deferred: bool = false;
     if (execution_state[execution_cpu_index()].stack_live) {
         let mut outgoing: ProcessHandle = execution_state[execution_cpu_index()].stack_handle;
         if (scheduled_process_handle_matches(outgoing) == false ||
@@ -5440,6 +5483,7 @@ private fn kernel_process_stack_switch_take(frame: borrow FrameRef[process, leve
                 ProcessSlotState::Exited) {
             workload_busy_peer_exit_stack_released(
                 scheduled_process_pid_of_handle(outgoing), core);
+            orphan_deferred = kernel_process_orphan_defer(guard, outgoing);
         }
     }
     let mut incoming: ProcessHandle = match kernel_process_current_read() {
@@ -5472,8 +5516,11 @@ private fn kernel_process_stack_switch_take(frame: borrow FrameRef[process, leve
         let reaped_status: ProcessEnd =
             kernel_process_reap_zombie(reap_parent, reap_child);
         incoming = kernel_process_current_required();
-        kernel_init_boot_fixture_reaped(
-            scheduled_process_pid_of_handle(incoming), reaped_status);
+        // The incoming process did not reap an orphan, whatever it is.
+        if (orphan_deferred == false) {
+            kernel_init_boot_fixture_reaped(
+                scheduled_process_pid_of_handle(incoming), reaped_status);
+        }
     }
     // Last, after the deferred reap: that reap is the path that left the
     // target at root 0 in #437.
@@ -5517,6 +5564,7 @@ fn kernel_process_stack_idle_complete() {
     execution_state[execution_cpu_index()].stack_live = false;
     workload_busy_peer_exit_stack_released(
         scheduled_process_pid_of_handle(outgoing), core);
+    let orphan_deferred: bool = kernel_process_orphan_defer(guard, outgoing);
     let reap_live: bool = execution_state[execution_cpu_index()].deferred_reap_live;
     let mut reap_child: ProcessHandle = execution_state[execution_cpu_index()].deferred_reap_handle;
     let mut reap_parent: ProcessHandle = execution_state[execution_cpu_index()].deferred_reap_parent;
@@ -7845,7 +7893,8 @@ fn kernel_process_current_has_relative(current_authority: borrow ProcessCurrent[
         }
     };
     return scheduled_process_record_current(current_authority).has_first_child ||
-           scheduled_process_record_current(current_authority).has_parent;
+           scheduled_process_record_current(current_authority).has_parent ||
+           scheduled_process_record_current(current_authority).orphaned;
 }
 
 // GitHub issue #375: make a kernel stack overflow LOUD.
@@ -12311,8 +12360,8 @@ fn kernel_process_is_child(current_authority: borrow ProcessCurrent[current_proc
             return false;
         }
     };
-    return scheduled_process_record_current(current_authority)
-        .has_parent;
+    return scheduled_process_record_current(current_authority).has_parent ||
+        scheduled_process_record_current(current_authority).orphaned;
 }
 
 // Whether the current process is a direct child of BusyBox init.
@@ -12331,7 +12380,8 @@ fn kernel_process_parent_is_root(current_authority: borrow ProcessCurrent[curren
     // particular slot.
     let guard = process_run_lock();
     let root: bool = scheduled_process_handle_matches(parent) &&
-        scheduled_process_record_live_locked(guard, parent).has_parent == false;
+        scheduled_process_record_live_locked(guard, parent).has_parent == false &&
+        scheduled_process_record_live_locked(guard, parent).orphaned == false;
     process_run_unlock(guard);
     return root;
 }
@@ -12760,8 +12810,8 @@ fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, Pro
             return __running_result;
         }
     };
-    if (scheduled_process_record_current(current_authority)
-            .has_parent == false) { { let mut __running_result: ExitSwitch = ExitSwitch::Idle(span); process_current_end(current_authority); return __running_result; } }
+    if (scheduled_process_record_current(current_authority).has_parent == false &&
+        scheduled_process_record_current(current_authority).orphaned == false) { { let mut __running_result: ExitSwitch = ExitSwitch::Idle(span); process_current_end(current_authority); return __running_result; } }
     let mut child: ProcessHandle = process_current_handle(current_authority);
     let mut parent: ProcessHandle =
         scheduled_process_record_current(current_authority).parent;
@@ -12806,27 +12856,6 @@ fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, Pro
     // Linux re-parents to init instead, which is the better answer once
     // there is something to re-parent that is still RUNNING. A zombie has
     // nothing left to run and only a status nobody asked for.
-    // A grandchild that exited on another CPU which has not yet left its
-    // stack is skipped here (#609: kernel_process_first_zombie_of does not
-    // name it), and nobody waits for it afterwards. The window is a peer
-    // exit landing within microseconds of its parent's own exit; the
-    // bounded suite's teardown sweep would still collect it, but a
-    // long-running kernel would keep the record.
-    let mut draining: usize = scheduled_process_pool_live_count() + 1;
-    while (draining != 0) {
-        draining = draining - 1;
-        let drain_guard = process_run_lock();
-        let next_zombie = kernel_process_first_zombie_of(drain_guard, child);
-        process_run_unlock(drain_guard);
-        match next_zombie {
-            ProcessNextReadyResult::Missing => { draining = 0; }
-            ProcessNextReadyResult::Next(grandchild) => {
-                let orphan_status: ProcessEnd =
-                    kernel_process_reap_zombie(child, grandchild);
-            }
-        }
-    }
-    parent = scheduled_process_record_current(current_authority).parent;
     scheduled_process_record_current(current_authority).exit_status = status;
     // GitHub issue #653: this CPU's own record of the child it is exiting,
     // for kernel_process_child_exec_reap right after. It used to be written
@@ -12841,12 +12870,17 @@ fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, Pro
     // then crosses the unlocked ASID preparation interval. wait4 delivery is
     // deliberately later, after activation commits and the guard is released,
     // because it writes user memory and may fault into the scheduler.
-    let exit_guard = process_run_lock();
+    // The drain described above ends in this hold (#1310).
+    let exit_guard = kernel_process_exit_lock_drained(current_authority);
+    parent = scheduled_process_record_current(current_authority).parent;
     // GitHub issue #693 step 3: the parent's disposition is read under the
     // run lock, which is what keeps the parent from being reaped under it.
     // A parent already gone asks for nothing (#1289).
     let mut auto_reap: bool = false;
-    if (scheduled_process_handle_matches(parent)) {
+    // An orphan's link names a record that is gone (#1310).
+    let parent_linked: bool =
+        scheduled_process_record_live_locked(exit_guard, child).has_parent;
+    if (parent_linked) {
         auto_reap = scheduled_process_record_live_locked(exit_guard, parent).sigchld_ignored;
         // GitHub issue #1309: here and not at the reap, which a parent woken
         // below can outrun: its wait4 returns while this CPU still stands on
@@ -12872,8 +12906,10 @@ fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, Pro
     // the same exit scheduling decision. In particular, a peer scheduler
     // must not observe the parent wake before this CPU has stopped exposing
     // the child as Running.
-    kernel_process_signal_child_exit(exit_guard, parent,
-        scheduled_process_pid_of_handle(child), status);
+    if (parent_linked) {
+        kernel_process_signal_child_exit(exit_guard, parent,
+            scheduled_process_pid_of_handle(child), status);
+    }
     match scheduled_process_running_take(exit_guard, child) {
         ScheduledProcessRunningTakeResult::Missing => {
             process_current_end(current_authority);
@@ -12887,7 +12923,8 @@ fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, Pro
             scheduled_process_release(owner, exited);
             // GitHub issue #244: a parent blocked in wait4 needs both the
             // wake transition and completion of its saved syscall frame.
-            if (scheduled_process_state_of_locked(exit_guard, parent) ==
+            if (parent_linked &&
+                scheduled_process_state_of_locked(exit_guard, parent) ==
                     ProcessSlotState::Blocked &&
                 scheduled_process_wait_reason_of_locked(exit_guard, parent) ==
                     ProcessWaitReason::ChildExit) {
@@ -12940,7 +12977,7 @@ fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, Pro
                     }
                 }
             }
-            if (kernel_process_cpu_allows_slot(exit_guard,
+            if (parent_linked && kernel_process_cpu_allows_slot(exit_guard,
                     cpu_id(), process_slot_of(parent.pool_index))) {
             match scheduled_process_ready_take(exit_guard, parent) {
                 ScheduledProcessReadyTakeResult::Missing => {}
@@ -13046,6 +13083,34 @@ private fn kernel_process_first_zombie_of(guard: borrow ProcessRunGuard[lock], p
         cursor = scheduled_process_record_live_locked(guard, cursor).next_sibling;
     }
     return ProcessNextReadyResult::Missing;
+}
+
+// GitHub issue #1310: the run lock, in a hold that found no zombie of this
+// exiting process, so it can become Exited in that same hold. A child that
+// exited with its stack released before this hold has been reaped here; any
+// other child releases its stack after this process is Exited, and that hold
+// reaps it (kernel_process_orphan_defer). This process forks nothing while it
+// exits and every pass takes a child off its list, so the bound is not reached.
+private fn kernel_process_exit_lock_drained(
+        current_authority: borrow ProcessCurrent[process, ProcessState::Running])
+        -> ProcessRunGuard[&scheduled_process_run_lock] !{unsafe} {
+    let mut draining: usize = scheduled_process_pool_live_count() + 1;
+    while (draining != 0) {
+        draining = draining - 1;
+        let drain_guard = process_run_lock();
+        match kernel_process_first_zombie_of(
+                drain_guard, process_current_handle(current_authority)) {
+            ProcessNextReadyResult::Missing => { return drain_guard; }
+            ProcessNextReadyResult::Next(grandchild) => {
+                process_run_unlock(drain_guard);
+                let orphan_status: ProcessEnd =
+                    kernel_process_reap_zombie(
+                        process_current_handle(current_authority), grandchild);
+            }
+        }
+    }
+    kernel_invariant_stop();
+    return process_run_lock();
 }
 
 // A parent woken on a CPU that cannot admit it retains ChildExit as a
@@ -13161,8 +13226,17 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
             let status: ProcessEnd =
                 scheduled_process_record_owned(exited_owner).exit_status;
             let pid: usize = scheduled_process_pid_of_handle(child);
-            let parent_pid: usize = scheduled_process_pid_of_handle(parent);
-            kernel_process_unlink_child(unlink_guard, parent, child);
+            let orphaned: bool =
+                scheduled_process_record_owned(exited_owner).orphaned;
+            let mut parent_pid: usize = 0;
+            if (orphaned == false) { parent_pid = scheduled_process_pid_of_handle(parent); }
+            // A parent past Running will not read last_reaped_pid.
+            let parent_waits: bool =
+                kernel_process_parent_cannot_wait(unlink_guard, child) == false;
+            if (orphaned == false) {
+                kernel_process_unlink_child(unlink_guard, parent, child);
+            }
+            kernel_process_orphan_children(unlink_guard, child);
             // GitHub issue #693 step 5: through the owner the take handed
             // back, not looked up again.
             scheduled_process_record_owned(exited_owner).has_parent = false;
@@ -13189,7 +13263,7 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
             // A deferred reap's parent may have been reaped since the child's
             // exit named it; a gone parent has nothing to remember (#1289).
             let reaped_guard = process_run_lock();
-            if (scheduled_process_handle_matches(parent)) {
+            if (parent_waits && scheduled_process_handle_matches(parent)) {
                 scheduled_process_record_live_locked(reaped_guard, parent).last_reaped_pid =
                     pid;
             }
@@ -13202,6 +13276,28 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
             }
             return status;
         }
+    }
+}
+
+// GitHub issue #1310: the record going away is the parent of whatever is left
+// on its list, and these links would name nothing. In the hold that took it,
+// so a link with has_parent set always names a live record.
+private fn kernel_process_orphan_children(
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+        reaped: ProcessHandle) !{unsafe} {
+    let reaped_record: &mut ProcessRecord = scheduled_process_record_live_locked(guard, reaped);
+    if (reaped_record.has_first_child == false) { return; }
+    let mut cursor: ProcessHandle = reaped_record.first_child;
+    reaped_record.has_first_child = false;
+    let mut remaining: usize = scheduled_process_pool_live_count() + 1;
+    while (remaining != 0) {
+        remaining = remaining - 1;
+        let orphan: &mut ProcessRecord = scheduled_process_record_live_locked(guard, cursor);
+        orphan.has_parent = false;
+        orphan.orphaned = true;
+        if (orphan.has_next_sibling == false) { return; }
+        cursor = orphan.next_sibling;
+        orphan.has_next_sibling = false;
     }
 }
 
@@ -13972,7 +14068,8 @@ fn kernel_process_parent_is_root_locked(guard: borrow ProcessRunGuard[lock]) -> 
     let mut parent: ProcessHandle = record.parent;
     // GitHub issue #831: the root is the process with no parent, as above.
     return scheduled_process_handle_matches(parent) &&
-        scheduled_process_record_live_locked(guard, parent).has_parent == false;
+        scheduled_process_record_live_locked(guard, parent).has_parent == false &&
+        scheduled_process_record_live_locked(guard, parent).orphaned == false;
 }
 
 fn kernel_process_current_set_pending_block_locked(
