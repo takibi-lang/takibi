@@ -23,7 +23,7 @@ def main():
         # GitHub issue #818: a block comment is a comment too.
         'block-commented context marker': replace_once(original, site + '!{changes_witness_ProcessCurrent}', site + '/* !{changes_witness_ProcessCurrent} */'),
         'new inline entry mint': original + '\ninline fn unreviewed() { process_running_here(); }\n',
-        'additional entry mint': replace_once(original, 'process_running_new(execution_state[execution_cpu_index()]', 'process_running_here(); process_running_new(execution_state[execution_cpu_index()]'),
+        'additional entry mint': replace_once(original, 'process_running_new(current_task.generation', 'process_running_here(); process_running_new(current_task.generation'),
         'global mint': original + '\nlet unreviewed = view ProcessCurrent[0, ProcessState::Running];\n',
         'new direct mint': original + '\nfn unreviewed() { view ProcessCurrent[0, ProcessState::Running]; }\n',
         'new unmarked writer': original + '\nfn unreviewed() { execution_state[execution_cpu_index()].current_live = false; }\n',

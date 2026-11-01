@@ -1300,7 +1300,7 @@ private fn ddb_current_unwind_root() -> DdbUnwindRoot !{unsafe} {
         ddb_snapshot.cpu,
         kernel_process_leveled_frame_pid_or_zero(
             frame_ref_from_entry(ddb_snapshot.frame_sp,
-                                 kernel_process_entry_generation())),
+                                 kernel_process_stopped_entry_generation())),
         frame.elr_el1,
         frame.x29,
         ddb_snapshot.frame_sp + EXC_CONTEXT_SIZE,
@@ -2808,7 +2808,7 @@ private fn kernel_ddb_enter_stopped(
     ddb_snapshot.parent_pid = current_record.ppid;
     ddb_snapshot.process_state = current_record.state;
     ddb_snapshot.wait_reason = current_record.wait_reason;
-    ddb_snapshot.root_slot = process_slot_address(kernel_process_current_slot());
+    ddb_snapshot.root_slot = process_slot_address(kernel_process_stopped_current_slot());
     let mut vm: AddressSpaceDiagnosticSnapshot =
         ddb_vm_snapshot_stopped(stopped_world, scheduled_process_address_space_root_stopped(stopped_world, root_slot_of_key(ddb_snapshot.root_slot)), ddb_snapshot.process_pid);
     ddb_snapshot.root_live = 0;
@@ -3149,7 +3149,7 @@ fn kernel_ddb_sync_dispatch(frame_sp: usize) -> usize !{interrupt, unsafe} {
         return frame_sp;
     }
     kernel_current_sync_fail_stop_leveled(
-        frame_ref_from_entry(frame_sp, kernel_process_entry_generation()));
+        frame_ref_from_entry(frame_sp, kernel_process_stopped_entry_generation()));
 }
 
 
@@ -3479,7 +3479,7 @@ private fn crash_world_stop_report(origin: usize, frame_sp: usize)
             if (origin == 1 && frame_sp != 0 &&
                 kernel_process_crash_frame_usable(stopped, frame_sp)) {
                 crash_snapshot_copy_leveled_frame(
-                    frame_ref_from_entry(frame_sp, kernel_process_entry_generation()),
+                    frame_ref_from_entry(frame_sp, kernel_process_stopped_entry_generation()),
                     &snapshot.saved_sp_el0);
                 crash_snapshot_here().saved_frame_available = 1;
             }
@@ -3760,12 +3760,12 @@ private fn crash_snapshot_capture(slot: usize, frame_sp: usize, origin: usize, c
     crash_snapshot_here().sp_el0 = crash_snapshot_read_sp_el0();
     crash_snapshot_here().tpidr_el0 = crash_snapshot_read_tpidr_el0();
     crash_snapshot_here().ttbr0_el1 = crash_snapshot_read_ttbr0_el1();
-    crash_snapshot_here().root_slot = process_slot_address(kernel_process_current_slot());
+    crash_snapshot_here().root_slot = process_slot_address(kernel_process_stopped_current_slot());
     crash_snapshot_here().activity = kernel_activity_code_here();
     crash_snapshot_here().saved_frame_available = 0;
     if (origin == 0 && frame_sp != 0) {
         crash_snapshot_copy_leveled_frame(
-            frame_ref_from_entry(frame_sp, kernel_process_entry_generation()),
+            frame_ref_from_entry(frame_sp, kernel_process_stopped_entry_generation()),
             &snapshot.saved_sp_el0);
         crash_snapshot_here().saved_frame_available = 1;
     }

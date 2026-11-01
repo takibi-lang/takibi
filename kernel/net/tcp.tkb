@@ -1382,6 +1382,32 @@ fn tcp_pool_lock_wait_cost_log() !{unsafe, acquires_lock_40_tcp_connection_pool,
     kernel_boot_log("\n");
 }
 
+// GitHub issue #1321: what one read of current costs, the preempt_off region
+// and its snapshot, beside the lock pair above. The least of three samples of
+// 4096 reads, including the loop and the match.
+fn kernel_process_current_read_cost_log() !{unsafe} {
+    let mut least: i64 = 0;
+    let mut running: usize = 0;
+    for sample: usize in 0..<3 {
+        let start: i64 = tcp_pin_cost_clock();
+        for round: usize in 0..<4096 {
+            match kernel_process_current_read() {
+                ProcessCurrentRead::Idle => {}
+                ProcessCurrentRead::Running(_) => { running = running + 1; }
+            }
+        }
+        let elapsed: i64 = tcp_pin_cost_clock() - start;
+        if (sample == 0 || elapsed < least) { least = elapsed; }
+    }
+    kernel_boot_log("RECORDED current read cost: reads=4096 ticks=");
+    uart_put_udec(least as usize);
+    kernel_boot_log(" running=");
+    uart_put_udec(running);
+    kernel_boot_log(" freq=");
+    uart_put_udec(read_cntfrq() as usize);
+    kernel_boot_log("\n");
+}
+
 // Empty critical-section cost, separate from handle and object-lock work.
 fn tcp_connection_pool_lock_cost() -> i64 !{unsafe} {
     let start: i64 = tcp_pin_cost_clock();
