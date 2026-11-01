@@ -30,7 +30,7 @@ def main() -> int:
                                              syscall, process)
     controls.append("current tree")
     injected = replace_once(makefile, "$(KERNEL_SHELL_EXT2_IMAGE):", "\tE2FSPROGS_FAKE_TIME=1700000000 e2cp fixture "
-        "$@.tmp:/bin/new-fixture\n\n$(KERNEL_SHELL_EXT2_IMAGE):")
+        "$@.$(MAKE_PID).tmp:/bin/new-fixture\n\n$(KERNEL_SHELL_EXT2_IMAGE):")
     assert "new-fixture" in check.image_bin_names(injected)
     assert check.image_bin_names(injected) != check.expected_bin_names(
         stdin, expected)
@@ -39,12 +39,12 @@ def main() -> int:
     assert names != check.expected_bin_names(stdin, removed)
     controls.append("missing expected entry")
     try:
-        check.image_bin_names(replace_once(makefile, "$@.tmp:/bin/peer-spin", "$@.tmp:/bin/peer-spin.extra-syntax"))
+        check.image_bin_names(replace_once(makefile, "$@.$(MAKE_PID).tmp:/bin/peer-spin", "$@.$(MAKE_PID).tmp:/bin/peer-spin.extra-syntax"))
     except ValueError:
         # A valid new name is not an unsupported command, so test a malformed
         # path spelling instead below.
         raise AssertionError("valid image name was refused")
-    malformed = replace_once(makefile, "$@.tmp:/bin/peer-spin", "$@.tmp:/bin/peer-spin/child")
+    malformed = replace_once(makefile, "$@.$(MAKE_PID).tmp:/bin/peer-spin", "$@.$(MAKE_PID).tmp:/bin/peer-spin/child")
     try:
         check.image_bin_names(malformed)
     except ValueError:

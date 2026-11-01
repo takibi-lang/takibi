@@ -1298,243 +1298,249 @@ KERNEL_EXT2_EQ_SH := $(KERNEL_USER_BUILD_DIR)/ext2-eq.sh
 $(KERNEL_EXT2_EQ_SH): $(KERNEL_EXT2_EQ_OPS) scripts/ext2_eq.py | $(KERNEL_USER_BUILD_DIR)
 	python3 scripts/ext2_eq.py gen-sh $< $@
 KERNEL_EXT2_IMAGES := $(KERNEL_EXT2_IMAGE) $(KERNEL_SHELL_EXT2_IMAGE)
+# This make's own process id (a $(shell) child's parent), in every temporary a
+# recipe writes beside its target. Two make levels building one stale target
+# must not share a temporary: one recipe's mv or truncate ran under the other's
+# e2cp and failed e2fsck (GitHub issue #1343). Each mv then installs a complete
+# file. scripts/check_lane_kernel_prereqs.py refuses a temporary without it.
+MAKE_PID := $(shell echo $$PPID)
 $(KERNEL_EXT2_IMAGES): export E2FSPROGS_FAKE_TIME := $(KERNEL_EXT2_FAKE_TIME)
 
 $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/about.html $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/httpd.sh $(KERNEL_EXT2_FIXTURE_DIR)/churn.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $(KERNEL_EXT2_FIXTURE_DIR)/bad-interpreter.sh $(KERNEL_EXT2_FIXTURE_DIR)/crlf.sh $(KERNEL_EXT2_FIXTURE_DIR)/no-newline.sh $(KERNEL_EXT2_FIXTURE_DIR)/long-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/inittab $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_EXT2_EQ_SH) $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSY_LOOP_A_ELF) $(KERNEL_BUSY_LOOP_B_ELF) $(KERNEL_BUSY_LOOP_PLACEMENT_REPORT_ELF) $(KERNEL_BUSY_LOOP_PLACEMENT_GUARD_ELF) $(KERNEL_BUSY_LOOP_PEER_SPIN_ELF) $(KERNEL_BUSY_LOOP_PEER_NET_WAKE_ELF) $(KERNEL_PEER_READ_ELF) $(KERNEL_CORE_READ_ELF) $(KERNEL_PEER_CONSOLE_ELF) $(KERNEL_PEER_TTY_ELF) $(KERNEL_PEER_SETTINGS_ELF) $(KERNEL_CLOEXEC_ELF) $(KERNEL_CLOEXEC_CHECK_ELF) $(KERNEL_PPOLL_PROBE_ELF) $(KERNEL_PIPE_PROBE_ELF) $(KERNEL_PIPE_CLOEXEC_CHECK_ELF) $(KERNEL_AFFINITY_ELF) $(KERNEL_SPREAD_ELF) $(KERNEL_MOVECOST_ELF) $(KERNEL_PEER_MUTATE_ELF) $(KERNEL_PROTOCOL_TRACE_ELF) $(KERNEL_PEER_EXEC_ELF) $(KERNEL_PEER_EXEC_IMAGE_ELF) $(KERNEL_PEER_FORK_ELF) $(KERNEL_PEER_SLEEP_ELF) $(KERNEL_SIGNAL_BOUNDARY_ELF) $(KERNEL_SIGNAL_TERMINAL_ELF) $(KERNEL_SIGNAL_TERMINAL_SKIP_ELF) $(KERNEL_NESTED_EXEC_ELF) $(KERNEL_NESTED_WRONG_IMAGE_ELF) $(KERNEL_EXEC_ENOMEM_ELFS) $(KERNEL_SESSION_ELF) $(KERNEL_SESSION_CHECK_ELF) $(KERNEL_TERMINAL_ELF) $(KERNEL_NESTED_FIXTURES) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_BUSYBOX_EXTRAS) $(KERNEL_MUSL_LOADER) $(KERNEL_TASKSET) $(KERNEL_LOAD_PROGRAMS)/stress-ng $(KERNEL_LOAD_PROGRAMS)/hackbench scripts/make_interp_probe_elf.py scripts/make_wide_span_elf.py | $(KERNEL_USER_BUILD_DIR)
-	rm -f $@.tmp
-	truncate -s 6291456 $@.tmp
-	E2FSPROGS_FAKE_TIME=1700000000 mke2fs -q -t ext2 -b 1024 -I 128 -N 1024 -O none -F -U 00000000-0000-0000-0000-000000000177 -E hash_seed=00000000-0000-0000-0000-000000000890 $@.tmp 6144
-	debugfs -w -R 'mkdir /etc' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'mkdir /bin' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'mkdir /lib' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'mkdir /dev' $@.tmp >/dev/null 2>&1
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $@.tmp:/hello.txt
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $@.tmp:/mutable.txt
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/index.html $@.tmp:/index.html
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/about.html $@.tmp:/about.html
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $@.tmp:/icon.png
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $@.tmp:/etc/init.sh
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/httpd.sh $@.tmp:/bin/httpd.sh
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/churn.sh $@.tmp:/bin/churn.sh
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $@.tmp:/etc/script-shebang.sh
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $@.tmp:/bin/script-interpreter-argument.sh
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $@.tmp:/etc/not-a-program
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/bad-interpreter.sh $@.tmp:/etc/bad-interpreter.sh
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/crlf.sh $@.tmp:/etc/crlf.sh
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/no-newline.sh $@.tmp:/etc/no-newline.sh
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/long-shebang.sh $@.tmp:/etc/long-shebang.sh
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/inittab $@.tmp:/etc/inittab
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $@.tmp:/large.txt
+	rm -f $@.$(MAKE_PID).tmp
+	truncate -s 6291456 $@.$(MAKE_PID).tmp
+	E2FSPROGS_FAKE_TIME=1700000000 mke2fs -q -t ext2 -b 1024 -I 128 -N 1024 -O none -F -U 00000000-0000-0000-0000-000000000177 -E hash_seed=00000000-0000-0000-0000-000000000890 $@.$(MAKE_PID).tmp 6144
+	debugfs -w -R 'mkdir /etc' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'mkdir /bin' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'mkdir /lib' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'mkdir /dev' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $@.$(MAKE_PID).tmp:/hello.txt
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $@.$(MAKE_PID).tmp:/mutable.txt
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/index.html $@.$(MAKE_PID).tmp:/index.html
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/about.html $@.$(MAKE_PID).tmp:/about.html
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $@.$(MAKE_PID).tmp:/icon.png
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $@.$(MAKE_PID).tmp:/etc/init.sh
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/httpd.sh $@.$(MAKE_PID).tmp:/bin/httpd.sh
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/churn.sh $@.$(MAKE_PID).tmp:/bin/churn.sh
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $@.$(MAKE_PID).tmp:/etc/script-shebang.sh
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $@.$(MAKE_PID).tmp:/bin/script-interpreter-argument.sh
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $@.$(MAKE_PID).tmp:/etc/not-a-program
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/bad-interpreter.sh $@.$(MAKE_PID).tmp:/etc/bad-interpreter.sh
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/crlf.sh $@.$(MAKE_PID).tmp:/etc/crlf.sh
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/no-newline.sh $@.$(MAKE_PID).tmp:/etc/no-newline.sh
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/long-shebang.sh $@.$(MAKE_PID).tmp:/etc/long-shebang.sh
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/inittab $@.$(MAKE_PID).tmp:/etc/inittab
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $@.$(MAKE_PID).tmp:/large.txt
 	# GitHub issue #1034: the tier-B equivalence script the ash fixture runs.
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_EQ_SH) $@.tmp:/lib/ext2-eq.sh
-	dd if=/dev/zero bs=98304 count=1 status=none | tr '\0' Z >$@.peer_read.tmp
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.peer_read.tmp $@.tmp:/peer-read.bin
-	rm -f $@.peer_read.tmp
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSYBOX_STATIC) $@.tmp:/bin/busybox.static
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSYBOX_EXTRAS) $@.tmp:/bin/busybox-extras
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_MUSL_LOADER) $@.tmp:/lib/ld-musl-aarch64.so.1
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_TASKSET) $@.tmp:/bin/taskset
-	python3 scripts/make_interp_probe_elf.py /lib/ld-none-aarch64.so.1 $@.interp_absent.tmp
-	python3 scripts/make_interp_probe_elf.py /bin/busybox.static $@.interp_other.tmp
-	python3 scripts/make_interp_probe_elf.py --et-exec /bin/busybox.static $@.et_exec.tmp
-	python3 scripts/make_interp_probe_elf.py --span 0x10001000 /bin/busybox.static $@.wide_span.tmp
-	python3 scripts/make_wide_span_elf.py 0x300000 $@.wide_run.tmp
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.interp_absent.tmp $@.tmp:/etc/interp-absent
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.interp_other.tmp $@.tmp:/etc/interp-other
-	rm -f $@.interp_absent.tmp $@.interp_other.tmp
-	truncate -s 0 $@.devnull.tmp
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.devnull.tmp $@.tmp:/dev/null
-	rm -f $@.devnull.tmp
-	dd if=/dev/zero bs=13311 count=1 status=none | tr '\0' Z >$@.read_indirect.tmp
-	printf '\n' >>$@.read_indirect.tmp
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.read_indirect.tmp $@.tmp:/read_indirect.txt
-	rm -f $@.read_indirect.tmp
-	printf 'removable\n' >$@.removable.tmp
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.removable.tmp $@.tmp:/etc/gone
-	rm -f $@.removable.tmp
-	printf 'mva\n' >$@.mva.tmp
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.mva.tmp $@.tmp:/etc/mva
-	printf 'mvb\n' >$@.mvb.tmp
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.mvb.tmp $@.tmp:/etc/mvb
-	rm -f $@.mva.tmp $@.mvb.tmp
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_RPI5_USER_PAYLOAD_ELF) $@.tmp:/bin/user_payload
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSY_LOOP_A_ELF) $@.tmp:/bin/busy-a
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSY_LOOP_B_ELF) $@.tmp:/bin/busy-b
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSY_LOOP_PLACEMENT_REPORT_ELF) $@.tmp:/etc/placement-report
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSY_LOOP_PLACEMENT_GUARD_ELF) $@.tmp:/etc/placement-guard
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSY_LOOP_PEER_SPIN_ELF) $@.tmp:/bin/peer-spin
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSY_LOOP_PEER_NET_WAKE_ELF) $@.tmp:/bin/peer-net-wake
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_READ_ELF) $@.tmp:/bin/peer-read
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_CORE_READ_ELF) $@.tmp:/bin/core-read
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_CONSOLE_ELF) $@.tmp:/bin/peer-console
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_TTY_ELF) $@.tmp:/bin/peer-tty
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_SETTINGS_ELF) $@.tmp:/bin/peer-settings
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_CLOEXEC_ELF) $@.tmp:/bin/cloexec
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_CLOEXEC_CHECK_ELF) $@.tmp:/bin/cloexec-check
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PPOLL_PROBE_ELF) $@.tmp:/bin/ppoll-probe
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PIPE_PROBE_ELF) $@.tmp:/bin/pipe-probe
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PIPE_CLOEXEC_CHECK_ELF) $@.tmp:/bin/pipe-cloexec-check
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_AFFINITY_ELF) $@.tmp:/bin/affinity
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_SPREAD_ELF) $@.tmp:/bin/spread
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_MOVECOST_ELF) $@.tmp:/bin/movecost
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_MUTATE_ELF) $@.tmp:/bin/peer-mutate
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PROTOCOL_TRACE_ELF) $@.tmp:/bin/protocol-trace
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_EXEC_ELF) $@.tmp:/bin/peer-exec
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_EXEC_IMAGE_ELF) $@.tmp:/bin/peer-exec-image
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_FORK_ELF) $@.tmp:/bin/peer-fork
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_SLEEP_ELF) $@.tmp:/bin/peer-sleep
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_SIGNAL_BOUNDARY_ELF) $@.tmp:/bin/signal-boundary
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_SIGNAL_TERMINAL_ELF) $@.tmp:/bin/signal-terminal
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_SIGNAL_TERMINAL_SKIP_ELF) $@.tmp:/bin/signal-terminal-skip
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_TERMINAL_ELF) $@.tmp:/bin/termios
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_SESSION_ELF) $@.tmp:/bin/session
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_SESSION_CHECK_ELF) $@.tmp:/bin/session-check
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_NESTED_EXEC_ELF) $@.tmp:/bin/nested-exec
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUILD_DIR)/exec_enomem_cpu0.elf $@.tmp:/bin/exenom0
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUILD_DIR)/exec_enomem_cpu1.elf $@.tmp:/bin/exenom1
-	E2FSPROGS_FAKE_TIME=1700000000 e2mkdir $@.tmp:/nested
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_EQ_SH) $@.$(MAKE_PID).tmp:/lib/ext2-eq.sh
+	dd if=/dev/zero bs=98304 count=1 status=none | tr '\0' Z >$@.$(MAKE_PID).peer_read.tmp
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.$(MAKE_PID).peer_read.tmp $@.$(MAKE_PID).tmp:/peer-read.bin
+	rm -f $@.$(MAKE_PID).peer_read.tmp
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSYBOX_STATIC) $@.$(MAKE_PID).tmp:/bin/busybox.static
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSYBOX_EXTRAS) $@.$(MAKE_PID).tmp:/bin/busybox-extras
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_MUSL_LOADER) $@.$(MAKE_PID).tmp:/lib/ld-musl-aarch64.so.1
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_TASKSET) $@.$(MAKE_PID).tmp:/bin/taskset
+	python3 scripts/make_interp_probe_elf.py /lib/ld-none-aarch64.so.1 $@.$(MAKE_PID).interp_absent.tmp
+	python3 scripts/make_interp_probe_elf.py /bin/busybox.static $@.$(MAKE_PID).interp_other.tmp
+	python3 scripts/make_interp_probe_elf.py --et-exec /bin/busybox.static $@.$(MAKE_PID).et_exec.tmp
+	python3 scripts/make_interp_probe_elf.py --span 0x10001000 /bin/busybox.static $@.$(MAKE_PID).wide_span.tmp
+	python3 scripts/make_wide_span_elf.py 0x300000 $@.$(MAKE_PID).wide_run.tmp
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.$(MAKE_PID).interp_absent.tmp $@.$(MAKE_PID).tmp:/etc/interp-absent
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.$(MAKE_PID).interp_other.tmp $@.$(MAKE_PID).tmp:/etc/interp-other
+	rm -f $@.$(MAKE_PID).interp_absent.tmp $@.$(MAKE_PID).interp_other.tmp
+	truncate -s 0 $@.$(MAKE_PID).devnull.tmp
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.$(MAKE_PID).devnull.tmp $@.$(MAKE_PID).tmp:/dev/null
+	rm -f $@.$(MAKE_PID).devnull.tmp
+	dd if=/dev/zero bs=13311 count=1 status=none | tr '\0' Z >$@.$(MAKE_PID).read_indirect.tmp
+	printf '\n' >>$@.$(MAKE_PID).read_indirect.tmp
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.$(MAKE_PID).read_indirect.tmp $@.$(MAKE_PID).tmp:/read_indirect.txt
+	rm -f $@.$(MAKE_PID).read_indirect.tmp
+	printf 'removable\n' >$@.$(MAKE_PID).removable.tmp
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.$(MAKE_PID).removable.tmp $@.$(MAKE_PID).tmp:/etc/gone
+	rm -f $@.$(MAKE_PID).removable.tmp
+	printf 'mva\n' >$@.$(MAKE_PID).mva.tmp
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.$(MAKE_PID).mva.tmp $@.$(MAKE_PID).tmp:/etc/mva
+	printf 'mvb\n' >$@.$(MAKE_PID).mvb.tmp
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.$(MAKE_PID).mvb.tmp $@.$(MAKE_PID).tmp:/etc/mvb
+	rm -f $@.$(MAKE_PID).mva.tmp $@.$(MAKE_PID).mvb.tmp
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_RPI5_USER_PAYLOAD_ELF) $@.$(MAKE_PID).tmp:/bin/user_payload
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSY_LOOP_A_ELF) $@.$(MAKE_PID).tmp:/bin/busy-a
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSY_LOOP_B_ELF) $@.$(MAKE_PID).tmp:/bin/busy-b
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSY_LOOP_PLACEMENT_REPORT_ELF) $@.$(MAKE_PID).tmp:/etc/placement-report
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSY_LOOP_PLACEMENT_GUARD_ELF) $@.$(MAKE_PID).tmp:/etc/placement-guard
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSY_LOOP_PEER_SPIN_ELF) $@.$(MAKE_PID).tmp:/bin/peer-spin
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSY_LOOP_PEER_NET_WAKE_ELF) $@.$(MAKE_PID).tmp:/bin/peer-net-wake
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_READ_ELF) $@.$(MAKE_PID).tmp:/bin/peer-read
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_CORE_READ_ELF) $@.$(MAKE_PID).tmp:/bin/core-read
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_CONSOLE_ELF) $@.$(MAKE_PID).tmp:/bin/peer-console
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_TTY_ELF) $@.$(MAKE_PID).tmp:/bin/peer-tty
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_SETTINGS_ELF) $@.$(MAKE_PID).tmp:/bin/peer-settings
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_CLOEXEC_ELF) $@.$(MAKE_PID).tmp:/bin/cloexec
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_CLOEXEC_CHECK_ELF) $@.$(MAKE_PID).tmp:/bin/cloexec-check
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PPOLL_PROBE_ELF) $@.$(MAKE_PID).tmp:/bin/ppoll-probe
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PIPE_PROBE_ELF) $@.$(MAKE_PID).tmp:/bin/pipe-probe
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PIPE_CLOEXEC_CHECK_ELF) $@.$(MAKE_PID).tmp:/bin/pipe-cloexec-check
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_AFFINITY_ELF) $@.$(MAKE_PID).tmp:/bin/affinity
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_SPREAD_ELF) $@.$(MAKE_PID).tmp:/bin/spread
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_MOVECOST_ELF) $@.$(MAKE_PID).tmp:/bin/movecost
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_MUTATE_ELF) $@.$(MAKE_PID).tmp:/bin/peer-mutate
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PROTOCOL_TRACE_ELF) $@.$(MAKE_PID).tmp:/bin/protocol-trace
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_EXEC_ELF) $@.$(MAKE_PID).tmp:/bin/peer-exec
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_EXEC_IMAGE_ELF) $@.$(MAKE_PID).tmp:/bin/peer-exec-image
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_FORK_ELF) $@.$(MAKE_PID).tmp:/bin/peer-fork
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_SLEEP_ELF) $@.$(MAKE_PID).tmp:/bin/peer-sleep
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_SIGNAL_BOUNDARY_ELF) $@.$(MAKE_PID).tmp:/bin/signal-boundary
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_SIGNAL_TERMINAL_ELF) $@.$(MAKE_PID).tmp:/bin/signal-terminal
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_SIGNAL_TERMINAL_SKIP_ELF) $@.$(MAKE_PID).tmp:/bin/signal-terminal-skip
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_TERMINAL_ELF) $@.$(MAKE_PID).tmp:/bin/termios
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_SESSION_ELF) $@.$(MAKE_PID).tmp:/bin/session
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_SESSION_CHECK_ELF) $@.$(MAKE_PID).tmp:/bin/session-check
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_NESTED_EXEC_ELF) $@.$(MAKE_PID).tmp:/bin/nested-exec
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUILD_DIR)/exec_enomem_cpu0.elf $@.$(MAKE_PID).tmp:/bin/exenom0
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUILD_DIR)/exec_enomem_cpu1.elf $@.$(MAKE_PID).tmp:/bin/exenom1
+	E2FSPROGS_FAKE_TIME=1700000000 e2mkdir $@.$(MAKE_PID).tmp:/nested
 	@set -e; for fixture in $(KERNEL_NESTED_FIXTURES); do \
-	    E2FSPROGS_FAKE_TIME=1700000000 e2cp $$fixture $@.tmp:/nested/$$(basename $$fixture); \
+	    E2FSPROGS_FAKE_TIME=1700000000 e2cp $$fixture $@.$(MAKE_PID).tmp:/nested/$$(basename $$fixture); \
 	done
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.et_exec.tmp $@.tmp:/nested/et-exec
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.wide_span.tmp $@.tmp:/nested/wide-span
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.$(MAKE_PID).et_exec.tmp $@.$(MAKE_PID).tmp:/nested/et-exec
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.$(MAKE_PID).wide_span.tmp $@.$(MAKE_PID).tmp:/nested/wide-span
 	# #1065: an image named like a BusyBox applet, which the nested probe
 	# passes as argv[0] while execve's pathname is /bin/sh.
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_NESTED_WRONG_IMAGE_ELF) $@.tmp:/nested/sh
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.wide_run.tmp $@.tmp:/nested/wide-run
-	rm -f $@.et_exec.tmp $@.wide_span.tmp $@.wide_run.tmp
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_NESTED_WRONG_IMAGE_ELF) $@.$(MAKE_PID).tmp:/nested/sh
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.$(MAKE_PID).wide_run.tmp $@.$(MAKE_PID).tmp:/nested/wide-run
+	rm -f $@.$(MAKE_PID).et_exec.tmp $@.$(MAKE_PID).wide_span.tmp $@.$(MAKE_PID).wide_run.tmp
 	@set -e; for fixture in $(KERNEL_NESTED_FIXTURES); do \
-	    debugfs -w -R "set_inode_field /nested/$$(basename $$fixture) mode 0100755" $@.tmp >/dev/null 2>&1; \
+	    debugfs -w -R "set_inode_field /nested/$$(basename $$fixture) mode 0100755" $@.$(MAKE_PID).tmp >/dev/null 2>&1; \
 	done
-	debugfs -w -R 'set_inode_field /nested/noexec mode 0100644' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/termios mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/session mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/session-check mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/nested-exec mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/exenom0 mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/exenom1 mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/busybox.static mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/busybox-extras mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /lib/ld-musl-aarch64.so.1 mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/taskset mode 0100755' $@.tmp >/dev/null 2>&1
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_LOAD_PROGRAMS)/stress-ng $@.tmp:/bin/stress-ng
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_LOAD_PROGRAMS)/hackbench $@.tmp:/bin/hackbench
-	debugfs -w -R 'set_inode_field /bin/stress-ng mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/hackbench mode 0100755' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /nested/noexec mode 0100644' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/termios mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/session mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/session-check mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/nested-exec mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/exenom0 mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/exenom1 mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/busybox.static mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/busybox-extras mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /lib/ld-musl-aarch64.so.1 mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/taskset mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_LOAD_PROGRAMS)/stress-ng $@.$(MAKE_PID).tmp:/bin/stress-ng
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_LOAD_PROGRAMS)/hackbench $@.$(MAKE_PID).tmp:/bin/hackbench
+	debugfs -w -R 'set_inode_field /bin/stress-ng mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/hackbench mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
 	# The 6 MiB extent is the content rounded up to a MiB (#742). /pad holds
 	# the rounding, so the boot fixture that fills the free blocks before its
 	# ENOSPC checks does the same work as on the 2816-block image; shrink it
 	# when a program is added.
-	head -c 282624 /dev/zero >$@.pad.tmp
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.pad.tmp $@.tmp:/pad
-	rm -f $@.pad.tmp
+	head -c 282624 /dev/zero >$@.$(MAKE_PID).pad.tmp
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.$(MAKE_PID).pad.tmp $@.$(MAKE_PID).tmp:/pad
+	rm -f $@.$(MAKE_PID).pad.tmp
 	# Execute-only file for the maintained access/faccessat R_OK and W_OK checks.
-	debugfs -w -R 'set_inode_field /etc/interp-absent mode 0100111' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /etc/interp-other mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /nested/et-exec mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /nested/wide-span mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /nested/sh mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /nested/wide-run mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /etc/init.sh mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/httpd.sh mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/churn.sh mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /etc/script-shebang.sh mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/script-interpreter-argument.sh mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /etc/not-a-program mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /etc/bad-interpreter.sh mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /etc/crlf.sh mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /etc/no-newline.sh mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /etc/long-shebang.sh mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/user_payload mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/busy-a mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/busy-b mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /etc/placement-report mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /etc/placement-guard mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/peer-spin mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/peer-net-wake mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/peer-read mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/core-read mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/peer-console mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/peer-tty mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/peer-settings mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/cloexec mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/cloexec-check mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/ppoll-probe mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/pipe-probe mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/pipe-cloexec-check mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/affinity mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/spread mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/movecost mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/peer-mutate mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/protocol-trace mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/peer-exec mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/peer-exec-image mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/peer-fork mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/peer-sleep mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/signal-boundary mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/signal-terminal mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/signal-terminal-skip mode 0100755' $@.tmp >/dev/null 2>&1
-	E2FSPROGS_FAKE_TIME=1700000000 debugfs -w -R 'symlink /latest hello.txt' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /etc/interp-absent mode 0100111' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /etc/interp-other mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /nested/et-exec mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /nested/wide-span mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /nested/sh mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /nested/wide-run mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /etc/init.sh mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/httpd.sh mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/churn.sh mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /etc/script-shebang.sh mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/script-interpreter-argument.sh mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /etc/not-a-program mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /etc/bad-interpreter.sh mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /etc/crlf.sh mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /etc/no-newline.sh mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /etc/long-shebang.sh mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/user_payload mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/busy-a mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/busy-b mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /etc/placement-report mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /etc/placement-guard mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/peer-spin mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/peer-net-wake mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/peer-read mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/core-read mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/peer-console mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/peer-tty mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/peer-settings mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/cloexec mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/cloexec-check mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/ppoll-probe mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/pipe-probe mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/pipe-cloexec-check mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/affinity mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/spread mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/movecost mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/peer-mutate mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/protocol-trace mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/peer-exec mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/peer-exec-image mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/peer-fork mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/peer-sleep mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/signal-boundary mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/signal-terminal mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/signal-terminal-skip mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	E2FSPROGS_FAKE_TIME=1700000000 debugfs -w -R 'symlink /latest hello.txt' $@.$(MAKE_PID).tmp >/dev/null 2>&1
 	# /bin outgrew its one block with /bin/pipe-probe (GitHub issue #1042), and
 	# debugfs's link does not grow a directory. Grown here, after every file
 	# is in place, so no earlier allocation moves.
-	debugfs -w -R 'expand /bin' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /bin/busybox.static /bin/busybox' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /bin/busybox.static /bin/sh' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /bin/busybox.static /bin/cat' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /bin/busybox.static /bin/uname' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /bin/busybox.static /bin/od' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /bin/busybox.static /bin/echo' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /bin/busybox.static /bin/ls' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /bin/busybox.static /bin/ps' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /bin/busybox.static /bin/dmesg' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /bin/busybox.static /bin/mkdir' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /bin/busybox.static /bin/rmdir' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /bin/busybox.static /bin/rm' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /bin/busybox.static /bin/mv' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /bin/busybox.static /bin/cal' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /bin/busybox.static /bin/nproc' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /bin/busybox.static /bin/sleep' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /bin/busybox-extras /bin/httpd' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'mkdir /many' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'expand /many' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'expand /bin' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/busybox' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/sh' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/cat' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/uname' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/od' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/echo' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/ls' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/ps' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/dmesg' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/mkdir' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/rmdir' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/rm' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/mv' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/cal' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/nproc' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/sleep' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox-extras /bin/httpd' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'mkdir /many' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'expand /many' $@.$(MAKE_PID).tmp >/dev/null 2>&1
 	for index in $$(seq -w 0 19); do \
-		debugfs -w -R "link /bin/busybox.static /many/entry-$$index" $@.tmp >/dev/null 2>&1; \
+		debugfs -w -R "link /bin/busybox.static /many/entry-$$index" $@.$(MAKE_PID).tmp >/dev/null 2>&1; \
 	done
-	debugfs -w -R 'set_inode_field /bin/busybox.static links_count 37' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/busybox-extras links_count 2' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /hello.txt /etc/hlink' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /hello.txt links_count 2' $@.tmp >/dev/null 2>&1
-	e2fsck -fn $@.tmp >/dev/null
-	python3 scripts/ext2_fixed_times.py $@.tmp $(KERNEL_EXT2_FAKE_TIME)
-	python3 scripts/check_ext2_image_free_blocks.py $@.tmp
-	mv $@.tmp $@
+	debugfs -w -R 'set_inode_field /bin/busybox.static links_count 37' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/busybox-extras links_count 2' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'link /hello.txt /etc/hlink' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /hello.txt links_count 2' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	e2fsck -fn $@.$(MAKE_PID).tmp >/dev/null
+	python3 scripts/ext2_fixed_times.py $@.$(MAKE_PID).tmp $(KERNEL_EXT2_FAKE_TIME)
+	python3 scripts/check_ext2_image_free_blocks.py $@.$(MAKE_PID).tmp
+	mv $@.$(MAKE_PID).tmp $@
 
 $(KERNEL_SHELL_EXT2_IMAGE): $(KERNEL_EXT2_IMAGE) \
 	$(KERNEL_EXT2_FIXTURE_DIR)/inittab.shell $(KERNEL_EXT2_FIXTURE_DIR)/restart.sh \
 	$(KERNEL_EXT2_FIXTURE_DIR)/load.sh $(KERNEL_EXT2_FIXTURE_DIR)/load-job.sh \
 	$(KERNEL_EXT2_FIXTURE_DIR)/passwd $(KERNEL_EXT2_FIXTURE_DIR)/group \
 	$(KERNEL_HANG_CORE_ELF)
-	cp $(KERNEL_EXT2_IMAGE) $@.tmp
-	debugfs -w -R 'rm /etc/inittab' $@.tmp >/dev/null 2>&1
+	cp $(KERNEL_EXT2_IMAGE) $@.$(MAKE_PID).tmp
+	debugfs -w -R 'rm /etc/inittab' $@.$(MAKE_PID).tmp >/dev/null 2>&1
 	E2FSPROGS_FAKE_TIME=1700000000 \
-		e2cp $(KERNEL_EXT2_FIXTURE_DIR)/inittab.shell $@.tmp:/etc/inittab
+		e2cp $(KERNEL_EXT2_FIXTURE_DIR)/inittab.shell $@.$(MAKE_PID).tmp:/etc/inittab
 	E2FSPROGS_FAKE_TIME=1700000000 \
-		e2cp $(KERNEL_EXT2_FIXTURE_DIR)/restart.sh $@.tmp:/etc/restart.sh
-	debugfs -w -R 'set_inode_field /etc/restart.sh mode 0100755' $@.tmp >/dev/null 2>&1
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/load.sh $@.tmp:/bin/load.sh
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/load-job.sh $@.tmp:/bin/load-job.sh
-	debugfs -w -R 'set_inode_field /bin/load.sh mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/load-job.sh mode 0100755' $@.tmp >/dev/null 2>&1
+		e2cp $(KERNEL_EXT2_FIXTURE_DIR)/restart.sh $@.$(MAKE_PID).tmp:/etc/restart.sh
+	debugfs -w -R 'set_inode_field /etc/restart.sh mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/load.sh $@.$(MAKE_PID).tmp:/bin/load.sh
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/load-job.sh $@.$(MAKE_PID).tmp:/bin/load-job.sh
+	debugfs -w -R 'set_inode_field /bin/load.sh mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/load-job.sh mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
 	# GitHub issue #1176: load.sh runs stress-ng as `load` through su.
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/passwd $@.tmp:/etc/passwd
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/group $@.tmp:/etc/group
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/passwd $@.$(MAKE_PID).tmp:/etc/passwd
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/group $@.$(MAKE_PID).tmp:/etc/group
 	# GitHub issue #980: in /lib, which no ash listing shows.
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_HANG_CORE_ELF) $@.tmp:/lib/hang-core
-	debugfs -w -R 'set_inode_field /lib/hang-core mode 0100755' $@.tmp >/dev/null 2>&1
-	python3 scripts/ext2_fixed_times.py $@.tmp $(KERNEL_EXT2_FAKE_TIME)
-	e2fsck -fn $@.tmp >/dev/null
-	mv $@.tmp $@
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_HANG_CORE_ELF) $@.$(MAKE_PID).tmp:/lib/hang-core
+	debugfs -w -R 'set_inode_field /lib/hang-core mode 0100755' $@.$(MAKE_PID).tmp >/dev/null 2>&1
+	python3 scripts/ext2_fixed_times.py $@.$(MAKE_PID).tmp $(KERNEL_EXT2_FAKE_TIME)
+	e2fsck -fn $@.$(MAKE_PID).tmp >/dev/null
+	mv $@.$(MAKE_PID).tmp $@
 
 $(KERNEL_LOAD_PROGRAMS)/stress-ng $(KERNEL_LOAD_PROGRAMS)/hackbench &: scripts/build_load_programs.sh
 	bash scripts/build_load_programs.sh $(KERNEL_LOAD_PROGRAMS)
@@ -1891,9 +1897,9 @@ $(KERNEL_RPI5_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_
 # the image (GitHub issue #1218).
 $(KERNEL_EXT2_TKZ): $(KERNEL_EXT2_IMAGE) $(KERNEL_SHELL_EXT2_IMAGE) scripts/lz4_image.py
 	python3 scripts/lz4_image.py pack-pair $(KERNEL_EXT2_IMAGE) $(KERNEL_SHELL_EXT2_IMAGE) \
-		$(KERNEL_EXT2_TKZ).tmp $(KERNEL_SHELL_EXT2_TKZ).tmp
-	mv $(KERNEL_SHELL_EXT2_TKZ).tmp $(KERNEL_SHELL_EXT2_TKZ)
-	mv $(KERNEL_EXT2_TKZ).tmp $(KERNEL_EXT2_TKZ)
+		$(KERNEL_EXT2_TKZ).$(MAKE_PID).tmp $(KERNEL_SHELL_EXT2_TKZ).$(MAKE_PID).tmp
+	mv $(KERNEL_SHELL_EXT2_TKZ).$(MAKE_PID).tmp $(KERNEL_SHELL_EXT2_TKZ)
+	mv $(KERNEL_EXT2_TKZ).$(MAKE_PID).tmp $(KERNEL_EXT2_TKZ)
 $(KERNEL_SHELL_EXT2_TKZ): $(KERNEL_EXT2_TKZ)
 
 $(KERNEL_RPI5_SHELL_ELF): $(KERNEL_RPI5_ELF) $(KERNEL_EXT2_TKZ) \
@@ -2088,14 +2094,14 @@ kernelbuild-qemu: build
 # Console offsets come from LLVM, including the wrapper around atomic words.
 $(KERNEL_CONSOLE_LAYOUT): $(KERNEL_QEMU_MAIN_O) scripts/struct_layout_gdb.py
 	@mkdir -p $(dir $@)
-	python3 scripts/struct_layout_gdb.py $(KERNEL_QEMU_MAIN_O).facts/structs.tsv KernelLogCoreState AtomicWord KernelLogTxState TerminalEchoState TerminalStateStore TerminalStateRecord UartRxState > $@.tmp
-	mv $@.tmp $@
+	python3 scripts/struct_layout_gdb.py $(KERNEL_QEMU_MAIN_O).facts/structs.tsv KernelLogCoreState AtomicWord KernelLogTxState TerminalEchoState TerminalStateStore TerminalStateRecord UartRxState > $@.$(MAKE_PID).tmp
+	mv $@.$(MAKE_PID).tmp $@
 
 # Churn debugger layouts are host-only and track the compiled source.
 _build/kernel-churn-layout.gdb: $(KERNEL_QEMU_MAIN_O) scripts/struct_layout_gdb.py
 	@mkdir -p $(dir $@)
-	python3 scripts/struct_layout_gdb.py $(KERNEL_QEMU_MAIN_O).facts/structs.tsv AsidState 'LockedCell$$AsidState' Mutex WorldStop AtomicWord > $@.tmp
-	mv $@.tmp $@
+	python3 scripts/struct_layout_gdb.py $(KERNEL_QEMU_MAIN_O).facts/structs.tsv AsidState 'LockedCell$$AsidState' Mutex WorldStop AtomicWord > $@.$(MAKE_PID).tmp
+	mv $@.$(MAKE_PID).tmp $@
 
 $(KERNEL_DEBUG_METADATA): $(KERNEL_QEMU_MAIN_O)
 	@mkdir -p $(dir $@)
@@ -2200,8 +2206,8 @@ $(KERNEL_EXC_CONTEXT_OFFSETS): $(KERNEL_QEMU_MAIN_O)
 # main.o's depfile as the one boundary.
 $(KERNEL_CRASH_SNAPSHOT_LAYOUT): $(KERNEL_QEMU_MAIN_O) scripts/struct_layout_gdb.py
 	@mkdir -p $(dir $@)
-	python3 scripts/struct_layout_gdb.py $(KERNEL_QEMU_MAIN_O).facts/structs.tsv CrashSnapshot > $@.tmp
-	mv $@.tmp $@
+	python3 scripts/struct_layout_gdb.py $(KERNEL_QEMU_MAIN_O).facts/structs.tsv CrashSnapshot > $@.$(MAKE_PID).tmp
+	mv $@.$(MAKE_PID).tmp $@
 
 ## Verify that exception-frame offsets are consistent and the hand-written
 ## SAVE/RESTORE macros contain real assembly, not placeholder/empty bodies.
@@ -2240,7 +2246,11 @@ kernelbuild-rpi5-debug: build
 ## and because a memory map that is only verified when someone runs the
 ## slow suite is a memory map that is wrong when someone trusts it.
 .PHONY: kernel-memory-map-check
-kernel-memory-map-check: _kernelbuild-rpi5 _kernelbuild-qemu
+kernel-memory-map-check: build
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernel-memory-map-check
+
+.PHONY: _kernel-memory-map-check
+_kernel-memory-map-check: _kernelbuild-rpi5 _kernelbuild-qemu
 	python3 scripts/buildcheck_kernel_memory_map.py
 
 ## kernel/models/README.md's action rows against both kernels' call-graph
@@ -2273,7 +2283,7 @@ model-map-restamp: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _model-map-restamp
 
 .PHONY: _kernelbuild
-_kernelbuild: _kernelbuild-rpi5 _kernelbuild-qemu _kernelbuild-dma-qemu _kernelbuild-invariant-qemu kernel-memory-map-check $(MODEL_MAP_STAMP) $(GLOBAL_PROTECTION_STAMP)
+_kernelbuild: _kernelbuild-rpi5 _kernelbuild-qemu _kernelbuild-dma-qemu _kernelbuild-invariant-qemu _kernel-memory-map-check $(MODEL_MAP_STAMP) $(GLOBAL_PROTECTION_STAMP)
 
 kernelbuild: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild
@@ -2291,7 +2301,7 @@ kernelbuild: build
 .PHONY: _kernelbuild-images kernelbuild-images
 _kernelbuild-images: _kernelbuild _kernelbuild-qemu-debug _kernelbuild-rpi5-debug \
 	$(KERNEL_QEMU_NET_WAKE_CONTROL_ELF) $(KERNEL_QEMU_RACE_WINDOW_ELFS) \
-	kernel-debug-layout-check \
+	_kernel-debug-layout-check \
 	$(KERNEL_CRASH_SNAPSHOT_LAYOUT)
 
 kernelbuild-images: build
@@ -2313,8 +2323,11 @@ _kernelbuild-check: _kernelbuild-images
 kernelbuild-check: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-check
 
-.PHONY: kernel-debug-layout-check
-kernel-debug-layout-check: _kernelbuild _kernelbuild-qemu-debug
+.PHONY: kernel-debug-layout-check _kernel-debug-layout-check
+kernel-debug-layout-check: build
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernel-debug-layout-check
+
+_kernel-debug-layout-check: _kernelbuild _kernelbuild-qemu-debug
 	python3 scripts/buildcheck_kernel_memory_map.py --debug
 
 ## trustedbasecheck: repeatable inventory of the maintained kernel's checked
@@ -3103,7 +3116,7 @@ litmuscheck: build
 
 clean:
 	$(NICE_HEAVY) dune clean
-	find kernel/build -type f \( -name '*.o' -o -name '*.elf' -o -name '*.bin' -o -name '*.img' -o -name '*.d' \) -delete 2>/dev/null || true
+	find kernel/build -type f \( -name '*.o' -o -name '*.elf' -o -name '*.bin' -o -name '*.img' -o -name '*.d' -o -name '*.tmp' \) -delete 2>/dev/null || true
 	find kernel/build -type d -name '*.facts' -prune -exec rm -rf {} + 2>/dev/null || true
 	rm -f kernel/arch/arm64/kernel/exception_context_offsets.inc
 	rm -rf $(LINUX_USER_BUILD_DIR)

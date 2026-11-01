@@ -60,7 +60,7 @@ def busybox_sleep_probe_is_real(makefile: str, stdin: str,
                                 workload: str, syscall: str,
                                 process: str) -> bool:
     sleep_alias = re.compile(
-        r"\blink /bin/busybox\.static /bin/sleep'\s+\$@\.tmp")
+        r"\blink /bin/busybox\.static /bin/sleep'\s+\$@\.\$\(MAKE_PID\)\.tmp")
     commands = tuple(line for line in stdin.splitlines()
                      if line and not line.startswith("#"))
     observer = syscall.find(

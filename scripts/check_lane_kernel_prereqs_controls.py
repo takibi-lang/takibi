@@ -18,12 +18,16 @@ def main() -> int:
         "lane on linux_user executables": ".PHONY: zzcheck\nzzcheck: $(LINUX_USER_BINS)\n\ttrue\n",
         "lane on linux_user objects": ".PHONY: zzcheck\nzzcheck: $(LINUX_USER_OBJS)\n\ttrue\n",
         "literal linux_user executable": ".PHONY: zzcheck\nzzcheck: linux_user/page_run/page_run.exe\n\ttrue\n",
+        # The #1343 shapes.
+        "lane on a private build target": ".PHONY: zzcheck\nzzcheck: _kernelbuild-qemu\n\ttrue\n",
+        "shared recipe temporary": "zz.o:\n\ttouch $@.tmp\n",
     }
     for name, rule in failing.items():
         cases.note()
         assert problems(text + "\n" + rule), name
     passing = {
         "private inner target": ".PHONY: _zzbuild\n_zzbuild: $(KERNEL_RPI5_MAIN_O)\n",
+        "per-process temporary": "zz.o:\n\ttouch $@.$(MAKE_PID).tmp\n",
         "file rule": "zz.o: $(KERNEL_RPI5_MAIN_O)\n\ttrue\n",
         "order-only prerequisite": ".PHONY: zzcheck\nzzcheck: build | $(KERNEL_BUILD_DIR)\n\ttrue\n",
     }
