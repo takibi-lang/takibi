@@ -400,29 +400,26 @@ private fn syscall_slot_release(slot: sink SyscallSlot[0]) {
     atomic_word_store(&syscall_slot_words[slot.index], 0);
 }
 
-// GitHub issue #559: this CPU's current syscall is a counted ext2 reader
-// and owes ext2_read_leave. Kept out of the scratch above: it is state one
-// function leaves for another, not per-call scratch.
-// A per-CPU store (#704, #981), reached only with the CpuHere a preempt_off
-// block mints; an MPIDR beyond KERNEL_MAX_CORES stops in the mint instead of
-// sharing core 0's flag.
-struct per_cpu SyscallExt2Reader {
+// GitHub issue #559: this syscall is a counted ext2 reader and owes
+// ext2_read_leave. A local of kernel_syscall_dispatch, on the process's own
+// stack, reached here through this pointer: the registration belongs to the
+// syscall, so it follows a task that changes CPU (#1323). It was a per-CPU
+// flag, marked in one preempt_off region and taken in another, which a
+// preempted task would have left to the next syscall on its old CPU.
+struct SyscallExt2Reader {
     private reading: bool;
 }
-private let mut syscall_ext2_reader: [SyscallExt2Reader; KERNEL_MAX_CORES];
 
-private fn syscall_ext2_reader_mark() {
-    preempt_off (cpu) { syscall_ext2_reader[cpu].reading = true; }
+private fn syscall_ext2_reader_mark(reader: &mut SyscallExt2Reader) {
+    reader.reading = true;
 }
 
-// Whether this CPU's syscall was a counted reader, clearing the mark: the
-// caller owes ext2_read_leave exactly when this answers true.
-private fn syscall_ext2_reader_take() -> bool {
-    preempt_off (cpu) {
-        let reading: bool = syscall_ext2_reader[cpu].reading;
-        syscall_ext2_reader[cpu].reading = false;
-        return reading;
-    }
+// Whether this syscall was a counted reader, clearing the mark: the caller
+// owes ext2_read_leave exactly when this answers true.
+private fn syscall_ext2_reader_take(reader: &mut SyscallExt2Reader) -> bool {
+    let reading: bool = reader.reading;
+    reader.reading = false;
+    return reading;
 }
 // GitHub issue #257: connection_open, socket_buffer_length/_offset and
 // inetd_response_length used to be four more [T; TCP_CONNECTION_MAX]
@@ -4966,7 +4963,7 @@ fn kernel_syscall_clone_child_return(parent_frame_sp: usize, child_pid: usize)
 // action 8, which found the page again in a per-CPU slot. Every path ends in
 // el0_context_resume or a fail-stop.
 fn kernel_syscall_child_exec_return(frame: FrameRef[process, ExceptionLevel::El0],
-        args_page: sink PageOwner[page]) !{unsafe} {
+        args_page: sink PageOwner[page], ext2_reader: &mut SyscallExt2Reader) !{unsafe} {
     let ProcessRunningHere::Running(current_authority) = process_running_here() else {
         ProcessRunningHere::Idle => {
             page_free(args_page);
@@ -4978,7 +4975,7 @@ fn kernel_syscall_child_exec_return(frame: FrameRef[process, ExceptionLevel::El0
     let result: KernelChildExecPrepareResult =
         kernel_process_child_exec_prepare(current_authority, args_page);
     // GitHub issue #597: the prepare was the last ext2 read of this execve.
-    if (syscall_ext2_reader_take()) {
+    if (syscall_ext2_reader_take(ext2_reader)) {
         ext2_read_leave();
     }
     // GitHub issue #1058 classified these arms; #1079 (maintainer decision
@@ -7023,15 +7020,17 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     // entry, before peer-safety policy can migrate its frame to core 0.
     workload_ordinary_placement_note_syscall(number);
     let mut caller_slot: ProcessSlot = kernel_syscall_process_slot();
+    let mut ext2_reader: SyscallExt2Reader = { false };
     let (action_code, action_value) = syscall_action_encode(
         kernel_syscall_dispatch_action(esr, number, x0, x1, x2, x3, x4,
-            maybe_frame_from_entry(frame_sp, kernel_process_entry_generation())));
+            maybe_frame_from_entry(frame_sp, kernel_process_entry_generation()),
+            &ext2_reader));
     // GitHub issue #559: the ext2 reader registered at entry is done with
     // ext2 by the time the handler has chosen what happens next, whatever
     // that is -- Block and Migrate included. An execve that succeeded is the
     // exception (#597) and never returns here: its prepare reads the image,
     // and kernel_syscall_child_exec_return releases the registration then.
-    if (syscall_ext2_reader_take()) { ext2_read_leave(); }
+    if (syscall_ext2_reader_take(&ext2_reader)) { ext2_read_leave(); }
     // A call that completed no longer needs core 0 (GitHub issue #9). A
     // blocked or waiting one keeps the mark until it completes, and a
     // migrated one has only just been given it.
@@ -7062,10 +7061,11 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
 // releases it after the prepare. The frame is the one the syscall entered
 // on: an in-kernel probe, which has none, was answered ENOSYS before execve.
 private fn kernel_syscall_dispatch_child_exec(number: usize,
-        frame: FrameRef[process, ExceptionLevel::El0], args_page: sink PageOwner[page]) !{unsafe} {
+        frame: FrameRef[process, ExceptionLevel::El0], args_page: sink PageOwner[page],
+        ext2_reader: &mut SyscallExt2Reader) !{unsafe} {
     kernel_process_clear_core0_for_call(kernel_syscall_process_slot());
     workload_profile_syscall_complete(number);
-    kernel_syscall_child_exec_return(frame, args_page);
+    kernel_syscall_child_exec_return(frame, args_page, ext2_reader);
 }
 
 // Linux's reboot ABI is decoded before any world-stop request. Alternate
@@ -7829,7 +7829,8 @@ private fn syscall_uname(current_authority: borrow ProcessCurrent[process, Proce
 }
 
 fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usize,
-                           x2: usize, x3: usize, x4: usize, frame: MaybeFrame)
+                           x2: usize, x3: usize, x4: usize, frame: MaybeFrame,
+                           ext2_reader: &mut SyscallExt2Reader)
         -> SyscallAction !{unsafe} {
     let ProcessRunningHere::Running(current_authority) = process_running_here() else {
         ProcessRunningHere::Idle => { return SyscallAction::Unreachable; }
@@ -7910,7 +7911,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             // process's placement for a condition no core owns.
             return syscall_finish_current(frame, SyscallAction::WaitInterrupt, current_authority);
         }
-        syscall_ext2_reader_mark();
+        syscall_ext2_reader_mark(ext2_reader);
     }
     kernel_init_boot_fixture_poll(current_authority);
     kernel_syscall_persistent_shell_checkpoint_selected();
@@ -8481,7 +8482,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             SyscallExecveResult::ChildExec(args_page) => {
                 process_current_end(current_authority);
                 kernel_syscall_dispatch_child_exec(number, entry_frame,
-                                                   args_page);
+                                                   args_page, ext2_reader);
                 // Not reached: the tail resumes EL0 or stops. If it ever
                 // returned, user_entry.S fail-stops on Unreachable.
                 return SyscallAction::Unreachable;
@@ -9674,15 +9675,17 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
     }
 }
 
-// GitHub issue #453. Persistent syscall state belongs to ProcessRecord, and
-// the transient buffers are SyscallSlot pool slots (#638), which survive
-// preemption as they are. What still belongs to the executing core is
-// syscall_ext2_reader. On one core a timer interrupt already arrives inside
-// a syscall -- interrupts are unmasked on EL0 entry -- but the switch is
-// deferred to kernel_process_syscall_return_schedule.
+// GitHub issue #453. Persistent syscall state belongs to ProcessRecord, the
+// transient buffers are SyscallSlot pool slots (#638), and the ext2 reader
+// registration is a local of the dispatch (#1323); those survive preemption
+// as they are. What still depends on the executing core is the placement
+// gate: kernel_syscall_dispatch_action answers syscall_peer_safe for the CPU
+// it asked on, and a core-only handler relies on staying there until it
+// returns, because the switch is deferred to
+// kernel_process_syscall_return_schedule.
 fn syscall_execution_model_assumption() {
     static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "syscall_ext2_reader is per-CPU state one function leaves for another; preemption would let another handler on this CPU take it over");
+                  "the syscall placement gate answers for the CPU it asked on; a core-0-only handler preempted and moved would run on a peer");
 }
 
 // Complete a syscall while retaining its current authority through signal delivery.

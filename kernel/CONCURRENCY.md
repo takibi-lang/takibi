@@ -127,11 +127,11 @@ checks that the page is consumed exactly once on every path.
 
 Reserve and prepare are one non-preemptible EL1 action. Prepare takes the
 page before returning to EL0, so the process cannot migrate while the page
-remains in the slot. KERNEL_PREEMPTIBLE == 0 is asserted for this contract as
-well as for the per-CPU `syscall_ext2_reader` flag. The syscall scratch
-buffers are no longer per-core: they are `SyscallSlot` pool slots held only
-around a handler's bounded section (#638). Enabling kernel preemption
-requires revisiting both remaining contracts.
+remains in the slot. KERNEL_PREEMPTIBLE == 0 is asserted for this contract.
+The syscall's ext2 reader registration is a local of the dispatch, so it stays
+with the task. The syscall scratch buffers are no longer per-core: they are
+`SyscallSlot` pool slots held only around a handler's bounded section (#638).
+Enabling kernel preemption requires revisiting the remaining contract.
 
 ## Clone publication
 
