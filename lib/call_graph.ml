@@ -12,7 +12,9 @@
    Types.program_types.call_targets (a direct call, after overloads and
    generic instantiation), function_values (a function used as a value), and
    Type_inf.resolved_indirect_call_effects (a call through a function value,
-   whose target is not known). *)
+   whose target is not known). A call with neither has no definition to resolve
+   to: the checker typed it from its name, a compiler builtin (GitHub issue
+   #1261). *)
 
 open Ast
 open Types
@@ -27,6 +29,7 @@ type reference =
   | Call      (* a resolved direct call; the target is its definition key *)
   | Value     (* a function named as a value; likewise *)
   | Indirect  (* a call through a function value; the target is "" *)
+  | Builtin   (* a call of a compiler builtin; the target is its name *)
 
 (* The key type inference gives a definition. Generic instances share their
    template's def_loc (lib/monomorphize.ml copies it), so the loc-keyed
@@ -67,10 +70,12 @@ let iter_references (visit : string option -> reference -> string -> unit)
     (match StringMap.find_opt key types.function_values with
      | Some target -> visit from Value target | None -> ());
     match e.desc with
-    | Call (_, args) ->
+    | Call (name, args) ->
         (match StringMap.find_opt key types.call_targets with
          | Some target -> visit from Call target
-         | None -> if StringMap.mem key indirect then visit from Indirect "");
+         | None ->
+             if StringMap.mem key indirect then visit from Indirect ""
+             else visit from Builtin name);
         List.iter (expr from) args
     | VariantCtor (_, _, x) | Bnot x | Deref x | AddrOf x | Cast (_, x)
     | FieldGet (x, _) | Unsafe x -> expr from x
@@ -102,7 +107,7 @@ let iter_references (visit : string option -> reference -> string -> unit)
 
 (* ---- The table ---------------------------------------------------------- *)
 
-let format_version = 1
+let format_version = 2
 
 let columns = [
   "file"; "line"; "end_line"; "name"; "qualifiers"; "declared"; "effects";
@@ -242,6 +247,7 @@ let write_table (out : out_channel) (prog : toplevel list) (types : program_type
     | None -> ()
     | Some id -> match reference with
       | Indirect -> add callees id "*"
+      | Builtin -> add callees id (key ^ "@-")
       | Call ->
           let target, text = target_label key in
           add callees id text;

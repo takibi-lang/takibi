@@ -16,11 +16,11 @@ refuses another format version, a changed column set and an empty table.
 Without the flag the compiler does no work for it: the parser records
 definition ends only while the flag is set.
 
-## Format, version 1
+## Format, version 2
 
 The first line is
 
-    # takibi call graph, format 1; see docs/CALL_GRAPH.md
+    # takibi call graph, format 2; see docs/CALL_GRAPH.md
 
 and the second names the columns. Each later line is one function
 definition. A cell that holds a list separates its items with `,`; an
@@ -36,7 +36,7 @@ empty cell or empty list is `-`.
 | `declared` | the declared effect contract: `-` when there is none, `{}` for an explicit empty one, else its effects as written |
 | `effects` | the effects the checker inferred, with declared roles, sorted (the effect names of `EFFECTS.md`); the union over a generic function's instances |
 | `params` | `name: type` per parameter, separated by `, `. The type is spelled from the compiler's tokens with a blank only between two word-like tokens (`borrow Ext2MutationGuard[ext2_mutation]`, `&mut T`, `[u8;4]`), so `, ` never occurs inside one |
-| `callees` | the resolved direct callees, deduplicated and sorted, each `name@file:line` naming the callee's own row, or `name@-` for a callee with no definition here (an `extern`); `*` when the function also calls through a function value, whose target is not known |
+| `callees` | the resolved direct callees, deduplicated and sorted, each `name@file:line` naming the callee's own row, or `name@-` for a callee with no definition here (an `extern`, or a compiler builtin such as `dma_finish_owned_rx`, which the checker types from its name); `*` when the function also calls through a function value, whose target is not known |
 | `callers` | the rows whose `callees` name this one, spelled the same way |
 | `values` | the functions this one names as a value (passes, stores or returns a function pointer to), spelled the same way |
 | `body_hash` | the MD5 digest, in hex, of the definition's tokens from the compiler's own lexer, joined by blanks: comments and layout do not move it, any token change does, including one inside a string literal or the signature; `-` for a generated definition |
@@ -46,7 +46,7 @@ global or constant initializer belong to no row.
 
 What the table does not say: the targets of an indirect call (the effect
 contracts in `effect_rules.ml` constrain those), anything about `extern`
-declarations beyond their name, and a generic function that is never
+declarations or compiler builtins beyond their name, and a generic function that is never
 instantiated (it has no compiled body and no row).
 
 ## Changing the format

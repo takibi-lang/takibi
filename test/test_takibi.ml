@@ -107,7 +107,7 @@ let call_graph_rows src =
   match lines with
   | version :: header :: rows ->
       Alcotest.(check bool) "format line" true
-        (String.starts_with ~prefix:"# takibi call graph, format 1" version);
+        (String.starts_with ~prefix:"# takibi call graph, format 2" version);
       let columns = String.split_on_char '\t' header in
       List.map (fun row ->
         let cells = List.combine columns (String.split_on_char '\t' row) in
@@ -3186,10 +3186,11 @@ let infer_tests = [
          fn g(T: type, p: &T) -> usize { return secret(); }
          fn callback() {}
          fn take(f: fn() -> void) { f(); }
+         fn smaller(x: usize) -> usize { return min(x, secret()); }
          fn main() -> usize {
            let mut a: A = { 1 }; let mut b: B = { 2 };
            take(callback);
-           return g(&a) + g(&b);
+           return g(&a) + g(&b) + smaller(3);
          }" in
       let field name column = List.assoc column (List.assoc name rows) in
       Alcotest.(check string) "private qualifier" "private" (field "secret" "qualifiers");
@@ -3201,6 +3202,15 @@ let infer_tests = [
         "1" (string_of_int (List.length
           (String.split_on_char ',' (field "g" "callers"))));
       Alcotest.(check string) "indirect call is *" "*" (field "take" "callees");
+      (* GitHub issue #1261: a builtin is a callee with no definition, listed
+         beside the user callee of the same function. *)
+      (match String.split_on_char ',' (field "smaller" "callees") with
+       | [builtin; user] ->
+           Alcotest.(check string) "builtin callee" "min@-" builtin;
+           Alcotest.(check bool) "user callee beside it" true
+             (String.starts_with ~prefix:"secret@" user)
+       | cells ->
+           Alcotest.failf "callees of smaller: %s" (String.concat "," cells));
       Alcotest.(check string) "params" "f: fn()->void" (field "take" "params");
       Alcotest.(check bool) "function value" true
         (String.starts_with ~prefix:"callback@" (field "main" "values")));

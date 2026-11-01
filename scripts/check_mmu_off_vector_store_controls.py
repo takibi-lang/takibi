@@ -25,7 +25,7 @@ HEADER = ("file\tline\tend_line\tname\tqualifiers\tdeclared\teffects\tparams"
 
 def graph(rows):
     handle = tempfile.NamedTemporaryFile("w", suffix=".tsv", delete=False)
-    handle.write("# takibi call graph, format 1\n" + HEADER)
+    handle.write("# takibi call graph, format 2\n" + HEADER)
     for name, declared, callees in rows:
         handle.write(f"f.tkb\t1\t2\t{name}\t-\t{declared}\t-\t-\t{callees}\t-\t-\t-\n")
     handle.close()

@@ -29,7 +29,7 @@ let check ~external_entries ~check_files (prog : toplevel list) (types : program
   Call_graph.iter_references (fun from reference target ->
     match reference with
     | Call_graph.Call | Call_graph.Value -> add_reference from target
-    | Call_graph.Indirect -> ()) prog types;
+    | Call_graph.Indirect | Call_graph.Builtin -> ()) prog types;
   List.iter (fun (f : Ast.func) -> match f.effects with
     | Some effects when List.mem "interrupt" effects || List.mem "exception" effects
                      || List.mem "nmi" effects ->
