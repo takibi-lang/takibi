@@ -17,7 +17,9 @@
 # is removed after one hit so only one acquisition fails.
 set confirm off
 set pagination off
-break kernel_test_common_probes
+# Armed at the table probe itself, not at the probes' start, so a probe that
+# allocates a process earlier cannot absorb the refusal (#1312).
+break scheduled_process_table_probe
 continue
 delete
 printf "alloc-rollback: armed after the pooled-record baseline\n"

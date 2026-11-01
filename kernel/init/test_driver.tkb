@@ -1249,12 +1249,15 @@ private fn kernel_record_existence_probe() -> bool {
         ProcessFdContextReady::Missing => {}
         ProcessFdContextReady::Ready(evidence) => { return false; }
     }
-    if (process_image_record_live_count() != images ||
-        unified_fd_context_live_count() != contexts ||
-        page_allocator_live_count() != pages) {
-        return false;
-    }
-    // A publish whose process is gone (#1312): a slot just given back.
+    return process_image_record_live_count() == images &&
+        unified_fd_context_live_count() == contexts &&
+        page_allocator_live_count() == pages;
+}
+
+// A publish whose process is gone (#1312): a slot just given back. It takes a
+// process, so it runs after the table probe, whose first allocation
+// kernelcheck-alloc-rollback-qemu refuses.
+private fn kernel_record_absent_publish_probe() -> bool {
     let mut slot: ProcessSlot = scheduled_process_probe_slot_acquire();
     let absent: usize = process_slot_address(slot);
     if (absent == 0) { return false; }
@@ -1305,6 +1308,11 @@ fn kernel_test_common_probes() !{unsafe} {
         kernel_boot_log(" (upper half of an aligned run), every record given back\n");
     } else {
         kernel_boot_log("process table: failed\n");
+    }
+    if (kernel_record_absent_publish_probe()) {
+        kernel_boot_log("record existence: a publish for a gone process keeps nothing\n");
+    } else {
+        kernel_boot_log("record existence: absent publish failed\n");
     }
     // GitHub issue #1229: pids wrap inside pid_t and skip one in use.
     let pid_wrap_ok: bool = scheduled_process_pid_wrap_probe();

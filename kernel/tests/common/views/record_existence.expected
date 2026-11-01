@@ -1,1 +1,2 @@
 record existence: invalid slots refused without allocation
+record existence: a publish for a gone process keeps nothing
