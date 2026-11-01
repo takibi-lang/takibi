@@ -4900,17 +4900,18 @@ fn kernel_syscall_block_return(frame_sp: usize) {
 // child frame, so the child's syscall-return-scheduling check is not
 // skipped just because it arrived via clone rather than an ordinary return.
 fn kernel_syscall_resume_return(frame_sp: usize, value: usize) {
-    kernel_syscall_resume_tail(frame_sp, value, preempt_span_begin());
+    kernel_syscall_resume_tail(
+        frame_ref_from_el0_entry(frame_sp, kernel_process_entry_generation()),
+        value, preempt_span_begin());
 }
 
 // The syscall return holds a span from here to its resume (#1323): a frame in
 // hand must not be taken for the interrupted context by a tick. `span` is the
 // return's own; a Switch brings the schedule's, so the return's ends there.
-private fn kernel_syscall_resume_tail(frame_sp: usize, value: usize, span: sink PreemptOff[0]) {
-    let frame =
-        frame_ref_from_el0_entry(frame_sp, kernel_process_entry_generation());
+private fn kernel_syscall_resume_tail(frame: sink FrameRef[process, ExceptionLevel::El0],
+        value: usize, span: sink PreemptOff[0]) {
     el0_context_set_x0(frame, value);
-    kernel_stack_guard_check(frame_sp);  // issue #375
+    kernel_stack_guard_check(frame_ref_address(frame));  // issue #375
     match kernel_process_syscall_return_schedule(frame) {
         FrameSwitch::Stay => {
             // GitHub issue #592: no successor, and core 0 may not keep this
@@ -4973,7 +4974,7 @@ fn kernel_syscall_clone_child_return(parent_frame_sp: usize, child_pid: usize)
                 CurrentRootActivationResult::Activated => {}
             }
             process_current_end(current_authority);
-            kernel_syscall_resume_tail(frame_ref_address(child_frame), 0, span);
+            kernel_syscall_resume_tail(child_frame, 0, span);
         }
     }
 }

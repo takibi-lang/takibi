@@ -74,7 +74,8 @@ FRAME_PARAM_RE = re.compile(
 FRAME_DEFAULT_RE = re.compile(
     r"\blet\s+(?:mut\s+)?\w+\s*:\s*FrameRef(?:\s*\[[^\]]+\])?\s*;")
 FRAME_USIZE_SEAMS = {
-    "kernel_syscall_block_return", "kernel_syscall_resume_return",
+    "kernel_syscall_block_return", "kernel_syscall_block_choose",
+    "kernel_syscall_resume_return",
     "kernel_syscall_clone_child_return",
     "kernel_syscall_clone_parent_return", "kernel_syscall_migrate_return",
     "kernel_process_stack_switch_complete", "platform_irq_dispatch",
