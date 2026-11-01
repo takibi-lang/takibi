@@ -13109,7 +13109,6 @@ private fn kernel_process_exit_lock_drained(
             }
         }
     }
-    kernel_invariant_stop();
     return process_run_lock();
 }
 

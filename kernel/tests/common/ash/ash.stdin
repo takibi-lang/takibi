@@ -99,10 +99,10 @@ echo "sub: $(/bin/echo inner)"
 # GitHub issue #1310: a grandchild outliving its parent. Its parent has been
 # reaped by the time the first exits, and is an unreaped zombie when the second
 # does; on neither is anything left to wait for it, so kill -0 stops naming it.
-orphan_pid=$(/bin/busybox sh -c '/bin/sleep 1 >/dev/null 2>&1 & echo $!')
+orphan_pid=$(/bin/busybox sh -c '/bin/sleep 1 </dev/null >/dev/null 2>&1 & echo $!')
 /bin/sleep 2
 kill -0 "$orphan_pid" 2>/dev/null && echo orphan-of-reaped-parent-kept || echo orphan-of-reaped-parent-collected
-( ( /bin/busybox sh -c '/bin/sleep 1 >/dev/null 2>&1 & echo $! >/orphan.pid' ) & /bin/sleep 3 ) &
+( ( /bin/busybox sh -c '/bin/sleep 1 </dev/null >/dev/null 2>&1 & echo $! >/orphan.pid' ) & /bin/sleep 3 ) &
 orphan_holder_pid=$!
 /bin/sleep 2
 kill -0 "$(/bin/cat /orphan.pid)" 2>/dev/null && echo orphan-of-zombie-parent-kept || echo orphan-of-zombie-parent-collected
