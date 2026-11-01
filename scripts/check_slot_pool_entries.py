@@ -47,9 +47,9 @@ handed a guard of a lower-level TaskMutex reaches any pool's acquire: those
 guards are inside every pool. kernel/models/SlotPool.tla is the protocol.
 
 BlockSlot also covers kernel/drivers/block/block_cache.tkb, whose entries
-are indexed by the slot's number as a plain usize: only memory.tkb (and the
-linux_user test that plays two writers) may call its slot-indexed functions,
-so every index it is handed belongs to a live BlockSlot.
+are indexed by the slot's number as a plain usize: rows of
+scripts/allowed_callers.tsv hold its slot-indexed functions to memory.tkb, on
+the compiler's call-graph table (#567).
 """
 
 import re
@@ -85,12 +85,6 @@ INNER_GUARDS = ["BlockDeviceGuard", "TcpConnectionOwner", "XhciRingGuard",
 # The scheduler sleeps a syscall takes after its handler returns.
 SLEEP = re.compile(r"^(?:kernel_process_block_\w+|kernel_syscall_block_return)$")
 CALL = re.compile(r"\b(\w+)\s*\(")
-# block_cache.tkb's functions that take a BlockSlot's index.
-SLOT_INDEXED = ["block_cache_read", "block_cache_fill",
-                "block_cache_note_write", "block_cache_forget_all"]
-SLOT_INDEX_CALLERS = {"kernel/drivers/block/memory.tkb",
-                      "kernel/drivers/block/block_cache.tkb",
-                      "linux_user/block_cache/block_cache.tkb"}
 FUNCTION = function_header(suffix=r"\s*\(")
 
 
@@ -271,23 +265,6 @@ def nesting_problems(files):
     return problems
 
 
-def slot_index_problems(files):
-    """files: {relative path: text}. Callers of the slot-indexed cache."""
-    problems = []
-    for path, text in sorted(files.items()):
-        if path in SLOT_INDEX_CALLERS:
-            continue
-        if not any(name in text for name in SLOT_INDEXED):
-            continue
-        code = strip_comments(text)
-        for name in SLOT_INDEXED:
-            if re.search(r"\b" + name + r"\b", code):
-                problems.append(
-                    f"{path} names {name}, which takes a BlockSlot's index; "
-                    "only memory.tkb holds BlockSlots")
-    return problems
-
-
 def controls():
     """The check must see the shapes it exists to catch."""
     for _, acquire, token, _ in POOLS:
@@ -374,14 +351,6 @@ def controls():
                          "fn ext2_slot_acquire() { }\n"}):
         print("ERROR slot-pool-entries: the outer-to-inner order was reported")
         sys.exit(1)
-    if not slot_index_problems(
-            {"kernel/x.tkb": "fn f() { block_cache_fill(cpu_id(), 0, 0); }"}):
-        print("ERROR slot-pool-entries: control 'cache indexed outside "
-              "memory.tkb' was not detected")
-        sys.exit(1)
-    if slot_index_problems({"kernel/x.tkb": "// block_cache_fill(0)\n"}):
-        print("ERROR slot-pool-entries: a comment was reported as a cache call")
-        sys.exit(1)
 
 
 def main():
@@ -408,17 +377,16 @@ def main():
                 print(f"ERROR slot-pool-entries: {problem}")
             sys.exit(1)
         total += len(entries)
-    index_problems = slot_index_problems(files) + nesting_problems(files)
-    if index_problems:
-        for problem in index_problems:
+    nesting = nesting_problems(files)
+    if nesting:
+        for problem in nesting:
             print(f"ERROR slot-pool-entries: {problem}")
         sys.exit(1)
     report_pass("slot-pool-entries",
                 f"{total} entry points across {len(POOLS)} slot pools acquire "
                 "a slot, no slot holder reaches another entry point or any of "
                 f"{len(sleepers)} functions that reach a scheduler sleep, and "
-                "no slot is returned; the slot-indexed block cache is called "
-                f"from memory.tkb only ({len(files)} files scanned, sixteen "
+                f"no slot is returned ({len(files)} files scanned, fourteen "
                 "controls)",
                 entries=total, files=len(files), sleepers=len(sleepers))
 

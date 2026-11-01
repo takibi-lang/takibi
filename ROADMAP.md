@@ -196,7 +196,9 @@ next one taken. The done record of the previous queue is in HISTORY.md
 (2026-10-25).
 
 0. **Stop the silent growth (now).** The remaining `.tkb`-reading checks
-   move to #987's call-graph table one by one (#567); #850's stop-gap is
+   move to #987's call-graph table one by one (#567; the table names
+   compiler builtins since #1261, and the DMA finish callers and the block
+   cache's slot-indexed callers moved with it); #850's stop-gap is
    done (EFFECTS.md lists the checker-only effect words from the table
    `dynamic_rule` reads; no new such word, DECISIONS.md; the migration
    stays in band 2); #1003 (`WORDS.md`) and #1027 step 1 (`CLI.md`, the dead
