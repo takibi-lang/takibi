@@ -161,7 +161,7 @@ owners are TaskMutex, the spare stack stays masked). #980
    (6) the slot pools'
    capacity premise (#993, done 2026-11-01: capacity unchanged, a full pool retries unmasked for the tick, the mutation lock before any slot, `SlotPool.tla`); (7) the lock-holder group with the `PreemptOff`
    token (lifecycle spans done 2026-11-01, #1323; #789 is not needed for the flip: #638 comment); (8) the EL1 switch at IRQ return when the count is zero,
-   shown once in a deterministic lane; (9) the flip, models passing without
+   shown once in a deterministic lane; (9) the flip (its per_cpu field list is done, #1331: `scripts/per_cpu_carried_fields.tsv`), models passing without
    their no-preemption guards, the three boot-phase stand-ins rewritten,
    never while #584's soak runs. The flip's precondition is a number:
    #1012's ratchet reports no production global outside the typed set.

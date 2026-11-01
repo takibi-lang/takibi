@@ -116,6 +116,15 @@ the worklist cannot grow unseen; the flip reviews each file and either moves
 its sites into a region or records why a switch cannot happen there
 (interrupt context, IRQs masked, boot) or does no harm (a diagnostic).
 
+A fifth names no constant either: a `struct per_cpu` field written in one
+region and read in another. The type keeps the authority inside each region,
+but the task may stand on another CPU by the second one, and the globals ratchet
+counts the store as protected. `scripts/per_cpu_carried_fields.tsv` lists every
+field with what such a task finds there, and `scripts/check_per_cpu_carried_fields.py`
+refuses a new reader, writer or region until its row is reviewed again. Task
+state does not belong in one: a value of one task's operation is a local or a
+slot, as `syscall_ext2_reader` became (#1323).
+
 Raising either prints a worklist: files assert the constant they depend on
 with a per-site message. The compiler's `--require-execution-model
 kernel/EXECUTION_MODEL` (GitHub issue #988) requires every file with a mutable
