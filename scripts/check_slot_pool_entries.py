@@ -52,6 +52,7 @@ linux_user test that plays two writers) may call its slot-indexed functions,
 so every index it is handed belongs to a live BlockSlot.
 """
 
+import functools
 import re
 import sys
 from pathlib import Path
@@ -99,6 +100,7 @@ FUNCTION = function_header(suffix=r"\s*\(")
 strip_comments = code_only
 
 
+@functools.lru_cache(maxsize=None)
 def functions(text):
     """name -> (signature, body) with comments removed."""
     code = strip_comments(text)
@@ -221,6 +223,13 @@ def nesting_problems(files):
                     for m in CALL.finditer(body)} & set(fns)
              for name, rows in fns.items()}
     problems = []
+    closure = {}
+
+    def reached_from(name):
+        if name not in closure:
+            closure[name] = reach(name, graph)
+        return closure[name]
+
     for _, acquire, token, _ in POOLS:
         for holder in sorted(fns):
             if holder == acquire:
@@ -237,7 +246,7 @@ def nesting_problems(files):
                                    CALL.finditer(body[taken.end():])}
             reached = set(held_calls)
             for callee in held_calls:
-                reached |= reach(callee, graph)
+                reached |= reached_from(callee)
             for target in sorted(reached & set(RANK)):
                 if target == acquire or RANK[target] > RANK[acquire]:
                     continue
@@ -250,7 +259,7 @@ def nesting_problems(files):
             if not any(re.search(r"\b" + token + r"\b", signature)
                        for signature, _ in rows):
                 continue
-            for target in sorted(reach(name, graph) & set(RANK)):
+            for target in sorted(reached_from(name) & set(RANK)):
                 problems.append(f"{name} holds a {token} and reaches {target}; "
                                 "that lock is inside every slot pool")
     return problems
