@@ -43,7 +43,6 @@ CONSTANTS
     LEAVE_CHECKS_STACK,
     WAKE_START_CHECKS_STACK,
     PREEMPT_EL1_KEEPS_STACK,
-    PREEMPT_EL1_HONORS_SPAN,
     \* An action left out of the next-state relation, or "none": the
     \* negative control that a path the model lacked fails a passing run.
     WITHOUT,

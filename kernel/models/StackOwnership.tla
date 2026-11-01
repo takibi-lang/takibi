@@ -71,7 +71,6 @@ CONSTANTS
     WAKE_START_CHECKS_STACK,
     \* @type: Bool;
     PREEMPT_EL1_KEEPS_STACK,
-    PREEMPT_EL1_HONORS_SPAN,
     \* @type: Set(Str);
     Cores,
     \* @type: Set(Str);
@@ -411,12 +410,15 @@ InterruptDepart(c) ==
 \* InterruptDepart the EL1 entry does not release the stack. No EL1 frame
 \* is produced until the route's stage 8 (KERNEL_PREEMPTIBLE stays 0);
 \* the action is the design the kernel's El1 frame type is built for.
+\* #1323: Settled is what the kernel's PreemptOff spans give the tick: every
+\* window where current and the stack disagree holds the count. Here the guard
+\* cannot be dropped to a violation, since a reservation only exists settled;
+\* the hazard a span excludes (saved_sp stored for the wrong process) is below
+\* this model's level and is held by the linear token instead.
 PreemptEL1(c) ==
     /\ reserved[c] # None
     /\ current[c] # None
-    \* #1323: the kernel's PreemptOff spans. Each window where current and the
-    \* stack disagree holds the count, and the tick switches only at zero.
-    /\ PREEMPT_EL1_HONORS_SPAN => Settled(c, current[c])
+    /\ Settled(c, current[c])
     /\ ~interrupted[c]
     /\ state[current[c]] = "Running"
     /\ state' = [state EXCEPT ![current[c]] = "Ready"]
@@ -578,7 +580,6 @@ TwoProcs ==
 CInitFixed ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
     /\ PREEMPT_EL1_KEEPS_STACK = TRUE
-    /\ PREEMPT_EL1_HONORS_SPAN = TRUE
     /\ TwoProcs
 CInitOther ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
@@ -589,27 +590,18 @@ CInitOther ==
 CInitExitWaits ==
     EXIT_IDLES = FALSE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
     /\ PREEMPT_EL1_KEEPS_STACK = TRUE
-    /\ PREEMPT_EL1_HONORS_SPAN = TRUE
     /\ TwoProcs
 CInitLeaveUnchecked ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = FALSE /\ WAKE_START_CHECKS_STACK = TRUE
     /\ PREEMPT_EL1_KEEPS_STACK = TRUE
-    /\ PREEMPT_EL1_HONORS_SPAN = TRUE
     /\ TwoProcs
 CInitPreemptReleases ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
     /\ PREEMPT_EL1_KEEPS_STACK = FALSE
-    /\ PREEMPT_EL1_HONORS_SPAN = TRUE
-    /\ TwoProcs
-CInitPreemptSpan ==
-    EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
-    /\ PREEMPT_EL1_KEEPS_STACK = TRUE
-    /\ PREEMPT_EL1_HONORS_SPAN = FALSE
     /\ TwoProcs
 CInitWakeStartUnchecked ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = FALSE
     /\ PREEMPT_EL1_KEEPS_STACK = TRUE
-    /\ PREEMPT_EL1_HONORS_SPAN = TRUE
     /\ TwoProcs
 
 =============================================================================
