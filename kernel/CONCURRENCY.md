@@ -1103,3 +1103,15 @@ artificial DDB hold is outside the window. The CPU mask and counter consistency
 are functional checks on both platforms. Durations are observations only on
 QEMU; physical timing evidence comes from RPi5. Maxima are observed samples,
 not worst-case bounds or a guarantee of IRQ-independent debugger entry.
+
+## How a task reaches current
+
+`execution_state` selects by CPU, so task context does not index its current
+fields. `kernel_process_current_read` takes (live, handle) once inside a
+`preempt_off` region and returns a closed variant; the snapshot stays valid
+because a running task's own current does not change when it moves. Idle
+carries no handle. Writers read under the run lock; crash, DDB and evidence
+paths read the record directly, stopped or masked, because a region's mint can
+stop the CPU. `scripts/check_current_task_reads.py` lists each direct reader.
+A snapshot does not survive a call that can reap a process: the compiler's
+handle invalidation rule makes the caller read again.
