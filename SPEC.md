@@ -2223,9 +2223,12 @@ mint would neither stop nor find TPIDR_EL1 naming another CPU than MPIDR, so
 a caller that must not stop -- the IRQ mask, whose stop path masks IRQs
 again -- keeps a fallback instead.
 
-The region is the lexical form of a linear `PreemptOff` token minted on
-entry and consumed at every exit; a later step exposes the token for regions
-that are not lexical. The kernel's pair raises and lowers a per-CPU preempt
+The region is the lexical form of the linear `PreemptOff` token the kernel's
+authority file declares for spans that end at an exception return in another
+function (GitHub issue #1323): an ordinary linear struct, so a path that drops
+one does not compile, with no language rule of its own. Unlike the block, a
+token span's ban on blocking is a run-time check, not a compile-time one. The
+kernel's pair raises and lowers a per-CPU preempt
 count, as Linux's `preempt_disable`/`preempt_enable`, independent of the IRQ
 mask. It finds the count through TPIDR_EL1 rather than through an
 authority, read by a one-instruction assembly helper

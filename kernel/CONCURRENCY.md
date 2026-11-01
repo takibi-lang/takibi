@@ -98,6 +98,17 @@ the lock before its slot, with one chunk's user copy under the lock.
 `kernel/models/SlotPool.tla` checks this, including the two orders that
 deadlock; `scripts/check_slot_pool_entries.py` holds the source to it.
 
+Lifecycle spans that end at an exception return, in another function, hold the
+same count through a linear `PreemptOff` (#1323): the reserved successor, the
+switch, block and exit tails, the clone window, and a syscall's return. A path
+that ends neither the span nor hands it to a resume does not compile; the
+`after_switch` hook, and each idle entry, resets the count on the far side of
+the stack change, as Linux's `schedule_tail` does. Exit and clone cross the
+syscall action table's assembly on the way, where the count stands in for the
+token. Execve's commit holds none: it stands on its own stack as its own
+current process throughout, and a switch inside it would save an El1 frame
+below the El0 frame being rewritten, which nothing reads until it resumes.
+
 A fourth dependency names no constant: a raw `cpu_id()` read outside a
 region assumes the task cannot move to another CPU before it uses the
 index. `scripts/check_raw_cpu_id_sites.py` counts those calls per file, so

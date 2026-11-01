@@ -160,7 +160,7 @@ owners are TaskMutex, the spare stack stays masked). #980
    `syscall_ext2_reader`, done (#1323: a dispatch local), exception_evidence);
    (6) the slot pools'
    capacity premise (#993, done 2026-11-01: capacity unchanged, a full pool retries unmasked for the tick, the mutation lock before any slot, `SlotPool.tla`); (7) the lock-holder group with the `PreemptOff`
-   token and #789; (8) the EL1 switch at IRQ return when the count is zero,
+   token (lifecycle spans done 2026-11-01, #1323; #789 is not needed for the flip: #638 comment); (8) the EL1 switch at IRQ return when the count is zero,
    shown once in a deterministic lane; (9) the flip, models passing without
    their no-preemption guards, the three boot-phase stand-ins rewritten,
    never while #584's soak runs. The flip's precondition is a number:

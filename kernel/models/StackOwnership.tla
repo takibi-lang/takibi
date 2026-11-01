@@ -71,6 +71,7 @@ CONSTANTS
     WAKE_START_CHECKS_STACK,
     \* @type: Bool;
     PREEMPT_EL1_KEEPS_STACK,
+    PREEMPT_EL1_HONORS_SPAN,
     \* @type: Set(Str);
     Cores,
     \* @type: Set(Str);
@@ -413,7 +414,9 @@ InterruptDepart(c) ==
 PreemptEL1(c) ==
     /\ reserved[c] # None
     /\ current[c] # None
-    /\ Settled(c, current[c])
+    \* #1323: the kernel's PreemptOff spans. Each window where current and the
+    \* stack disagree holds the count, and the tick switches only at zero.
+    /\ PREEMPT_EL1_HONORS_SPAN => Settled(c, current[c])
     /\ ~interrupted[c]
     /\ state[current[c]] = "Running"
     /\ state' = [state EXCEPT ![current[c]] = "Ready"]
@@ -575,6 +578,7 @@ TwoProcs ==
 CInitFixed ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
     /\ PREEMPT_EL1_KEEPS_STACK = TRUE
+    /\ PREEMPT_EL1_HONORS_SPAN = TRUE
     /\ TwoProcs
 CInitOther ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
@@ -585,18 +589,27 @@ CInitOther ==
 CInitExitWaits ==
     EXIT_IDLES = FALSE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
     /\ PREEMPT_EL1_KEEPS_STACK = TRUE
+    /\ PREEMPT_EL1_HONORS_SPAN = TRUE
     /\ TwoProcs
 CInitLeaveUnchecked ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = FALSE /\ WAKE_START_CHECKS_STACK = TRUE
     /\ PREEMPT_EL1_KEEPS_STACK = TRUE
+    /\ PREEMPT_EL1_HONORS_SPAN = TRUE
     /\ TwoProcs
 CInitPreemptReleases ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
     /\ PREEMPT_EL1_KEEPS_STACK = FALSE
+    /\ PREEMPT_EL1_HONORS_SPAN = TRUE
+    /\ TwoProcs
+CInitPreemptSpan ==
+    EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
+    /\ PREEMPT_EL1_KEEPS_STACK = TRUE
+    /\ PREEMPT_EL1_HONORS_SPAN = FALSE
     /\ TwoProcs
 CInitWakeStartUnchecked ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = FALSE
     /\ PREEMPT_EL1_KEEPS_STACK = TRUE
+    /\ PREEMPT_EL1_HONORS_SPAN = TRUE
     /\ TwoProcs
 
 =============================================================================

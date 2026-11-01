@@ -28874,6 +28874,17 @@ let ext2_slot_tests =
    the CPU authority outside its file. The block may not reach may_block,
    and the authority cannot leave it by a return. *)
 let preempt_off_tests =
+  let span1323 = "linear struct PreemptOff1323[unit: usize] { private held: usize; }
+    fn span_begin() -> PreemptOff1323[0] { let mut span: PreemptOff1323[0] = { 1 }; return span; }
+    fn span_end(span: sink PreemptOff1323[0]) { }
+    extern fn resume1323() !{noreturn};
+    variant Switch1323 { Stay; Switch(PreemptOff1323[0]); }
+    fn choose1323(flag: bool) -> Switch1323 {
+      let span = span_begin();
+      if (flag) { span_end(span); return Switch1323::Stay; }
+      return Switch1323::Switch(span);
+    }
+    " in
   let mint = "struct cpu_authority Cpu638 { private id: {0..<2 as usize}; }
     struct per_cpu Store638 { value: usize; }
     private let mut stores638: [Store638; 2];
@@ -28901,6 +28912,41 @@ let preempt_off_tests =
       preempt_off (cpu) { if (flag) { return 1; } bump638(cpu); }
       return 0;
     }";
+    (* #1323: a span's end is a linear obligation, on every path. *)
+    Alcotest.test_case "a span with no end on a path is rejected" `Quick
+      (expect_type_error "span"
+        (span1323 ^ "fn bad1323(flag: bool) -> usize {
+           let span = span_begin();
+           if (flag) { return 1; }
+           span_end(span);
+           return 0;
+         }"));
+    Alcotest.test_case "a switch's span dropped by its match arm is rejected" `Quick
+      (expect_type_error "span"
+        (span1323 ^ "fn bad1323(flag: bool) {
+           match choose1323(flag) {
+             Switch1323::Stay => {}
+             Switch1323::Switch(span) => {}
+           }
+         }"));
+    Alcotest.test_case "a span ended before a noreturn resume compiles" `Quick
+      (fun () -> ignore (infer (span1323 ^ "fn good1323(flag: bool) {
+           match choose1323(flag) {
+             Switch1323::Stay => {}
+             Switch1323::Switch(span) => { span_end(span); resume1323(); }
+           }
+         }")));
+    Alcotest.test_case "a span overwritten by assignment is rejected" `Quick
+      (expect_type_error "discard its obligation"
+        (span1323 ^ "fn bad1323(flag: bool) {
+           let mut held: Switch1323 = Switch1323::Stay;
+           held = choose1323(flag);
+           held = choose1323(flag);
+           match held {
+             Switch1323::Stay => {}
+             Switch1323::Switch(span) => { span_end(span); }
+           }
+         }"));
     bad "direct blocking call inside the block"
       "preempt_off block in function 'bad638' may block via sleep638"
       "fn bad638() { preempt_off (cpu) { bump638(cpu); sleep638(); } }";
