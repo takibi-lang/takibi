@@ -553,3 +553,4 @@ condition below applies, and reports the land afterwards.
 
 ## 2026-11-01 #1159 the log's partial line
 - `kernel_log_core_state` keeps one line per CPU with an owner word: a byte from another owner retains the staged piece as its own record, and each byte is staged in a `preempt_off` region. Space decides it: a task-owned line (#613 option b) costs 640 B per live process. The row stays allow-listed, its cross-CPU reads under the world stop. [active] #1159
+- 2026-11-01 #993: the scratch pools stay at KERNEL_MAX_CORES slots under preemption; a full pool is a bounded retry with interrupts unmasked, ended by the tick's switch to a holder (the route review's yield-and-retry; no synthetic voluntary switch). The order is mutation lock, then SyscallSlot or ExecWindowSlot, ProcessImageSlot, Ext2Slot, BlockSlot, lower TaskMutexes. [active] #993 #638

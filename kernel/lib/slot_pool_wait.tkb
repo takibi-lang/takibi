@@ -1,0 +1,48 @@
+// GitHub issue #993: how often a slot pool's acquire found every slot held.
+//
+// The five scratch pools (ext2's, the block layer's, the exec staging's, the
+// syscall scratch's, the exec windows') keep KERNEL_MAX_CORES slots under
+// preemption. An operation that finds them all held spins with interrupts
+// unmasked and retries, and the tick moves a preempted holder back onto a
+// core; kernel/models/SlotPool.tla is the argument that every such wait ends.
+// This count is the measurement a capacity change would have to start from:
+// one per acquire that waited, however long it waited.
+//
+// Current limitations (2026-11-01):
+// - A total for the boot, not per core and not a duration.
+// - While KERNEL_PREEMPTIBLE is 0 holders do not outnumber cores, so only the
+//   two-core probe in ext2_mutation_contention_evidence.tkb makes it nonzero.
+
+use "kernel/lib/atomic_word.tkb";
+use "kernel/lib/execution_model.tkb";
+
+const SLOT_POOL_WAIT_POOLS: usize = 5;
+
+variant SlotPoolWaitPool {
+    Ext2;
+    Block;
+    ProcessImage;
+    Syscall;
+    ExecWindow;
+}
+
+private let mut slot_pool_waits: [AtomicWord; SLOT_POOL_WAIT_POOLS];
+
+private inline fn slot_pool_wait_index(pool: SlotPoolWaitPool)
+        -> {0..<SLOT_POOL_WAIT_POOLS as usize} {
+    match pool {
+        SlotPoolWaitPool::Ext2 => { return 0; }
+        SlotPoolWaitPool::Block => { return 1; }
+        SlotPoolWaitPool::ProcessImage => { return 2; }
+        SlotPoolWaitPool::Syscall => { return 3; }
+        SlotPoolWaitPool::ExecWindow => { return 4; }
+    }
+}
+
+fn slot_pool_wait_note(pool: SlotPoolWaitPool) {
+    atomic_word_fetch_add(&slot_pool_waits[slot_pool_wait_index(pool)], 1);
+}
+
+fn slot_pool_wait_count(pool: SlotPoolWaitPool) -> usize {
+    return atomic_word_load(&slot_pool_waits[slot_pool_wait_index(pool)]);
+}

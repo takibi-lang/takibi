@@ -33,6 +33,7 @@ pin sharing evidence: same-chunk layouts checked, every online core completed an
 pool walk stage: complete
 pool walk: a walk's reference to a record freed under it is refused, and the floor reads back ok
 ext2 mutation contention reader: control-overlap=every-peer waited-overlap=0
+ext2 slot pool wait: full-pool acquires by peers waited and ended ok
 ext2 mutation contention core0 reader: control-overlap=1 waited-overlap=0
 ext2 mutation contention stage: complete
 ext2 mutation contention counts: asked=every-peer-twice clear=every-peer held=every-peer

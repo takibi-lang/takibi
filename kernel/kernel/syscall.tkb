@@ -21,6 +21,7 @@ use "kernel/lib/execution_model.tkb";
 use "kernel/kernel/cpu_authority.tkb";
 use "kernel/lib/occupancy.tkb";
 use "kernel/lib/atomic_word.tkb";
+use "kernel/lib/slot_pool_wait.tkb";
 
 // Current limitations (2026-08-26). Keep this list current as
 // call sites change; a limitation that goes stale here is worse than
@@ -357,7 +358,9 @@ struct SyscallScratch {
 //
 // Current limitations (2026-10-17):
 // - While KERNEL_PREEMPTIBLE is 0 and every in-handler wait spins, at most
-//   one section per CPU is live, so the acquire never waits.
+//   one section per CPU is live, so the acquire never waits. Under preemption
+//   it can, which is safe only because no slot holder waits for the ext2
+//   mutation lock or for ext2's readers (kernel/CONCURRENCY.md).
 private scratch let mut syscall_scratch: [SyscallScratch; KERNEL_MAX_CORES];
 private let mut syscall_slot_words: [AtomicWord; KERNEL_MAX_CORES];
 
@@ -373,6 +376,7 @@ private fn syscall_slot_acquire() -> SyscallSlot[0] !{may_block} {
     preempt_assert_blockable();
     let mut index: {0..<KERNEL_MAX_CORES as usize} = 0;
     let mut held: bool = false;
+    let mut waited: bool = false;
     while (held == false) {
         for i: usize in 0..<KERNEL_MAX_CORES {
             if (held == false &&
@@ -380,6 +384,12 @@ private fn syscall_slot_acquire() -> SyscallSlot[0] !{may_block} {
                 index = i;
                 held = true;
             }
+        }
+        // Every slot is held: retry. An unmasked spin, so the tick can switch
+        // to a holder this core preempted (kernel/CONCURRENCY.md, slot pools).
+        if (held == false && waited == false) {
+            slot_pool_wait_note(SlotPoolWaitPool::Syscall);
+            waited = true;
         }
     }
     let mut slot: SyscallSlot[0] = { index };
@@ -3012,7 +3022,61 @@ fn syscall_terminal_write_wait(current_authority: borrow ProcessCurrent[current_
 }
 
 // Shared scalar and vectored fd operation; byte counts and errors stay distinct.
+// GitHub issue #993: the same questions syscall_write_segment_with asks, in
+// its order, answered before it takes a slot: true for a write it would
+// send to ext2. Everything else, including the error answers, stays there.
+private fn syscall_write_reaches_ext2(fd: usize, length: usize) -> bool !{unsafe} {
+    if (length == 0 || kernel_connected_fd_is_open(fd)) { return false; }
+    match kernel_listener_fd_lookup(fd) {
+        KernelListenerLookupResult::Missing => {}
+        KernelListenerLookupResult::Found(listener_fd) => { return false; }
+    }
+    match unified_pipe_lookup(kernel_syscall_process_key(), fd) {
+        UnifiedPipeResult::Missing => {}
+        UnifiedPipeResult::Found(found) => { return false; }
+    }
+    return kernel_syscall_file_is_open(fd) &&
+           kernel_syscall_file_writable(fd) &&
+           procfs_inode_is_ours(kernel_syscall_file_inode(fd)) == false;
+}
+
+// GitHub issue #1036: an ext2 write longer than the staging block goes one
+// block at a time, as the read path does; a failure after a transferred
+// prefix reports that prefix (a short write).
+private fn syscall_ext2_write_segment(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+        fd: usize, address: usize, length: usize) -> SyscallIoResult !{unsafe} {
+    let mut written: usize = 0;
+    while (written < length) {
+        let chunk: usize = min(length - written, KERNEL_BLOCK_SIZE);
+        let answer: usize = match checked_add_usize(address, written) {
+            CheckedUsize::Overflow => { LINUX_EFAULT }
+            CheckedUsize::Value(source) => {
+                syscall_ext2_write_locked(current_authority, fd, source, chunk)
+            }
+        };
+        if (answer != 0) {
+            if (written != 0) {
+                return SyscallIoResult::Transferred(written);
+            }
+            return SyscallIoResult::Errno(answer);
+        }
+        workload_peer_mutation_note(8);
+        written = written + chunk;
+    }
+    return SyscallIoResult::Transferred(written);
+}
+
 fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], fd: usize, address: usize, length: usize)
+        -> SyscallIoResult !{unsafe} {
+    // GitHub issue #993: an ext2 write takes the mutation lock before its
+    // slot, as every other mutation does, so it goes round the slot here.
+    if (syscall_write_reaches_ext2(fd, length)) {
+        return syscall_ext2_write_segment(current_authority, fd, address, length);
+    }
+    return syscall_write_segment_slotted(current_authority, fd, address, length);
+}
+
+private fn syscall_write_segment_slotted(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], fd: usize, address: usize, length: usize)
         -> SyscallIoResult !{unsafe} {
     let slot: SyscallSlot[0] = syscall_slot_acquire();
     let result: SyscallIoResult = syscall_write_segment_with(slot, current_authority, fd, address, length);
@@ -3223,56 +3287,9 @@ fn syscall_write_segment_with(slot: borrow SyscallSlot[0],
                 }
                 return SyscallIoResult::Transferred(length);
             }
-            // GitHub issue #1036: an ext2 write longer than the staging block
-            // goes one block at a time, as the read path does; a failure
-            // after a transferred prefix reports that prefix (a short write).
-            let mut written: usize = 0;
-            while (written < length) {
-                let chunk: usize = min(length - written, KERNEL_BLOCK_SIZE);
-                let source: usize = match checked_add_usize(address, written) {
-                    CheckedUsize::Overflow => {
-                        if (written != 0) {
-                            return SyscallIoResult::Transferred(written);
-                        }
-                        return SyscallIoResult::Errno(LINUX_EFAULT);
-                    }
-                    CheckedUsize::Value(value) => { value }
-                };
-                match user_range_check_read(current_authority, source, chunk) {
-                    UserReadRangeResult::Fault => {
-                        if (written != 0) {
-                            return SyscallIoResult::Transferred(written);
-                        }
-                        return SyscallIoResult::Errno(LINUX_EFAULT);
-                    }
-                    UserReadRangeResult::Ok(range) => {
-                        if (copy_from_user_span(
-                                range,
-                                syscall_scratch[slot.index].file_buffer as []u8,
-                                0, chunk) == false) {
-                            if (written != 0) {
-                                return SyscallIoResult::Transferred(written);
-                            }
-                            return SyscallIoResult::Errno(LINUX_EFAULT);
-                        }
-                    }
-                }
-                let content_buffer = syscall_scratch[slot.index].file_buffer as []u8;
-                if (chunk > content_buffer.len) {
-                    return SyscallIoResult::Errno(LINUX_EINVAL);
-                }
-                let content = content_buffer[0..<chunk];
-                let answer: usize = syscall_ext2_write_locked(fd, content);
-                if (answer != 0) {
-                    if (written != 0) {
-                        return SyscallIoResult::Transferred(written);
-                    }
-                    return SyscallIoResult::Errno(answer);
-                }
-                workload_peer_mutation_note(8);
-                written = written + chunk;
-            }
-            return SyscallIoResult::Transferred(written);
+            // syscall_write_segment sent every ext2 write round the slot; the
+            // same process's descriptors cannot have changed since.
+            return SyscallIoResult::Errno(LINUX_EBADF);
         }
         if (kernel_syscall_terminal_is_open(fd) == false) {
             return SyscallIoResult::Errno(LINUX_EBADF);
@@ -5187,26 +5204,58 @@ fn kernel_syscall_clone_parent_return(parent_sp: usize) {
 // one write -- harmless while every file write ran on core 0, whose
 // dispatch is not preemptible. A reader's position update is not under
 // this guard; see kernel/CONCURRENCY.md.
-private fn syscall_ext2_write_locked(fd: usize, content: []u8) -> usize {
+//
+// GitHub issue #993: the lock comes before the slot, and one chunk's user copy
+// runs under it. A slot holder never waits for this lock, so a holder always
+// finishes: with holders outnumbering slots, a slot held while waiting here
+// is the cycle kernel/models/SlotPool.tla's slotfirst variant deadlocks in.
+private fn syscall_ext2_write_locked(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+        fd: usize, source: usize, chunk: usize) -> usize !{unsafe} {
     let mount: Ext2Mount = match syscall_filesystem_lookup() {
         SyscallFilesystemReady::Unconfigured => { return LINUX_EBADF; }
         SyscallFilesystemReady::Configured(found) => { found }
     };
 
     let guard = ext2_mutation_take();
-    let offset: usize = kernel_syscall_file_offset(fd);
-    let length: usize = content.len;
-    let inode: usize = kernel_syscall_file_inode(fd);
-    let mut answer: usize =
-        ext2_syscall_write_at(mount, guard, inode, offset, content);
-    if (answer == 0 &&
-        kernel_syscall_file_set_offset(fd, offset + length) == false) {
-        answer = LINUX_EBADF;
-    }
+    let slot: SyscallSlot[0] = syscall_slot_acquire();
+    let answer: usize = syscall_ext2_write_locked_with(slot, current_authority,
+            mount, guard, fd, source, chunk);
+    syscall_slot_release(slot);
     ext2_mutation_give(guard);
     if (answer == LINUX_ENOSPC) {
         kernel_boot_log_resource_exhausted("ext2 blocks" as *u8,
                                           ext2_block_capacity(mount));
+    }
+    return answer;
+}
+
+private fn syscall_ext2_write_locked_with(slot: borrow SyscallSlot[0],
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+        mount: Ext2Mount, guard: borrow Ext2MutationGuard[ext2_mutation],
+        fd: usize, source: usize, chunk: usize) -> usize !{unsafe} {
+    match user_range_check_read(current_authority, source, chunk) {
+        UserReadRangeResult::Fault => { return LINUX_EFAULT; }
+        UserReadRangeResult::Ok(range) => {
+            if (copy_from_user_span(
+                    range,
+                    syscall_scratch[slot.index].file_buffer as []u8,
+                    0, chunk) == false) {
+                return LINUX_EFAULT;
+            }
+        }
+    }
+    let content_buffer = syscall_scratch[slot.index].file_buffer as []u8;
+    if (chunk > content_buffer.len) {
+        return LINUX_EINVAL;
+    }
+    let content = content_buffer[0..<chunk];
+    let offset: usize = kernel_syscall_file_offset(fd);
+    let inode: usize = kernel_syscall_file_inode(fd);
+    let mut answer: usize =
+        ext2_syscall_write_at(mount, guard, inode, offset, content);
+    if (answer == 0 &&
+        kernel_syscall_file_set_offset(fd, offset + chunk) == false) {
+        answer = LINUX_EBADF;
     }
     return answer;
 }

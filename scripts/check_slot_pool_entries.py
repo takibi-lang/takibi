@@ -38,6 +38,14 @@ so it cannot outlive the function that acquired it and be carried to the
 sleep. Bounded waits -- a TaskMutex, a device completion -- are not sleeps
 and stay allowed.
 
+Pools nest in one order, with the ext2 mutation lock outside them all (#993):
+under preemption holders can outnumber cores, every slot of a pool can be held
+at once, and a holder waiting for something outer completes a cycle. So over
+the whole kernel call graph no holder of a pool reaches the mutation lock, or
+the acquire of a pool ranked the same or further out (RANK). Also no function
+handed a guard of a lower-level TaskMutex reaches any pool's acquire: those
+guards are inside every pool. kernel/models/SlotPool.tla is the protocol.
+
 BlockSlot also covers kernel/drivers/block/block_cache.tkb, whose entries
 are indexed by the slot's number as a plain usize: only memory.tkb (and the
 linux_user test that plays two writers) may call its slot-indexed functions,
@@ -65,6 +73,15 @@ POOLS = [
     ("kernel/init/test_driver.tkb", "exec_window_slot_acquire",
      "ExecWindowSlot", "leaf"),
 ]
+# Nesting: a holder may reach only higher numbers. Syscall and exec scratch are
+# siblings: neither reaches the other today, and equal ranks keep it so.
+MUTATION_TAKE = "ext2_mutation_take"
+RANK = {MUTATION_TAKE: 0, "syscall_slot_acquire": 1,
+        "exec_window_slot_acquire": 1, "process_image_slot_acquire": 2,
+        "ext2_slot_acquire": 3, "block_slot_acquire": 4}
+# Guards of TaskMutexes that sit below every pool.
+INNER_GUARDS = ["BlockDeviceGuard", "TcpConnectionOwner", "XhciRingGuard",
+                "MscDmaGuard"]
 # The scheduler sleeps a syscall takes after its handler returns.
 SLEEP = re.compile(r"^(?:kernel_process_block_\w+|kernel_syscall_block_return)$")
 CALL = re.compile(r"\b(\w+)\s*\(")
@@ -192,6 +209,53 @@ def sleepers_in(files):
     return sleeping
 
 
+def nesting_problems(files):
+    """Holders of a pool reaching something outer, over the kernel's graph."""
+    fns = {}
+    for path, text in files.items():
+        if not path.startswith("kernel/") or "/tests/" in path:
+            continue
+        for name, (signature, body) in functions(text).items():
+            fns.setdefault(name, []).append((signature, body))
+    graph = {name: {m.group(1) for _, body in rows
+                    for m in CALL.finditer(body)} & set(fns)
+             for name, rows in fns.items()}
+    problems = []
+    for _, acquire, token, _ in POOLS:
+        for holder in sorted(fns):
+            if holder == acquire:
+                continue
+            held_calls = set()
+            for signature, body in fns[holder]:
+                taken = re.search(r"\b" + acquire + r"\s*\(", body)
+                if re.search(r"\b" + token + r"\b", signature):
+                    held_calls |= {m.group(1) for m in CALL.finditer(body)}
+                elif taken:
+                    # What the function did before the acquire, it did
+                    # holding nothing: the mutation lock comes first.
+                    held_calls |= {m.group(1) for m in
+                                   CALL.finditer(body[taken.end():])}
+            reached = set(held_calls)
+            for callee in held_calls:
+                reached |= reach(callee, graph)
+            for target in sorted(reached & set(RANK)):
+                if target == acquire or RANK[target] > RANK[acquire]:
+                    continue
+                problems.append(
+                    f"{holder} holds a {token} and reaches {target}, which "
+                    "is outside it; with more holders than cores that is a "
+                    "deadlock (kernel/models/SlotPool.tla)")
+    for token in INNER_GUARDS:
+        for name, rows in sorted(fns.items()):
+            if not any(re.search(r"\b" + token + r"\b", signature)
+                       for signature, _ in rows):
+                continue
+            for target in sorted(reach(name, graph) & set(RANK)):
+                problems.append(f"{name} holds a {token} and reaches {target}; "
+                                "that lock is inside every slot pool")
+    return problems
+
+
 def slot_index_problems(files):
     """files: {relative path: text}. Callers of the slot-indexed cache."""
     problems = []
@@ -264,6 +328,35 @@ def controls():
         print("ERROR slot-pool-entries: control 'transitive sleeper' was not "
               "detected")
         sys.exit(1)
+    outer = {
+        "write holding a slot takes the mutation lock":
+            "fn w(s: borrow SyscallSlot[0]) { h(); }\n"
+            "fn h() { ext2_mutation_take(); }\n"
+            "fn ext2_mutation_take() { }\n",
+        "inner holder takes the outer pool":
+            "fn f(s: borrow Ext2Slot[0]) { process_image_slot_acquire(); }\n"
+            "fn process_image_slot_acquire() { }\n",
+        "lock guard holder takes a pool":
+            "fn f(g: borrow BlockDeviceGuard[x]) { block_slot_acquire(); }\n"
+            "fn block_slot_acquire() { }\n",
+    }
+    for label, text in outer.items():
+        if not nesting_problems({"kernel/x.tkb": text}):
+            print(f"ERROR slot-pool-entries: control '{label}' was not "
+                  "detected")
+            sys.exit(1)
+    if nesting_problems({"kernel/x.tkb":
+                         "fn w() { ext2_mutation_take();\n"
+                         "    syscall_slot_acquire(); }\n"
+                         "fn ext2_mutation_take() { }\n"
+                         "fn syscall_slot_acquire() { }\n"}):
+        print("ERROR slot-pool-entries: the lock before the slot was reported")
+        sys.exit(1)
+    if nesting_problems({"kernel/x.tkb":
+                         "fn f(s: borrow SyscallSlot[0]) { ext2_slot_acquire(); }\n"
+                         "fn ext2_slot_acquire() { }\n"}):
+        print("ERROR slot-pool-entries: the outer-to-inner order was reported")
+        sys.exit(1)
     if not slot_index_problems(
             {"kernel/x.tkb": "fn f() { block_cache_fill(cpu_id(), 0, 0); }"}):
         print("ERROR slot-pool-entries: control 'cache indexed outside "
@@ -298,7 +391,7 @@ def main():
                 print(f"ERROR slot-pool-entries: {problem}")
             sys.exit(1)
         total += len(entries)
-    index_problems = slot_index_problems(files)
+    index_problems = slot_index_problems(files) + nesting_problems(files)
     if index_problems:
         for problem in index_problems:
             print(f"ERROR slot-pool-entries: {problem}")

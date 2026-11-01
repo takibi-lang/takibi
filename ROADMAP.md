@@ -157,7 +157,7 @@ owners are TaskMutex, the spare stack stays masked). #980
    `PreemptOff` rule (#641 item 1); (5) site migration (process_image's
    target root, the log's partial line with an owner word, done (#1159),
    `syscall_ext2_reader`, exception_evidence); (6) the slot pools'
-   capacity premise (#993); (7) the lock-holder group with the `PreemptOff`
+   capacity premise (#993, done 2026-11-01: capacity unchanged, a full pool retries unmasked for the tick, the mutation lock before any slot, `SlotPool.tla`); (7) the lock-holder group with the `PreemptOff`
    token and #789; (8) the EL1 switch at IRQ return when the count is zero,
    shown once in a deterministic lane; (9) the flip, models passing without
    their no-preemption guards, the three boot-phase stand-ins rewritten,

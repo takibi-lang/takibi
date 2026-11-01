@@ -58,6 +58,7 @@
 //   by the ext2_mutation view; this covers the lock they share.
 use "kernel/lib/peer_tick_window.tkb";
 use "kernel/lib/peer_round.tkb";
+use "kernel/lib/slot_pool_wait.tkb";
 use "kernel/fs/ext2/mutation_lock.tkb";
 use "kernel/lib/execution_model.tkb";
 
@@ -93,7 +94,9 @@ fn ext2_mutation_contention_secondary_run(cpu: usize) !{unsafe} {
     let sequence: usize = atomic_word_load(&ext2_mutation_probe_sequence);
     if (peer_tally_count(&ext2_mutation_probe_done, cpu) == sequence) { return; }
     let phase: usize = atomic_word_load(&ext2_mutation_probe_phase);
-    if (phase == 3 || phase == 4) {
+    if (phase == 7) {
+        ext2_slot_pool_probe_cycle();
+    } else if (phase == 3 || phase == 4) {
         ext2_mutation_probe_reader(cpu);
     } else if (phase == 5 || phase == 6) {
         ext2_mutation_probe_mutator(phase);
@@ -162,6 +165,35 @@ private fn ext2_mutation_probe_mutator(phase: usize) !{unsafe} {
         peer_tick_window_end(hold);
         ext2_mutation_give(guard);
     }
+}
+
+// GitHub issue #993, phase 7: core 0 holds every ext2 slot while every peer
+// acquires one. Each peer finds the pool full, waits, and gets a slot once
+// core 0 lets go; a count of waits below the peers' number is the failure.
+private fn ext2_slot_pool_probe() -> bool !{unsafe} {
+    let before: usize = slot_pool_wait_count(SlotPoolWaitPool::Ext2);
+    if (ext2_slot_pool_probe_fill() != KERNEL_MAX_CORES) {
+        ext2_slot_pool_probe_empty();
+        kernel_boot_log("ext2 slot pool wait: a slot was already held\n");
+        return false;
+    }
+    let sequence: usize = ext2_mutation_probe_arm(7);
+    // Until a peer's acquire has seen the pool full, bounded by peer ticks.
+    let mut window = peer_tick_window_policy(
+        peer_tick_window_peer(), PeerTickPolicy::Arrival);
+    while (slot_pool_wait_count(SlotPoolWaitPool::Ext2) == before &&
+           peer_tick_window_open(window)) { }
+    peer_tick_window_end(window);
+    ext2_slot_pool_probe_empty();
+    let finished: bool = ext2_mutation_probe_finish(sequence);
+    let waited: usize = slot_pool_wait_count(SlotPoolWaitPool::Ext2) - before;
+    kernel_boot_log("ext2 slot pool wait: full-pool acquires by peers ");
+    if (finished && waited != 0) {
+        kernel_boot_log("waited and ended ok\n");
+        return true;
+    }
+    kernel_boot_log("failed\n");
+    return false;
 }
 
 // Arm one phase for every online peer.
@@ -338,6 +370,10 @@ fn ext2_mutation_contention_probe() -> bool !{unsafe} {
 
     // GitHub issue #597: the mirror, with core 0 as the reader and every
     // peer a mutator. Control first again.
+    if (ext2_slot_pool_probe() == false) {
+        ext2_mutation_probe_report("slot-pool-wait-not-shown" as *u8, clear, held);
+        return false;
+    }
     let core0_control: usize = ext2_mutation_probe_core0_reader(5);
     let core0_waited: usize = ext2_mutation_probe_core0_reader(6);
     kernel_boot_log("ext2 mutation contention core0 reader: control-overlap=");

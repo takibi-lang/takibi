@@ -1,6 +1,7 @@
 use "kernel/drivers/block/block_cache.tkb";
 use "kernel/lib/task_mutex.tkb";
 use "kernel/lib/atomic_word.tkb";
+use "kernel/lib/slot_pool_wait.tkb";
 use "kernel/kernel/cpu_authority.tkb";
 
 const KERNEL_BLOCK_SIZE: usize = 1024;
@@ -114,6 +115,7 @@ private fn block_slot_acquire() -> BlockSlot[0] !{may_block} {
             held = true;
         }
     }
+    let mut waited: bool = false;
     while (held == false) {
         for i: usize in 0..<KERNEL_MAX_CORES {
             if (held == false &&
@@ -121,6 +123,12 @@ private fn block_slot_acquire() -> BlockSlot[0] !{may_block} {
                 index = i;
                 held = true;
             }
+        }
+        // Every slot is held: retry. An unmasked spin, so the tick can switch
+        // to a holder this core preempted (kernel/CONCURRENCY.md, slot pools).
+        if (held == false && waited == false) {
+            slot_pool_wait_note(SlotPoolWaitPool::Block);
+            waited = true;
         }
     }
     let mut slot: BlockSlot[0] = { index };

@@ -140,6 +140,15 @@ check_model PipeWait NoLostWakeup 10 \
     unlocked:CInitUnlocked:NoLostWakeup:violated \
     norecheck:CInitNoRecheck:NoLostWakeup:violated
 
+# GitHub issue #993: scratch pools with more holders than cores. Each order
+# but the kernel's deadlocks; a masked retry keeps the core its holder needs.
+check_model SlotPool NoDeadlock 4 \
+    fixed:CInitFixed:pass:ok \
+    slotfirst:CInitSlotFirst:NoDeadlock:violated:16 \
+    allslotfirst:CInitAllSlotFirst:NoDeadlock:violated:16 \
+    innerouter:CInitInnerOuter:NoDeadlock:violated:16 \
+    masked:CInitMasked:deadlock:ok
+
 check_model RecordLifetime RecordInvariants 6 \
     fixed:CInitFixed:pass:ok \
     unfixed:CInitUnfixed:ReadsOnlyLiveRecords:violated \

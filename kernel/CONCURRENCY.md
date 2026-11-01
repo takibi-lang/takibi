@@ -86,6 +86,18 @@ reverse, so the two pools cannot wait on each other. The rest of the first
 kind moves the same way, or into regions where it
 does not span a blocking call, before the flip.
 
+The pools keep `KERNEL_MAX_CORES` slots under preemption (GitHub issue #993).
+Holders can then outnumber cores, and an acquire that finds every slot held
+retries with interrupts unmasked: it waits for the tick to switch to a holder,
+not for a sleep, and `RECORDED slot pool wait:` counts it. There is no deadline,
+because a wait ends when the holder does. That rests on one order: the ext2
+mutation lock, then `SyscallSlot` or `ExecWindowSlot`, then `ProcessImageSlot`,
+`Ext2Slot`, `BlockSlot`, then the lower TaskMutexes. So a slot holder never
+waits for the mutation lock or for ext2's reader count, and an ext2 write takes
+the lock before its slot, with one chunk's user copy under the lock.
+`kernel/models/SlotPool.tla` checks this, including the two orders that
+deadlock; `scripts/check_slot_pool_entries.py` holds the source to it.
+
 A fourth dependency names no constant: a raw `cpu_id()` read outside a
 region assumes the task cannot move to another CPU before it uses the
 index. `scripts/check_raw_cpu_id_sites.py` counts those calls per file, so

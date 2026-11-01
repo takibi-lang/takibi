@@ -357,6 +357,32 @@ Properties:
 - `AllRead` (liveness, TLC only): every byte written is read, then end of
   file, under weak fairness of every step.
 
+## SlotPool.tla -- scratch pools with more holders than cores (#993)
+
+Four operations on one core, one slot per pool (a cycle needs only every slot
+held), and a tick that may switch at
+any step: holders outnumber cores, which a kernel with `KERNEL_PREEMPTIBLE`
+at 0 never sees. An acquire that finds a pool full retries with interrupts
+unmasked, so what it waits on is a switch, not a sleep.
+
+`NoDeadlock` says some operation can always move; `EveryAcquireEnds` says each
+finishes. `slotfirst` is the tree before #993, a write taking `SyscallSlot`
+and then the mutation lock while mkdir takes them the other way round.
+`allslotfirst` is the other cure, and breaks through the reader count: a
+mutator holding the lock waits for a reader, the reader for a slot, and the
+slots are held by mutators waiting for the lock. `innerouter` is a holder of
+the inner pool taking the outer one. `masked` keeps the kernel's order but
+retries with interrupts masked, so the spinner keeps the core and
+`EveryAcquireEnds` breaks. The order itself is checked over
+the source by `scripts/check_slot_pool_entries.py`.
+
+| Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
+| --- | --- | --- | --- | --- |
+| `Step` | `syscall_slot_acquire`, `ext2_slot_acquire`, `block_slot_acquire`, `ext2_mutation_take`, `ext2_read_enter`, `syscall_ext2_write_locked` | one successful acquire of the next resource in the operation's order, the mutator's wait for readers as a step of its own | the block slot's CPU hint -- irrelevant to `NoDeadlock`: it only chooses which free word to try first; the exec pools `process_image_slot_acquire` and `exec_window_slot_acquire` -- irrelevant to `NoDeadlock`: they sit outside `Ext2Slot` exactly as `SyscallSlot` does and no process holding them waits for the mutation lock, which the source check enforces; TaskMutexes taken below `BlockSlot` -- irrelevant to `NoDeadlock`: their holders take no slot, which the source check enforces | `37b94e4b1250` |
+| `FullPass` | `slot_pool_wait_note`, `ext2_slot_acquire` | the first pass that found every slot held is counted once per acquire | later passes -- irrelevant to `NoDeadlock`: a failed compare-exchange changes nothing | `1567729cdc3e` |
+| `Finish` | `syscall_slot_release`, `ext2_slot_release`, `block_slot_release`, `ext2_mutation_give`, `ext2_read_leave` | everything the operation holds becomes free | the order of the releases -- irrelevant to `NoDeadlock`: a release only enables others | `6dcb8fc6f4f4` |
+| `Switch` | negative variant only: the tick's switch at IRQ return, which no kernel code performs before the EL1 switch stage | any preemption point reaches the next process in turn | which process comes next -- irrelevant to `EveryAcquireEnds`: the run queue serves every Ready process in bounded rounds | `e3b0c44298fc` |
+
 ## RecordLifetime.tla -- a process record read while another CPU reaps it (#482)
 
 One record, one reader, two reapers, and the process's own execve. The
@@ -617,8 +643,8 @@ modelcheck` requires each to fail:
 
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |
-| `WriterEnter` | `syscall_write_segment_with` | a terminal write is admitted whole under the run lock | fd lookup and the user-memory copy -- irrelevant to `ProgramOrder`: they run before the chunk is admitted and change no queue or lock | `4fd1259b7c7b` |
-| `WriterAppend` | `uart_user_write`, `uart_terminal_write_chunk`, `uart_user_write_locked`, `uart_user_write_room_locked`, `syscall_write_segment_with`, `kernel_log_emit_line`, `kernel_log_emit_byte_locked`, `console_lock`, `console_unlock`, `mutex_acquire_measured` | the append to the queue under the console lock, or the decision that there is no room; on every CPU the same queue, and the run lock let go | short counts and partial chunks -- irrelevant to `ProgramOrder`: a partial chunk is a shorter chunk, and the model already appends each whole; nonterminal fd paths -- irrelevant to `ProgramOrder`: they do not append terminal bytes; kernel log lines -- irrelevant to `ProgramOrder`: they share the FIFO order without changing a terminal writer's chunk order; measurement counters -- irrelevant to `ProgramOrder`: they are updated under the same lock and never select queue contents, admission or ownership | `667abb6bf1c5` |
+| `WriterEnter` | `syscall_write_segment_with` | a terminal write is admitted whole under the run lock | fd lookup and the user-memory copy -- irrelevant to `ProgramOrder`: they run before the chunk is admitted and change no queue or lock | `61104101f684` |
+| `WriterAppend` | `uart_user_write`, `uart_terminal_write_chunk`, `uart_user_write_locked`, `uart_user_write_room_locked`, `syscall_write_segment_with`, `kernel_log_emit_line`, `kernel_log_emit_byte_locked`, `console_lock`, `console_unlock`, `mutex_acquire_measured` | the append to the queue under the console lock, or the decision that there is no room; on every CPU the same queue, and the run lock let go | short counts and partial chunks -- irrelevant to `ProgramOrder`: a partial chunk is a shorter chunk, and the model already appends each whole; nonterminal fd paths -- irrelevant to `ProgramOrder`: they do not append terminal bytes; kernel log lines -- irrelevant to `ProgramOrder`: they share the FIFO order without changing a terminal writer's chunk order; measurement counters -- irrelevant to `ProgramOrder`: they are updated under the same lock and never select queue contents, admission or ownership | `9f9ba59056e6` |
 | `BlockWriter` | `kernel_process_block_uart_tx` | the writer publishes itself asleep under the run lock; `RECHECK` is the room re-check there | successor choice and the switch -- modelled elsewhere: `Wait4Block.Wait4Block` | `d28cda46e101` |
 | `TxTake` | `uart_tx_service`, `uart_tx_drain_into_fifo` | one chunk leaves the queue onto the wire under the console lock and makes room; `NESTED` keeps the lock | the FIFO's capacity and the byte-by-byte drain -- irrelevant to `ProgramOrder`: bytes leave the queue in order, so a chunk taken whole is the same order | `f805ddb9e445` |
 | `PollDrain` | `uart_tx_drain_into_fifo_force`, `uart_terminal_resume_output`, `uart_wire_byte`, `kernel_log_tx_writer_room_locked` | a drain outside the transmit interrupt takes a chunk onto the wire under the console lock and, when it gives writers their room, keeps the interrupt enabled so the service runs the wake | the FIFO and the interrupt's own timing -- irrelevant to `NoLostWakeup`: an enabled TX interrupt is taken once the FIFO falls to its level, which the drained bytes guarantee; the echo queue -- irrelevant to `NoLostWakeup`: echo pending is one more reason the room predicate is false, and the drain that empties it is this action | `db5d17151952` |

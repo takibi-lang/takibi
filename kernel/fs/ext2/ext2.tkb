@@ -3,6 +3,7 @@ use "kernel/fs/ext2/mutation_lock.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/byte_slice.tkb";
 use "kernel/lib/atomic_word.tkb";
+use "kernel/lib/slot_pool_wait.tkb";
 use "kernel/kernel/cpu_authority.tkb";
 
 const EXT2_SUPERBLOCK_BLOCK: usize = 1;
@@ -56,8 +57,9 @@ fn ext2_max_regular_file_size() -> usize {
 // Current limitations (2026-10-17):
 // - The pool has KERNEL_MAX_CORES slots. While KERNEL_PREEMPTIBLE is 0 and
 //   block I/O waits by spinning, at most one operation per CPU is inside
-//   ext2, so acquire never waits. Once an operation can sleep inside ext2,
-//   a later one waits in ext2_slot_acquire for a release.
+//   ext2, so acquire never waits. Under preemption holders can outnumber
+//   cores and a later one waits in ext2_slot_acquire for a release; the
+//   nesting order (kernel/CONCURRENCY.md) is what makes that wait end.
 struct Ext2Scratch {
     metadata: [u8; KERNEL_BLOCK_SIZE];
     file: [u8; KERNEL_BLOCK_SIZE];
@@ -83,6 +85,7 @@ private fn ext2_slot_acquire() -> Ext2Slot[0] !{may_block} {
     preempt_assert_blockable();
     let mut index: {0..<KERNEL_MAX_CORES as usize} = 0;
     let mut held: bool = false;
+    let mut waited: bool = false;
     while (held == false) {
         for i: usize in 0..<KERNEL_MAX_CORES {
             if (held == false &&
@@ -91,6 +94,12 @@ private fn ext2_slot_acquire() -> Ext2Slot[0] !{may_block} {
                 held = true;
             }
         }
+        // Every slot is held: retry. An unmasked spin, so the tick can switch
+        // to a holder this core preempted (kernel/CONCURRENCY.md, slot pools).
+        if (held == false && waited == false) {
+            slot_pool_wait_note(SlotPoolWaitPool::Ext2);
+            waited = true;
+        }
     }
     let mut slot: Ext2Slot[0] = { index };
     return slot;
@@ -98,6 +107,32 @@ private fn ext2_slot_acquire() -> Ext2Slot[0] !{may_block} {
 
 private fn ext2_slot_release(slot: sink Ext2Slot[0]) {
     atomic_word_store(&ext2_slot_words[slot.index], 0);
+}
+
+// GitHub issue #993, for ext2_mutation_contention_evidence.tkb only, while
+// no ext2 operation is running: every slot word set with no token behind it,
+// so a peer's acquire finds the pool full, and every word cleared again; and
+// that peer's acquire. `unsafe` so any other use is visible in the trusted
+// base.
+fn ext2_slot_pool_probe_fill() -> usize !{unsafe} {
+    let mut filled: usize = 0;
+    for i: usize in 0..<KERNEL_MAX_CORES {
+        if (atomic_word_compare_exchange(&ext2_slot_words[i], 0, 1)) {
+            filled = filled + 1;
+        }
+    }
+    return filled;
+}
+
+fn ext2_slot_pool_probe_empty() !{unsafe} {
+    for i: usize in 0..<KERNEL_MAX_CORES {
+        atomic_word_store(&ext2_slot_words[i], 0);
+    }
+}
+
+fn ext2_slot_pool_probe_cycle() !{may_block, unsafe} {
+    let slot: Ext2Slot[0] = ext2_slot_acquire();
+    ext2_slot_release(slot);
 }
 
 // A position in this operation's scratch: which buffer, and a byte offset into

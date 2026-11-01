@@ -26,6 +26,7 @@
 // - ONLY THE TEN PRODUCTION POOLS listed below are counted; fixture-private
 //   pools (pin sharing, pool walk, pool contention) are not.
 
+use "kernel/lib/slot_pool_wait.tkb";
 use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/execution_model.tkb";
 
@@ -82,6 +83,22 @@ fn pool_lock_wait_contended(tag: PoolLockWaitPool) !{unsafe} {
     let core: {0..<KERNEL_MAX_CORES as usize} = raw;
     let at: {0..<POOL_LOCK_WAIT_POOLS as usize} = pool_lock_wait_index(tag);
     atomic_word_fetch_add(&pool_lock_wait_cores[core].words[at], 1);
+}
+
+// GitHub issue #993: one RECORDED line, per slot pool, the acquires that found
+// every slot held.
+fn slot_pool_wait_log() !{unsafe} {
+    kernel_boot_log("RECORDED slot pool wait: ext2=");
+    uart_put_udec(slot_pool_wait_count(SlotPoolWaitPool::Ext2));
+    kernel_boot_log(" block=");
+    uart_put_udec(slot_pool_wait_count(SlotPoolWaitPool::Block));
+    kernel_boot_log(" process_image=");
+    uart_put_udec(slot_pool_wait_count(SlotPoolWaitPool::ProcessImage));
+    kernel_boot_log(" syscall=");
+    uart_put_udec(slot_pool_wait_count(SlotPoolWaitPool::Syscall));
+    kernel_boot_log(" exec_window=");
+    uart_put_udec(slot_pool_wait_count(SlotPoolWaitPool::ExecWindow));
+    kernel_boot_log("\n");
 }
 
 fn pool_lock_wait_pause(paused: bool) {

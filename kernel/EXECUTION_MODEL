@@ -80,6 +80,7 @@ exempt kernel/kernel/irq_counts.tkb  per-CPU rows are indexed below KERNEL_MAX_C
 exempt kernel/arch/arm64/boot/cpu.tkb  GitHub issue #920: the per-CPU shadow of the GIC priority mask and its ready flag; each slot is written only by its own CPU, and the stop handler that can interrupt the writer writes neither
 exempt kernel/kernel/uart_irq_affinity.tkb  GitHub issue #830: the serial-service word and the per-CPU counts are AtomicWords any core may update
 exempt kernel/kernel/pool_lock_wait.tkb  GitHub issue #953: each CPU writes only its own row of counters; the pause word is an AtomicWord written by core 0
+exempt kernel/lib/slot_pool_wait.tkb  GitHub issue #993: one AtomicWord per pool, added to by any CPU; no number in it depends on the core count or on preemption
 exempt kernel/kernel/nic_irq_affinity.tkb  GitHub issue #830: the rotation counter, the pin and the per-CPU counts are AtomicWords any core may update; the fixture's phase snapshot and pinned INTID are written only by the boot core's network fixture
 exempt kernel/kernel/profile_samples.tkb  per-CPU samples are indexed below KERNEL_MAX_CORES and opened or read only for kernel_online_core_count() under a world stop
 exempt kernel/kernel/profile_session.tkb  per-CPU buffers and counts are indexed below KERNEL_MAX_CORES; each is written by its own CPU's PMU interrupt or by DDB under a world stop, and the session mode is written only by DDB under a world stop

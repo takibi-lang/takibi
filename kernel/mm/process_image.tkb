@@ -7,6 +7,7 @@ use "kernel/fs/elf64.tkb";
 use "kernel/fs/ext2/ext2.tkb";
 use "kernel/lib/mutex.tkb";
 use "kernel/lib/atomic_word.tkb";
+use "kernel/lib/slot_pool_wait.tkb";
 use "kernel/kernel/cpu_authority.tkb";
 
 
@@ -70,6 +71,7 @@ private fn process_image_slot_acquire() -> ProcessImageSlot[0] !{may_block} {
     preempt_assert_blockable();
     let mut index: {0..<KERNEL_MAX_CORES as usize} = 0;
     let mut held: bool = false;
+    let mut waited: bool = false;
     while (held == false) {
         for i: usize in 0..<KERNEL_MAX_CORES {
             if (held == false &&
@@ -77,6 +79,12 @@ private fn process_image_slot_acquire() -> ProcessImageSlot[0] !{may_block} {
                 index = i;
                 held = true;
             }
+        }
+        // Every slot is held: retry. An unmasked spin, so the tick can switch
+        // to a holder this core preempted (kernel/CONCURRENCY.md, slot pools).
+        if (held == false && waited == false) {
+            slot_pool_wait_note(SlotPoolWaitPool::ProcessImage);
+            waited = true;
         }
     }
     process_image_staging[index].source = ProcessImageSourceState::Absent;
