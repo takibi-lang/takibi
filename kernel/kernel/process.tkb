@@ -5313,6 +5313,8 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
             kernel_process_stack_switch_take(frame);
         }
     }
+    // The span of whichever path chose this frame ends here (#1323).
+    preempt_count_after_switch();
 }
 
 private fn kernel_process_stack_switch_take(frame: borrow FrameRef[process, level]) {
@@ -7046,22 +7048,27 @@ private fn kernel_process_next_ready(guard: borrow ProcessRunGuard[lock], from: 
 // frame of another process, which is the one to resume instead.
 must_use variant FrameSwitch {
     Stay;
-    Switch(exists next: usize. exists level: ExceptionLevel. FrameRef[next, level]);
+    Switch(exists next: usize. exists level: ExceptionLevel. (FrameRef[next, level], PreemptOff[0]));
 }
 
+// The reserved-successor and switch-tail spans of #1323: open before the
+// reservation, and on Switch handed to the caller for its resume.
 fn kernel_process_schedule(current: borrow FrameRef[process, level]) -> FrameSwitch {
     if (execution_state[execution_cpu_index()].current_live == false) { return FrameSwitch::Stay; }
+    let span = preempt_span_begin();
     let mut from: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
     let guard = process_run_lock();
     match kernel_process_next_ready(guard, from, cpu_id()) {
         ProcessNextReadyResult::Missing => {
             process_run_unlock(guard);
+            preempt_span_end(span);
             return FrameSwitch::Stay;
         }
         ProcessNextReadyResult::Next(to) => {
             match scheduled_process_ready_take(guard, to) {
                 ScheduledProcessReadyTakeResult::Missing => {
                     process_run_unlock(guard);
+                    preempt_span_end(span);
                     return FrameSwitch::Stay;
                 }
                 ScheduledProcessReadyTakeResult::Ready(resources) => {
@@ -7069,7 +7076,7 @@ fn kernel_process_schedule(current: borrow FrameRef[process, level]) -> FrameSwi
                     let running = scheduled_process_start(owner, ready);
                     process_run_unlock(guard);
                     return kernel_process_schedule_reserved(
-                        from, owner, running, current);
+                        from, owner, running, current, span);
                 }
             }
         }
@@ -7353,29 +7360,33 @@ private fn kernel_process_schedule_reserved(
         from: ProcessHandle,
         owner: sink ScheduledProcessOwner[process],
         running: sink ScheduledProcessState[process, ProcessState::Running],
-        current: borrow FrameRef[from_process, level]) -> FrameSwitch !{changes_witness_ProcessCurrent} {
+        current: borrow FrameRef[from_process, level],
+        span: sink PreemptOff[0]) -> FrameSwitch !{changes_witness_ProcessCurrent} {
     match process_image_prepare_activation(
         scheduled_process_address_space_root_owned(owner)) {
         AddressSpaceActivationPrepareResult::Invalid => {
             kernel_process_schedule_cancel_reserved(owner, running);
+            preempt_span_end(span);
             return FrameSwitch::Stay;
         }
         AddressSpaceActivationPrepareResult::RolloverNeeded => {
             match world_stop_machine_begin(SCHEDULER_WORLD_STOP_SPINS) {
                 MachineStopResult::Busy => {
                     kernel_process_schedule_cancel_reserved(owner, running);
+                    preempt_span_end(span);
                     return FrameSwitch::Stay;
                 }
                 MachineStopResult::Partial(partial) => {
                     machine_stop_partial_release(partial, &kernel_world_stop);
                     kernel_process_schedule_cancel_reserved(owner, running);
+                    preempt_span_end(span);
                     return FrameSwitch::Stay;
                 }
                 MachineStopResult::Complete(stopped) => {
                     if (asid_rollover_stopped(stopped)) {}
                     machine_stop_release(stopped, &kernel_world_stop);
                     return kernel_process_schedule_reserved(
-                        from, owner, running, current);
+                        from, owner, running, current, span);
                 }
             }
         }
@@ -7398,6 +7409,7 @@ private fn kernel_process_schedule_reserved(
                 let ready = scheduled_process_yield(owner, running);
                 scheduled_process_release(owner, ready);
                 process_run_unlock(guard);
+                preempt_span_end(span);
                 return FrameSwitch::Stay;
             }
             scheduled_process_record_live_locked(guard, from).saved_sp = frame_ref_address(current);
@@ -7406,6 +7418,7 @@ private fn kernel_process_schedule_reserved(
                 let ready = scheduled_process_yield(owner, running);
                 scheduled_process_release(owner, ready);
                 process_run_unlock(guard);
+                preempt_span_end(span);
                 return FrameSwitch::Stay;
             }
             if (process_image_commit_activation(prepared) == false) {
@@ -7413,6 +7426,7 @@ private fn kernel_process_schedule_reserved(
                 let ready = scheduled_process_yield(owner, running);
                 scheduled_process_release(owner, ready);
                 process_run_unlock(guard);
+                preempt_span_end(span);
                 return FrameSwitch::Stay;
             }
             execution_state[execution_cpu_index()].current_handle = to;
@@ -7434,8 +7448,8 @@ private fn kernel_process_schedule_reserved(
             scheduled_process_release(owner, running);
             process_run_unlock(guard);
             match next {
-                LeveledFrame::El0(low) => { return FrameSwitch::Switch(low); }
-                LeveledFrame::El1(high) => { return FrameSwitch::Switch(high); }
+                LeveledFrame::El0(low) => { return FrameSwitch::Switch((low, span)); }
+                LeveledFrame::El1(high) => { return FrameSwitch::Switch((high, span)); }
             }
         }
     }
@@ -8375,8 +8389,11 @@ fn kernel_process_timer_schedule(current: sink FrameRef[process, ExceptionLevel:
     if (has_relative) {
         match kernel_process_schedule(current) {
             FrameSwitch::Stay => {}
-            FrameSwitch::Switch(next) => {
+            FrameSwitch::Switch(switched) => {
+                let (next, span) = switched;
                 process_test_evidence_record_timer_switch();
+                // The tick's span ends at this interrupt's own after_switch.
+                preempt_span_resume(span);
                 return TimerSwitch::Resume(next);
             }
         }
@@ -8448,9 +8465,9 @@ fn kernel_process_syscall_return_schedule(current: borrow FrameRef[process, leve
     }
     match kernel_process_schedule(current) {
         FrameSwitch::Stay => { return FrameSwitch::Stay; }
-        FrameSwitch::Switch(next) => {
+        FrameSwitch::Switch(switched) => {
             process_test_evidence_record_deferred_switch();
-            return FrameSwitch::Switch(next);
+            return FrameSwitch::Switch(switched);
         }
     }
 }
@@ -10871,7 +10888,24 @@ private fn kernel_process_probe_tick_address(sp: usize) -> usize
         TimerSwitch::Resume(resumed) => { frame_ref_address(resumed) }
         TimerSwitch::ToIdle => { 1 }
     };
+    // The probe stands in for the exception return: no after_switch follows.
+    preempt_count_after_switch();
     return address;
+}
+
+// A deferred switch's frame address, the frame itself when none. The probe
+// does not resume it, so the span ends here. Out of line: the tuple would
+// otherwise sit in the probe's frame.
+private noinline fn kernel_process_probe_deferred_address(
+        frame: borrow FrameRef[process, level]) -> usize {
+    match kernel_process_syscall_return_schedule(frame) {
+        FrameSwitch::Stay => { return frame_ref_address(frame); }
+        FrameSwitch::Switch(switched) => {
+            let (resumed, span) = switched;
+            preempt_span_end(span);
+            return frame_ref_address(resumed);
+        }
+    }
 }
 
 fn kernel_process_trace_block_wake_probe() -> bool !{unsafe} {
@@ -11422,11 +11456,7 @@ fn kernel_process_scheduler_probe() -> bool !{changes_witness_ProcessCurrent} {
     kernel_process_request_reschedule();
     let deferred_frame = frame_ref_from_el0_entry(
         kernel_process_scheduler_probe_frame_b(), kernel_process_entry_generation());
-    let deferred_parent_sp: usize = match
-            kernel_process_syscall_return_schedule(deferred_frame) {
-        FrameSwitch::Stay => { frame_ref_address(deferred_frame) }
-        FrameSwitch::Switch(resumed) => { frame_ref_address(resumed) }
-    };
+    let deferred_parent_sp: usize = kernel_process_probe_deferred_address(deferred_frame);
     if (kernel_process_scheduler_probe_stack_depart() == false ||
         kernel_process_scheduler_probe_stack_arrive() == false) {
         return false;

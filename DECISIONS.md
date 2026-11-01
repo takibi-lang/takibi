@@ -317,10 +317,10 @@ condition below applies, and reports the land afterwards.
   off the queues except their stop-gaps in Territory B's band 0; #1009, the
   syntax edition, is done last of them, after #1010 (a lossless printer and
   `takibi fmt`), its only prerequisite. [active] #1009 #1010
-- 2026-10-25 The syntax review (#1006) is held until before #789's token
-  design starts, and before the next split of `process.tkb` or
-  `syscall.tkb` that #1008's `module` line would otherwise have to
-  retract. [active] #1006
+- 2026-11-01 The syntax review (#1006) is deferred until the kernel landed
+  milestone, superseding the 2026-10-25 line that held it until before #789's
+  token design and the next split of `process.tkb` or `syscall.tkb`. Work
+  before it takes provisional spellings, as FrameRef did. [active] #1006
 - 2026-10-25 The evidence a later write-up of Takibi's additions over Rust
   would need is collected as a by-product of ordinary work, never as a
   project: every defect followup answers whether safe Rust, klint, Kani,
@@ -554,3 +554,4 @@ condition below applies, and reports the land afterwards.
 ## 2026-11-01 #1159 the log's partial line
 - `kernel_log_core_state` keeps one line per CPU with an owner word: a byte from another owner retains the staged piece as its own record, and each byte is staged in a `preempt_off` region. Space decides it: a task-owned line (#613 option b) costs 640 B per live process. The row stays allow-listed, its cross-CPU reads under the world stop. [active] #1159
 - 2026-11-01 #993: the scratch pools stay at KERNEL_MAX_CORES slots under preemption; a full pool is a bounded retry with interrupts unmasked, ended by the tick's switch to a holder (the route review's yield-and-retry; no synthetic voluntary switch). The order is mutation lock, then SyscallSlot or ExecWindowSlot, ProcessImageSlot, Ext2Slot, BlockSlot, lower TaskMutexes. [active] #993 #638
+- 2026-11-01 #1323: lifecycle spans hold a linear `PreemptOff` token issued at span start and consumed by the resume path, and after_switch resets the count (the Linux schedule_tail shape). `PreemptOff[0]` is a provisional spelling. [active] #638 #1323

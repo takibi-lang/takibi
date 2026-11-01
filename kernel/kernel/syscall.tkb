@@ -4898,8 +4898,10 @@ fn kernel_syscall_resume_return(frame_sp: usize, value: usize) {
             workload_profile_el0_enter();
             el0_context_resume(frame);
         }
-        FrameSwitch::Switch(next) => {
+        FrameSwitch::Switch(switched) => {
+            let (next, span) = switched;
             workload_profile_el0_enter();
+            preempt_span_resume(span);
             el0_context_resume(next);
         }
     }

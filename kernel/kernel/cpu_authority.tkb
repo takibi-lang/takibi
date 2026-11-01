@@ -8,8 +8,8 @@
 // region, `preempt_off (cpu) { ... }`, which the compiler lowers to a call
 // of the private preempt_off_enter below. The compiler keeps the CpuHere
 // inside the block (no function outside this file returns one) and rejects
-// a block that can reach may_block. The block is sugar over a linear
-// PreemptOff token that a later step will expose (#638 option A).
+// a block that can reach may_block. A span the block cannot express holds the
+// same count through the linear PreemptOff below (#638 option A).
 //
 // Stage 2 (#638, maintainer 2026-10-25): the region is a per-CPU preempt
 // count, as Linux's preempt_disable/preempt_enable. preempt_off_enter
@@ -39,8 +39,8 @@
 //
 // Current limitations (2026-10-25):
 // - The count is not yet consulted by any switch: KERNEL_PREEMPTIBLE is 0
-//   (static_assert below), the EL1 IRQ return never switches, and no lock
-//   holder raises it yet (#638 stages 7 and 8).
+//   (static_assert below), and the EL1 IRQ return never switches (#638
+//   stage 8).
 // - The raise is a plain read-modify-write of this CPU's slot. That is
 //   sound while nothing preempts: an interrupt on this CPU that enters a
 //   region leaves the count as it found it. Once the IRQ return can switch
@@ -138,6 +138,51 @@ private inline fn preempt_off_exit() {
         kernel_invariant_stop();
     }
     preempt_counts[slot].depth = depth - 1;
+}
+
+// GitHub issue #638 stage 7 (maintainer, 2026-11-01, #1323 option A): a span
+// that cannot be a lexical preempt_off block, because it ends at an exception
+// return in another function. It holds the same count. The token is linear, so
+// a path that neither ends the span nor hands it to a resume does not compile.
+// A span may not reach a blocking point: preempt_assert_blockable says so at
+// run time; the static rule the block has is not extended to the token.
+// Spelling is provisional (DECISIONS.md 2026-11-01).
+linear struct PreemptOff[unit: usize] {
+    private held: usize;
+}
+
+inline fn preempt_span_begin() -> PreemptOff[0] {
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+                  "preempt_span_begin's raise is not yet migration-safe and no IRQ return consults the count");
+    let mut slot: CpuHere = preempt_slot();
+    preempt_counts[slot].depth = preempt_counts[slot].depth + 1;
+    let mut span: PreemptOff[0] = { 1 };
+    return span;
+}
+
+// The span ended here: nothing was switched.
+inline fn preempt_span_end(span: sink PreemptOff[0]) {
+    preempt_off_exit();
+}
+
+// The span ends at the exception return (or idle entry) that follows. The
+// count stays raised until preempt_count_after_switch, on the far side of the
+// stack change. The callers are the resume paths
+// (scripts/allowed_callers.tsv).
+inline fn preempt_span_resume(span: sink PreemptOff[0]) {
+}
+
+// The Linux schedule_tail shape: the after_switch hook of every exception
+// return, and every idle entry, on the far side of the stack change. What it
+// resumes runs at count zero by construction (only a zero count is ever
+// switched away from), so the count of a resume path's span is simply reset.
+// More than one open means a lexical region or a second span reached a resume.
+fn preempt_count_after_switch() {
+    let mut slot: CpuHere = preempt_slot();
+    if (KERNEL_PREEMPT_ASSERTS != 0 && preempt_counts[slot].depth > 1) {
+        kernel_invariant_stop();
+    }
+    preempt_counts[slot].depth = 0;
 }
 
 // This CPU's preempt count.
