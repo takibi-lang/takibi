@@ -2624,7 +2624,7 @@ _kernelcheck-probe-ticks-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_probe_refusals_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_PROBE_REFUSALS_CONTROL=old-baseline bash scripts/run_kernel_probe_refusals_qemutest.sh
 	@# GitHub issue #1194: a hand-made frame whose SPSR says EL0t must not reach the El1 landing.
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_RACE_WINDOW=1194-el0-spsr KERNEL_QEMU_RACE_WINDOW_ARMED=skip KERNEL_QEMU_RACE_WINDOW_REQUIRE_FAILURE=1 KERNEL_QEMU_RACE_WINDOW_SIGNATURE='^oops: fail-stop .* ec=0x0000000000000020 ' KERNEL_QEMU_SERIAL_PORT=18740 KERNEL_QEMU_QMP_PORT=18741 KERNEL_QEMU_NETDEV_LOCAL_PORT=18742 KERNEL_QEMU_NETDEV_REMOTE_PORT=18743 bash scripts/run_kernel_race_window_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_RACE_WINDOW=1194-el0-spsr KERNEL_QEMU_RACE_WINDOW_ARMED=skip KERNEL_QEMU_RACE_WINDOW_REQUIRE_FAILURE=1 KERNEL_QEMU_RACE_WINDOW_SIGNATURE='^oops: fail-stop .* ec=0x0000000000000020 ' KERNEL_QEMU_SERIAL_PORT=18521 KERNEL_QEMU_QMP_PORT=18522 KERNEL_QEMU_NETDEV_LOCAL_PORT=18523 KERNEL_QEMU_NETDEV_REMOTE_PORT=18524 bash scripts/run_kernel_race_window_qemutest.sh
 
 # GitHub issue #761: a functional negative control. A connected read that
 # copies the requested length instead of the segment's must fail the
