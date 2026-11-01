@@ -281,15 +281,20 @@ private fn procfs_put_comm(output: borrow uninit [u8; 1024..], offset_in: usize,
     return offset;
 }
 
+private fn procfs_profile_mode_text(mode: usize) -> []const u8 {
+    if (mode == 0) { return bs"idle"; }
+    if (mode == 1) { return bs"sampling"; }
+    if (mode == 3) { return bs"starting"; }
+    return bs"stopped";
+}
+
 // /proc/takibi/profile read back: the session and each core's counts.
 private fn procfs_render_profile(output: borrow uninit [u8; 1024..]) -> usize
         ensures init(output[0..<result]) {
     let mut offset: usize = 0;
     let mode: usize = profile_session_mode_now();
     offset = procfs_put_text(output, offset, bs"mode ");
-    if (mode == 0) { offset = procfs_put_text(output, offset, bs"idle"); }
-    else if (mode == 1) { offset = procfs_put_text(output, offset, bs"sampling"); }
-    else { offset = procfs_put_text(output, offset, bs"stopped"); }
+    offset = procfs_put_text(output, offset, procfs_profile_mode_text(mode));
     offset = procfs_put_text(output, offset, bs"\nperiod ");
     offset = procfs_put_usize(output, offset, profile_session_period_now());
     offset = procfs_put_text(output, offset, bs"\ndepth ");
@@ -304,17 +309,18 @@ private fn procfs_render_profile(output: borrow uninit [u8; 1024..]) -> usize
             offset = procfs_put_usize(output, offset, profile_session_core_stored(cpu));
             offset = procfs_put_text(output, offset, bs" lost ");
             offset = procfs_put_usize(output, offset, profile_session_core_lost(cpu));
+            let mut span: IrqsoffRead = irqsoff_core_read(cpu);
             offset = procfs_put_text(output, offset, bs" irqsoff_ticks ");
-            offset = procfs_put_usize(output, offset, irqsoff_core_longest(cpu));
+            offset = procfs_put_usize(output, offset, span.longest);
             offset = procfs_put_text(output, offset, bs" from");
             for slot: usize in 0..<IRQSOFF_DEPTH {
                 offset = procfs_put_byte(output, offset, 0x20);
-                offset = procfs_put_hex(output, offset, irqsoff_core_site(cpu, false, slot));
+                offset = procfs_put_hex(output, offset, span.from[slot]);
             }
             offset = procfs_put_text(output, offset, bs" to");
             for slot: usize in 0..<IRQSOFF_DEPTH {
                 offset = procfs_put_byte(output, offset, 0x20);
-                offset = procfs_put_hex(output, offset, irqsoff_core_site(cpu, true, slot));
+                offset = procfs_put_hex(output, offset, span.to[slot]);
             }
             offset = procfs_put_byte(output, offset, 0x0A);
         }

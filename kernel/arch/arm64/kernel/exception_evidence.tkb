@@ -464,7 +464,7 @@ private fn ddb_command_profile(command: DdbProfileCommand) !{unsafe} {
             }
         }
         DdbProfileCommand::Dump => {
-            if (profile_session_exists()) {
+            if (profile_session_dumpable()) {
                 profile_session_dump();
             } else {
                 ddb_puts("ddb: profile nothing to dump\n");

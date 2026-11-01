@@ -290,3 +290,12 @@ file's comment lines are not rows.
   a `LogRingTraceReader` on its stack, so the role follows the read and not a CPU.
   Also `block_cache_hits` and `kernel_exec_reserve_undercount`. 275 -> 268
   unprotected.
+- 2026-11-01: the profile session and irqsoff words. The classification named a
+  lock for the session, but DDB and the sample interrupt cannot wait for one, so a
+  writer claims a start or a stop by compare-and-swap of `profile_session_mode`,
+  with a new state 3 while a start builds (#1315), and the period and depth are one
+  `AtomicWord`. `profile_core_state`, `irqsoff_core` and `irqsoff_standing` are
+  `AtomicWord` fields; a version word gives procfs a matched longest and sites. The
+  boot report still reads `irqsoff_standing`'s peers live, so a class can pair a
+  tick with another's sites for a core inside its close; each word is untorn. 268
+  -> 261 unprotected, with `kernel_log_core_state` reviewed. No row is unreviewed.

@@ -35,7 +35,7 @@
 // arguments, and `profile dump` (or a new start) gives it back. Drop-tail:
 // a full buffer counts `lost`.
 //
-// Concurrency. Start and stop run in a syscall while every core runs;
+// Concurrency. Start and stop run in a syscall or DDB while every core runs;
 // dump runs in DDB with every other core stopped. Start builds the buffers
 // before it publishes the mode (release), and a sample interrupt reads the
 // mode (acquire) before it takes its buffer. Each core arms or disarms its
@@ -86,37 +86,46 @@ struct ProfileCoreStore {
 
 private let mut profile_core_store: [ProfileCoreStore; KERNEL_MAX_CORES];
 
-// Per-core bookkeeping, written by that core's interrupt or by DDB while the
-// core is stopped (see the header).
+// Per-core bookkeeping, written by that core's interrupt, by the start that
+// holds the mode, or by DDB while the core is stopped (see the header).
 struct ProfileCoreState {
-    stored: usize;
-    lost: usize;
+    stored: AtomicWord;
+    lost: AtomicWord;
     // Pages of this core's buffer run, 0 when it has none.
-    pages: usize;
+    pages: AtomicWord;
     // The physical base of the run, for giving it back.
-    base: usize;
+    base: AtomicWord;
     // The session epoch this core last armed or disarmed its counter for.
-    synced_epoch: usize;
+    synced_epoch: AtomicWord;
     // Interrupts this core took while a session sampled, and the ones it
     // could not store (no buffer): the dump reports both, so a PMU line
     // that is delivered but never recorded is visible.
-    interrupts: usize;
-    unbuffered: usize;
-    arms: usize;
+    interrupts: AtomicWord;
+    unbuffered: AtomicWord;
+    arms: AtomicWord;
 }
 
 private let mut profile_core_state: [ProfileCoreState; KERNEL_MAX_CORES];
 
-// 0 idle, 1 sampling, 2 stopped with samples to dump. Written by the
-// control file's writer (or DDB) and read by every core's interrupts.
+// 0 idle, 1 sampling, 2 stopped with samples to dump, 3 a start is building
+// (#1315). A writer changes it by compare-and-swap, so one of two racing writers
+// owns a start or a stop and the other is refused, with no lock, since DDB and
+// the sample interrupt cannot wait for one. Read by every core's interrupts.
+const PROFILE_MODE_IDLE: usize = 0;
+const PROFILE_MODE_SAMPLING: usize = 1;
+const PROFILE_MODE_STOPPED: usize = 2;
+const PROFILE_MODE_STARTING: usize = 3;
 private let mut profile_session_mode: AtomicWord;
 // Bumped at every start and stop; a core whose synced_epoch differs arms
 // or disarms on its next timer tick (or on leaving the world-stop pen).
 private let mut profile_session_epoch: AtomicWord;
-private let mut profile_session_period: usize = 0;
-private let mut profile_session_depth: usize = 0;
-private let mut profile_session_started: usize = 0;
-private let mut profile_session_stopped: usize = 0;
+// Period << PROFILE_SETTINGS_DEPTH_BITS | depth: one word, so a reader never
+// pairs one session's period with another's depth. Written only by the start
+// that holds PROFILE_MODE_STARTING.
+const PROFILE_SETTINGS_DEPTH_BITS: usize = 5;
+private let mut profile_session_settings: AtomicWord;
+private let mut profile_session_started: AtomicWord;
+private let mut profile_session_stopped: AtomicWord;
 
 private linear struct ProfileBufferGuard[lock: addr] {
     private flags: usize;
@@ -163,8 +172,25 @@ fn profile_session_sampling() -> bool {
     return atomic_word_load(&profile_session_mode) == 1;
 }
 
+// Any session, even one still building: the sampled interval keeps off the PMU.
 fn profile_session_exists() -> bool {
-    return atomic_word_load(&profile_session_mode) != 0;
+    return atomic_word_load(&profile_session_mode) != PROFILE_MODE_IDLE;
+}
+
+// Samples DDB may print. A start stopped mid-build has none: its writer owns
+// the buffers.
+fn profile_session_dumpable() -> bool {
+    let mode: usize = atomic_word_load(&profile_session_mode);
+    return mode == PROFILE_MODE_SAMPLING || mode == PROFILE_MODE_STOPPED;
+}
+
+private fn profile_session_period() -> usize {
+    return atomic_word_load(&profile_session_settings) >> PROFILE_SETTINGS_DEPTH_BITS;
+}
+
+private fn profile_session_depth() -> usize {
+    return atomic_word_load(&profile_session_settings) &
+        ((1 << PROFILE_SETTINGS_DEPTH_BITS) - 1);
 }
 
 // Give one core's buffer back to the page allocator.
@@ -179,16 +205,16 @@ private fn profile_core_release(cpu: {0..<KERNEL_MAX_CORES as usize}) !{unsafe} 
             let RegionBytes::Assumed(bytes) = region_into_bytes(records) else {};
             region_release(bytes);
             page_run_transferred_release_physical(
-                profile_core_state[cpu].base, profile_core_state[cpu].pages);
+                atomic_word_load(&profile_core_state[cpu].base), atomic_word_load(&profile_core_state[cpu].pages));
         }
     }
-    profile_core_state[cpu].pages = 0;
-    profile_core_state[cpu].base = 0;
-    profile_core_state[cpu].stored = 0;
-    profile_core_state[cpu].lost = 0;
-    profile_core_state[cpu].interrupts = 0;
-    profile_core_state[cpu].unbuffered = 0;
-    profile_core_state[cpu].arms = 0;
+    atomic_word_store(&profile_core_state[cpu].pages, 0);
+    atomic_word_store(&profile_core_state[cpu].base, 0);
+    atomic_word_store(&profile_core_state[cpu].stored, 0);
+    atomic_word_store(&profile_core_state[cpu].lost, 0);
+    atomic_word_store(&profile_core_state[cpu].interrupts, 0);
+    atomic_word_store(&profile_core_state[cpu].unbuffered, 0);
+    atomic_word_store(&profile_core_state[cpu].arms, 0);
 }
 
 // The smallest power-of-two page count holding `samples` records:
@@ -250,10 +276,10 @@ private fn profile_core_allocate(cpu: {0..<KERNEL_MAX_CORES as usize}, samples: 
                     region_release(old);
                 }
             }
-            profile_core_state[cpu].pages = pages;
-            profile_core_state[cpu].base = base;
-            profile_core_state[cpu].stored = 0;
-            profile_core_state[cpu].lost = 0;
+            atomic_word_store(&profile_core_state[cpu].pages, pages);
+            atomic_word_store(&profile_core_state[cpu].base, base);
+            atomic_word_store(&profile_core_state[cpu].stored, 0);
+            atomic_word_store(&profile_core_state[cpu].lost, 0);
             return true;
         }
     }
@@ -264,11 +290,14 @@ private fn profile_core_allocate(cpu: {0..<KERNEL_MAX_CORES as usize}, samples: 
 // Nothing samples while the buffers are made: the mode is published last.
 fn profile_session_start(period: usize, samples: usize, depth: usize)
         -> ProfileStartResult !{allocates, requires_mmu, unsafe} {
-    if (profile_sample_interval_active() ||
-            atomic_word_load(&profile_session_mode) == 1) {
+    if (pmu_sample_supported() != 1) { return ProfileStartResult::NoPmu; }
+    if (profile_sample_interval_active()) { return ProfileStartResult::Busy; }
+    if (atomic_word_compare_exchange(&profile_session_mode, PROFILE_MODE_IDLE,
+                                     PROFILE_MODE_STARTING) == false &&
+        atomic_word_compare_exchange(&profile_session_mode, PROFILE_MODE_STOPPED,
+                                     PROFILE_MODE_STARTING) == false) {
         return ProfileStartResult::Busy;
     }
-    if (pmu_sample_supported() != 1) { return ProfileStartResult::NoPmu; }
     for cpu: usize in 0..<KERNEL_MAX_CORES {
         profile_core_release(cpu);
     }
@@ -279,23 +308,24 @@ fn profile_session_start(period: usize, samples: usize, depth: usize)
                 for undo: usize in 0..<KERNEL_MAX_CORES {
                     profile_core_release(undo);
                 }
-                atomic_word_store(&profile_session_mode, 0);
+                atomic_word_store(&profile_session_mode, PROFILE_MODE_IDLE);
                 return ProfileStartResult::OutOfMemory(cpu);
             }
         }
     }
-    profile_session_period = period;
-    profile_session_depth = depth;
-    if (profile_session_depth > PROFILE_DEPTH_MAX) {
-        profile_session_depth = PROFILE_DEPTH_MAX;
-    }
-    if (profile_session_depth < 1) { profile_session_depth = 1; }
-    profile_session_started = read_cntpct() as usize;
-    profile_session_stopped = 0;
+    static_assert(PROFILE_DEPTH_MAX < (1 << PROFILE_SETTINGS_DEPTH_BITS),
+                  "the depth fits its field of the settings word");
+    let mut kept_depth: usize = depth;
+    if (kept_depth > PROFILE_DEPTH_MAX) { kept_depth = PROFILE_DEPTH_MAX; }
+    if (kept_depth < 1) { kept_depth = 1; }
+    atomic_word_store(&profile_session_settings,
+                      (period << PROFILE_SETTINGS_DEPTH_BITS) | kept_depth);
+    atomic_word_store(&profile_session_started, read_cntpct() as usize);
+    atomic_word_store(&profile_session_stopped, 0);
     irqsoff_reset();
     atomic_word_store(&profile_session_epoch,
                       atomic_word_load(&profile_session_epoch) + 1);
-    atomic_word_store(&profile_session_mode, 1);
+    atomic_word_store(&profile_session_mode, PROFILE_MODE_SAMPLING);
     return ProfileStartResult::Started;
 }
 
@@ -303,9 +333,11 @@ fn profile_session_start(period: usize, samples: usize, depth: usize)
 // already inside its interrupt on another core may still land; none starts
 // after. Counters are disarmed on each core's next tick.
 fn profile_session_stop() -> bool {
-    if (atomic_word_load(&profile_session_mode) != 1) { return false; }
-    profile_session_stopped = read_cntpct() as usize;
-    atomic_word_store(&profile_session_mode, 2);
+    if (atomic_word_compare_exchange(&profile_session_mode, PROFILE_MODE_SAMPLING,
+                                     PROFILE_MODE_STOPPED) == false) {
+        return false;
+    }
+    atomic_word_store(&profile_session_stopped, read_cntpct() as usize);
     atomic_word_store(&profile_session_epoch,
                       atomic_word_load(&profile_session_epoch) + 1);
     return true;
@@ -320,12 +352,12 @@ fn profile_session_sync() !{unsafe} {
     if (raw_cpu >= KERNEL_MAX_CORES) { return; }
     let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
     let epoch: usize = atomic_word_load(&profile_session_epoch);
-    if (profile_core_state[cpu].synced_epoch == epoch) { return; }
-    profile_core_state[cpu].synced_epoch = epoch;
+    if (atomic_word_load(&profile_core_state[cpu].synced_epoch) == epoch) { return; }
+    atomic_word_store(&profile_core_state[cpu].synced_epoch, epoch);
     if (atomic_word_load(&profile_session_mode) == 1 &&
-            profile_core_state[cpu].pages != 0) {
-        profile_core_state[cpu].arms = profile_core_state[cpu].arms + 1;
-        pmu_sample_start(profile_session_period);
+            atomic_word_load(&profile_core_state[cpu].pages) != 0) {
+        atomic_word_fetch_add(&profile_core_state[cpu].arms, 1);
+        pmu_sample_start(profile_session_period());
     } else if (profile_sample_interval_active() == false) {
         pmu_sample_stop();
     }
@@ -342,21 +374,21 @@ fn profile_session_irq(frame: borrow FrameRef[process, level]) !{interrupt, unsa
         return;
     }
     let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
-    profile_core_state[cpu].interrupts = profile_core_state[cpu].interrupts + 1;
+    atomic_word_fetch_add(&profile_core_state[cpu].interrupts, 1);
     // Read before the rearm resets it: how far past the overflow the
     // counter already is.
     let skid: usize = pmu_sample_counter();
-    pmu_sample_rearm(profile_session_period);
+    pmu_sample_rearm(profile_session_period());
     // Read the pid before the buffer lock: it takes the process pool lock
     // (rank 40), which must not nest inside profile_buffer (rank 90) (#789).
     let pid: usize = kernel_process_current_pid();
     let guard = profile_buffer_lock(&profile_core_store[cpu].mutex);
-    let stored: usize = profile_core_state[cpu].stored;
+    let stored: usize = atomic_word_load(&profile_core_state[cpu].stored);
     let taken = place_take(guard, &profile_core_store[cpu].mutex,
                            profile_core_store[cpu].buffer);
     match taken {
         Place::Empty => {
-            profile_core_state[cpu].unbuffered = profile_core_state[cpu].unbuffered + 1;
+            atomic_word_fetch_add(&profile_core_state[cpu].unbuffered, 1);
             profile_buffer_unlock(guard, &profile_core_store[cpu].mutex);
             return;
         }
@@ -364,9 +396,9 @@ fn profile_session_irq(frame: borrow FrameRef[process, level]) !{interrupt, unsa
             if (stored < region_count(records)) {
                 let record: &mut ProfileRecord = region_at(records, stored);
                 profile_record_fill(record, frame, skid, pid);
-                profile_core_state[cpu].stored = stored + 1;
+                atomic_word_store(&profile_core_state[cpu].stored, stored + 1);
             } else {
-                profile_core_state[cpu].lost = profile_core_state[cpu].lost + 1;
+                atomic_word_fetch_add(&profile_core_state[cpu].lost, 1);
             }
             let back = place_put(guard, &profile_core_store[cpu].mutex,
                                  profile_core_store[cpu].buffer, records);
@@ -494,11 +526,14 @@ const IRQSOFF_DEPTH: usize = 3;
 
 struct IrqsoffCore {
     // Counter value at the open, 0 when no span is open.
-    opened: usize;
-    longest: usize;
-    open_pcs: [usize; IRQSOFF_DEPTH];
-    longest_from: [usize; IRQSOFF_DEPTH];
-    longest_to: [usize; IRQSOFF_DEPTH];
+    opened: AtomicWord;
+    longest: AtomicWord;
+    // Odd while this core rewrites longest and its sites, so a reader on
+    // another core can tell a matched set (irqsoff_core_read).
+    version: AtomicWord;
+    open_pcs: [AtomicWord; IRQSOFF_DEPTH];
+    longest_from: [AtomicWord; IRQSOFF_DEPTH];
+    longest_to: [AtomicWord; IRQSOFF_DEPTH];
 }
 
 private let mut irqsoff_core: [IrqsoffCore; KERNEL_MAX_CORES];
@@ -518,19 +553,19 @@ private let mut irqsoff_core: [IrqsoffCore; KERNEL_MAX_CORES];
 const IRQSOFF_CLASS_SLOTS: usize = 8;
 
 struct IrqsoffClass {
-    ticks: usize;
-    sites: [usize; IRQSOFF_DEPTH];
+    ticks: AtomicWord;
+    sites: [AtomicWord; IRQSOFF_DEPTH];
 }
 
 struct IrqsoffStanding {
     // Counter value at the open, 0 when no span is open.
-    opened: usize;
-    longest: usize;
+    opened: AtomicWord;
+    longest: AtomicWord;
     // The smallest ticks in classes: a span must beat it to be walked.
-    floor: usize;
+    floor: AtomicWord;
     // The span being recorded, and the chain irqsoff_walk just wrote.
-    pending: usize;
-    scratch: [usize; IRQSOFF_DEPTH];
+    pending: AtomicWord;
+    scratch: [AtomicWord; IRQSOFF_DEPTH];
     classes: [IrqsoffClass; IRQSOFF_CLASS_SLOTS];
 }
 
@@ -592,9 +627,9 @@ private fn irqsoff_site_store(cpu: {0..<KERNEL_MAX_CORES as usize}, target: Irqs
     if (index >= IRQSOFF_DEPTH) { return; }
     let slot: {0..<IRQSOFF_DEPTH as usize} = index;
     match target {
-        IrqsoffSink::Open => { irqsoff_core[cpu].open_pcs[slot] = pc; }
-        IrqsoffSink::LongestTo => { irqsoff_core[cpu].longest_to[slot] = pc; }
-        IrqsoffSink::Standing => { irqsoff_standing[cpu].scratch[slot] = pc; }
+        IrqsoffSink::Open => { atomic_word_store(&irqsoff_core[cpu].open_pcs[slot], pc); }
+        IrqsoffSink::LongestTo => { atomic_word_store(&irqsoff_core[cpu].longest_to[slot], pc); }
+        IrqsoffSink::Standing => { atomic_word_store(&irqsoff_standing[cpu].scratch[slot], pc); }
     }
 }
 
@@ -616,8 +651,8 @@ fn irqsoff_open() !{unsafe} {
                      caller_stack_address());
     }
     let now: usize = mrs_cntpct_el0();
-    if (profiling) { irqsoff_core[cpu].opened = now; }
-    if (standing) { irqsoff_standing[cpu].opened = now; }
+    if (profiling) { atomic_word_store(&irqsoff_core[cpu].opened, now); }
+    if (standing) { atomic_word_store(&irqsoff_standing[cpu].opened, now); }
 }
 
 // Called by the matching restore just before it unmasks. A span opened
@@ -638,16 +673,18 @@ fn irqsoff_close() !{unsafe} {
         }
     }
     if (profiling == false) { return; }
-    let opened: usize = irqsoff_core[cpu].opened;
+    let opened: usize = atomic_word_load(&irqsoff_core[cpu].opened);
     if (opened == 0) { return; }
-    irqsoff_core[cpu].opened = 0;
-    if (now >= opened && now - opened > irqsoff_core[cpu].longest) {
-        irqsoff_core[cpu].longest = now - opened;
+    atomic_word_store(&irqsoff_core[cpu].opened, 0);
+    if (now >= opened && now - opened > atomic_word_load(&irqsoff_core[cpu].longest)) {
+        atomic_word_fetch_add(&irqsoff_core[cpu].version, 1);
+        atomic_word_store(&irqsoff_core[cpu].longest, now - opened);
         for slot: usize in 0..<IRQSOFF_DEPTH {
-            irqsoff_core[cpu].longest_from[slot] = irqsoff_core[cpu].open_pcs[slot];
+            atomic_word_store(&irqsoff_core[cpu].longest_from[slot], atomic_word_load(&irqsoff_core[cpu].open_pcs[slot]));
         }
         irqsoff_walk(cpu, IrqsoffSink::LongestTo, caller_frame_address(),
                      caller_stack_address());
+        atomic_word_fetch_add(&irqsoff_core[cpu].version, 1);
     }
 }
 
@@ -655,16 +692,16 @@ fn irqsoff_close() !{unsafe} {
 // floor, so the caller walks the closing chain and records it.
 private fn irqsoff_standing_close(cpu: {0..<KERNEL_MAX_CORES as usize},
                                   now: usize) -> bool {
-    let opened: usize = irqsoff_standing[cpu].opened;
+    let opened: usize = atomic_word_load(&irqsoff_standing[cpu].opened);
     if (opened == 0) { return false; }
-    irqsoff_standing[cpu].opened = 0;
+    atomic_word_store(&irqsoff_standing[cpu].opened, 0);
     if (now < opened) { return false; }
     let span: usize = now - opened;
-    if (span > irqsoff_standing[cpu].longest) {
-        irqsoff_standing[cpu].longest = span;
+    if (span > atomic_word_load(&irqsoff_standing[cpu].longest)) {
+        atomic_word_store(&irqsoff_standing[cpu].longest, span);
     }
-    if (span <= irqsoff_standing[cpu].floor) { return false; }
-    irqsoff_standing[cpu].pending = span;
+    if (span <= atomic_word_load(&irqsoff_standing[cpu].floor)) { return false; }
+    atomic_word_store(&irqsoff_standing[cpu].pending, span);
     return true;
 }
 
@@ -672,40 +709,39 @@ private fn irqsoff_standing_close(cpu: {0..<KERNEL_MAX_CORES as usize},
 // class with it, then recompute the floor. An empty class has ticks 0, so
 // it is the smallest until the table is full.
 private fn irqsoff_standing_record(cpu: {0..<KERNEL_MAX_CORES as usize}) {
-    let span: usize = irqsoff_standing[cpu].pending;
+    let span: usize = atomic_word_load(&irqsoff_standing[cpu].pending);
     let mut smallest: {0..<IRQSOFF_CLASS_SLOTS as usize} = 0;
     let mut matched: bool = false;
     for slot: usize in 0..<IRQSOFF_CLASS_SLOTS {
-        let mut same: bool = irqsoff_standing[cpu].classes[slot].ticks != 0;
+        let mut same: bool = atomic_word_load(&irqsoff_standing[cpu].classes[slot].ticks) != 0;
         for site: usize in 0..<IRQSOFF_DEPTH {
-            if (irqsoff_standing[cpu].classes[slot].sites[site] !=
-                irqsoff_standing[cpu].scratch[site]) { same = false; }
+            if (atomic_word_load(&irqsoff_standing[cpu].classes[slot].sites[site]) !=
+                atomic_word_load(&irqsoff_standing[cpu].scratch[site])) { same = false; }
         }
         if (same) {
             matched = true;
-            if (span > irqsoff_standing[cpu].classes[slot].ticks) {
-                irqsoff_standing[cpu].classes[slot].ticks = span;
+            if (span > atomic_word_load(&irqsoff_standing[cpu].classes[slot].ticks)) {
+                atomic_word_store(&irqsoff_standing[cpu].classes[slot].ticks, span);
             }
         }
-        if (irqsoff_standing[cpu].classes[slot].ticks <
-            irqsoff_standing[cpu].classes[smallest].ticks) {
+        if (atomic_word_load(&irqsoff_standing[cpu].classes[slot].ticks) <
+            atomic_word_load(&irqsoff_standing[cpu].classes[smallest].ticks)) {
             smallest = slot;
         }
     }
     if (matched == false) {
-        irqsoff_standing[cpu].classes[smallest].ticks = span;
+        atomic_word_store(&irqsoff_standing[cpu].classes[smallest].ticks, span);
         for site: usize in 0..<IRQSOFF_DEPTH {
-            irqsoff_standing[cpu].classes[smallest].sites[site] =
-                irqsoff_standing[cpu].scratch[site];
+            atomic_word_store(&irqsoff_standing[cpu].classes[smallest].sites[site], atomic_word_load(&irqsoff_standing[cpu].scratch[site]));
         }
     }
-    let mut floor: usize = irqsoff_standing[cpu].classes[0].ticks;
+    let mut floor: usize = atomic_word_load(&irqsoff_standing[cpu].classes[0].ticks);
     for slot: usize in 0..<IRQSOFF_CLASS_SLOTS {
-        if (irqsoff_standing[cpu].classes[slot].ticks < floor) {
-            floor = irqsoff_standing[cpu].classes[slot].ticks;
+        if (atomic_word_load(&irqsoff_standing[cpu].classes[slot].ticks) < floor) {
+            floor = atomic_word_load(&irqsoff_standing[cpu].classes[slot].ticks);
         }
     }
-    irqsoff_standing[cpu].floor = floor;
+    atomic_word_store(&irqsoff_standing[cpu].floor, floor);
 }
 
 // The cost probe's switch (tcp_connection_contention_evidence.tkb): its
@@ -723,24 +759,24 @@ fn irqsoff_standing_pause(paused: bool) {
 fn irqsoff_standing_log() !{unsafe} {
     atomic_word_store(&irqsoff_standing_stopped, 1);
     for cpu: usize in 0..<KERNEL_MAX_CORES {
-        if (irqsoff_standing[cpu].longest != 0) {
+        if (atomic_word_load(&irqsoff_standing[cpu].longest) != 0) {
             kernel_boot_log("RECORDED irqsoff: cpu=");
             uart_put_udec(cpu);
             kernel_boot_log(" longest=");
-            uart_put_udec(irqsoff_standing[cpu].longest);
+            uart_put_udec(atomic_word_load(&irqsoff_standing[cpu].longest));
             kernel_boot_log(" freq=");
             uart_put_udec(read_cntfrq() as usize);
             kernel_boot_log("\n");
             for slot: usize in 0..<IRQSOFF_CLASS_SLOTS {
-                if (irqsoff_standing[cpu].classes[slot].ticks != 0) {
+                if (atomic_word_load(&irqsoff_standing[cpu].classes[slot].ticks) != 0) {
                     kernel_boot_log("RECORDED irqsoff class: cpu=");
                     uart_put_udec(cpu);
                     kernel_boot_log(" ticks=");
-                    uart_put_udec(irqsoff_standing[cpu].classes[slot].ticks);
+                    uart_put_udec(atomic_word_load(&irqsoff_standing[cpu].classes[slot].ticks));
                     kernel_boot_log(" to");
                     for site: usize in 0..<IRQSOFF_DEPTH {
                         kernel_boot_log(" ");
-                        uart_put_hex(irqsoff_standing[cpu].classes[slot].sites[site]);
+                        uart_put_hex(atomic_word_load(&irqsoff_standing[cpu].classes[slot].sites[site]));
                     }
                     kernel_boot_log("\n");
                 }
@@ -749,29 +785,42 @@ fn irqsoff_standing_log() !{unsafe} {
     }
 }
 
-fn irqsoff_core_longest(cpu: {0..<KERNEL_MAX_CORES as usize}) -> usize {
-    return irqsoff_core[cpu].longest;
+// One core's longest span with its own sites: longest ticks, then where it
+// began and where it ended, innermost first; 0 when the walk stopped before it.
+struct IrqsoffRead {
+    longest: usize;
+    from: [usize; IRQSOFF_DEPTH];
+    to: [usize; IRQSOFF_DEPTH];
 }
 
-// Where the longest span began (`to` false) or ended (`to` true): return
-// address `slot` of the caller chain, innermost first; 0 when the walk
-// stopped before it.
-fn irqsoff_core_site(cpu: {0..<KERNEL_MAX_CORES as usize}, to: bool,
-                     slot: {0..<IRQSOFF_DEPTH as usize}) -> usize {
-    if (to) { return irqsoff_core[cpu].longest_to[slot]; }
-    return irqsoff_core[cpu].longest_from[slot];
+// A bounded number of tries: a core that keeps beating its own longest wins, and
+// the last try's mixed set is then what is shown, as a diagnostic may.
+fn irqsoff_core_read(cpu: {0..<KERNEL_MAX_CORES as usize}) -> IrqsoffRead {
+    let mut out: IrqsoffRead = { 0, { 0, 0, 0 }, { 0, 0, 0 } };
+    for attempt: usize in 0..<8 {
+        let before: usize = atomic_word_load(&irqsoff_core[cpu].version);
+        out.longest = atomic_word_load(&irqsoff_core[cpu].longest);
+        for slot: usize in 0..<IRQSOFF_DEPTH {
+            out.from[slot] = atomic_word_load(&irqsoff_core[cpu].longest_from[slot]);
+            out.to[slot] = atomic_word_load(&irqsoff_core[cpu].longest_to[slot]);
+        }
+        if ((before & 1) == 0 && atomic_word_load(&irqsoff_core[cpu].version) == before) {
+            return out;
+        }
+    }
+    return out;
 }
 
 // A new session starts every core's record afresh. No core opens or closes
 // a span meanwhile: the mode is not 1 until the caller publishes it.
 private fn irqsoff_reset() {
     for cpu: usize in 0..<KERNEL_MAX_CORES {
-        irqsoff_core[cpu].opened = 0;
-        irqsoff_core[cpu].longest = 0;
+        atomic_word_store(&irqsoff_core[cpu].opened, 0);
+        atomic_word_store(&irqsoff_core[cpu].longest, 0);
         for slot: usize in 0..<IRQSOFF_DEPTH {
-            irqsoff_core[cpu].open_pcs[slot] = 0;
-            irqsoff_core[cpu].longest_from[slot] = 0;
-            irqsoff_core[cpu].longest_to[slot] = 0;
+            atomic_word_store(&irqsoff_core[cpu].open_pcs[slot], 0);
+            atomic_word_store(&irqsoff_core[cpu].longest_from[slot], 0);
+            atomic_word_store(&irqsoff_core[cpu].longest_to[slot], 0);
         }
     }
 }
@@ -781,15 +830,15 @@ fn profile_session_mode_now() -> usize {
     return atomic_word_load(&profile_session_mode);
 }
 
-fn profile_session_period_now() -> usize { return profile_session_period; }
-fn profile_session_depth_now() -> usize { return profile_session_depth; }
+fn profile_session_period_now() -> usize { return profile_session_period(); }
+fn profile_session_depth_now() -> usize { return profile_session_depth(); }
 
 fn profile_session_core_stored(cpu: {0..<KERNEL_MAX_CORES as usize}) -> usize {
-    return profile_core_state[cpu].stored;
+    return atomic_word_load(&profile_core_state[cpu].stored);
 }
 
 fn profile_session_core_lost(cpu: {0..<KERNEL_MAX_CORES as usize}) -> usize {
-    return profile_core_state[cpu].lost;
+    return atomic_word_load(&profile_core_state[cpu].lost);
 }
 
 // Walk stop reasons, as the host prints them.
@@ -823,7 +872,7 @@ private fn profile_record_fill(record: borrow &mut ProfileRecord,
         let mut fp: usize = frame_general(frame, 29);
         let mut walking: bool = fp != 0;
         while (walking) {
-            if (frames >= profile_session_depth || frames >= PROFILE_DEPTH_MAX) {
+            if (frames >= profile_session_depth() || frames >= PROFILE_DEPTH_MAX) {
                 record.stop = PROFILE_STOP_DEPTH;
                 walking = false;
             } else {
@@ -916,15 +965,15 @@ private fn profile_put_udec(value_in: usize) {
 //   profile-session: sample cpu=C t=HEX pid=P el=0|1 skid=N stop=S pcs=HEX,HEX,...
 fn profile_session_dump() !{unsafe} {
     profile_puts(bs"profile-session: begin period=");
-    profile_put_udec(profile_session_period);
+    profile_put_udec(profile_session_period());
     profile_puts(bs" depth=");
-    profile_put_udec(profile_session_depth);
+    profile_put_udec(profile_session_depth());
     profile_puts(bs" mode=");
     profile_put_udec(atomic_word_load(&profile_session_mode));
     profile_puts(bs" started=");
-    profile_put_udec(profile_session_started);
+    profile_put_udec(atomic_word_load(&profile_session_started));
     profile_puts(bs" stopped=");
-    profile_put_udec(profile_session_stopped);
+    profile_put_udec(atomic_word_load(&profile_session_stopped));
     profile_puts(bs" cntfrq=");
     profile_put_udec(read_cntfrq() as usize);
     profile_puts(bs"\n");
@@ -945,7 +994,7 @@ fn profile_session_dump() !{unsafe} {
                 profile_buffer_try_unlock(guard, &profile_core_store[cpu].mutex);
             }
             Place::Full(records) => {
-                let stored: usize = profile_core_state[cpu].stored;
+                let stored: usize = atomic_word_load(&profile_core_state[cpu].stored);
                 let count: usize = region_count(records);
                 let mut index: usize = 0;
                 for slot: usize in 0..<count {
@@ -955,21 +1004,21 @@ fn profile_session_dump() !{unsafe} {
                     }
                 }
                 total = total + index;
-                lost = lost + profile_core_state[cpu].lost;
+                lost = lost + atomic_word_load(&profile_core_state[cpu].lost);
                 profile_puts(bs"profile-session: core cpu=");
                 profile_put_udec(cpu);
                 profile_puts(bs" stored=");
                 profile_put_udec(index);
                 profile_puts(bs" lost=");
-                profile_put_udec(profile_core_state[cpu].lost);
+                profile_put_udec(atomic_word_load(&profile_core_state[cpu].lost));
                 profile_puts(bs" capacity=");
                 profile_put_udec(count);
                 profile_puts(bs" interrupts=");
-                profile_put_udec(profile_core_state[cpu].interrupts);
+                profile_put_udec(atomic_word_load(&profile_core_state[cpu].interrupts));
                 profile_puts(bs" unbuffered=");
-                profile_put_udec(profile_core_state[cpu].unbuffered);
+                profile_put_udec(atomic_word_load(&profile_core_state[cpu].unbuffered));
                 profile_puts(bs" arms=");
-                profile_put_udec(profile_core_state[cpu].arms);
+                profile_put_udec(atomic_word_load(&profile_core_state[cpu].arms));
                 profile_puts(bs"\n");
                 let back = place_put(guard, &profile_core_store[cpu].mutex,
                                      profile_core_store[cpu].buffer, records);
@@ -1024,9 +1073,9 @@ private fn profile_record_print(cpu: usize, record: borrow &mut ProfileRecord) {
 }
 
 // GitHub issue #479's coverage rule: what makes this file's mutable globals
-// safe. The mode, epoch, period, depth and timestamps are written only by
-// DDB with every other core stopped, and read by the sample interrupt with
-// its own IRQs masked; a core cannot be in its interrupt while it is in the
-// pen. The per-core state is PARTITIONED: an element is written by its own
-// core's interrupt, or by DDB while that core is stopped. The buffers are
+// safe. The mode, epoch, settings and timestamps are AtomicWords; a /proc/takibi/profile
+// writer or DDB claims a start or a stop by compare-and-swap of the mode (#1315),
+// and the sample interrupt reads them with its own IRQs masked. The per-core
+// state is AtomicWords too: an element is written by its own core's interrupt,
+// by the start that holds the mode, or by DDB while that core is stopped. The buffers are
 // places under their core's lock (see the header).

@@ -149,13 +149,6 @@ kernel/kernel/profile_samples.tkb	profile_sample_end_counter	read-by profile_sam
 kernel/kernel/profile_samples.tkb	profile_sample_end_gic	read-by profile_sample_report: 2026-10-31 stop: as profile_sample_end_counter
 kernel/kernel/profile_samples.tkb	profile_sample_end_pending	read-by profile_sample_report: 2026-10-31 stop: as profile_sample_end_counter
 kernel/kernel/profile_samples.tkb	profile_sample_end_state	read-by profile_sample_report: 2026-10-31 stop: as profile_sample_end_counter
-kernel/kernel/profile_session.tkb	irqsoff_core	unreviewed; 2026-10-31 migrate to per_cpu, cross-core reads under a stop: procfs reads a live core's longest and its sites, so a task sees a mismatched pair
-kernel/kernel/profile_session.tkb	irqsoff_standing	unreviewed; 2026-10-31 migrate to per_cpu, cross-core reads under a stop: the boot report prints live peers' tables, as its comment admits
-kernel/kernel/profile_session.tkb	profile_core_state	unreviewed; 2026-10-31 migrate to lock (profile_core_store's buffer mutex, which already exists): a task allocates and releases any core's fields while that core's tick and IRQ use them
-kernel/kernel/profile_session.tkb	profile_session_depth	unreviewed; 2026-10-31 migrate to lock, with profile_session_period: procfs and the sample IRQ read a pair the start writes in several stores
-kernel/kernel/profile_session.tkb	profile_session_period	unreviewed; 2026-10-31 migrate to lock (a session control mutex): written by /proc/takibi/profile writers, no lock, the file comment saying DDB only is stale; two writers race today
-kernel/kernel/profile_session.tkb	profile_session_started	unreviewed; 2026-10-31 migrate to lock, with profile_session_period
-kernel/kernel/profile_session.tkb	profile_session_stopped	unreviewed; 2026-10-31 migrate to lock, with profile_session_period: started and stopped are one record
 kernel/kernel/profile_timeline.tkb	profile_timeline_active	read-by profile_timeline_note: 2026-10-31 stop: written under the workload interval's stop; tested with IRQs masked
 kernel/kernel/profile_timeline.tkb	profile_timeline_cores	read-by profile_timeline_note,profile_timeline_report: 2026-10-31 partition: own element with IRQs masked, so no preemption between cpu_id and the store; the report reads after the interval
 kernel/kernel/profile_timeline.tkb	profile_timeline_pid_a	read-by profile_timeline_pid_relevant: 2026-10-31 stop: set by the start under the stop, before the flag
