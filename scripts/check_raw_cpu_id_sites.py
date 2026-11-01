@@ -69,8 +69,8 @@ LISTED = {
     "kernel/platform/rpi5/intc.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/platform/rpi5/xhci_irq_affinity.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/printk/console_lock.tkb": (1, FLIP, "not yet reviewed for migration"),
-    "kernel/printk/log.tkb": (5, FLIP, "not yet reviewed for migration"),
-    "kernel/printk/log_ring_trace.tkb": (3, FLIP, "not yet reviewed for migration"),
+    "kernel/printk/log.tkb": (4, FLIP, "not yet reviewed for migration"),
+    "kernel/printk/log_ring_trace.tkb": (1, FLIP, "picks the buffer an event goes to; its slot is one fetch_add (#1159)"),
 }
 
 
