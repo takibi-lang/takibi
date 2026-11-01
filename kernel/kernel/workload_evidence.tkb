@@ -2165,11 +2165,12 @@ fn workload_peer_mutation_report() -> usize {
 // this CPU has no usable counters or the call was refused.
 fn workload_move_cost_progress(phase: usize, round: usize, cold: usize)
         -> usize !{unsafe} {
-    let raw_cpu: usize = cpu_id();
-    if (raw_cpu >= KERNEL_MAX_CORES) { return 0; }
     if (phase == MOVE_COST_SUMMARY) { return workload_move_cost_report(); }
     if (pmu_count_supported() == 0) { return 0; }
     preempt_off (cpu) {
+        // Inside the region, so the tick count and the record name this CPU
+        // (#1316).
+        let raw_cpu: usize = cpu_id();
         if (phase == MOVE_COST_BEGIN) {
             pmu_count_start();
             let guard = process_run_lock();

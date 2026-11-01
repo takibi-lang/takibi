@@ -2785,11 +2785,8 @@ fn process_image_gap_is_unmapped(pages: borrow ProcessImagePages[image]) -> bool
 // The ext2 exec staging is not per-core: it is a slot of the
 // ProcessImageSlot pool above, so it would survive preemption as it is.
 //
-// The missing-record fallback and its count are per-core, so one core cannot
-// overwrite another core's failure record.
-//
-// The stale-root fallback count is per-core too, summed for the boot
-// diagnostic.
+// The fallback counts are AtomicWords (#1316 re-read this; they were per-core
+// read-modify-writes when the assertion below was first written).
 //
 // The pool initializer is shared but not concurrent: secondary-core startup
 // calls process_image_pool_init_before_secondary() before PSCI can make core 1
@@ -2798,7 +2795,7 @@ fn process_image_gap_is_unmapped(pages: borrow ProcessImagePages[image]) -> bool
 // completion before another process can overwrite the same slot.
 fn process_image_execution_model_assumption() {
     static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "process_image's per-CPU fallback counters are a read-modify-write of this CPU's element; before KERNEL_PREEMPTIBLE is 1 they must be per_cpu stores or atomic (GitHub issue #638)");
+                  "process_image's operation records assume a kernel path runs to completion on its core; review at the preemption flip (GitHub issue #638)");
 }
 
 // Samples allocator metadata while holding only this pool allocation guard.

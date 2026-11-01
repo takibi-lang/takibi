@@ -5810,6 +5810,12 @@ fn kernel_process_trace_record(event: usize, pid: usize, generation: usize,
     // the interrupt-versus-thread reservation above still works unchanged
     // and needs no atomic. The SEQUENCE is shared and does, and it is a
     // fetch-add returning the previous value.
+    //
+    // GitHub issue #1316: callers include task context with IRQs on (exit,
+    // exec commit). The mask holds the task on this CPU from choosing the
+    // segment to the last word, so a preempted writer cannot move and write
+    // into a peer's segment, whose counter only that peer may advance.
+    let irq_was_masked: usize = irq_save();
     let cpu: {0..<KERNEL_MAX_CORES as usize} = kernel_crash_trace_cpu();
     let sequence: usize =
         atomic_word_fetch_add(&kernel_crash_trace_sequence, 1) + 1;
@@ -5834,6 +5840,7 @@ fn kernel_process_trace_record(event: usize, pid: usize, generation: usize,
     kernel_crash_trace[base + KERNEL_PROCESS_TRACE_SAVED_SP_WORD] = saved_sp;
     kernel_crash_trace[base + KERNEL_PROCESS_TRACE_AUX_WORD] = aux;
     kernel_crash_trace[base + KERNEL_PROCESS_TRACE_SEQUENCE_WORD] = sequence;
+    mutex_irq_restore(irq_was_masked);
 }
 
 fn kernel_process_trace_enable() { atomic_word_store(&kernel_process_trace_enabled, 1); }

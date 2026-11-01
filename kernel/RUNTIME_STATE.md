@@ -186,10 +186,7 @@ section's entries stopped being plain unsynchronized globals:
 
 No image context remains; the ext2 staging an exec holds across its reads is a slot of the `ProcessImageSlot` pool.
 Target/source readers match the closed stored state before extracting its
-descriptor. `KERNEL_PREEMPTIBLE == 0` still protects the target root from
-same-core interleaving; it is per-current-task state and must move into the
-process record (or be saved at context switch) before the kernel is made
-preemptible.
+descriptor. The target root is a parameter, so preemption cannot interleave it.
 
 The last two are the distinction this section should keep: five subsystems
 this week were missing exclusion, and three were not shared at all. A lock
@@ -338,13 +335,12 @@ issues #281 and #208 are ordered against, and a lost increment would
 understate the number a change is judged by.
 
 `drivers/block/block_cache.tkb` is the block layer's read cache (GitHub issue
-#208), and it is per core for the same reason: sixteen 1 KiB slots for each
-core, sized by `KERNEL_MAX_CORES` and indexed by the `cpu_id()` that
-`block_read` and `block_write` pass in.
-What one core writes reaches the other through a write epoch. The epoch is
-the sum of the per-core write counts, each written only by its own core. A
-slot is valid only while the epoch it was filled at is still the current one.
-`memory.tkb` asserts `KERNEL_PREEMPTIBLE == 0` beside its only caller.
+#208): sixteen 1 KiB entries per `BlockSlot`, a pool of `KERNEL_MAX_CORES`
+slots whose acquire tries the `cpu_id()` slot first as a locality hint only;
+the compare-exchange gives exclusivity, and the slot is kept across
+preemption (#638). What one slot's holder writes reaches the others through
+a write epoch, the sum of the per-slot atomic write counts. An entry is valid
+only while the epoch it was filled at is still the current one.
 
 The device under all of that is NOT per core, and `memory.tkb`'s
 `block_device_lock` is what makes it safe (GitHub issue #533). Virtio-blk

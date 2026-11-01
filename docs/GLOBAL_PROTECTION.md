@@ -173,6 +173,17 @@ migration log below records the ones gone. Of the six the preemption flip breaks
 first, by selecting an element or a role by `cpu_id()` in task context with IRQs
 on, `kernel_log_core_state` stays listed with its premise, by decision.
 
+## Re-audit against the flip, 2026-11-01 (#1316)
+
+All 262 rows, asking of each whether a task-context access with IRQs on can see
+it torn or pick an element by `cpu_id()` and move. Two rows the flip still breaks
+read `FLIP BREAKS` in their cells: `execution_state`, which has no owner yet, and
+`kernel_activity`. `kernel_crash_trace` and `kernel_crash_trace_next` were broken
+too and now record with IRQs masked. The other rows' stated premises were read,
+by families and not by a proof of each caller; they stay unchecked claims. The
+findings table, including what the `KERNEL_PREEMPTIBLE` assertions still depend
+on, is on #1316.
+
 ## Measured, 2026-10-29
 
 Both kernels, 712 production `let mut` globals (711 before #1172 added one AtomicWord): atomic 132, composite 53,
