@@ -294,8 +294,8 @@ file's comment lines are not rows.
   lock for the session, but DDB and the sample interrupt cannot wait for one, so a
   writer claims a start or a stop by compare-and-swap of `profile_session_mode`,
   with a new state 3 while a start builds (#1315), and the period and depth are one
-  `AtomicWord`. `profile_core_state`, `irqsoff_core` and `irqsoff_standing` are
-  `AtomicWord` fields; a version word gives procfs a matched longest and sites. The
-  boot report still reads `irqsoff_standing`'s peers live, so a class can pair a
-  tick with another's sites for a core inside its close; each word is untorn. 268
-  -> 261 unprotected, with `kernel_log_core_state` reviewed. No row is unreviewed.
+  `AtomicWord`. `profile_core_state` and `irqsoff_core` are `AtomicWord` fields; a
+  version word gives procfs a matched longest and sites. `irqsoff_standing` stays a
+  reviewed row: on every outermost mask, release stores took the RPi5 lock pair to
+  101.1 ns against the 100 ns ceiling, and no relaxed store exists. 268 -> 262
+  unprotected, with `kernel_log_core_state` reviewed. No row is unreviewed.

@@ -149,6 +149,7 @@ kernel/kernel/profile_samples.tkb	profile_sample_end_counter	read-by profile_sam
 kernel/kernel/profile_samples.tkb	profile_sample_end_gic	read-by profile_sample_report: 2026-10-31 stop: as profile_sample_end_counter
 kernel/kernel/profile_samples.tkb	profile_sample_end_pending	read-by profile_sample_report: 2026-10-31 stop: as profile_sample_end_counter
 kernel/kernel/profile_samples.tkb	profile_sample_end_state	read-by profile_sample_report: 2026-10-31 stop: as profile_sample_end_counter
+kernel/kernel/profile_session.tkb	irqsoff_standing	read-by irqsoff_standing_log,irqsoff_standing_record: 2026-11-01 partition: own element with IRQs masked; plain because a release store per pair breaks the lock pair ceiling; the boot report reads peers after the stop, a core inside its close may still write
 kernel/kernel/profile_timeline.tkb	profile_timeline_active	read-by profile_timeline_note: 2026-10-31 stop: written under the workload interval's stop; tested with IRQs masked
 kernel/kernel/profile_timeline.tkb	profile_timeline_cores	read-by profile_timeline_note,profile_timeline_report: 2026-10-31 partition: own element with IRQs masked, so no preemption between cpu_id and the store; the report reads after the interval
 kernel/kernel/profile_timeline.tkb	profile_timeline_pid_a	read-by profile_timeline_pid_relevant: 2026-10-31 stop: set by the start under the stop, before the flag
