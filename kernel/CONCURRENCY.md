@@ -55,9 +55,9 @@ The authority that disables preemption is a region,
 rejects a region from which `may_block` is reachable, with the same
 reachability rule that keeps blocking out of interrupt handlers, and keeps
 the `CpuHere` inside the region: no function outside the mint file returns
-one, and none returns one from a region. The region is sugar over a linear
-`PreemptOff` token, which a later step exposes for regions that are not
-lexical, such as a lock guard (#789). The region raises this CPU's preempt
+one, and none returns one from a region. The region is the lexical form of
+the linear `PreemptOff` token that lifecycle spans hold, described below
+(#1323). The region raises this CPU's preempt
 count on entry and lowers it on every exit, the compiler placing the
 exits (stage 2, 2026-10-25); the count is reached through TPIDR_EL1, so a
 place with no `CpuHere` can read it. Every blocking leaf (the interrupt
