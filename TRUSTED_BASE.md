@@ -297,7 +297,7 @@ rules globally.
   took off. (c) Ownership transitions (`dma_begin_*`,
   `dma_finish_owned_*`): the #740 capability split itself; the finishing
   calls are already confined per function by
-  `scripts/check_dma_mint_files.py`, so counting them would duplicate that
+  `scripts/allowed_callers.tsv`, so counting them would duplicate that
   list.
 - Translation system intrinsics (GitHub issue #1028). `tlbi_vae1is` and
   `tlbi_aside1is` (an operand selecting a VA or ASID) and `msr_ttbr0_el1`,
@@ -315,7 +315,8 @@ rules globally.
   Device tokens, so the checker rejects CPU access while the device may
   use the buffer. What stays trusted is the observation that returns
   ownership: `dma_finish_owned_rx`/`_tx` compile only in the record's
-  declaring file, and `scripts/check_dma_mint_files.py` fixes which functions
+  declaring file, `scripts/check_dma_mint_files.py` fixes which files may
+  declare a record, and `scripts/allowed_callers.tsv` fixes which functions
   there may call them and which device observation each trusts (descriptor
   ownership bits, a used-ring advance, a reset read back, GEM's halt report).
   The compiler-created owner slot starts with the one CPU token.

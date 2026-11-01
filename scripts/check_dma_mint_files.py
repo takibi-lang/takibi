@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-"""Hold the fixed-DMA mint sites to a reviewed list (GitHub issues #716, #717).
+"""Hold the fixed-DMA records to a reviewed list of files (#716, #717).
 
 The compiler accepts dma_finish_owned_rx/_tx only in the file that declares
 the record, which makes that file the trusted claim that the device is done.
 It cannot see whether the file stays small: declaring a record in a large
-driver file, or adding a new finishing function to a mint file, would widen
-the trusted code without any compile error. This check fixes both, and
-the files it names are the ones #637 is to add to its mint-file list:
+driver file would widen the trusted code without any compile error. So every
+`struct dma_fixed` record is declared in a listed mint file, and a listed file
+still declares one. A change to the list is a review of the trusted claim.
 
-  * every `struct dma_fixed` record is declared in a listed mint file;
-  * every function that calls a finish builtin is listed for its file.
-
-A change to either list is a review of the trusted claim, made here.
+Which functions in those files may call a finish builtin, and the observation
+each trusts, are rows of scripts/allowed_callers.tsv, read against the
+compiler's call-graph table (#1261).
 """
 
 import re
@@ -19,54 +18,18 @@ import sys
 from pathlib import Path
 
 from pass_line import report_pass
-from source_scan import code_only, function_header, per_file
 
 ROOT = Path(__file__).resolve().parent.parent
 KERNEL = ROOT / "kernel"
 
-# file -> functions that may return device ownership to the CPU, each with
-# the observation it trusts (the file header says the same).
-MINT_SITES = {
-    "kernel/drivers/block/virtio_blk_dma.tkb": {
-        "virtio_blk_receive_settle_used": "used ring advanced",
-        "virtio_blk_receive_settle_reset": "status read back zero",
-        "virtio_blk_request_settle": "called only after one of the above",
-        "virtio_blk_data_settle": "called only after one of the above",
-    },
-    "kernel/platform/rpi5/usb_xhci_dma.tkb": {
-        "xhci_receive_configuration": "final Transfer Event or HCHalted",
-        "msc_data_receive_once": "final Transfer Event or HCHalted",
-        "msc_csw_receive_once": "final Transfer Event or HCHalted",
-        "msc_cbw_send_once": "final Transfer Event or HCHalted",
-        "msc_data_send_once": "final Transfer Event or HCHalted",
-    },
-}
+MINT_FILES = (
+    "kernel/drivers/block/virtio_blk_dma.tkb",
+    "kernel/platform/rpi5/usb_xhci_dma.tkb",
+)
 # A standalone fixture that is never linked into a kernel.
 EXCLUDED = (KERNEL / "tests" / "debug_return_abi", KERNEL / "build")
 
 RECORD = re.compile(r"^\s*struct\s+dma_fixed\s+(\w+)", re.M)
-FUNCTION = function_header()
-FINISH = re.compile(r"\bdma_finish_owned_(?:rx|tx)\s*\(")
-
-
-@per_file
-def finishing_functions(text):
-    """Names of the functions whose bodies call a finish builtin.
-    GitHub issue #823: cached per text, and a file that never names a finish
-    builtin is skipped before the comment strip and the function split
-    (blanking comments only removes matches, never adds one); scanning every
-    kernel file four times went over the fast gate's 10 s under host load."""
-    if not FINISH.search(text):
-        return frozenset()
-    found = set()
-    text = code_only(text)  # GitHub issue #818: block comments too
-    starts = [(m.start(), m.group(1)) for m in FUNCTION.finditer(text)]
-    for index, (start, name) in enumerate(starts):
-        end = starts[index + 1][0] if index + 1 < len(starts) else len(text)
-        body = text[start:end]
-        if FINISH.search(body):
-            found.add(name)
-    return frozenset(found)
 
 
 def problems_in(files):
@@ -74,25 +37,18 @@ def problems_in(files):
     problems = []
     for path, text in sorted(files.items()):
         records = RECORD.findall(text)
-        if records and path not in MINT_SITES:
+        if records and path not in MINT_FILES:
             problems.append(
                 f"{path} declares fixed DMA record(s) {', '.join(records)} "
                 "but is not a listed mint file: the whole file would become "
                 "trusted to return device ownership")
-        finishing = finishing_functions(text)
-        allowed = set(MINT_SITES.get(path, {}))
-        for name in sorted(finishing - allowed):
-            problems.append(
-                f"{path}: {name} returns device ownership to the CPU but is "
-                "not a listed mint site; list it with the observation it trusts")
-    for path, sites in MINT_SITES.items():
+    for path in MINT_FILES:
         text = files.get(path)
         if text is None:
             problems.append(f"{path} is a listed mint file that does not exist")
-            continue
-        for name in sorted(set(sites) - finishing_functions(text)):
-            problems.append(f"{path}: listed mint site {name} no longer "
-                            "finishes anything; remove it from the list")
+        elif not RECORD.search(text):
+            problems.append(f"{path} is a listed mint file that declares no "
+                            "fixed DMA record; remove it from the list")
     return problems
 
 
@@ -109,19 +65,15 @@ def controls(files):
     """Each planted widening must be refused."""
     failures = []
     driver = "kernel/drivers/block/virtio_blk.tkb"
-    mint = "kernel/drivers/block/virtio_blk_dma.tkb"
+    mint = MINT_FILES[0]
+    without = {path: text for path, text in files.items() if path != mint}
     cases = {
         "a record in a driver file":
             {**files, driver: files[driver] +
              "\nstruct dma_fixed Planted { private bytes: [u8; 64]; }\n"},
-        "a new finishing function in a mint file":
-            {**files, mint: files[mint] +
-             "\nfn planted(d: sink *VirtioBlkReceiveDevice) -> *VirtioBlkReceiveCpu {\n"
-             "    return dma_finish_owned_rx(d, VirtioBlkReceive);\n}\n"},
-        "a stale listed site":
-            {**files, mint: files[mint].replace(
-                "dma_finish_owned_tx(device, VirtioBlkDataTransmit)",
-                "planted(device)")},
+        "a listed file that declares no record":
+            {**files, mint: RECORD.sub("struct planted", files[mint])},
+        "a listed file that does not exist": without,
     }
     for label, planted in cases.items():
         if not problems_in(planted):
@@ -138,14 +90,13 @@ def main():
     for label in failures:
         print(f"ERROR\tdma-mint-files: control not refused: {label}")
     if problems or failures:
-        print("FAIL dma-mint-files: the trusted fixed-DMA finish sites changed "
+        print("FAIL dma-mint-files: the trusted fixed-DMA record files changed "
               "without review")
         return 1
-    sites = sum(len(v) for v in MINT_SITES.values())
     report_pass("dma-mint-files",
-                f"{len(MINT_SITES)} mint files, {sites} reviewed finish sites; "
-                "a record outside them, an unlisted finisher and a stale "
-                "entry are each refused", cases=count)
+                f"{len(MINT_FILES)} mint files hold every fixed DMA record; a "
+                "record outside them and a listed file with no record or no "
+                "file are each refused", cases=count)
     return 0
 
 
