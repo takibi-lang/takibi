@@ -72,3 +72,66 @@ Takibi waits for #1190: stress-ng's exec stressor skips with "can't determine st
 | ops/s usr+sys | - | - |
 | reported s | 185.936 | 6.756 |
 
+## 2026-11-01 qemu
+
+Takibi commit 222ed27d; sample clean.
+Linux: 6.12.0-061200-generic.
+Arguments: seconds=10 jobs=64 loops=200.
+
+### BusyBox xargs -P 4
+
+| | Takibi | Linux |
+| --- | ---: | ---: |
+| status | 0 | 0 |
+| wall s (host clock) | 53.81 | 1.86 |
+| bogo-ops | - | - |
+| ops/s real | - | - |
+| ops/s usr+sys | - | - |
+| reported s | - | - |
+
+### stress-ng --fork 4
+
+| | Takibi | Linux |
+| --- | ---: | ---: |
+| status | 0 | 0 |
+| wall s (host clock) | 12.51 | 10.20 |
+| bogo-ops | 49 | 3817 |
+| ops/s real | 4.94 | 381.20 |
+| ops/s usr+sys | 7.26 | 97.13 |
+| reported s | - | - |
+
+### stress-ng --exec 4
+
+Takibi waits for #1190: stress-ng's exec stressor skips with "can't determine stress-ng executable name" -- readlinkat (nr 78) of /proc/self/exe is unimplemented.
+
+| | Takibi | Linux |
+| --- | ---: | ---: |
+| status | not run | 0 |
+| wall s (host clock) | not run | 10.39 |
+| bogo-ops | not run | 1321 |
+| ops/s real | not run | 131.79 |
+| ops/s usr+sys | not run | 34.49 |
+| reported s | not run | - |
+
+### stress-ng --pipe 4
+
+| | Takibi | Linux |
+| --- | ---: | ---: |
+| status | 0 | 0 |
+| wall s (host clock) | 11.92 | 10.15 |
+| bogo-ops | 11805 | 309368 |
+| ops/s real | 1233.80 | 30900.65 |
+| ops/s usr+sys | 349.13 | 7720.28 |
+| reported s | - | - |
+
+### hackbench -P -p -g 4
+
+| | Takibi | Linux |
+| --- | ---: | ---: |
+| status | 0 | 0 |
+| wall s (host clock) | 197.74 | 6.98 |
+| bogo-ops | - | - |
+| ops/s real | - | - |
+| ops/s usr+sys | - | - |
+| reported s | 188.920 | 6.770 |
+
