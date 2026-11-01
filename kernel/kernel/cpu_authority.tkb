@@ -172,6 +172,18 @@ inline fn preempt_span_end(span: sink PreemptOff[0]) {
 inline fn preempt_span_resume(span: sink PreemptOff[0]) {
 }
 
+// The Takibi function an assembly hop of the syscall action table branches to
+// (SyscallAction::CloneChild) takes the span back: a value crossing assembly
+// loses its type (DECISIONS 2026-10-25), so the count stood in for the token.
+// Trusted: the hop always arrives here; it stops when no span is open.
+inline fn preempt_span_adopt() -> PreemptOff[0] {
+    if (KERNEL_PREEMPT_ASSERTS != 0 && preempt_count_here() != 1) {
+        kernel_invariant_stop();
+    }
+    let mut span: PreemptOff[0] = { 1 };
+    return span;
+}
+
 // The Linux schedule_tail shape: the after_switch hook of every exception
 // return, and every idle entry, on the far side of the stack change. What it
 // resumes runs at count zero by construction (only a zero count is ever

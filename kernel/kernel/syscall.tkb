@@ -4725,18 +4725,20 @@ fn kernel_syscall_uart_block_prepare(frame: borrow FrameRef[process, ExceptionLe
 // than adding a 9th hand-written assembly action branch for the second
 // one -- whichever syscall handler decided to return SyscallAction::Block
 // records which reason first.
-fn kernel_syscall_block_return(frame_sp: usize) {
-    let ProcessRunningHere::Running(current_authority) = process_running_here() else {
-        ProcessRunningHere::Idle => { kernel_invariant_stop(); return; }
-    };
+// Whether a blocker already rewound the syscall, for the retry below.
+struct SyscallBlockRewound { done: bool; }
+
+// The blocker that applies. A separate function because BlockSwitch holds a
+// linear span and so cannot be assigned over a default (#1323).
+private fn kernel_syscall_block_choose(
+        current_authority: ProcessCurrent[process, ProcessState::Running],
+        frame_sp: usize,
+        reason: ProcessWaitReason, rewound: &mut SyscallBlockRewound) -> BlockSwitch {
     let frame =
         frame_ref_from_el0_entry(frame_sp, kernel_process_entry_generation());
-    let mut switch: BlockSwitch = BlockSwitch::Retry;
-    let mut rewound: bool = false;
-    let reason: ProcessWaitReason = kernel_process_current_pending_block_reason(current_authority);
     if (reason ==
             ProcessWaitReason::ChildExit) {
-        switch = kernel_process_block_wait4(current_authority, frame);
+        return kernel_process_block_wait4(current_authority, frame);
     } else if (reason ==
                    ProcessWaitReason::NetRx) {
         process_current_end(current_authority);
@@ -4750,8 +4752,8 @@ fn kernel_syscall_block_return(frame_sp: usize) {
         // changed the answer in between. The Retry arm below then resumes
         // the frame: this rewind already points it back at the syscall, so
         // the process re-enters accept and takes another bounded step.
-        rewound = true;
-        switch = kernel_process_block_net(frame);
+        rewound.done = true;
+        return kernel_process_block_net(frame);
     } else if (reason ==
                    ProcessWaitReason::Pipe) {
         process_current_end(current_authority);
@@ -4761,8 +4763,8 @@ fn kernel_syscall_block_return(frame_sp: usize) {
         // (kernel_process_block_would_miss), under the lock the waker's
         // wake takes too.
         el0_context_retry_syscall(frame);
-        rewound = true;
-        switch = kernel_process_block_pipe(frame);
+        rewound.done = true;
+        return kernel_process_block_pipe(frame);
     } else if (reason ==
                    ProcessWaitReason::UartTx) {
         process_current_end(current_authority);
@@ -4783,12 +4785,12 @@ fn kernel_syscall_block_return(frame_sp: usize) {
             workload_profile_el0_enter();
             el0_context_resume(frame);
         }
-        rewound = true;
-        switch = kernel_process_block_uart_tx(frame);
+        rewound.done = true;
+        return kernel_process_block_uart_tx(frame);
     } else if (reason ==
                    ProcessWaitReason::Deadline) {
         process_current_end(current_authority);
-        switch = kernel_process_block_deadline(frame);
+        return kernel_process_block_deadline(frame);
     } else if (reason ==
                    ProcessWaitReason::Signal) {
         process_current_end(current_authority);
@@ -4796,9 +4798,9 @@ fn kernel_syscall_block_return(frame_sp: usize) {
         // delivers the signal the wake left pending.
         if (kernel_process_current_signal_suspending()) {
             el0_context_retry_syscall(frame);
-            rewound = true;
+            rewound.done = true;
         }
-        switch = kernel_process_block_signal(frame);
+        return kernel_process_block_signal(frame);
     } else {
         process_current_end(current_authority);
         // GitHub issue #546: look at the ring once more, with interrupts
@@ -4828,12 +4830,24 @@ fn kernel_syscall_block_return(frame_sp: usize) {
             el0_context_resume(frame);
         }
         kernel_syscall_uart_block_prepare(frame);
-        switch = kernel_process_block_uart(frame);
+        return kernel_process_block_uart(frame);
     }
+}
+
+fn kernel_syscall_block_return(frame_sp: usize) {
+    let ProcessRunningHere::Running(current_authority) = process_running_here() else {
+        ProcessRunningHere::Idle => { kernel_invariant_stop(); return; }
+    };
+    let frame =
+        frame_ref_from_el0_entry(frame_sp, kernel_process_entry_generation());
+    let mut rewound: SyscallBlockRewound = { false };
+    let reason: ProcessWaitReason = kernel_process_current_pending_block_reason(current_authority);
+    let switch: BlockSwitch = kernel_syscall_block_choose(current_authority, frame_sp, reason, &rewound);
     match switch {
         // GitHub issue #583: published Blocked with no successor; leave its
         // stack for this CPU's idle context.
-        BlockSwitch::ToIdle => {
+        BlockSwitch::ToIdle(span) => {
+            preempt_span_resume(span);
             kernel_idle_block_enter();
         }
         BlockSwitch::Retry => {
@@ -4858,7 +4872,7 @@ fn kernel_syscall_block_return(frame_sp: usize) {
                 retry_delivery == UartBlockDelivery::Read;
             // Rewound above: rt_sigsuspend, accept, a blocked write and a
             // pipe wait.
-            if (uart_read_prepared == false && rewound == false) {
+            if (uart_read_prepared == false && rewound.done == false) {
                 el0_context_retry_syscall(frame);
             }
             // GitHub issue #603: wait4 recorded ChildExit on this Running
@@ -4870,8 +4884,10 @@ fn kernel_syscall_block_return(frame_sp: usize) {
             workload_profile_el0_enter();
             el0_context_resume(frame);
         }
-        BlockSwitch::Switch(next) => {
+        BlockSwitch::Switch(switched) => {
+            let (next, span) = switched;
             workload_profile_el0_enter();
+            preempt_span_resume(span);
             el0_context_resume(next);
         }
     }
@@ -4884,6 +4900,13 @@ fn kernel_syscall_block_return(frame_sp: usize) {
 // child frame, so the child's syscall-return-scheduling check is not
 // skipped just because it arrived via clone rather than an ordinary return.
 fn kernel_syscall_resume_return(frame_sp: usize, value: usize) {
+    kernel_syscall_resume_tail(frame_sp, value, preempt_span_begin());
+}
+
+// The syscall return holds a span from here to its resume (#1323): a frame in
+// hand must not be taken for the interrupted context by a tick. `span` is the
+// return's own; a Switch brings the schedule's, so the return's ends there.
+private fn kernel_syscall_resume_tail(frame_sp: usize, value: usize, span: sink PreemptOff[0]) {
     let frame =
         frame_ref_from_el0_entry(frame_sp, kernel_process_entry_generation());
     el0_context_set_x0(frame, value);
@@ -4893,15 +4916,18 @@ fn kernel_syscall_resume_return(frame_sp: usize, value: usize) {
             // GitHub issue #592: no successor, and core 0 may not keep this
             // one.
             if (kernel_process_core0_leave_excluded(frame)) {
+                preempt_span_resume(span);
                 kernel_idle_yield_enter();
             }
             workload_profile_el0_enter();
+            preempt_span_resume(span);
             el0_context_resume(frame);
         }
         FrameSwitch::Switch(switched) => {
-            let (next, span) = switched;
+            let (next, next_span) = switched;
             workload_profile_el0_enter();
-            preempt_span_resume(span);
+            preempt_span_end(span);
+            preempt_span_resume(next_span);
             el0_context_resume(next);
         }
     }
@@ -4917,6 +4943,7 @@ fn kernel_syscall_resume_return(frame_sp: usize, value: usize) {
 // syscall return, and must not skip the same reschedule check.
 fn kernel_syscall_clone_child_return(parent_frame_sp: usize, child_pid: usize)
         !{unsafe} {
+    let span = preempt_span_adopt();
     let parent_frame = frame_ref_from_el0_entry(
         parent_frame_sp, kernel_process_entry_generation());
     // The suspended parent observes clone() == child PID whenever it is
@@ -4946,7 +4973,7 @@ fn kernel_syscall_clone_child_return(parent_frame_sp: usize, child_pid: usize)
                 CurrentRootActivationResult::Activated => {}
             }
             process_current_end(current_authority);
-            kernel_syscall_resume_return(frame_ref_address(child_frame), 0);
+            kernel_syscall_resume_tail(frame_ref_address(child_frame), 0, span);
         }
     }
 }
@@ -5144,8 +5171,16 @@ fn kernel_syscall_init_exit(status: usize) !{unsafe} {
 fn kernel_syscall_clone_parent_action(switch: sink ExitSwitch)
         -> SyscallAction {
     match switch {
-        ExitSwitch::Idle => { return SyscallAction::CloneParent(0); }
-        ExitSwitch::Resume(frame) => {
+        // The action crosses assembly (DECISIONS 2026-10-25): the count stands
+        // in for the span through kernel_syscall_clone_parent_return, and its
+        // resume or idle entry resets it.
+        ExitSwitch::Idle(span) => {
+            preempt_span_resume(span);
+            return SyscallAction::CloneParent(0);
+        }
+        ExitSwitch::Resume(switched) => {
+            let (frame, span) = switched;
+            preempt_span_resume(span);
             return SyscallAction::CloneParent(frame_ref_address(frame));
         }
     }
@@ -6103,9 +6138,11 @@ fn kernel_syscall_migrate_return(frame_sp: usize) {
     let frame =
         frame_ref_from_el0_entry(frame_sp, kernel_process_entry_generation());
     el0_context_retry_syscall(frame);
+    let span = preempt_span_begin();
     if (kernel_process_migrate_current(frame) == false) {
         kernel_invariant_stop_with_frame(frame);
     }
+    preempt_span_resume(span);
     kernel_idle_yield_enter();
 }
 
@@ -9743,11 +9780,17 @@ private fn syscall_clone_current(
     // child's own ProcessHandle.pool_index -- not fixed to root 1 /
     // fd-slot 1 anymore, so nothing downstream can pick them without
     // asking process.tkb for the slot it actually allocated.
+    // The clone window of #1323: current becomes the Constructing child,
+    // standing on the parent's stack, until the install's resume or the
+    // rollback.
+    let span = preempt_span_begin();
     match kernel_process_clone_begin(current_authority, clone_flags, clone_stack) {
         ProcessCloneResult::Invalid(restored) => {
+            preempt_span_end(span);
             return syscall_finish_current(frame, kernel_syscall_clone_failure_action(ProcessCloneFailure::Invalid), restored);
         }
         ProcessCloneResult::ResourceExhausted(restored) => {
+            preempt_span_end(span);
             return syscall_finish_current(frame, kernel_syscall_clone_failure_action(ProcessCloneFailure::ResourceExhausted), restored);
         }
         ProcessCloneResult::ChildConstructing(child_authority) => {
@@ -9782,9 +9825,11 @@ private fn syscall_clone_current(
                 ProcessCloneVmResult::OutOfMemory => {
                     match kernel_process_clone_rollback(child_authority) {
                         ProcessCloneRollbackResult::Invalid => {
+                            preempt_span_end(span);
                             return SyscallAction::Unreachable;
                         }
                         ProcessCloneRollbackResult::Restored(restored) => {
+                            preempt_span_end(span);
                             return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EAGAIN), restored);
                         }
                     }
@@ -9799,9 +9844,11 @@ private fn syscall_clone_current(
                             }
                             match kernel_process_clone_rollback(child_authority) {
                                 ProcessCloneRollbackResult::Invalid => {
+                                    preempt_span_end(span);
                                     return SyscallAction::Unreachable;
                                 }
                                 ProcessCloneRollbackResult::Restored(restored) => {
+                                    preempt_span_end(span);
                                     return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EAGAIN), restored);
                                 }
                             }
@@ -9812,6 +9859,9 @@ private fn syscall_clone_current(
                     // to the dedicated child kernel stack and resumes
                     // x0=0.
                     process_current_end(child_authority);
+                    // Across assembly the count stands in for the span;
+                    // kernel_syscall_clone_child_return adopts it.
+                    preempt_span_resume(span);
                     return SyscallAction::CloneChild(child_pid);
                 }
             }

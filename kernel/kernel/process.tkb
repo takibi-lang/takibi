@@ -5296,6 +5296,10 @@ fn kernel_process_stack_interrupt_depart() {
 // handler, KernelActivity::None, the EL0 priority-mask reset -- is skipped
 // for an El1 one, whose kernel path continues where it was interrupted.
 fn kernel_process_stack_switch_complete(frame_sp: usize) {
+    // The span of whichever path chose this frame ends here, first (#1323): SP
+    // has moved, IRQs are masked, and a default-action signal below can exit
+    // the process through a span and a resume of its own.
+    preempt_count_after_switch();
     match frame_ref_from_entry(frame_sp, kernel_process_entry_generation()) {
         LeveledFrame::El0(frame) => {
             kernel_process_stack_switch_take(frame);
@@ -5313,8 +5317,6 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
             kernel_process_stack_switch_take(frame);
         }
     }
-    // The span of whichever path chose this frame ends here (#1323).
-    preempt_count_after_switch();
 }
 
 private fn kernel_process_stack_switch_take(frame: borrow FrameRef[process, level]) {
@@ -7088,12 +7090,13 @@ fn kernel_process_schedule(current: borrow FrameRef[process, level]) -> FrameSwi
 // drop ProcessRunGuard or stop the machine, exactly as in an ordinary switch.
 must_use variant ProcessSecondaryStart {
     Idle;
-    Frame(exists process: usize. exists level: ExceptionLevel. FrameRef[process, level]);
+    Frame(exists process: usize. exists level: ExceptionLevel. (FrameRef[process, level], PreemptOff[0]));
 }
 
 private fn kernel_process_secondary_start_reserved(
         owner: sink ScheduledProcessOwner[process],
-        running: sink ScheduledProcessState[process, ProcessState::Running])
+        running: sink ScheduledProcessState[process, ProcessState::Running],
+        span: sink PreemptOff[0])
         -> ProcessSecondaryStart !{changes_witness_ProcessCurrent} {
     match process_image_prepare_activation(
         scheduled_process_address_space_root_owned(owner)) {
@@ -7103,6 +7106,7 @@ private fn kernel_process_secondary_start_reserved(
             let ready = scheduled_process_yield(owner, running);
             scheduled_process_release(owner, ready);
             process_run_unlock(guard);
+            preempt_span_end(span);
             return ProcessSecondaryStart::Idle;
         }
         AddressSpaceActivationPrepareResult::RolloverNeeded => {
@@ -7113,6 +7117,7 @@ private fn kernel_process_secondary_start_reserved(
                     let ready = scheduled_process_yield(owner, running);
                     scheduled_process_release(owner, ready);
                     process_run_unlock(guard);
+                    preempt_span_end(span);
                     return ProcessSecondaryStart::Idle;
                 }
                 MachineStopResult::Partial(partial) => {
@@ -7122,12 +7127,13 @@ private fn kernel_process_secondary_start_reserved(
                     let ready = scheduled_process_yield(owner, running);
                     scheduled_process_release(owner, ready);
                     process_run_unlock(guard);
+                    preempt_span_end(span);
                     return ProcessSecondaryStart::Idle;
                 }
                 MachineStopResult::Complete(stopped) => {
                     if (asid_rollover_stopped(stopped)) {}
                     machine_stop_release(stopped, &kernel_world_stop);
-                    return kernel_process_secondary_start_reserved(owner, running);
+                    return kernel_process_secondary_start_reserved(owner, running, span);
                 }
             }
         }
@@ -7143,12 +7149,14 @@ private fn kernel_process_secondary_start_reserved(
                 let ready = scheduled_process_yield(owner, running);
                 scheduled_process_release(owner, ready);
                 process_run_unlock(guard);
+                preempt_span_end(span);
                 return ProcessSecondaryStart::Idle;
             }
             if (process_image_commit_activation(prepared) == false) {
                 let ready = scheduled_process_yield(owner, running);
                 scheduled_process_release(owner, ready);
                 process_run_unlock(guard);
+                preempt_span_end(span);
                 return ProcessSecondaryStart::Idle;
             }
             execution_state[execution_cpu_index()].current_handle = to;
@@ -7167,8 +7175,8 @@ private fn kernel_process_secondary_start_reserved(
             scheduled_process_release(owner, running);
             process_run_unlock(guard);
             match next {
-                LeveledFrame::El0(low) => { return ProcessSecondaryStart::Frame(low); }
-                LeveledFrame::El1(high) => { return ProcessSecondaryStart::Frame(high); }
+                LeveledFrame::El0(low) => { return ProcessSecondaryStart::Frame((low, span)); }
+                LeveledFrame::El1(high) => { return ProcessSecondaryStart::Frame((high, span)); }
             }
         }
     }
@@ -7323,6 +7331,9 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
                             // unlock, for a world stop in the window. One
                             // region, so the clear names the CPU the set did
                             // (#981).
+                            // The successor's span outlives the region: it
+                            // ends at the resume (#1323).
+                            let span = preempt_span_begin();
                             preempt_off (cpu) {
                                 kernel_process_claim[cpu].pid =
                                     scheduled_process_record_owned(owner).pid;
@@ -7330,7 +7341,7 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
                                 process_run_unlock(guard);
                                 let started: ProcessSecondaryStart =
                                     kernel_process_secondary_start_reserved(
-                                        owner, running);
+                                        owner, running, span);
                                 kernel_process_claim[cpu].pid = 0;
                                 return started;
                             }
@@ -8617,13 +8628,12 @@ fn kernel_process_current_set_wait4_pid(current_authority: borrow ProcessCurrent
 // process's stack for the CPU's idle context instead of resuming anything.
 // `Switch` is the successor's frame.
 //
-// Not must_use: kernel_syscall_block_return assigns the one it is given by
-// whichever blocker applies, starting from Retry. Every function returns it,
-// so it is not dropped.
+// Not must_use: every function returns it, so it is not dropped, and ToIdle
+// and Switch hold a linear span.
 variant BlockSwitch {
     Retry;
-    ToIdle;
-    Switch(exists process: usize. exists level: ExceptionLevel. FrameRef[process, level]);
+    ToIdle(PreemptOff[0]);
+    Switch(exists process: usize. exists level: ExceptionLevel. (FrameRef[process, level], PreemptOff[0]));
 }
 
 // GitHub issue #583: a wait with no Ready successor used to decline to
@@ -8674,6 +8684,9 @@ private fn kernel_process_block_current(current: borrow FrameRef[process, level]
     if (execution_state[execution_cpu_index()].current_live == false) {
         return BlockSwitch::Retry;
     }
+    // The block tail of #1323: open before the reservation or the Blocked
+    // publication, and on ToIdle or Switch handed to the resume path.
+    let span = preempt_span_begin();
     let mut from: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
     let guard = process_run_lock();
     match kernel_process_next_ready(guard, from, cpu_id()) {
@@ -8681,13 +8694,15 @@ private fn kernel_process_block_current(current: borrow FrameRef[process, level]
             let idle: bool = kernel_process_block_to_idle(
                 guard, from, current, reason, trace_aux);
             process_run_unlock(guard);
-            if (idle) { return BlockSwitch::ToIdle; }
+            if (idle) { return BlockSwitch::ToIdle(span); }
+            preempt_span_end(span);
             return BlockSwitch::Retry;
         }
         ProcessNextReadyResult::Next(to) => {
             match scheduled_process_ready_take(guard, to) {
                 ScheduledProcessReadyTakeResult::Missing => {
                     process_run_unlock(guard);
+                    preempt_span_end(span);
                     return BlockSwitch::Retry;
                 }
                 ScheduledProcessReadyTakeResult::Ready(resources) => {
@@ -8695,7 +8710,7 @@ private fn kernel_process_block_current(current: borrow FrameRef[process, level]
                     let running = scheduled_process_start(owner, ready);
                     process_run_unlock(guard);
                     return kernel_process_block_reserved(
-                        from, owner, running, current, reason, trace_aux);
+                        from, owner, running, current, reason, trace_aux, span);
                 }
             }
         }
@@ -8707,29 +8722,32 @@ private fn kernel_process_block_reserved(
         owner: sink ScheduledProcessOwner[process],
         running: sink ScheduledProcessState[process, ProcessState::Running],
         current: borrow FrameRef[from_process, level], reason: ProcessWaitReason,
-        trace_aux: usize) -> BlockSwitch !{changes_witness_ProcessCurrent} {
+        trace_aux: usize, span: sink PreemptOff[0]) -> BlockSwitch !{changes_witness_ProcessCurrent} {
     match process_image_prepare_activation(
         scheduled_process_address_space_root_owned(owner)) {
         AddressSpaceActivationPrepareResult::Invalid => {
             kernel_process_schedule_cancel_reserved(owner, running);
+            preempt_span_end(span);
             return BlockSwitch::Retry;
         }
         AddressSpaceActivationPrepareResult::RolloverNeeded => {
             match world_stop_machine_begin(SCHEDULER_WORLD_STOP_SPINS) {
                 MachineStopResult::Busy => {
                     kernel_process_schedule_cancel_reserved(owner, running);
+                    preempt_span_end(span);
                     return BlockSwitch::Retry;
                 }
                 MachineStopResult::Partial(partial) => {
                     machine_stop_partial_release(partial, &kernel_world_stop);
                     kernel_process_schedule_cancel_reserved(owner, running);
+                    preempt_span_end(span);
                     return BlockSwitch::Retry;
                 }
                 MachineStopResult::Complete(stopped) => {
                     if (asid_rollover_stopped(stopped)) {}
                     machine_stop_release(stopped, &kernel_world_stop);
                     return kernel_process_block_reserved(
-                        from, owner, running, current, reason, trace_aux);
+                        from, owner, running, current, reason, trace_aux, span);
                 }
             }
         }
@@ -8752,6 +8770,7 @@ private fn kernel_process_block_reserved(
                 let ready = scheduled_process_yield(owner, running);
                 scheduled_process_release(owner, ready);
                 process_run_unlock(guard);
+                preempt_span_end(span);
                 return BlockSwitch::Retry;
             }
             // GitHub issue #547: the last look at the terminal ring, in the
@@ -8766,6 +8785,7 @@ private fn kernel_process_block_reserved(
                 let ready = scheduled_process_yield(owner, running);
                 scheduled_process_release(owner, ready);
                 process_run_unlock(guard);
+                preempt_span_end(span);
                 return BlockSwitch::Retry;
             }
             scheduled_process_record_live_locked(guard, from).saved_sp = frame_ref_address(current);
@@ -8775,6 +8795,7 @@ private fn kernel_process_block_reserved(
                     let ready = scheduled_process_yield(owner, running);
                     scheduled_process_release(owner, ready);
                     process_run_unlock(guard);
+                    preempt_span_end(span);
                     return BlockSwitch::Retry;
                 }
                 ScheduledProcessRunningTakeResult::Running(from_resources) => {
@@ -8815,6 +8836,7 @@ private fn kernel_process_block_reserved(
                 let ready = scheduled_process_yield(owner, running);
                 scheduled_process_release(owner, ready);
                 process_run_unlock(guard);
+                preempt_span_end(span);
                 return BlockSwitch::Retry;
             }
             execution_state[execution_cpu_index()].current_handle = to;
@@ -8831,8 +8853,8 @@ private fn kernel_process_block_reserved(
             scheduled_process_release(owner, running);
             process_run_unlock(guard);
             match next {
-                LeveledFrame::El0(low) => { return BlockSwitch::Switch(low); }
-                LeveledFrame::El1(high) => { return BlockSwitch::Switch(high); }
+                LeveledFrame::El0(low) => { return BlockSwitch::Switch((low, span)); }
+                LeveledFrame::El1(high) => { return BlockSwitch::Switch((high, span)); }
             }
         }
     }
@@ -10548,13 +10570,13 @@ fn kernel_process_block_uart(current: borrow FrameRef[process, level])
     // Anything but a retry is a block that was published.
     match blocked {
         BlockSwitch::Retry => { return BlockSwitch::Retry; }
-        BlockSwitch::ToIdle => {
+        BlockSwitch::ToIdle(span) => {
             kernel_process_uart_block_published(fixture_block);
-            return BlockSwitch::ToIdle;
+            return BlockSwitch::ToIdle(span);
         }
-        BlockSwitch::Switch(next) => {
+        BlockSwitch::Switch(switched) => {
             kernel_process_uart_block_published(fixture_block);
-            return BlockSwitch::Switch(next);
+            return BlockSwitch::Switch(switched);
         }
     }
 }
@@ -10863,8 +10885,10 @@ private fn kernel_process_probe_blocks_to(
         parent: borrow FrameRef[parent_process, level]) -> bool {
     let same: bool = match kernel_process_block_uart(child) {
         BlockSwitch::Retry => { false }
-        BlockSwitch::ToIdle => { false }
-        BlockSwitch::Switch(resumed) => {
+        BlockSwitch::ToIdle(span) => { preempt_span_end(span); false }
+        BlockSwitch::Switch(switched) => {
+            let (resumed, span) = switched;
+            preempt_span_end(span);
             frame_ref_address(resumed) == frame_ref_address(parent)
         }
     };
@@ -11558,11 +11582,16 @@ private fn kernel_process_exit_continuation_probe(parent: ProcessHandle) -> bool
             let running = scheduled_process_start(owner, ready);
             process_run_unlock(guard);
             // The frame address the probe's exit resumed, 0 for none.
+            let span = preempt_span_begin();
             let exited: ExitSwitch = kernel_process_exit_reserved(
-                child, parent, owner, running, false, false);
+                child, parent, owner, running, false, false, span);
             let address: usize = match exited {
-                ExitSwitch::Idle => { 0 }
-                ExitSwitch::Resume(frame) => { frame_ref_address(frame) }
+                ExitSwitch::Idle(ended) => { preempt_span_end(ended); 0 }
+                ExitSwitch::Resume(switched) => {
+                    let (frame, ended) = switched;
+                    preempt_span_end(ended);
+                    frame_ref_address(frame)
+                }
             };
             address
         }
@@ -12222,8 +12251,8 @@ private fn kernel_process_leave_parent_ready(
 // the assembly boundary (SyscallAction::CloneParent) this is encoded as a
 // frame address, 0 for Idle, by kernel_syscall_clone_parent_action.
 must_use variant ExitSwitch {
-    Idle;
-    Resume(exists process: usize. exists level: ExceptionLevel. FrameRef[process, level]);
+    Idle(PreemptOff[0]);
+    Resume(exists process: usize. exists level: ExceptionLevel. (FrameRef[process, level], PreemptOff[0]));
 }
 
 private fn kernel_process_exit_reserved(
@@ -12231,30 +12260,30 @@ private fn kernel_process_exit_reserved(
         parent: ProcessHandle,
         owner: sink ScheduledProcessOwner[process],
         running: sink ScheduledProcessState[process, ProcessState::Running],
-        deliver_wait4: bool, auto_reap: bool) -> ExitSwitch !{changes_witness_ProcessCurrent} {
+        deliver_wait4: bool, auto_reap: bool, span: sink PreemptOff[0]) -> ExitSwitch !{changes_witness_ProcessCurrent} {
     match process_image_prepare_activation(
         scheduled_process_address_space_root_owned(owner)) {
         AddressSpaceActivationPrepareResult::Invalid => {
             kernel_process_schedule_cancel_reserved(owner, running);
-            return ExitSwitch::Idle;
+            return ExitSwitch::Idle(span);
         }
         AddressSpaceActivationPrepareResult::RolloverNeeded => {
             match world_stop_machine_begin(SCHEDULER_WORLD_STOP_SPINS) {
                 MachineStopResult::Busy => {
                     kernel_process_schedule_cancel_reserved(owner, running);
-                    return ExitSwitch::Idle;
+                    return ExitSwitch::Idle(span);
                 }
                 MachineStopResult::Partial(partial) => {
                     machine_stop_partial_release(partial, &kernel_world_stop);
                     kernel_process_schedule_cancel_reserved(owner, running);
-                    return ExitSwitch::Idle;
+                    return ExitSwitch::Idle(span);
                 }
                 MachineStopResult::Complete(stopped) => {
                     if (asid_rollover_stopped(stopped)) {}
                     machine_stop_release(stopped, &kernel_world_stop);
                     return kernel_process_exit_reserved(
                         child, parent, owner, running, deliver_wait4,
-                        auto_reap);
+                        auto_reap, span);
                 }
             }
         }
@@ -12278,13 +12307,13 @@ private fn kernel_process_exit_reserved(
                 let ready = scheduled_process_yield(owner, running);
                 scheduled_process_release(owner, ready);
                 process_run_unlock(guard);
-                return ExitSwitch::Idle;
+                return ExitSwitch::Idle(span);
             }
             if (process_image_commit_activation(prepared) == false) {
                 let ready = scheduled_process_yield(owner, running);
                 scheduled_process_release(owner, ready);
                 process_run_unlock(guard);
-                return ExitSwitch::Idle;
+                return ExitSwitch::Idle(span);
             }
             execution_state[execution_cpu_index()].current_handle = successor;
             // Every incoming wait4 continuation now runs with its parent's
@@ -12333,8 +12362,8 @@ private fn kernel_process_exit_reserved(
             }
             scheduled_process_release(owner, running);
             match successor_frame {
-                LeveledFrame::El0(low) => { return ExitSwitch::Resume(low); }
-                LeveledFrame::El1(high) => { return ExitSwitch::Resume(high); }
+                LeveledFrame::El0(low) => { return ExitSwitch::Resume((low, span)); }
+                LeveledFrame::El1(high) => { return ExitSwitch::Resume((high, span)); }
             }
         }
     }
@@ -12342,6 +12371,10 @@ private fn kernel_process_exit_reserved(
 
 fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, ProcessState::Running], status: ProcessEnd) -> ExitSwitch !{changes_witness_ProcessCurrent} {
     process_test_evidence_record_child_exit(status);
+    // The exit tail of #1323: the record is Exited while current still names
+    // it, then current is the successor while this CPU stands on the child's
+    // stack. Handed to the resume or the idle entry.
+    let span = preempt_span_begin();
     // GitHub issue #209: a child exit used to close the scheduling gate
     // here (kernel_process_scheduler_disable()), a leftover of the
     // two-process model where "a child exited" really did mean "nothing
@@ -12358,9 +12391,9 @@ fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, Pro
     // off a dying context. Leaving preemption on is also the prerequisite
     // for genuinely concurrent children (a shell backgrounding a job with
     // `&`), where a child exit must not stop the survivors from running.
-    if (execution_state[execution_cpu_index()].current_live == false) { { let mut __running_result: ExitSwitch = ExitSwitch::Idle; process_current_end(current_authority); return __running_result; } }
+    if (execution_state[execution_cpu_index()].current_live == false) { { let mut __running_result: ExitSwitch = ExitSwitch::Idle(span); process_current_end(current_authority); return __running_result; } }
     if (scheduled_process_record_current(current_authority)
-            .has_parent == false) { { let mut __running_result: ExitSwitch = ExitSwitch::Idle; process_current_end(current_authority); return __running_result; } }
+            .has_parent == false) { { let mut __running_result: ExitSwitch = ExitSwitch::Idle(span); process_current_end(current_authority); return __running_result; } }
     let mut child: ProcessHandle = process_current_handle(current_authority);
     let mut parent: ProcessHandle =
         scheduled_process_record_current(current_authority).parent;
@@ -12477,7 +12510,7 @@ fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, Pro
         ScheduledProcessRunningTakeResult::Missing => {
             process_current_end(current_authority);
             process_run_unlock(exit_guard);
-            { let mut __running_result: ExitSwitch = ExitSwitch::Idle; return __running_result; }
+            { let mut __running_result: ExitSwitch = ExitSwitch::Idle(span); return __running_result; }
         }
         ScheduledProcessRunningTakeResult::Running(resources) => {
             let (owner, running) = resources;
@@ -12525,7 +12558,7 @@ fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, Pro
                                     process_run_unlock(exit_guard);
                                     { let mut __running_result: ExitSwitch = kernel_process_exit_reserved(
                                         child, parent, parent_owner,
-                                        parent_running, true, false); return __running_result; }
+                                        parent_running, true, false, span); return __running_result; }
                                 }
                                 ScheduledProcessStartCheck::Standing(standing) => {
                                     kernel_process_leave_parent_ready(
@@ -12550,7 +12583,7 @@ fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, Pro
                     process_run_unlock(exit_guard);
                     { let mut __running_result: ExitSwitch = kernel_process_exit_reserved(
                         child, parent, parent_owner, parent_running, false,
-                        auto_reap); return __running_result; }
+                        auto_reap, span); return __running_result; }
                 }
             }
             }
@@ -12569,7 +12602,7 @@ fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, Pro
                             process_run_unlock(exit_guard);
                             { let mut __running_result: ExitSwitch = kernel_process_exit_reserved(
                                 child, parent, successor_owner,
-                                successor_running, false, auto_reap); return __running_result; }
+                                successor_running, false, auto_reap, span); return __running_result; }
                         }
                     }
                 }
@@ -12601,7 +12634,7 @@ fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, Pro
     execution_state[execution_cpu_index()].scheduler_enabled = false;
     execution_state[execution_cpu_index()].reschedule_pending = false;
     process_run_unlock(exit_guard);
-    { let mut __running_result: ExitSwitch = ExitSwitch::Idle; return __running_result; }
+    { let mut __running_result: ExitSwitch = ExitSwitch::Idle(span); return __running_result; }
 }
 
 // GitHub issue #248: per-slot now, indexed by whichever slot is CURRENTLY
