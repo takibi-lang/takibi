@@ -4,11 +4,14 @@
 // A frame used to be a bare `usize` everywhere, and the signal-frame code read
 // and wrote `frame_sp + offset` for an offset it computed itself, so nothing
 // bounded the offset by the frame's 0x330 bytes. A `FrameRef` holds the
-// address in a private field: explicit construction uses the two mints
-// below, and its words are reached only through the accessors
-// below, each named for what it reads and bounded by a refined index. The
-// generic word access is private to this file, so a caller cannot ask for an
-// arbitrary offset.
+// address in a private field: explicit construction uses the mints below, and
+// its words are reached only through the accessors below, each named for what
+// it reads and bounded by a refined index. The generic word access is private
+// to this file, so a caller cannot ask for an arbitrary offset.
+//
+// The one exception to how frames are made is frame_handmade_el1 (GitHub issue
+// #1194): it hands no FrameRef out, takes a bare address, and writes an EL1
+// mode into the SPSR word for the boot probe that erets through it.
 //
 // The struct is one `usize`, which AAPCS64 passes and returns in x0 exactly
 // as a bare `usize`, so a FrameRef crosses the assembly boundary unchanged.
@@ -36,7 +39,8 @@
 // frame holds: that word is what el0_context_resume restores before eret, so
 // the index names where the frame goes. Only the classifiers below read it to
 // choose; every writer of a frame word takes an El0 frame, and the SPSR writer
-// keeps M at EL0t, so no write can move a frame between levels. A delivery
+// keeps M at EL0t, so no write can move a frame between levels, frame_handmade_el1
+// alone excepted. A delivery
 // (a register written into a parked process's frame) is therefore a type error
 // on an El1 frame -- a preempted kernel context -- not a state argument.
 // Spelling is provisional (DECISIONS.md 2026-10-29; #1006 may rename it).
