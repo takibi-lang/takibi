@@ -443,6 +443,9 @@ struct ProcessRecord {
     // rt_sigtimedwait: its frame is rewound, and a wake leaves the signal
     // pending for the rerun to deliver instead of consuming it.
     sigwait_suspend: bool;
+    // GitHub issue #1322: this process's kernel_activity word while it is off
+    // a CPU. Saved and restored at the stack handoff, in padding.
+    parked_activity: KernelActivity;
     deadline_result: usize;
     // GitHub issue #302: wait4()'s status pointer, owned per-slot so a
     // multi-level concurrent wait4() chain delivers each blocked parent's
@@ -1439,6 +1442,11 @@ private let mut scheduled_process_missing_current: AtomicWord;
 // (`oops: activity=`), and DDB's `current` (`ddb: activity cpu=`), which is
 // taken with every CPU stopped. One store per entry and per exit; no lock,
 // since only this CPU writes its own word.
+//
+// GitHub issue #1322: the word belongs to the task on the CPU. The stack
+// handoff saves it in the outgoing process's record and loads the incoming
+// one's (kernel_activity_park, kernel_activity_resume), so an enter and leave
+// pair that spans a switch or a move reads as the same task's on any CPU.
 enum KernelActivity: u8 {
     None; SecondaryStart; NextReady; ReapOwnZombies; ReleaseEveryProcess;
     Syscall; IdleLoop;
@@ -1483,17 +1491,21 @@ private let mut scheduled_process_missing_site: KernelActivity;
 
 
 fn kernel_activity_enter(activity: KernelActivity) -> KernelActivity {
-    let previous: KernelActivity = kernel_activity[execution_cpu_index()];
-    kernel_activity[execution_cpu_index()] = activity;
+    let mut previous: KernelActivity = KernelActivity::None;
+    preempt_off (cpu) {
+        let index: {0..<KERNEL_MAX_CORES as usize} = execution_cpu_index();
+        previous = kernel_activity[index];
+        kernel_activity[index] = activity;
+    }
     return previous;
 }
 
 fn kernel_activity_leave(previous: KernelActivity) {
-    kernel_activity[execution_cpu_index()] = previous;
+    preempt_off (cpu) { kernel_activity[execution_cpu_index()] = previous; }
 }
 
 fn kernel_activity_set(activity: KernelActivity) {
-    kernel_activity[execution_cpu_index()] = activity;
+    preempt_off (cpu) { kernel_activity[execution_cpu_index()] = activity; }
 }
 
 // Any CPU's word, for a reporter that runs with every CPU stopped.
@@ -3651,6 +3663,7 @@ private fn scheduled_process_record_reset(guard: borrow ProcessRunGuard[lock],
     record.sigsuspend_saved_mask = 0;
     record.sigsuspend_mask_saved = false;
     record.sigwait_suspend = false;
+    record.parked_activity = KernelActivity::None;
     record.deadline_result = 0;
     record.wait4_status_ptr = 0;
     record.wait4_pid = 0;
@@ -5346,6 +5359,7 @@ fn kernel_process_stack_interrupt_depart() {
     let mut physical: ProcessHandle = execution_state[execution_cpu_index()].stack_handle;
     if (scheduled_process_handle_matches(physical) &&
         scheduled_process_record_live_locked(guard, physical).stack_owner_cpu == core) {
+        kernel_activity_park(guard, physical);
         scheduled_process_record_live_locked(guard, physical).stack_owner_cpu =
             PROCESS_STACK_UNOWNED;
         execution_state[execution_cpu_index()].stack_live = false;
@@ -5389,6 +5403,16 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
     }
 }
 
+private fn kernel_activity_park(guard: borrow ProcessRunGuard[lock], outgoing: ProcessHandle) {
+    scheduled_process_record_live_locked(guard, outgoing).parked_activity =
+        kernel_activity[execution_cpu_index()];
+}
+
+private fn kernel_activity_resume(guard: borrow ProcessRunGuard[lock], incoming: ProcessHandle) {
+    kernel_activity[execution_cpu_index()] =
+        scheduled_process_record_live_locked(guard, incoming).parked_activity;
+}
+
 private fn kernel_process_stack_switch_take(frame: borrow FrameRef[process, level]) {
     let core: usize = cpu_id();
     if (core >= KERNEL_MAX_CORES) {
@@ -5402,6 +5426,7 @@ private fn kernel_process_stack_switch_take(frame: borrow FrameRef[process, leve
             process_run_unlock(guard);
             kernel_invariant_stop_with_frame(frame);
         }
+        kernel_activity_park(guard, outgoing);
         scheduled_process_record_live_locked(guard, outgoing).stack_owner_cpu =
             PROCESS_STACK_UNOWNED;
         execution_state[execution_cpu_index()].stack_live = false;
@@ -5421,6 +5446,7 @@ private fn kernel_process_stack_switch_take(frame: borrow FrameRef[process, leve
         kernel_invariant_stop_with_frame(frame);
     }
     scheduled_process_record_live_locked(guard, incoming).stack_owner_cpu = core;
+    kernel_activity_resume(guard, incoming);
     execution_state[execution_cpu_index()].stack_handle = incoming;
     execution_state[execution_cpu_index()].stack_live = true;
     let reap_live: bool = execution_state[execution_cpu_index()].deferred_reap_live;
@@ -5468,6 +5494,7 @@ fn kernel_process_stack_idle_complete() {
     // freed root, ran on cached global kernel entries, and at the first
     // miss faulted fetching its own vector, forever, with IRQs masked:
     // the DDB lane's peer that never answered a world stop.
+    kernel_activity_park(guard, outgoing);
     address_space_activate_root(address_space_boot_root());
     scheduled_process_record_live_locked(guard, outgoing).stack_owner_cpu =
         PROCESS_STACK_UNOWNED;
@@ -5509,6 +5536,7 @@ fn kernel_process_stack_idle_yield() {
         kernel_invariant_stop();
     }
     // Leave its root before it can run elsewhere, as an exit does.
+    kernel_activity_park(guard, outgoing);
     address_space_activate_root(address_space_boot_root());
     scheduled_process_record_live_locked(guard, outgoing).stack_owner_cpu =
         PROCESS_STACK_UNOWNED;
@@ -5543,6 +5571,7 @@ fn kernel_process_stack_idle_blocked() {
         process_run_unlock(guard);
         kernel_invariant_stop();
     }
+    kernel_activity_park(guard, outgoing);
     address_space_activate_root(address_space_boot_root());
     scheduled_process_record_live_locked(guard, outgoing).stack_owner_cpu =
         PROCESS_STACK_UNOWNED;
@@ -11625,6 +11654,19 @@ fn kernel_process_scheduler_probe() -> bool !{changes_witness_ProcessCurrent} {
     let mut root_handle: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
     // #1307: with no process current here, no witness is minted.
     let live_before: bool = execution_state[execution_cpu_index()].current_live;
+    // GitHub issue #1322: an activity parked at a handoff comes back with its
+    // task, whatever ran on the CPU in between.
+    if (live_before) {
+        let activity_guard = process_run_lock();
+        let activity_before: KernelActivity = kernel_activity_enter(KernelActivity::Syscall);
+        kernel_activity_park(activity_guard, root_handle);
+        kernel_activity_set(KernelActivity::IdleLoop);
+        kernel_activity_resume(activity_guard, root_handle);
+        let restored: bool = kernel_activity_code_here() == KernelActivity::Syscall as usize;
+        kernel_activity_leave(activity_before);
+        process_run_unlock(activity_guard);
+        if (restored == false) { return false; }
+    }
     execution_state[execution_cpu_index()].current_live = false;
     let idle_refused: bool = match process_running_here() {
         ProcessRunningHere::Idle => { true }
