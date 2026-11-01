@@ -239,8 +239,11 @@ def nesting_problems(files):
                 continue
             held_calls = set()
             for signature, body in fns[holder]:
-                taken = re.search(r"\b" + acquire + r"\s*\(", body)
-                if re.search(r"\b" + token + r"\b", signature):
+                # Substring first: this runs per function, per pool.
+                taken = (re.search(r"\b" + acquire + r"\s*\(", body)
+                         if acquire in body else None)
+                if token in signature and re.search(r"\b" + token + r"\b",
+                                                    signature):
                     held_calls |= {m.group(1) for m in CALL.finditer(body)}
                 elif taken:
                     # What the function did before the acquire, it did
@@ -273,6 +276,8 @@ def slot_index_problems(files):
     problems = []
     for path, text in sorted(files.items()):
         if path in SLOT_INDEX_CALLERS:
+            continue
+        if not any(name in text for name in SLOT_INDEXED):
             continue
         code = strip_comments(text)
         for name in SLOT_INDEXED:
