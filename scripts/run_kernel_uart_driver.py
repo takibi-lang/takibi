@@ -98,8 +98,11 @@ def ash_command_results(transcript, commands, setup):
             index = end
             continue
         line = lines[index]
+        # ps's TIME is real CPU time since #1309, so a slow debug kernel can
+        # show 0:01 for a shell: a row's time is not part of the transcript.
+        line = re.sub(r"^( +[0-9]+ 0 +)[0-9]+:[0-5][0-9]( )", r"\g<1>0:00\2", line)
         # ps's own PID changes when a preceding probe forks. Its positive
-        # PID is dynamic; keep the uid, time and command fields exact.
+        # PID is dynamic; keep the uid and command fields exact.
         if re.fullmatch(r" +[1-9][0-9]* 0 +0:00 ps", line):
             line = "    <pid> 0         0:00 ps"
         result.append(line)

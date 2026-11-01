@@ -193,6 +193,10 @@ def main() -> int:
         (["    0 0         0:00 ps"], ["    0 0         0:00 ps"]),
         (["   18 1         0:00 ps"], ["   18 1         0:00 ps"]),
         (["    1 0         0:00 init"], ["    1 0         0:00 init"]),
+        (["    8 0         0:01 /bin/sh -i"], ["    8 0         0:00 /bin/sh -i"]),
+        (["   18 0         1:23 ps"], ["    <pid> 0         0:00 ps"]),
+        (["    8 1         0:01 /bin/sh -i"], ["    8 1         0:01 /bin/sh -i"]),
+        (["clock 0         0:01 x"], ["clock 0         0:01 x"]),
     )
     for transcript, expected in cases:
         CASES.note()
