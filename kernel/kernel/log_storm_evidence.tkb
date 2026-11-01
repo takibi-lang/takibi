@@ -213,9 +213,9 @@ fn log_storm_trace_probe() -> bool !{logs, unsafe} {
             peer_tick_window_end(window);
         }
     }
-    log_ring_trace_arm_reader();
-    let read: usize = kernel_log_snapshot_build_from(from);
-    log_ring_trace_disarm_reader();
+    let snapshot_guard = kernel_log_snapshot_take();
+    let read: usize = kernel_log_snapshot_build_from(snapshot_guard, from, true);
+    kernel_log_snapshot_give(snapshot_guard);
     let mut mine: bool = true;
     for index: usize in 1..<64 {
         if (index < kernel_log_storm_per_writer() && mine) {

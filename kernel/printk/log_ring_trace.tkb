@@ -15,25 +15,31 @@
 // checkable at all (#656: without it, 3 CPUs x 5 records and one read did not
 // finish in 180 s).
 //
-// Events go to per-CPU static buffers: each CPU writes only its own, so the
-// recording adds no shared atomic to the protocol under test. Outside a
+// Events go to one static buffer per CPU, and a recorder takes its event's
+// slot with one fetch_add on the buffer of the CPU it runs on, so two recorders
+// on one CPU (or one moved off it mid-event) never fill the same event, and no
+// word of the protocol under test is shared with the recording. Outside a
 // window every site pays one acquire load of the window flag.
 //
 // One window, opened and closed by core 0 (log_storm_trace_probe). The reader
-// traced is the one log_ring_trace_arm_reader names, on that CPU only, and
-// only for sequences at or past the head the window opened at: its first such
-// sequence is recorded as its begin, so the validator starts the model's
+// traced is the one whose read carries a LogRingTraceReader with `traced` set,
+// and only for sequences at or past the head the window opened at: its first
+// such sequence is recorded as its begin, so the validator starts the model's
 // reader there.
 //
-// Current limitations (2026-10-18):
+// Current limitations (2026-11-01):
 // - A writer that read the flag just before the close may store one more
 //   event after the report has counted its buffer; the report then misses
 //   it. The probe closes only after every writer said it was done, so only a
 //   writer that timed out of the round can do this.
+// - THE VALIDATOR TAKES A BUFFER AS ONE WRITER'S PROGRAM ORDER. That holds for
+//   the storm's one writer per CPU. A task preempted mid-record, or moved to
+//   another CPU, would break it; the validator then refuses the window rather
+//   than passing it. Nothing else logs inside the window today.
 // - kernel_log_discard (a token given up whole) is not a LogRing.tla action
 //   and records nothing; only the bounds probe at boot calls it, never inside
 //   a window.
-// - A CPU's buffer holds LOG_RING_TRACE_EVENTS events; more are counted lost
+// - A CPU's buffer holds LOG_RING_TRACE_EVENTS events; more are reported lost
 //   and the validator refuses the window.
 
 use "kernel/lib/atomic_word.tkb";
@@ -65,25 +71,32 @@ const LOG_RING_TRACE_OUT_OTHER: usize = 2;
 // first: the record's first sequence (reader: the sequence; begin: FIRST).
 // word: the slot word observed (begin: END). t0: the counter before.
 struct LogRingTraceEvent {
-    tag: usize;
-    first: usize;
-    word: usize;
-    t0: usize;
+    tag: AtomicWord;
+    first: AtomicWord;
+    word: AtomicWord;
+    t0: AtomicWord;
 }
 
+// `claimed`: the events ever claimed since the window opened, so at most
+// LOG_RING_TRACE_EVENTS are stored and the rest are lost.
 struct LogRingTraceCpu {
-    stored: usize;
-    lost: usize;
+    claimed: AtomicWord;
     events: [LogRingTraceEvent; LOG_RING_TRACE_EVENTS];
+}
+
+// One read's standing with the trace, on the reader's own stack: whether this
+// read is the traced one, and whether its begin has been recorded. It follows
+// the read and not a CPU, so a reader that moves stays traced and a second
+// reader on its CPU is not.
+struct LogRingTraceReader {
+    traced: bool;
+    begun: bool;
 }
 
 private let mut log_ring_trace_active: AtomicWord;
 private let mut log_ring_trace_cpus: [LogRingTraceCpu; KERNEL_MAX_CORES];
 // The head the window opened at; the reader records from there.
 private let mut log_ring_trace_from: usize;
-// The traced reader's CPU plus one (0: none), and whether it has begun.
-private let mut log_ring_trace_reader_cpu: usize;
-private let mut log_ring_trace_reader_begun: bool;
 
 // The system counter, after every earlier memory access has completed and
 // before any later one starts. Never 0, which means "not recording".
@@ -108,21 +121,18 @@ private fn log_ring_trace_store(t0: usize, kind: usize, first: usize, k: usize,
     let raw: usize = cpu_id();
     if (raw >= KERNEL_MAX_CORES) { return; }
     let cpu: {0..<KERNEL_MAX_CORES as usize} = raw;
-    let stored: usize = log_ring_trace_cpus[cpu].stored;
-    if (stored >= LOG_RING_TRACE_EVENTS) {
-        log_ring_trace_cpus[cpu].lost = log_ring_trace_cpus[cpu].lost + 1;
-        return;
-    }
+    let stored: usize = atomic_word_fetch_add(&log_ring_trace_cpus[cpu].claimed, 1);
+    if (stored >= LOG_RING_TRACE_EVENTS) { return; }
     let slot: {0..<LOG_RING_TRACE_EVENTS as usize} = stored;
     // A wider interval than the truth is sound; a narrower one is not.
     let mut delta: usize = 0xFFFFFFFF;
     if (t1 >= t0 && t1 - t0 < 0xFFFFFFFF) { delta = t1 - t0; }
-    log_ring_trace_cpus[cpu].events[slot].tag = (kind & 15) | ((k & 15) << 4) |
-        ((i & 15) << 8) | ((out & 15) << 12) | (delta << 32);
-    log_ring_trace_cpus[cpu].events[slot].first = first;
-    log_ring_trace_cpus[cpu].events[slot].word = word;
-    log_ring_trace_cpus[cpu].events[slot].t0 = t0;
-    log_ring_trace_cpus[cpu].stored = stored + 1;
+    atomic_word_store(&log_ring_trace_cpus[cpu].events[slot].tag,
+        (kind & 15) | ((k & 15) << 4) | ((i & 15) << 8) | ((out & 15) << 12) |
+        (delta << 32));
+    atomic_word_store(&log_ring_trace_cpus[cpu].events[slot].first, first);
+    atomic_word_store(&log_ring_trace_cpus[cpu].events[slot].word, word);
+    atomic_word_store(&log_ring_trace_cpus[cpu].events[slot].t0, t0);
 }
 
 // After a writer's atomic access that began at `t0` (0: no window then).
@@ -134,14 +144,12 @@ fn log_ring_trace_writer(t0: usize, kind: usize, first: usize, k: usize,
 
 // After a reader's access to sequence `seq` that began at `t0`. `end` is the
 // head the read started from.
-fn log_ring_trace_reader(t0: usize, kind: usize, seq: usize, word: usize,
-                         out: usize, end: usize) {
+fn log_ring_trace_reader(reader: borrow &mut LogRingTraceReader, t0: usize, kind: usize,
+                         seq: usize, word: usize, out: usize, end: usize) {
     if (t0 == 0) { return; }
-    if (cpu_id() + 1 != log_ring_trace_reader_cpu || seq < log_ring_trace_from) {
-        return;
-    }
-    if (log_ring_trace_reader_begun == false) {
-        log_ring_trace_reader_begun = true;
+    if (reader.traced == false || seq < log_ring_trace_from) { return; }
+    if (reader.begun == false) {
+        reader.begun = true;
         log_ring_trace_store(t0, LOG_RING_TRACE_BEGIN, seq, 0, 0, 0, end);
     }
     log_ring_trace_store(t0, kind, seq, 0, 0, out, word);
@@ -151,23 +159,10 @@ fn log_ring_trace_reader(t0: usize, kind: usize, seq: usize, word: usize,
 // open the next at `head`, the head this caller just read.
 fn log_ring_trace_open(head: usize) {
     for cpu: usize in 0..<KERNEL_MAX_CORES {
-        log_ring_trace_cpus[cpu].stored = 0;
-        log_ring_trace_cpus[cpu].lost = 0;
+        atomic_word_store(&log_ring_trace_cpus[cpu].claimed, 0);
     }
     log_ring_trace_from = head;
-    log_ring_trace_reader_cpu = 0;
-    log_ring_trace_reader_begun = false;
     atomic_word_store(&log_ring_trace_active, 1);
-}
-
-// The reader on this CPU is the one traced, until disarmed.
-fn log_ring_trace_arm_reader() {
-    log_ring_trace_reader_begun = false;
-    log_ring_trace_reader_cpu = cpu_id() + 1;
-}
-
-fn log_ring_trace_disarm_reader() {
-    log_ring_trace_reader_cpu = 0;
 }
 
 fn log_ring_trace_close() {
@@ -195,10 +190,10 @@ private fn log_ring_trace_out(kind: usize, out: usize) {
 
 private fn log_ring_trace_line(cpu: {0..<KERNEL_MAX_CORES as usize},
                                slot: {0..<LOG_RING_TRACE_EVENTS as usize}) {
-    let tag: usize = log_ring_trace_cpus[cpu].events[slot].tag;
-    let first: usize = log_ring_trace_cpus[cpu].events[slot].first;
-    let word: usize = log_ring_trace_cpus[cpu].events[slot].word;
-    let t0: usize = log_ring_trace_cpus[cpu].events[slot].t0;
+    let tag: usize = atomic_word_load(&log_ring_trace_cpus[cpu].events[slot].tag);
+    let first: usize = atomic_word_load(&log_ring_trace_cpus[cpu].events[slot].first);
+    let word: usize = atomic_word_load(&log_ring_trace_cpus[cpu].events[slot].word);
+    let t0: usize = atomic_word_load(&log_ring_trace_cpus[cpu].events[slot].t0);
     let kind: usize = tag & 15;
     let k: usize = (tag >> 4) & 15;
     let i: usize = (tag >> 8) & 15;
@@ -252,10 +247,13 @@ fn log_ring_trace_report() {
     let mut stored: usize = 0;
     let mut lost: usize = 0;
     for cpu: usize in 0..<KERNEL_MAX_CORES {
-        let count: usize = log_ring_trace_cpus[cpu].stored;
-        if (count > LOG_RING_TRACE_EVENTS) { stored = stored + LOG_RING_TRACE_EVENTS; }
-        else { stored = stored + count; }
-        lost = lost + log_ring_trace_cpus[cpu].lost;
+        let count: usize = atomic_word_load(&log_ring_trace_cpus[cpu].claimed);
+        if (count > LOG_RING_TRACE_EVENTS) {
+            stored = stored + LOG_RING_TRACE_EVENTS;
+            lost = lost + count - LOG_RING_TRACE_EVENTS;
+        } else {
+            stored = stored + count;
+        }
     }
     kernel_boot_log("log-ring-trace: begin cpus=");
     uart_put_udec(KERNEL_MAX_CORES);
@@ -269,7 +267,7 @@ fn log_ring_trace_report() {
     uart_put_udec(lost);
     kernel_boot_log("\n");
     for cpu: usize in 0..<KERNEL_MAX_CORES {
-        let count: usize = log_ring_trace_cpus[cpu].stored;
+        let count: usize = atomic_word_load(&log_ring_trace_cpus[cpu].claimed);
         for slot: usize in 0..<LOG_RING_TRACE_EVENTS {
             if (slot < count) {
                 log_ring_trace_line(cpu, slot);

@@ -96,7 +96,6 @@ LISTED = {
     ("kernel/kernel/stall_probe.tkb", "stall_probe_last_refused_pid"): (CROSS, "read from GDB by symbol name; the probe is off by default (KERNEL_STALL_PROBES)"),
     ("kernel/kernel/tcp_connection_contention_evidence.tkb", "tcp_pool_cost_mailboxes"): (CROSS, "the pool-cost probe's driver"),
     ("kernel/kernel/workload_evidence.tkb", "workload_profile_cores"): (CROSS, "the workload profile report"),
-    ("kernel/printk/log.tkb", "kernel_log_snapshots"): (CROSS, "DDB's log snapshots (#613)"),
     ("kernel/printk/log.tkb", "kernel_log_core_state"): (CROSS, "the log ring's peers (#613)"),
     ("kernel/printk/log.tkb", "kernel_log_peer_console_probe_sent"): (CROSS, "the console probe's driver"),
     ("kernel/printk/log.tkb", "kernel_log_storm_found"): (CROSS, "the log-storm report"),

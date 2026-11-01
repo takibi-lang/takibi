@@ -4577,7 +4577,19 @@ private fn syscall_syslog_with(slot: borrow SyscallSlot[0],
     if (action != LINUX_SYSLOG_ACTION_READ_ALL || requested == 0) {
         return SyscallAction::Resume(LINUX_EINVAL);
     }
-    let available: usize = kernel_log_snapshot_build();
+    // One snapshot, so the guard stays from the build to the last copy.
+    let snapshot = kernel_log_snapshot_take();
+    let result: SyscallAction = syscall_syslog_copy(slot, current_authority, snapshot,
+                                                    address, requested);
+    kernel_log_snapshot_give(snapshot);
+    return result;
+}
+
+private fn syscall_syslog_copy(slot: borrow SyscallSlot[0],
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+        snapshot: borrow KernelLogSnapshotGuard[&kernel_log_snapshot_lock], address: usize,
+        requested: usize) -> SyscallAction !{unsafe} {
+    let available: usize = kernel_log_snapshot_build(snapshot);
     let mut amount: usize = requested;
     if (amount > available) { amount = available; }
     if (amount == 0) { return SyscallAction::Resume(0); }
@@ -4591,7 +4603,7 @@ private fn syscall_syslog_with(slot: borrow SyscallSlot[0],
             return SyscallAction::Resume(LINUX_EINVAL);
         }
         let staging = staging_buffer[0..<chunk];
-        let staged: usize = kernel_log_snapshot_copy(copied, staging);
+        let staged: usize = kernel_log_snapshot_copy(snapshot, copied, staging);
         if (staged != chunk) { return SyscallAction::Resume(LINUX_EINVAL); }
         let target: usize = match checked_add_usize(address, copied) {
             CheckedUsize::Overflow => {

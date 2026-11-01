@@ -15,7 +15,7 @@ kernel/arch/arm64/mm/mmu.tkb	2	0	page-table entries as a raw table (#637 H)
 kernel/boot/fdt.tkb	1	0	the device tree blob as raw memory (#637 H)
 kernel/mm/user_memory.tkb	7	0	the user-range mint site: user addresses become slices here (#637 D)
 kernel/platform/qemu/device_map.tkb	0	3	virtio-mmio magic and device-id probes during DTB discovery (#637 A); the device-window mint
-kernel/printk/log.tkb	21	0	the syslog snapshot buffers and NUL-terminated string walks; per-CPU line state is indexed since #613 slice 5 (#637 B)
+kernel/printk/log.tkb	4	0	NUL-terminated string walks; per-CPU line state is indexed since #613 slice 5 (#637 B)
 <builtin region>	113	0	the compiler's built-in region definitions (#672): every dereference is a slot, chunk header or byte in memory the built-in hands out, and its trust is the compiler's, not the kernel's
 kernel/tests/qemu/dma/virtio_blk_fixture.tkb	1	4	test-only device-side descriptor status address and used-ring publication; never CPU-side buffer access or an authority mint
 kernel/mm/memory_map.tkb	2	0	the memory mint: page bytes and a probe of a fresh run's tails (#744)

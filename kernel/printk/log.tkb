@@ -20,6 +20,7 @@
 // that needs to name a slot outside those paths makes this a privilege
 // question first: add a syslog privilege check before it.
 use "kernel/lib/atomic_word.tkb";
+use "kernel/lib/task_mutex.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/printk/number.tkb";
 use "kernel/drivers/serial/terminal.tkb";
@@ -114,17 +115,47 @@ private let mut kernel_log_commit_lost: AtomicWord;
 
 private let mut kernel_log_boot_tick: AtomicWord;
 private let mut kernel_log_frequency: AtomicWord;
-// One snapshot per CPU: syslog(2) builds it and copies it out in one
-// syscall, which since #612 may run on any CPU.
+// One snapshot: syslog(2) builds it and copies it out holding this guard, over
+// a whole syscall that may run on any CPU and may be switched out, so readers
+// take turns (#1159; it used to be one per CPU, chosen by cpu_id()). The guard
+// is a TaskMutex because the holder copies to user memory; a writer of the ring
+// never takes it.
 struct KernelLogSnapshot {
     length: usize;
     bytes: [u8; KERNEL_LOG_SNAPSHOT_CAPACITY];
 }
-private let mut kernel_log_snapshots: [KernelLogSnapshot; KERNEL_MAX_CORES];
+let mut kernel_log_snapshot_lock: TaskMutex;
+private region let mut kernel_log_snapshot_backing: [KernelLogSnapshot; 1];
+struct KernelLogSnapshotStore {
+    private state: Place(exists c: addr. exists c__off: usize.
+                         region(KernelLogSnapshot)[c, 1])
+                   guarded_by(kernel_log_snapshot_lock);
+}
+private let mut kernel_log_snapshot_store: KernelLogSnapshotStore;
 
-private fn kernel_log_snapshot_here() -> *KernelLogSnapshot {
-    let base: *KernelLogSnapshot = kernel_log_snapshots;
-    return base + (cpu_id() as isize);
+linear struct KernelLogSnapshotGuard[lock: addr] { private held: usize; }
+
+// The first holder claims the storage.
+fn kernel_log_snapshot_take() -> KernelLogSnapshotGuard[&kernel_log_snapshot_lock]
+        !{may_block, acquires_lock_30_log_snapshot, lock_guard_30_log_snapshot} {
+    task_mutex_acquire(&kernel_log_snapshot_lock);
+    let mut guard: KernelLogSnapshotGuard[&kernel_log_snapshot_lock] = { 1 };
+    if (place_is_full(guard, kernel_log_snapshot_store.state) == false) {
+        let RegionOf(KernelLogSnapshot)::Taken(claimed) =
+                region_of(kernel_log_snapshot_backing) else {
+            RegionOf(KernelLogSnapshot)::Gone => { return guard; }
+        };
+        match place_put(guard, kernel_log_snapshot_store.state, claimed) {
+            Place::Empty => {}
+            Place::Full(previous) => { region_release(previous); }
+        }
+    }
+    return guard;
+}
+
+fn kernel_log_snapshot_give(guard: sink KernelLogSnapshotGuard[&kernel_log_snapshot_lock]) {
+    let held: usize = guard.held;
+    task_mutex_release(&kernel_log_snapshot_lock);
 }
 
 // The word stores and loads the protocol above is made of.
@@ -1626,8 +1657,7 @@ fn kernel_log_enter_emergency() {
     }
 }
 
-private fn kernel_log_snapshot_push(value: u8) {
-    let snapshot: *KernelLogSnapshot = kernel_log_snapshot_here();
+private fn kernel_log_snapshot_push(snapshot: borrow &mut KernelLogSnapshot, value: u8) {
     let length: usize = snapshot.length;
     if (length < KERNEL_LOG_SNAPSHOT_CAPACITY) {
         let safe_length:
@@ -1637,26 +1667,26 @@ private fn kernel_log_snapshot_push(value: u8) {
     }
 }
 
-private fn kernel_log_snapshot_text(text: *u8) {
+private fn kernel_log_snapshot_text(snapshot: borrow &mut KernelLogSnapshot, text: *u8) {
     while (*text != 0) {
-        kernel_log_snapshot_push(*text);
+        kernel_log_snapshot_push(snapshot, *text);
         text = text + 1;
     }
 }
 
-private fn kernel_log_snapshot_decimal6(value: usize) {
+private fn kernel_log_snapshot_decimal6(snapshot: borrow &mut KernelLogSnapshot, value: usize) {
     let mut place_values: [usize; 6] =
         { 100000, 10000, 1000, 100, 10, 1 };
     for position: usize in 0..<6 {
         let divisor: usize = place_values[position];
         if (divisor != 0) {
             let digit: usize = (value / divisor) % 10;
-            kernel_log_snapshot_push((digit + 48) as u8);
+            kernel_log_snapshot_push(snapshot, (digit + 48) as u8);
         }
     }
 }
 
-private fn kernel_log_snapshot_timestamp(ticks: i64) {
+private fn kernel_log_snapshot_timestamp(snapshot: borrow &mut KernelLogSnapshot, ticks: i64) {
     let mut seconds: usize = 0;
     let mut micros: usize = 0;
     let frequency: usize = atomic_word_load(&kernel_log_frequency);
@@ -1670,12 +1700,12 @@ private fn kernel_log_snapshot_timestamp(ticks: i64) {
             CheckedUsize::Value(scaled) => { micros = scaled / frequency; }
         }
     }
-    kernel_log_snapshot_push(91);
-    kernel_log_snapshot_decimal6(seconds % 1000000);
-    kernel_log_snapshot_push(46);
-    kernel_log_snapshot_decimal6(micros);
-    kernel_log_snapshot_push(93);
-    kernel_log_snapshot_push(32);
+    kernel_log_snapshot_push(snapshot, 91);
+    kernel_log_snapshot_decimal6(snapshot, seconds % 1000000);
+    kernel_log_snapshot_push(snapshot, 46);
+    kernel_log_snapshot_decimal6(snapshot, micros);
+    kernel_log_snapshot_push(snapshot, 93);
+    kernel_log_snapshot_push(snapshot, 32);
 }
 
 // What one acquire load of a slot word says about sequence `seq`. Only
@@ -1756,8 +1786,8 @@ must_use variant KernelLogRecordCopy {
     Skipped(usize);
 }
 
-// Copy the first `count` bytes of slot `slot` into this CPU's snapshot.
-private fn kernel_log_copy_slot_text(slot: {0..<KERNEL_LOG_SLOT_COUNT as usize},
+// Copy the first `count` bytes of slot `slot` into the snapshot.
+private fn kernel_log_copy_slot_text(snapshot: borrow &mut KernelLogSnapshot, slot: {0..<KERNEL_LOG_SLOT_COUNT as usize},
                                      count: usize, record: usize,
                                      overwrite_mid_copy: bool) !{unsafe} {
     for byte_index: usize in 0..<KERNEL_LOG_SLOT_BYTES {
@@ -1766,7 +1796,7 @@ private fn kernel_log_copy_slot_text(slot: {0..<KERNEL_LOG_SLOT_COUNT as usize},
             if (word_index < KERNEL_LOG_TEXT_WORDS) {
                 let safe_word: {0..<KERNEL_LOG_TEXT_WORDS as usize} = word_index;
                 let word: usize = kernel_log_observe(&kernel_log_text[safe_word]);
-                kernel_log_snapshot_push(((word >> ((byte_index % 8) * 8)) & 0xFF) as u8);
+                kernel_log_snapshot_push(snapshot, ((word >> ((byte_index % 8) * 8)) & 0xFF) as u8);
             }
             if (byte_index == 0 && overwrite_mid_copy) {
                 kernel_log_overwrite_slot_for_probe(record);
@@ -1775,17 +1805,18 @@ private fn kernel_log_copy_slot_text(slot: {0..<KERNEL_LOG_SLOT_COUNT as usize},
     }
 }
 
-// Record `seq` into this CPU's snapshot, or nothing, by the protocol at the
+// Record `seq` into the snapshot, or nothing, by the protocol at the
 // top of this file (LogRing.tla ReadHead .. ContCheck, generalised from two
 // slots to KERNEL_LOG_RECORD_SLOTS). `end` is the head the reader started
 // from. `second_check` false is the negative control's reader, which trusts
 // whatever it copied; `overwrite_mid_copy` has core 0 overwrite the slot
 // after the first text byte is copied, which makes that control
 // deterministic. Both are false for syslog(2).
-private fn kernel_log_snapshot_record(seq: usize, end: usize, second_check: bool,
+private fn kernel_log_snapshot_record(snapshot: borrow &mut KernelLogSnapshot,
+                                      reader: borrow &mut LogRingTraceReader,
+                                      seq: usize, end: usize, second_check: bool,
                                       overwrite_mid_copy: bool)
         -> KernelLogRecordCopy !{unsafe} {
-    let snapshot: *KernelLogSnapshot = kernel_log_snapshot_here();
     let mark: usize = snapshot.length;
     // Each load below is stamped for log_ring_trace.tkb, which records it
     // only inside a window (`at` is 0 otherwise).
@@ -1794,23 +1825,23 @@ private fn kernel_log_snapshot_record(seq: usize, end: usize, second_check: bool
     let seen: KernelLogUnvalidated = match kernel_log_slot_view(seq, head_word) {
         KernelLogSlotView::Readable(observed) => { observed }
         KernelLogSlotView::Unreported => {
-            log_ring_trace_reader(head_at, LOG_RING_TRACE_HEAD, seq, head_word,
+            log_ring_trace_reader(reader, head_at, LOG_RING_TRACE_HEAD, seq, head_word,
                                   LOG_RING_TRACE_OUT_LOST, end);
             return KernelLogRecordCopy::Lost(1);
         }
         KernelLogSlotView::WriterReported => {
-            log_ring_trace_reader(head_at, LOG_RING_TRACE_HEAD, seq, head_word,
+            log_ring_trace_reader(reader, head_at, LOG_RING_TRACE_HEAD, seq, head_word,
                                   LOG_RING_TRACE_OUT_OTHER, end);
             return KernelLogRecordCopy::Skipped(1);
         }
     };
     let span: usize = kernel_log_seen_span(seen);
     if (span > KERNEL_LOG_RECORD_SLOTS || seq + span > end) {
-        log_ring_trace_reader(head_at, LOG_RING_TRACE_HEAD, seq, head_word,
+        log_ring_trace_reader(reader, head_at, LOG_RING_TRACE_HEAD, seq, head_word,
                               LOG_RING_TRACE_OUT_LOST, end);
         return KernelLogRecordCopy::Lost(1);
     }
-    log_ring_trace_reader(head_at, LOG_RING_TRACE_HEAD, seq, head_word,
+    log_ring_trace_reader(reader, head_at, LOG_RING_TRACE_HEAD, seq, head_word,
                           LOG_RING_TRACE_OUT_GO, end);
     let copy_at: usize = log_ring_trace_t0();
     let first: {0..<KERNEL_LOG_SLOT_COUNT as usize} = kernel_log_slot_of(seq);
@@ -1821,7 +1852,7 @@ private fn kernel_log_snapshot_record(seq: usize, end: usize, second_check: bool
     // A continuation of a long line carries on the line before it, so it
     // prints no prefix of its own.
     if ((meta & KERNEL_LOG_META_CONTINUED) == 0) {
-        kernel_log_snapshot_timestamp(line_tick as i64);
+        kernel_log_snapshot_timestamp(snapshot, line_tick as i64);
         // GitHub issue #465: a core column, printed only for a core other
         // than core 0. Since #830 any core may own the console, so this is no
         // longer "the console owner"; core 0 stays unprefixed only so that
@@ -1829,9 +1860,9 @@ private fn kernel_log_snapshot_record(seq: usize, end: usize, second_check: bool
         // core 0's, so its dmesg is unchanged -- and a peer's line is the one
         // that could not previously be told from core 0's at all.
         if (line_cpu != 0) { // core-role: dmesg keeps core 0's lines unprefixed, the pre-#465 format
-            kernel_log_snapshot_text("cpu" as *u8);
-            kernel_log_snapshot_push(((line_cpu % 10) + 48) as u8);
-            kernel_log_snapshot_push(32);
+            kernel_log_snapshot_text(snapshot, "cpu" as *u8);
+            kernel_log_snapshot_push(snapshot, ((line_cpu % 10) + 48) as u8);
+            kernel_log_snapshot_push(snapshot, 32);
         }
     }
     // Cleared by the first slot found changed; what was copied is then
@@ -1850,7 +1881,7 @@ private fn kernel_log_snapshot_record(seq: usize, end: usize, second_check: bool
                 cont_word = kernel_log_observe(&kernel_log_slots[slot]);
             }
             if (cont_word != expected) {
-                log_ring_trace_reader(cont_at, LOG_RING_TRACE_CCOPY, seq + index, cont_word,
+                log_ring_trace_reader(reader, cont_at, LOG_RING_TRACE_CCOPY, seq + index, cont_word,
                                       LOG_RING_TRACE_OUT_LOST, end);
                 intact = false;
             } else {
@@ -1858,13 +1889,13 @@ private fn kernel_log_snapshot_record(seq: usize, end: usize, second_check: bool
                 let mut to: usize = from + KERNEL_LOG_SLOT_BYTES;
                 if (to > length) { to = length; }
                 if (from < to) {
-                    kernel_log_copy_slot_text(slot, to - from, seq,
+                    kernel_log_copy_slot_text(snapshot, slot, to - from, seq,
                                               overwrite_mid_copy && index == 0);
                 }
                 if (index == 0) {
-                    log_ring_trace_reader(copy_at, LOG_RING_TRACE_COPY, seq, 0, 0, end);
+                    log_ring_trace_reader(reader, copy_at, LOG_RING_TRACE_COPY, seq, 0, 0, end);
                 } else {
-                    log_ring_trace_reader(cont_at, LOG_RING_TRACE_CCOPY, seq + index,
+                    log_ring_trace_reader(reader, cont_at, LOG_RING_TRACE_CCOPY, seq + index,
                                           cont_word, LOG_RING_TRACE_OUT_GO, end);
                 }
                 // HeadCheck / ContCheck: the word is still what it was.
@@ -1876,14 +1907,14 @@ private fn kernel_log_snapshot_record(seq: usize, end: usize, second_check: bool
                         let mut out: usize = LOG_RING_TRACE_OUT_LOST;
                         if (intact && span == 1) { out = LOG_RING_TRACE_OUT_GO; }
                         if (intact && span != 1) { out = LOG_RING_TRACE_OUT_OTHER; }
-                        log_ring_trace_reader(check_at, LOG_RING_TRACE_CHECK, seq, now,
+                        log_ring_trace_reader(reader, check_at, LOG_RING_TRACE_CHECK, seq, now,
                                               out, end);
                     } else {
                         let now: usize = kernel_log_observe(&kernel_log_slots[slot]);
                         intact = now == expected;
                         let mut out: usize = LOG_RING_TRACE_OUT_LOST;
                         if (intact) { out = LOG_RING_TRACE_OUT_GO; }
-                        log_ring_trace_reader(check_at, LOG_RING_TRACE_CCHECK, seq + index,
+                        log_ring_trace_reader(reader, check_at, LOG_RING_TRACE_CCHECK, seq + index,
                                               now, out, end);
                     }
                 }
@@ -1901,17 +1932,31 @@ private fn kernel_log_snapshot_record(seq: usize, end: usize, second_check: bool
 // Records the ring had already overwritten, records in flight or overwritten
 // while this copied them, and records their writers gave up are each
 // reported explicitly instead of being presented as complete history.
-fn kernel_log_snapshot_build() -> usize !{unsafe} {
-    return kernel_log_snapshot_build_from(0);
+fn kernel_log_snapshot_build(guard: borrow KernelLogSnapshotGuard[&kernel_log_snapshot_lock])
+        -> usize !{unsafe} {
+    return kernel_log_snapshot_build_from(guard, 0, false);
 }
 
 // The same read, starting no earlier than `floor` (syslog(2): 0). The log
 // ring trace probe (#656) reads from its window's opening head, so the read
 // meets the records its writers are still committing instead of reaching
 // them only after a whole ring of older ones; the records it skips are
-// reported as overwritten, and that snapshot is never shown.
-fn kernel_log_snapshot_build_from(floor: usize) -> usize !{unsafe} {
-    let snapshot: *KernelLogSnapshot = kernel_log_snapshot_here();
+// reported as overwritten, and that snapshot is never shown. `traced`: this
+// read is the one the open trace window records.
+fn kernel_log_snapshot_build_from(guard: borrow KernelLogSnapshotGuard[&kernel_log_snapshot_lock],
+                                  floor: usize, traced: bool) -> usize !{unsafe} {
+    let length: usize = match place_borrow(guard, kernel_log_snapshot_store.state) {
+        Place::Empty => { 0 }
+        Place::Full(states) => {
+            kernel_log_snapshot_fill(region_at(states, 0), floor, traced)
+        }
+    };
+    return length;
+}
+
+private fn kernel_log_snapshot_fill(snapshot: borrow &mut KernelLogSnapshot, floor: usize,
+                                    traced: bool) -> usize !{unsafe} {
+    let mut reader: LogRingTraceReader = { traced, false };
     snapshot.length = 0;
     let end: usize = kernel_log_observe(&kernel_log_head);
     let mut begin: usize = 0;
@@ -1920,16 +1965,16 @@ fn kernel_log_snapshot_build_from(floor: usize) -> usize !{unsafe} {
     }
     if (floor > begin && floor <= end) { begin = floor; }
     if (begin != 0) {
-        kernel_log_snapshot_text("<4>kernel log: overwritten records=" as *u8);
-        kernel_log_snapshot_decimal6(begin % 1000000);
-        kernel_log_snapshot_push(10);
+        kernel_log_snapshot_text(snapshot, "<4>kernel log: overwritten records=" as *u8);
+        kernel_log_snapshot_decimal6(snapshot, begin % 1000000);
+        kernel_log_snapshot_push(snapshot, 10);
     }
     let mut lost: usize = 0;
     let mut first_lost: usize = 0;
     let mut seq: usize = begin;
     for step: usize in 0..<KERNEL_LOG_SLOT_COUNT {
         if (seq < end) {
-            match kernel_log_snapshot_record(seq, end, true, false) {
+            match kernel_log_snapshot_record(snapshot, &reader, seq, end, true, false) {
                 KernelLogRecordCopy::Kept(span) => { seq = seq + span; }
                 KernelLogRecordCopy::Lost(count) => {
                     if (lost == 0) { first_lost = seq; }
@@ -1942,22 +1987,22 @@ fn kernel_log_snapshot_build_from(floor: usize) -> usize !{unsafe} {
     }
     let discarded: usize = kernel_log_observe(&kernel_log_discarded);
     if (discarded != 0) {
-        kernel_log_snapshot_text("<4>kernel log: discarded records=" as *u8);
-        kernel_log_snapshot_decimal6(discarded % 1000000);
+        kernel_log_snapshot_text(snapshot, "<4>kernel log: discarded records=" as *u8);
+        kernel_log_snapshot_decimal6(snapshot, discarded % 1000000);
         let last: usize = kernel_log_observe(&kernel_log_last_discarded);
         if (last != 0) {
-            kernel_log_snapshot_text(" last seq=" as *u8);
-            kernel_log_snapshot_decimal6((last - 1) % 1000000);
+            kernel_log_snapshot_text(snapshot, " last seq=" as *u8);
+            kernel_log_snapshot_decimal6(snapshot, (last - 1) % 1000000);
         }
-        kernel_log_snapshot_push(10);
+        kernel_log_snapshot_push(snapshot, 10);
     }
     if (lost != 0) {
-        kernel_log_snapshot_text(
+        kernel_log_snapshot_text(snapshot,
             "<4>kernel log: records in flight or overwritten while read=" as *u8);
-        kernel_log_snapshot_decimal6(lost % 1000000);
-        kernel_log_snapshot_text(" first seq=" as *u8);
-        kernel_log_snapshot_decimal6(first_lost % 1000000);
-        kernel_log_snapshot_push(10);
+        kernel_log_snapshot_decimal6(snapshot, lost % 1000000);
+        kernel_log_snapshot_text(snapshot, " first seq=" as *u8);
+        kernel_log_snapshot_decimal6(snapshot, first_lost % 1000000);
+        kernel_log_snapshot_push(snapshot, 10);
     }
     return snapshot.length;
 }
@@ -1968,9 +2013,28 @@ fn kernel_log_snapshot_capacity() -> usize {
 
 // GitHub issue #975: initializes exactly the prefix it reports copying,
 // so a caller staging into scratch need not zero-fill it first.
-fn kernel_log_snapshot_copy(offset: usize, destination: borrow uninit []u8) -> usize
+fn kernel_log_snapshot_copy(guard: borrow KernelLogSnapshotGuard[&kernel_log_snapshot_lock],
+                            offset: usize, destination: borrow uninit []u8) -> usize
         ensures init(destination[0..<result]) {
-    let snapshot: *KernelLogSnapshot = kernel_log_snapshot_here();
+    // Taken and put back rather than borrowed: a borrow's Full arm cannot
+    // return, and this function's ensures follows the copy's own result.
+    match place_take(guard, kernel_log_snapshot_store.state) {
+        Place::Empty => { return 0; }
+        Place::Full(states) => {
+            let copied: usize =
+                kernel_log_snapshot_copy_out(region_at(states, 0), offset, destination);
+            match place_put(guard, kernel_log_snapshot_store.state, states) {
+                Place::Empty => {}
+                Place::Full(previous) => { region_release(previous); }
+            }
+            return copied;
+        }
+    }
+}
+
+private fn kernel_log_snapshot_copy_out(snapshot: borrow &mut KernelLogSnapshot, offset: usize,
+                                        destination: borrow uninit []u8) -> usize
+        ensures init(destination[0..<result]) {
     let snapshot_length: usize = snapshot.length;
     if (offset >= snapshot_length) { return 0; }
     let bytes = snapshot.bytes as []const u8;
@@ -2096,6 +2160,52 @@ private fn kernel_log_overwrite_slot_for_probe(record: usize) !{unsafe} {
     }
 }
 
+// The boot probes' short views of the snapshot, each one guard hold.
+private fn kernel_log_probe_snapshot_record(seq: usize, end: usize, second_check: bool,
+                                            overwrite_mid_copy: bool)
+        -> KernelLogRecordCopy !{unsafe} {
+    let guard = kernel_log_snapshot_take();
+    let mut reader: LogRingTraceReader = { false, false };
+    let answer: KernelLogRecordCopy = match place_borrow(guard, kernel_log_snapshot_store.state) {
+        Place::Empty => { KernelLogRecordCopy::Lost(0) }
+        Place::Full(states) => {
+            kernel_log_snapshot_record(region_at(states, 0), &reader, seq, end, second_check,
+                                       overwrite_mid_copy)
+        }
+    };
+    kernel_log_snapshot_give(guard);
+    return answer;
+}
+
+private fn kernel_log_probe_snapshot_clear() {
+    let guard = kernel_log_snapshot_take();
+    match place_borrow(guard, kernel_log_snapshot_store.state) {
+        Place::Empty => {}
+        Place::Full(states) => { region_at(states, 0).length = 0; }
+    }
+    kernel_log_snapshot_give(guard);
+}
+
+private fn kernel_log_probe_snapshot_length() -> usize {
+    let guard = kernel_log_snapshot_take();
+    let answer: usize = match place_borrow(guard, kernel_log_snapshot_store.state) {
+        Place::Empty => { 0 }
+        Place::Full(states) => { region_at(states, 0).length }
+    };
+    kernel_log_snapshot_give(guard);
+    return answer;
+}
+
+private fn kernel_log_probe_snapshot_byte(index: {0..<KERNEL_LOG_SNAPSHOT_CAPACITY as usize}) -> u8 {
+    let guard = kernel_log_snapshot_take();
+    let answer: u8 = match place_borrow(guard, kernel_log_snapshot_store.state) {
+        Place::Empty => { 0 }
+        Place::Full(states) => { region_at(states, 0).bytes[index] }
+    };
+    kernel_log_snapshot_give(guard);
+    return answer;
+}
+
 // GitHub issue #824: a continuation whose head slot was overwritten is a
 // loss the reader counts (LogRing.tla ReadHead, "a stray continuation"),
 // not a silent skip. A two-slot record, then records until its head slot is
@@ -2108,17 +2218,22 @@ private fn kernel_log_stray_continuation_probe() -> bool !{unsafe} {
     kernel_log_overwrite_slot_for_probe(wide);
     let end: usize = kernel_log_observe(&kernel_log_head);
     if (end != wide + KERNEL_LOG_SLOT_COUNT + 1) { return false; }
-    match kernel_log_snapshot_record(wide + 1, end, true, false) {
+    match kernel_log_probe_snapshot_record(wide + 1, end, true, false) {
         KernelLogRecordCopy::Lost(count) => { if (count != 1) { return false; } }
         KernelLogRecordCopy::Kept(_) => { return false; }
         KernelLogRecordCopy::Skipped(_) => { return false; }
     }
     // The whole snapshot, as syslog(2) builds it: the window starts at the
     // continuation, and its loss line ends " first seq=<wide + 1>\n".
-    let length: usize = kernel_log_snapshot_build();
+    let snapshot = kernel_log_snapshot_take();
+    let length: usize = kernel_log_snapshot_build(snapshot);
+    kernel_log_snapshot_give(snapshot);
     if (length < 7) { return false; }
     let mut tail: [u8; 7] = { 0, 0, 0, 0, 0, 0, 0 };
-    if (kernel_log_snapshot_copy(length - 7, tail as []u8) != 7) { return false; }
+    let copier = kernel_log_snapshot_take();
+    let copied: usize = kernel_log_snapshot_copy(copier, length - 7, tail as []u8);
+    kernel_log_snapshot_give(copier);
+    if (copied != 7) { return false; }
     let first: usize = (wide + 1) % 1000000;
     let mut place_values: [usize; 6] = { 100000, 10000, 1000, 100, 10, 1 };
     for digit: usize in 0..<6 {
@@ -2136,26 +2251,26 @@ private fn kernel_log_stray_continuation_probe() -> bool !{unsafe} {
 // the snapshot; the reader that skips the re-check must return it torn --
 // 'a' then 'b' -- which is what the check exists to catch.
 private fn kernel_log_torn_read_probe() -> bool !{unsafe} {
-    let snapshot: *KernelLogSnapshot = kernel_log_snapshot_here();
     kernel_log_probe_record(97);
-    snapshot.length = 0;
+    kernel_log_probe_snapshot_clear();
     let checked_end: usize = kernel_log_observe(&kernel_log_head);
-    match kernel_log_snapshot_record(checked_end - 1, checked_end, true, true) {
+    match kernel_log_probe_snapshot_record(checked_end - 1, checked_end, true, true) {
         KernelLogRecordCopy::Kept(_) => { return false; }
         KernelLogRecordCopy::Lost(_) => {}
         KernelLogRecordCopy::Skipped(_) => { return false; }
     }
-    if (snapshot.length != 0) { return false; }
+    if (kernel_log_probe_snapshot_length() != 0) { return false; }
     kernel_log_probe_record(97);
     let unchecked_end: usize = kernel_log_observe(&kernel_log_head);
-    match kernel_log_snapshot_record(unchecked_end - 1, unchecked_end, false, true) {
+    match kernel_log_probe_snapshot_record(unchecked_end - 1, unchecked_end, false, true) {
         KernelLogRecordCopy::Lost(_) => { return false; }
         KernelLogRecordCopy::Skipped(_) => { return false; }
         KernelLogRecordCopy::Kept(_) => {}
     }
     // "[000000.000000] " then the text.
-    return snapshot.length >= 18 && snapshot.bytes[16] == 97 &&
-        snapshot.bytes[17] == 98;
+    return kernel_log_probe_snapshot_length() >= 18 &&
+        kernel_log_probe_snapshot_byte(16) == 97 &&
+        kernel_log_probe_snapshot_byte(17) == 98;
 }
 
 // The span and metadata of the record that begins at `seq`, for the probe.
@@ -2213,10 +2328,11 @@ fn kernel_log_bounds_probe() -> bool !{unsafe} {
         kernel_log_observe(&kernel_log_commit_lost) != 0) {
         return false;
     }
-    let snapshot_length: usize = kernel_log_snapshot_build();
-    let snapshot: *KernelLogSnapshot = kernel_log_snapshot_here();
-    if (snapshot_length < 3 || snapshot.bytes[0] != 60 ||
-        snapshot.bytes[1] != 52 || snapshot.bytes[2] != 62) {
+    let snapshot = kernel_log_snapshot_take();
+    let snapshot_length: usize = kernel_log_snapshot_build(snapshot);
+    kernel_log_snapshot_give(snapshot);
+    if (snapshot_length < 3 || kernel_log_probe_snapshot_byte(0) != 60 ||
+        kernel_log_probe_snapshot_byte(1) != 52 || kernel_log_probe_snapshot_byte(2) != 62) {
         return false;
     }
     if (kernel_log_torn_read_probe() == false) { return false; }

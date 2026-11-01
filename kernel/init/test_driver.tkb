@@ -965,8 +965,7 @@ private fn kernel_process_child_exec_reserved(current_authority: borrow ProcessC
                 kernel_process_child_exec_commit(current_authority, argv,
                     mount, child_space, resolved);
             if (page_reservation_release(reservation) != 0) {
-                kernel_exec_reserve_undercount =
-                    kernel_exec_reserve_undercount + 1;
+                atomic_word_fetch_add(&kernel_exec_reserve_undercount, 1);
             }
             return result;
         }
@@ -976,7 +975,7 @@ private fn kernel_process_child_exec_reserved(current_authority: borrow ProcessC
 // GitHub issue #1079: an exec whose map allocated past its reservation,
 // which means process_image_exec_bound_* undercounted. Expected 0; the boot
 // report's exec reserve line prints it.
-private let mut kernel_exec_reserve_undercount: usize;
+private let mut kernel_exec_reserve_undercount: AtomicWord;
 
 // Past the reservation: the point of no return is the teardown below, and
 // every failure after it ends the process (kernel_syscall_child_exec_return).
@@ -1154,7 +1153,7 @@ fn kernel_init_script_success_evidence(current_authority: borrow ProcessCurrent[
     // GitHub issue #1079: every exec of the boot mapped within the pages
     // it reserved before its teardown, and none was refused or lost.
     let (exec_refused, exec_lost) = kernel_syscall_exec_reserve_evidence();
-    if (exec_reaps >= 1 && kernel_exec_reserve_undercount == 0 &&
+    if (exec_reaps >= 1 && atomic_word_load(&kernel_exec_reserve_undercount) == 0 &&
         exec_refused == 0 && exec_lost == 0) {
         kernel_boot_log("child exec reserve: every map within its pages\n");
     }

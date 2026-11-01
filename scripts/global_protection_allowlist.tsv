@@ -35,7 +35,6 @@ kernel/drivers/block/block_cache.tkb	block_cache_backend	read-by block_cache_fin
 kernel/drivers/block/block_cache.tkb	block_cache_block	read-by block_cache_find,block_cache_victim: 2026-10-31 slot: as block_cache_backend, the holder of the BlockSlot alone
 kernel/drivers/block/block_cache.tkb	block_cache_data	read-by block_cache_read,block_cache_store: 2026-10-31 slot: 1 KiB copies in and out by the BlockSlot holder; no pointer leaves the file
 kernel/drivers/block/block_cache.tkb	block_cache_epoch	read-by block_cache_find,block_cache_victim: 2026-10-31 slot: the BlockSlot holder compares it with the atomic write counts, which decide staleness
-kernel/drivers/block/block_cache.tkb	block_cache_hits	unreviewed; 2026-10-31 migrate to AtomicWord: block_cache_hit_total sums other slots' plain words while holders add
 kernel/drivers/block/block_cache.tkb	block_cache_tick	read-by block_cache_touch: 2026-10-31 slot: the LRU clock of the BlockSlot holder, indexed by that slot
 kernel/drivers/block/block_cache.tkb	block_cache_used	read-by block_cache_victim: 2026-10-31 slot: LRU stamps of the BlockSlot holder
 kernel/drivers/block/block_cache.tkb	block_cache_valid	read-by block_cache_find,block_cache_victim: 2026-10-31 slot: the BlockSlot holder; written last in block_cache_store
@@ -109,7 +108,6 @@ kernel/init/test_driver.tkb	image_record_baseline	read-by kernel_init_boot_fixtu
 kernel/init/test_driver.tkb	init_boot_fixture_pending	read-by kernel_init_boot_fixture_poll: 2026-10-31 retain-fixture: one-shot gate of the deferred report, polled on the syscall path; the pid 1 test leaves one process as the taker, by check then clear rather than a swap
 kernel/init/test_driver.tkb	init_boot_fixture_reported	read-by kernel_init_boot_fixture_reaped: 2026-10-31 retain-fixture: whether the deferred report ran, read when PID 1's fixture child is reaped
 kernel/init/test_driver.tkb	init_boot_fixture_status	read-by kernel_init_script_success_evidence: 2026-10-31 retain-fixture: stored when PID 1 reaps the fixture child, printed after by PID 1
-kernel/init/test_driver.tkb	kernel_exec_reserve_undercount	unreviewed; 2026-10-31 migrate to AtomicWord: a plain add from any exec on any core, lost today
 kernel/init/test_driver.tkb	kernel_test_init_script	read-by kernel_test_driver_run: 2026-10-31 retain-fixture: main's choice of init script, one read on the boot path
 kernel/init/test_driver.tkb	page_baseline	read-by kernel_init_boot_fixture_poll: 2026-10-31 retain-fixture: the deferred end-of-fixture page-leak report
 kernel/init/test_driver.tkb	page_baseline_init_root	read-by kernel_init_mmap_region_pages: 2026-10-31 retain-fixture: PID 1's root key, set before PID 1 runs; the leak report reads it
@@ -131,7 +129,6 @@ kernel/kernel/occupancy_drain_evidence.tkb	world_stop_probe_inspections	read-by 
 kernel/kernel/occupancy_drain_evidence.tkb	world_stop_stale_probe_controller	read-by world_stop_probe: 2026-10-31 retain-fixture: a second controller, for the stale-token case; WorldStop's own operations reach it
 kernel/kernel/pool_contention_evidence.tkb	contention_pool_grown	read-by pool_contention_probe: 2026-10-31 retain-fixture: set in init and read by the probe, core 0
 kernel/kernel/pool_contention_evidence.tkb	contention_pool_ready	read-by contention_pool_init: 2026-10-31 retain-fixture: first-run guard of the probe, core 0
-kernel/kernel/pool_lock_wait.tkb	pool_lock_wait_cores	unreviewed; 2026-10-31 migrate to AtomicWord: a plain add on a cpu_id element before the lock; preemption loses counts. FLIP BREAKS FIRST
 kernel/kernel/pool_walk_contention_evidence.tkb	pool_walk_floor	read-by pool_walk_init,pool_walk_once: 2026-10-31 retain-fixture: set by core 0 before the rendezvous words publish the round; the walker compares only
 kernel/kernel/pool_walk_contention_evidence.tkb	pool_walk_ready	read-by pool_walk_init: 2026-10-31 retain-fixture: first-run guard of the probe, core 0
 kernel/kernel/process.tkb	execution_state	read-by kernel_process_cpu_current_pid,kernel_process_block_current: 2026-10-31 retain-partition: each core's scheduler on its own element, selected by execution_cpu_index; DDB through kernel_process_cpu_current_pid and the protocol observation under the run lock read other cores' elements
@@ -275,9 +272,5 @@ kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_rings_claimed	read-by xhci_rings_cl
 kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_rings_quiesced	read-by xhci_ring_reset_seen,xhci_evt_reset: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after apart from a reset under the same lock
 kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_tables_claimed	read-by xhci_tables_start: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after
 kernel/printk/log.tkb	kernel_log_core_state	unreviewed; 2026-10-31 migrate to per_cpu or a task-owned line (#613 option b): task-context kernel_log_core_here takes cpu_id with IRQs on; a preempted writer continues another CPU's line. FLIP BREAKS FIRST
-kernel/printk/log.tkb	kernel_log_snapshots	unreviewed; 2026-10-31 migrate to Place by slot token: syslog builds and copies a snapshot chosen by cpu_id over a whole syscall; a preempted reader on one CPU has it overwritten or continues on another. FLIP BREAKS FIRST
 kernel/printk/log.tkb	kernel_log_storm_found	read-by kernel_log_storm_check,kernel_log_storm_found_mask: 2026-10-31 retain-fixture: core 0 verifier after every writer of the round finished
-kernel/printk/log_ring_trace.tkb	log_ring_trace_cpus	unreviewed; 2026-10-31 migrate to per_cpu under preempt_off: log_ring_trace_store fills one event over several stores on a cpu_id element in task context. FLIP BREAKS FIRST
 kernel/printk/log_ring_trace.tkb	log_ring_trace_from	read-by log_ring_trace_reader,log_ring_trace_report: 2026-10-31 retain-fixture: written by core 0 before the window opens, read-only inside it
-kernel/printk/log_ring_trace.tkb	log_ring_trace_reader_begun	unreviewed; 2026-10-31 migrate to Place, with log_ring_trace_reader_cpu: one state with it. FLIP BREAKS FIRST
-kernel/printk/log_ring_trace.tkb	log_ring_trace_reader_cpu	unreviewed; 2026-10-31 migrate to Place, naming the traced task and not a CPU: compared with cpu_id; a migrated reader stops being traced. FLIP BREAKS FIRST

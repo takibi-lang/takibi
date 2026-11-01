@@ -167,22 +167,11 @@ now name a reader, by what their why rests on; none of it is checked:
 | partition | 2 | own element with IRQs masked or in the IRQ itself |
 | protocol | 2 | `InitOnce`'s own operations |
 
-16 rows stay `unreviewed`, because a task-context reader or writer can see them
-inconsistent. Their cells name the owner they should migrate to:
-
-| owner | rows |
-| --- | --- |
-| lock | `profile_session_period`, `_depth`, `_started`, `_stopped`, `profile_core_state` |
-| per_cpu | `kernel_log_core_state`, `log_ring_trace_cpus`, `irqsoff_core`, `irqsoff_standing` |
-| Place | `kernel_log_snapshots`, `log_ring_trace_reader_cpu`, `log_ring_trace_reader_begun` |
-| AtomicWord | `pool_lock_wait_cores`, `block_cache_hits`, `kernel_exec_reserve_undercount` |
-| dead | `scheduled_process_record_absent` |
-
-The preemption flip breaks first the six that select an element or a role by
-`cpu_id()` in task context with IRQs on: `kernel_log_core_state`,
-`kernel_log_snapshots`, `log_ring_trace_cpus`, `log_ring_trace_reader_cpu`,
-`log_ring_trace_reader_begun`, `pool_lock_wait_cores`. The other ten are
-already racy without preemption, and the flip widens their windows.
+The rows that stayed `unreviewed`, because a task-context reader or writer can
+see them inconsistent, name the owner they should migrate to in their cells. The
+migration log below records the ones gone. Of the six the preemption flip breaks
+first, by selecting an element or a role by `cpu_id()` in task context with IRQs
+on, `kernel_log_core_state` remains.
 
 ## Measured, 2026-10-29
 
@@ -288,3 +277,16 @@ file's comment lines are not rows.
   core's tick times and the process trace's switches become `AtomicWord`; the
   omitted pid and its flag become one word, pid plus 1, so a reader cannot pair one
   pid with another's flag. 292 -> 277 unprotected.
+- 2026-11-01: the flip-breaking rows that needed no design choice.
+  `pool_lock_wait_cores` becomes `AtomicWord` rows, on the contended path only, so
+  the uncontended lock pair is unchanged; a task moved between choosing its row
+  and adding loses no count. `kernel_log_snapshots` was one 64 KiB buffer per CPU
+  chosen by `cpu_id()` for a whole syscall; it is now one `region` element whose
+  claim sits in a `Place` `guarded_by(kernel_log_snapshot_lock)`, a `TaskMutex`
+  held from the build to the last copy, so readers take turns and the image loses
+  `(KERNEL_MAX_CORES - 1) * 64` KiB of BSS, for one new region element type.
+  `log_ring_trace_cpus` becomes `AtomicWord` events whose slot is taken by one
+  `fetch_add`. `log_ring_trace_reader_cpu` and `_begun` go: the traced read carries
+  a `LogRingTraceReader` on its stack, so the role follows the read and not a CPU.
+  Also `block_cache_hits` and `kernel_exec_reserve_undercount`. 275 -> 268
+  unprotected.

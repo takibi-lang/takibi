@@ -631,6 +631,8 @@ became `TaskMutex` (rank 30, the band's floor, so they may still nest under
 one another and under a TCP connection): the TCP connection frames lock, the
 retransmit entry and chain locks, the GEM descriptor rings, the virtio used
 rings and packet slots, the xHCI ring and context slots, and `InitOnce`.
+`kernel_log_snapshot_lock` (#1159) is the same class: syslog holds it across its
+user copies, and no writer of the ring takes it.
 #1096 adds the compiler-generated `dma_owner_*` slots (the virtio-blk receive
 buffer and the xHCI mass-storage DMA buffers): `lib/dma_fixed_record.ml`
 declares their lock field `TaskMutex`, so the only blocking take is

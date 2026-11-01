@@ -81,7 +81,7 @@ private let mut block_cache_valid: [bool; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS];
 private let mut block_cache_epoch: [usize; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS];
 private let mut block_cache_used: [usize; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS];
 private let mut block_cache_tick: [usize; KERNEL_MAX_CORES];
-private let mut block_cache_hits: [usize; KERNEL_MAX_CORES];
+private let mut block_cache_hits: [AtomicWord; KERNEL_MAX_CORES];
 private let mut block_cache_writes:
     [AtomicWord; KERNEL_MAX_CORES * BLOCK_CACHE_BUCKETS];
 
@@ -202,7 +202,7 @@ fn block_cache_read(core: usize, backend: u8, block: usize,
             slice_copy(destination[0..<BLOCK_CACHE_BYTES],
                        block_cache_data[base..<base + BLOCK_CACHE_BYTES]);
             block_cache_touch(here, index);
-            block_cache_hits[here] = block_cache_hits[here] + 1;
+            atomic_word_fetch_add(&block_cache_hits[here], 1);
             return BlockCacheReadResult::Hit;
         }
     }
@@ -262,7 +262,7 @@ fn block_cache_epoch_now() -> usize {
 fn block_cache_hit_total() -> usize {
     let mut total: usize = 0;
     for core: usize in 0..<KERNEL_MAX_CORES {
-        total = total + block_cache_hits[core];
+        total = total + atomic_word_load(&block_cache_hits[core]);
     }
     return total;
 }

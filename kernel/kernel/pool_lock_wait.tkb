@@ -8,9 +8,11 @@
 // Each production pool's lock wrapper asks region_pool_lock_contended_hint before
 // it takes the lock (one load of the line the compare-exchange fetches
 // anyway) and, only when the lock is held, counts one contended acquire in
-// its own CPU's row: plain stores to a line no other CPU writes, so
-// counting creates no contention of its own, and the uncontended path
-// counts nothing (#953: counting every acquire cost 6.1 ns per pair).
+// the row of the CPU it ran on, a line other CPUs rarely write, so counting
+// creates little contention of its own, and the uncontended path counts
+// nothing (#953: counting every acquire cost 6.1 ns per pair). The add is
+// atomic so a task that moves off its CPU between choosing the row and adding
+// loses no count (#1159); only the row it lands in can be another CPU's.
 //
 // Current limitations (2026-10-24). Keep this list current as call sites
 // change; a stale limitation is worse than none.
@@ -60,12 +62,11 @@ inline fn pool_lock_wait_index(pool: PoolLockWaitPool) -> {0..<POOL_LOCK_WAIT_PO
 }
 
 // Per CPU, per pool: the contended acquires. A row is 16 words (two
-// 64-byte lines) so no two CPUs' rows share a line. Only the row's own CPU
-// writes it, with plain loads and stores and no barrier; the reporter sums
-// the rows once, after the suite (a stale read there costs at most a count
-// in flight).
+// 64-byte lines) so no two CPUs' rows share a line. The reporter sums the
+// rows once, after the suite (a stale read there costs at most a count in
+// flight).
 const POOL_LOCK_WAIT_ROW: usize = 16;
-struct PoolLockWaitCore { words: [usize; POOL_LOCK_WAIT_ROW]; }
+struct PoolLockWaitCore { words: [AtomicWord; POOL_LOCK_WAIT_ROW]; }
 private let mut pool_lock_wait_cores: [PoolLockWaitCore; KERNEL_MAX_CORES];
 // 1 while contention_probes() runs its deliberate contention fixtures.
 // Written by core 0 twice per boot; read only on the contended path.
@@ -80,7 +81,7 @@ fn pool_lock_wait_contended(tag: PoolLockWaitPool) !{unsafe} {
     if (raw >= KERNEL_MAX_CORES) { return; }
     let core: {0..<KERNEL_MAX_CORES as usize} = raw;
     let at: {0..<POOL_LOCK_WAIT_POOLS as usize} = pool_lock_wait_index(tag);
-    pool_lock_wait_cores[core].words[at] = pool_lock_wait_cores[core].words[at] + 1;
+    atomic_word_fetch_add(&pool_lock_wait_cores[core].words[at], 1);
 }
 
 fn pool_lock_wait_pause(paused: bool) {
@@ -113,7 +114,7 @@ private fn pool_lock_wait_log_one(label: *u8, tag: PoolLockWaitPool) {
     let at: {0..<POOL_LOCK_WAIT_POOLS as usize} = pool_lock_wait_index(tag);
     let mut contended: usize = 0;
     for core: usize in 0..<KERNEL_MAX_CORES {
-        contended = contended + pool_lock_wait_cores[core].words[at];
+        contended = contended + atomic_word_load(&pool_lock_wait_cores[core].words[at]);
     }
     kernel_boot_log(label);
     uart_put_udec(contended);
