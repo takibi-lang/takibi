@@ -36,7 +36,7 @@ def main():
                "fn kernel_invariant_stop() {}\n")
     # One more stop inside a listed function (kernel_syscall_migrate_return
     # has one row of 1).
-    anchor = ('el0_context_retry_syscall(frame);\n'
+    anchor = ('let span = preempt_span_begin();\n'
               '    if (kernel_process_migrate_current(frame) == false) {')
     exec_grown = replace_once(files[FILE], anchor,
                               anchor + " kernel_invariant_stop();", FILE)
