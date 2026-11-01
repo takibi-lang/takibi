@@ -1,9 +1,9 @@
 {
   "date": "2026-11-01",
   "event": "incremental",
-  "decision": "measured",
-  "source_sha256": "35bc099bfcca0e020a9863d31b9a88f8e3779a91aa056b22f8140fb5cc678944",
-  "workload": "#1261 and #567: the compiler's call-graph table names builtins as callees (a facts file, no code generated) and two checks moved to that table. Measured with scripts/space_delta.py origin/main: text, data, bss and usable RAM start unchanged on both kernels, no symbol changed size. Previous: #1334: frame_ref.tkb's header comment changed; the only production source change on the branch, no code. Evidence reused. Previous: #1321 and #1322: task context reads current through one preempt_off snapshot; kernel_activity is parked in the record at the stack handoff. Measured with scripts/space_delta.py origin/main: text 784348 -> 783212 B qemu, 4149868 -> 4148684 B rpi5; data unchanged; rpi5 bss 1712128 -> 1716224 from section alignment with text shift; no symbol changed size.",
+  "decision": "reuse",
+  "source_sha256": "0a1066343572404b8decf1db859067a4e47f88a87efefc60b56ca5ba498b75d5",
+  "workload": "#1339: a profile stop with no session sampling answers ESRCH rather than 0, one match arm in procfs_write, and a race-window control kernel joins the Makefile, which production kernels do not link. No storage or allocation change; evidence reused, not measured. Previous: #1261 and #567: the compiler's call-graph table names builtins as callees (a facts file, no code generated) and two checks moved to that table. Measured with scripts/space_delta.py origin/main: text, data, bss and usable RAM start unchanged on both kernels, no symbol changed size. Previous: #1334: frame_ref.tkb's header comment changed; the only production source change on the branch, no code. Evidence reused. Previous: #1321 and #1322: task context reads current through one preempt_off snapshot; kernel_activity is parked in the record at the stack handoff. Measured with scripts/space_delta.py origin/main: text 784348 -> 783212 B qemu, 4149868 -> 4148684 B rpi5; data unchanged; rpi5 bss 1712128 -> 1716224 from section alignment with text shift; no symbol changed size.",
   "evidence": [
     "docs/AGGREGATE_MERGE_SPACE_2026-10-23.md",
     "docs/IRQ_PRIORITY_MASK_SPACE_2026-10-23.md",
