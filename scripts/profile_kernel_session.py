@@ -293,12 +293,62 @@ def check_console(text: str, require_cores, expect_function, symbols,
     return problems
 
 
+# GitHub issue #1320: two writers of /proc/takibi/profile, pinned to two cores
+# and released together, claim a start by compare-and-swap of the session mode
+# (#1315). Whichever way the timing falls exactly one may win: the other is
+# refused, either while the winner builds (`mode=starting`) or after it
+# (`mode=sampling`). The samples argument makes the build long. Measured against
+# mutated kernels: a start with no claim during the build gave two winners in
+# all four rounds, while a load-then-store claim passed, its window being
+# nanoseconds; this fixture holds the claim over the build, not the CAS's
+# atomicity.
+TWO_WRITER_START = "start 1000000 65536 16"
+TWO_WRITER_RE = re.compile(
+    r"two-writer round=(\d+) cpu=(\d+) (started|refused mode=([a-z]+))\b")
+
+
+def two_writer_command(rounds: int) -> str:
+    go = "/two-writer-go"  # the image has no /tmp; the root is the guest's disk
+    writer = (f"while [ ! -e {go} ]; do :; done; "
+              f"if echo {TWO_WRITER_START} > /proc/takibi/profile 2>/dev/null; "
+              "then echo two-writer round=$0 cpu=$1 started; "
+              "else read n m < /proc/takibi/profile; "
+              "echo two-writer round=$0 cpu=$1 refused mode=$m; fi")
+    numbers = " ".join(str(number) for number in range(1, rounds + 1))
+    return (f"for r in {numbers}; do rm -f {go}; "
+            f"for c in 1 2; do taskset -c $c sh -c '{writer}' $r $c & done; "
+            f"sleep 1; : > {go}; wait; echo stop > /proc/takibi/profile; done; "
+            f"rm -f {go}")
+
+
+def two_writer_problems(text: str, rounds: int) -> list[str]:
+    """Each round has one start and one refusal, on two different cores."""
+    problems = []
+    seen: dict[int, dict] = {}
+    for found in TWO_WRITER_RE.finditer(text):
+        seen.setdefault(int(found.group(1)), {})[int(found.group(2))] = found.group(3)
+    for number in range(1, rounds + 1):
+        answers = seen.get(number, {})
+        started = sum(answer == "started" for answer in answers.values())
+        if len(answers) != 2 or started != 1:
+            problems.append(f"two-writer round {number}: expected one start "
+                            f"and one refusal, got {answers}")
+    return problems
+
+
+def two_writer_overlaps(text: str) -> int:
+    """Refusals that met the winner still building its session."""
+    return sum(found.group(4) == "starting"
+               for found in TWO_WRITER_RE.finditer(text))
+
+
 def cmd_check(args) -> int:
     text = Path(args.console).read_text(encoding="ascii", errors="replace").replace("\r", "")
     symbols = Symbols(args.elf, args.nm) if args.elf else None
     cores = [int(cpu) for cpu in args.require_cores.split(",") if cpu]
     problems = check_console(text, cores, args.expect_function, symbols,
                              args.expect_irqsoff)
+    problems += two_writer_problems(text, args.two_writers)
     if problems:
         for problem in problems:
             print(f"FAIL profile-session: {problem}")
@@ -307,7 +357,10 @@ def cmd_check(args) -> int:
           f"{cores or 'none'} sampled"
           + (f"; {args.expect_function} is a top frame" if args.expect_function else "")
           + ("; an irqsoff span was measured and its sites symbolize"
-             if args.expect_irqsoff else ""))
+             if args.expect_irqsoff else "")
+          + (f"; {args.two_writers} two-writer starts each had one winner "
+             f"({two_writer_overlaps(text)} refused while the winner built)"
+             if args.two_writers else ""))
     return 0
 
 
@@ -362,6 +415,8 @@ def capture(args) -> int:
         for _ in range(args.warmup if url else 0):
             with opener.open(url + args.http_path.lstrip("/"), timeout=120) as reply:
                 reply.read()
+        if args.two_writers:
+            print(shell(two_writer_command(args.two_writers)), flush=True)
         print(shell(f"echo {args.start} > /proc/takibi/profile; "
                     "cat /proc/takibi/profile"), flush=True)
         time.sleep(0.1)
@@ -427,6 +482,7 @@ def main() -> int:
     cap.add_argument("--target", choices=("qemu", "rpi5"), required=True)
     cap.add_argument("--root", default=str(HERE.parent))
     cap.add_argument("--start", default="start 240000 2048 16")
+    cap.add_argument("--two-writers", type=int, default=0)
     cap.add_argument("--http", type=int, default=0)
     cap.add_argument("--warmup", type=int, default=2)
     cap.add_argument("--http-path", default="/bin/busybox.static")
@@ -449,6 +505,7 @@ def main() -> int:
     chk.add_argument("--require-cores", default="")
     chk.add_argument("--expect-function", default="")
     chk.add_argument("--expect-irqsoff", action="store_true")
+    chk.add_argument("--two-writers", type=int, default=0)
     args = parser.parse_args()
     if args.action == "capture":
         return capture(args)

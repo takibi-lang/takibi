@@ -9,6 +9,8 @@
 # sampler: its level-triggered PMU line stormed and it stored nothing.
 # GitHub issue #811: the stop read of /proc/takibi/profile must show an
 # irqsoff span whose open and close sites symbolize against the kernel ELF.
+# GitHub issue #1320: before that session, two writers on two cores race for
+# the start, and each round must have exactly one winner.
 set -euo pipefail
 trap 'takibi_status=$?; echo "[$(basename "$0")] aborted at line $LINENO with exit $takibi_status: $BASH_COMMAND" >&2' ERR
 
@@ -34,12 +36,12 @@ export KERNEL_QEMU_SHELL_NETDEV_QEMU_PORT="${KERNEL_QEMU_SHELL_NETDEV_QEMU_PORT:
 export KERNEL_QEMU_SHELL_NETDEV_PEER_PORT="${KERNEL_QEMU_SHELL_NETDEV_PEER_PORT:-18763}"
 
 python3 "$REPO_ROOT/scripts/profile_kernel_session.py" capture --target qemu \
-    --start "start 1000000 1024 16" --http 0 --warmup 0 \
+    --start "start 1000000 1024 16" --http 0 --warmup 0 --two-writers 4 \
     --command "taskset -c 1 sh -c 'i=0; while [ \$i -lt 20000 ]; do i=\$((i+1)); done'; for i in 1 2; do ls -R / >/dev/null; done" \
     --out "$ARTIFACT_DIR"
 python3 "$REPO_ROOT/scripts/profile_kernel_session.py" check \
     --console "$ARTIFACT_DIR/console.log" --require-cores 0,1 \
-    --elf "$REPO_ROOT/kernel/build/qemu/kernel.elf" --expect-irqsoff
+    --elf "$REPO_ROOT/kernel/build/qemu/kernel.elf" --expect-irqsoff --two-writers 4
 python3 "$REPO_ROOT/scripts/profile_kernel_session.py" fold \
     --elf "$REPO_ROOT/kernel/build/qemu/kernel.elf" \
     --console "$ARTIFACT_DIR/console.log" --top 10

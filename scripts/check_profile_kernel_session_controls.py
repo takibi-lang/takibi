@@ -99,6 +99,29 @@ def main():
                  any("symbolize" in problem for problem in tool.check_console(
                      DUMP + proc.replace("to 0x1010", "to 0x0"), [], "",
                      FakeSymbols(), True)))
+    # GitHub issue #1320: the verdict on two writers racing for a start.
+    def answers(*lines):
+        return "".join(f"two-writer round=1 {line}\n" for line in lines)
+    won = answers("cpu=1 started", "cpu=2 refused mode=starting")
+    ok &= expect("two-writer: one winner passes",
+                 not tool.two_writer_problems(won, 1))
+    ok &= expect("two-writer: a refusal inside the build is counted",
+                 tool.two_writer_overlaps(won) == 1)
+    ok &= expect("two-writer: a refusal after the build is not",
+                 tool.two_writer_overlaps(answers(
+                     "cpu=1 started", "cpu=2 refused mode=sampling")) == 0)
+    ok &= expect("two-writer: two winners refused",
+                 bool(tool.two_writer_problems(answers(
+                     "cpu=1 started", "cpu=2 started"), 1)))
+    ok &= expect("two-writer: no winner refused",
+                 bool(tool.two_writer_problems(answers(
+                     "cpu=1 refused mode=idle", "cpu=2 refused mode=idle"), 1)))
+    ok &= expect("two-writer: a missing writer refused",
+                 bool(tool.two_writer_problems(answers("cpu=1 started"), 1)))
+    ok &= expect("two-writer: a missing round refused",
+                 bool(tool.two_writer_problems(won, 2)))
+    ok &= expect("two-writer: the typed command is not an answer",
+                 not tool.TWO_WRITER_RE.search(tool.two_writer_command(2)))
     if not ok:
         return 1
     report_pass(
@@ -109,7 +132,8 @@ def main():
         "root-first with return addresses at -4, EL0 stays apart, and the "
         "masked weight is what the skids say; irqsoff lines parse per cpu, "
         "symbolize at -4 up to the first 0, and a check refuses a missing "
-        "span or an unsymbolized site",
+        "span or an unsymbolized site; two writers racing for a start must "
+        "leave exactly one winner per round",
         cases=CASES.ran)
     return 0
 
