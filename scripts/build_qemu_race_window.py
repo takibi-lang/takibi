@@ -389,6 +389,15 @@ WINDOWS["1194-el0-spsr"] = {
               "el1_resume_probe_landing_address(), 0,"),
 }
 
+# The defect the first land of #1194 met: a frame without PAN leaves the kernel
+# running with user pages open after the eret. The probe must say so itself.
+WINDOWS["1194-no-pan"] = {
+    "spin": None,
+    "check": ("kernel/process.tkb",
+              "const KERNEL_PROCESS_PROBE_SPSR_EL1H: usize = 0x4003C5;",
+              "const KERNEL_PROCESS_PROBE_SPSR_EL1H: usize = 0x3C5;"),
+}
+
 WINDOWS["1211"] = {
     "spin": None,
     "prepare": [

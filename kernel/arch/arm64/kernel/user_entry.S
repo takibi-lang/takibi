@@ -235,12 +235,21 @@ el0_context_retry_syscall:
 // the one generated restore. The frame names el1_resume_probe_landing as its
 // PC; the landing stores what the eret made of the CPU, then returns to the
 // run's caller. Results: sp, x0, x30, d31, sp_el0, CurrentEL (bits 3:2 hold the
-// level), SPSel, DAIF. Assembly stays a leaf: it comes back to its caller, and
+// level), SPSel, DAIF, PAN here, PAN in the caller (both 0 without FEAT_PAN,
+// whose register does not exist). Assembly stays a leaf: it comes back to its caller, and
 // every decision about the result is the caller's.
     .section .bss
     .balign 8
 el1_resume_probe_state:
-    .skip 16                    // the saved sp, the results pointer
+    .skip 24                    // the saved sp, the results pointer, the caller's PAN
+
+    .macro EL1_RESUME_PROBE_READ_PAN out, done
+    mrs     \out, ID_AA64MMFR1_EL1
+    ubfx    \out, \out, #20, #4
+    cbz     \out, \done
+    mrs     \out, s3_0_c4_c2_3
+\done:
+    .endm
 
     .section .text, "ax"
     .global el1_resume_probe_run
@@ -269,6 +278,8 @@ el1_resume_probe_run:
     add     x9, x9, :lo12:el1_resume_probe_state
     mov     x10, sp
     stp     x10, x1, [x9]
+    EL1_RESUME_PROBE_READ_PAN x10, .Lel1_resume_probe_pan_saved
+    str     x10, [x9, #16]
     b       el0_context_resume
     .size el1_resume_probe_run, . - el1_resume_probe_run
 
@@ -287,6 +298,9 @@ el1_resume_probe_landing:
     mrs     x12, SPSel
     mrs     x13, daif
     stp     x12, x13, [x11, #48]
+    EL1_RESUME_PROBE_READ_PAN x12, .Lel1_resume_probe_pan_seen
+    ldr     x13, [x9, #16]
+    stp     x12, x13, [x11, #64]
     mov     sp, x10
     ldp     x19, x20, [sp, #0]
     ldp     x21, x22, [sp, #16]
