@@ -38,7 +38,7 @@ point, one more GDB stop in affinity-gdb), not to a lane of its own.
 | kernelcheck-ddb-qemu | 236 | integration | real PL011 BREAK enters DDB and `continue` resumes |
 | kernelcheck-stack-overflow-qemu | 175 | integration | exception-entry stack guard at a real IRQ entry (#377) |
 | kernelcheck-debug-return-abi-qemu | 2 | integration | debug sidecar variant return ABI, executed (#713) |
-| kernelcheck-profile-qemu | 47 | integration | PMU sampling session end to end (#497); two writers racing for a start leave one winner (#1320) |
+| kernelcheck-profile-qemu | 47 | integration | PMU sampling session end to end (#497); two writers racing for a start or a stop leave one winner (#1320, #1339); a load-then-store claim kernel must show two (#1339) |
 | kernelcheck-race-window-603-qemu | 388 | error-case | wait4 pending-block window, armed and reverted |
 | kernelcheck-race-window-609-qemu | 350 | error-case | peer publishes Blocked in wait4 (#609) |
 | kernelcheck-race-window-633-qemu | 425 | error-case | child exit vs parent record (#633) |

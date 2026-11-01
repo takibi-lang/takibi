@@ -300,8 +300,10 @@ def check_console(text: str, require_cores, expect_function, symbols,
 # (`mode=sampling`). The samples argument makes the build long. Measured against
 # mutated kernels: a start with no claim during the build gave two winners in
 # all four rounds, while a load-then-store claim passed, its window being
-# nanoseconds; this fixture holds the claim over the build, not the CAS's
-# atomicity.
+# nanoseconds; this fixture holds the claim over the build. GitHub issue #1339:
+# the CAS's atomicity is held by a control, the race-window kernel
+# 1339-load-store, whose load and store stand 31 ms apart and which must show
+# two winners here.
 TWO_WRITER_START = "start 1000000 65536 16"
 TWO_WRITER_RE = re.compile(
     r"two-writer round=(\d+) cpu=(\d+) (started|refused mode=([a-z]+))\b")
@@ -321,18 +323,70 @@ def two_writer_command(rounds: int) -> str:
             f"rm -f {go}")
 
 
+# GitHub issue #1339: the same for a stop, on a session started before the
+# writers are released. Only the winner's write succeeds; a stop that finds no
+# session sampling answers ESRCH.
+TWO_STOPPER_START = "start 1000000 1024 16"
+TWO_STOPPER_RE = re.compile(r"two-stopper round=(\d+) cpu=(\d+) (stopped|refused)\b")
+
+
+def two_stopper_command(rounds: int) -> str:
+    go = "/two-stopper-go"
+    writer = (f"while [ ! -e {go} ]; do :; done; "
+              "if echo stop > /proc/takibi/profile 2>/dev/null; "
+              "then echo two-stopper round=$0 cpu=$1 stopped; "
+              "else echo two-stopper round=$0 cpu=$1 refused; fi")
+    numbers = " ".join(str(number) for number in range(1, rounds + 1))
+    return (f"for r in {numbers}; do rm -f {go}; "
+            f"echo {TWO_STOPPER_START} > /proc/takibi/profile; "
+            f"for c in 1 2; do taskset -c $c sh -c '{writer}' $r $c & done; "
+            f"sleep 1; : > {go}; wait; done; rm -f {go}")
+
+
+def race_answers(pattern: re.Pattern, text: str) -> dict[int, dict]:
+    """Each round's answers by cpu."""
+    seen: dict[int, dict] = {}
+    for found in pattern.finditer(text):
+        seen.setdefault(int(found.group(1)), {})[int(found.group(2))] = found.group(3)
+    return seen
+
+
 def two_writer_problems(text: str, rounds: int) -> list[str]:
     """Each round has one start and one refusal, on two different cores."""
     problems = []
-    seen: dict[int, dict] = {}
-    for found in TWO_WRITER_RE.finditer(text):
-        seen.setdefault(int(found.group(1)), {})[int(found.group(2))] = found.group(3)
+    seen = race_answers(TWO_WRITER_RE, text)
     for number in range(1, rounds + 1):
         answers = seen.get(number, {})
         started = sum(answer == "started" for answer in answers.values())
         if len(answers) != 2 or started != 1:
             problems.append(f"two-writer round {number}: expected one start "
                             f"and one refusal, got {answers}")
+    return problems
+
+
+def two_stopper_problems(text: str, rounds: int) -> list[str]:
+    """Each round has one stop and one refusal, on two different cores."""
+    problems = []
+    seen = race_answers(TWO_STOPPER_RE, text)
+    for number in range(1, rounds + 1):
+        answers = seen.get(number, {})
+        stopped = sum(answer == "stopped" for answer in answers.values())
+        if len(answers) != 2 or stopped != 1:
+            problems.append(f"two-stopper round {number}: expected one stop "
+                            f"and one refusal, got {answers}")
+    return problems
+
+
+def double_winner_problems(text: str) -> list[str]:
+    """The non-atomic control: a stop and a start must each have had two winners."""
+    problems = []
+    for name, pattern, won in (("stop", TWO_STOPPER_RE, "stopped"),
+                               ("start", TWO_WRITER_RE, "started")):
+        rounds = race_answers(pattern, text).values()
+        if not any(sum(answer == won for answer in answers.values()) == 2
+                   for answers in rounds):
+            problems.append(f"no round of the {name} race had two winners, so "
+                            "the fixture did not reach the widened window")
     return problems
 
 
@@ -344,11 +398,20 @@ def two_writer_overlaps(text: str) -> int:
 
 def cmd_check(args) -> int:
     text = Path(args.console).read_text(encoding="ascii", errors="replace").replace("\r", "")
+    if args.expect_double_winners:
+        problems = double_winner_problems(text)
+        for problem in problems:
+            print(f"FAIL profile-session control: {problem}")
+        if not problems:
+            print("PASS profile-session control: a load-then-store claim gave "
+                  "two winners of a stop and of a start")
+        return 1 if problems else 0
     symbols = Symbols(args.elf, args.nm) if args.elf else None
     cores = [int(cpu) for cpu in args.require_cores.split(",") if cpu]
     problems = check_console(text, cores, args.expect_function, symbols,
                              args.expect_irqsoff)
     problems += two_writer_problems(text, args.two_writers)
+    problems += two_stopper_problems(text, args.two_writers)
     if problems:
         for problem in problems:
             print(f"FAIL profile-session: {problem}")
@@ -358,7 +421,7 @@ def cmd_check(args) -> int:
           + (f"; {args.expect_function} is a top frame" if args.expect_function else "")
           + ("; an irqsoff span was measured and its sites symbolize"
              if args.expect_irqsoff else "")
-          + (f"; {args.two_writers} two-writer starts each had one winner "
+          + (f"; {args.two_writers} two-writer stops and starts each had one winner "
              f"({two_writer_overlaps(text)} refused while the winner built)"
              if args.two_writers else ""))
     return 0
@@ -369,6 +432,10 @@ def cmd_check(args) -> int:
 LISTENER = b"listener ready port=8080"
 PROFILE_DONE = b"__PROFILE_DONE__"
 BRIDGE_RE = re.compile(r"httpd bridge: (http://127\.0\.0\.1:\d+/)".encode())
+
+
+class StopCapture(Exception):
+    """--races-only: the race fixtures ran, and no session follows them."""
 
 
 def capture(args) -> int:
@@ -416,7 +483,11 @@ def capture(args) -> int:
             with opener.open(url + args.http_path.lstrip("/"), timeout=120) as reply:
                 reply.read()
         if args.two_writers:
+            # Stops first: a control kernel's double start may not survive.
+            print(shell(two_stopper_command(args.two_writers)), flush=True)
             print(shell(two_writer_command(args.two_writers)), flush=True)
+        if args.races_only:
+            raise StopCapture
         print(shell(f"echo {args.start} > /proc/takibi/profile; "
                     "cat /proc/takibi/profile"), flush=True)
         time.sleep(0.1)
@@ -462,6 +533,8 @@ def capture(args) -> int:
                          or None, 30)
         (out / "http.json").write_text(json.dumps(timings, indent=2) + "\n")
         status = 0 if workload_error is None else 2
+    except StopCapture:
+        status = 0
     except RuntimeError as error:
         print(f"FAIL profile capture: {error}", file=sys.stderr)
     finally:
@@ -483,6 +556,7 @@ def main() -> int:
     cap.add_argument("--root", default=str(HERE.parent))
     cap.add_argument("--start", default="start 240000 2048 16")
     cap.add_argument("--two-writers", type=int, default=0)
+    cap.add_argument("--races-only", action="store_true")
     cap.add_argument("--http", type=int, default=0)
     cap.add_argument("--warmup", type=int, default=2)
     cap.add_argument("--http-path", default="/bin/busybox.static")
@@ -506,6 +580,7 @@ def main() -> int:
     chk.add_argument("--expect-function", default="")
     chk.add_argument("--expect-irqsoff", action="store_true")
     chk.add_argument("--two-writers", type=int, default=0)
+    chk.add_argument("--expect-double-winners", action="store_true")
     args = parser.parse_args()
     if args.action == "capture":
         return capture(args)

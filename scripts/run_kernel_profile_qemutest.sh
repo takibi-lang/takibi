@@ -11,6 +11,9 @@
 # irqsoff span whose open and close sites symbolize against the kernel ELF.
 # GitHub issue #1320: before that session, two writers on two cores race for
 # the start, and each round must have exactly one winner.
+# GitHub issue #1339: the same for a stop. A last boot runs the race fixtures on
+# a kernel whose claim is a load and a store held apart, and they must see two
+# winners of each: a claim that is not atomic does not pass them.
 set -euo pipefail
 trap 'takibi_status=$?; echo "[$(basename "$0")] aborted at line $LINENO with exit $takibi_status: $BASH_COMMAND" >&2' ERR
 
@@ -45,4 +48,13 @@ python3 "$REPO_ROOT/scripts/profile_kernel_session.py" check \
 python3 "$REPO_ROOT/scripts/profile_kernel_session.py" fold \
     --elf "$REPO_ROOT/kernel/build/qemu/kernel.elf" \
     --console "$ARTIFACT_DIR/console.log" --top 10
-echo "PASS kernel/qemu profile session: every PMU interrupt accounted, cores 0 and 1 sampled, an irqsoff span measured with symbolized sites, folded stacks written"
+# The control may die in its double start, so its console decides, not its exit.
+CONTROL_ELF="$REPO_ROOT/kernel/build/qemu/kernel-race-1339-load-store-reverted.elf"
+KERNEL_QEMU_SHELL_ELF="$CONTROL_ELF" \
+    TAKIBI_ARCHIVE_EXPECTED="profile claim control, a non-atomic kernel meant to fail (#1339)" \
+    python3 "$REPO_ROOT/scripts/profile_kernel_session.py" capture --target qemu \
+    --http 0 --warmup 0 --two-writers 2 --races-only \
+    --out "$ARTIFACT_DIR/control" || true
+python3 "$REPO_ROOT/scripts/profile_kernel_session.py" check \
+    --console "$ARTIFACT_DIR/control/console.log" --expect-double-winners
+echo "PASS kernel/qemu profile session: every PMU interrupt accounted, cores 0 and 1 sampled, an irqsoff span measured with symbolized sites, folded stacks written, two-writer stops and starts one winner each, a non-atomic claim caught"

@@ -250,7 +250,7 @@ by a Takibi name, and a Takibi interface is never mistaken for a Linux one.
 - `/proc/takibi/profile`: the sampling profiler's control file
   (`kernel/kernel/profile_session.tkb`). Write `start [PERIOD] [SAMPLES]
   [DEPTH]` (decimal; defaults 240000 cycles, 2048 samples per core, 16
-  frames) to start a session on every core, `stop` to stop it; read it for
+  frames) to start a session on every core, `stop` to stop it (`ESRCH` if none samples); read it for
   the session's mode and each core's stored and lost counts. The samples are
   printed by DDB `profile dump`, which also frees the buffers;
   `scripts/profile_kernel_session.py` captures and folds them.

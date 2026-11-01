@@ -122,6 +122,32 @@ def main():
                  bool(tool.two_writer_problems(won, 2)))
     ok &= expect("two-writer: the typed command is not an answer",
                  not tool.TWO_WRITER_RE.search(tool.two_writer_command(2)))
+    # GitHub issue #1339: two writers racing for a stop, and the verdict on the
+    # non-atomic control kernel.
+    def stops(*lines):
+        return "".join(f"two-stopper round=1 {line}\n" for line in lines)
+    one_stop = stops("cpu=1 stopped", "cpu=2 refused")
+    two_stops = stops("cpu=1 stopped", "cpu=2 stopped")
+    two_starts = answers("cpu=1 started", "cpu=2 started")
+    ok &= expect("two-stopper: one winner passes",
+                 not tool.two_stopper_problems(one_stop, 1))
+    ok &= expect("two-stopper: two winners refused",
+                 bool(tool.two_stopper_problems(two_stops, 1)))
+    ok &= expect("two-stopper: no winner refused",
+                 bool(tool.two_stopper_problems(
+                     stops("cpu=1 refused", "cpu=2 refused"), 1)))
+    ok &= expect("two-stopper: a missing writer refused",
+                 bool(tool.two_stopper_problems(stops("cpu=1 stopped"), 1)))
+    ok &= expect("two-stopper: the typed command is not an answer",
+                 not tool.TWO_STOPPER_RE.search(tool.two_stopper_command(2)))
+    ok &= expect("control: two winners of each pass",
+                 not tool.double_winner_problems(two_stops + two_starts))
+    ok &= expect("control: one winner of a stop refused",
+                 bool(tool.double_winner_problems(one_stop + two_starts)))
+    ok &= expect("control: one winner of a start refused",
+                 bool(tool.double_winner_problems(two_stops + won)))
+    ok &= expect("control: an empty console refused",
+                 bool(tool.double_winner_problems("")))
     if not ok:
         return 1
     report_pass(
@@ -132,8 +158,9 @@ def main():
         "root-first with return addresses at -4, EL0 stays apart, and the "
         "masked weight is what the skids say; irqsoff lines parse per cpu, "
         "symbolize at -4 up to the first 0, and a check refuses a missing "
-        "span or an unsymbolized site; two writers racing for a start must "
-        "leave exactly one winner per round",
+        "span or an unsymbolized site; two writers racing for a start or a stop "
+        "must leave exactly one winner per round, and the non-atomic control "
+        "must show two of each",
         cases=CASES.ran)
     return 0
 

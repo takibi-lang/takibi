@@ -418,6 +418,41 @@ WINDOWS["1211"] = {
               ""),
 }
 
+# GitHub issue #1339: the session mode claimed by a load and a store instead of
+# a compare-and-swap, the two held apart so that two writers released together
+# both pass the load. kernelcheck-profile-qemu must then see two winners, of a
+# stop and of a start: without the spin the window is nanoseconds and the same
+# fixture passes.
+WINDOWS["1339-load-store"] = {
+    "spin": None,
+    "check": [
+        ("kernel/profile_session.tkb",
+         "    if (atomic_word_compare_exchange(&profile_session_mode, PROFILE_MODE_IDLE,\n"
+         "                                     PROFILE_MODE_STARTING) == false &&\n"
+         "        atomic_word_compare_exchange(&profile_session_mode, PROFILE_MODE_STOPPED,\n"
+         "                                     PROFILE_MODE_STARTING) == false) {\n"
+         "        return ProfileStartResult::Busy;\n"
+         "    }\n",
+         "    let race_window_mode: usize = atomic_word_load(&profile_session_mode);\n"
+         "    if (race_window_mode != PROFILE_MODE_IDLE &&\n"
+         "        race_window_mode != PROFILE_MODE_STOPPED) {\n"
+         "        return ProfileStartResult::Busy;\n"
+         "    }\n"
+         + spin("1339-load-store", False) +
+         "    atomic_word_store(&profile_session_mode, PROFILE_MODE_STARTING);\n"),
+        ("kernel/profile_session.tkb",
+         "    if (atomic_word_compare_exchange(&profile_session_mode, PROFILE_MODE_SAMPLING,\n"
+         "                                     PROFILE_MODE_STOPPED) == false) {\n"
+         "        return false;\n"
+         "    }\n",
+         "    if (atomic_word_load(&profile_session_mode) != PROFILE_MODE_SAMPLING) {\n"
+         "        return false;\n"
+         "    }\n"
+         + spin("1339-load-store", False) +
+         "    atomic_word_store(&profile_session_mode, PROFILE_MODE_STOPPED);\n"),
+    ],
+}
+
 
 def main() -> None:
     args = sys.argv[1:]

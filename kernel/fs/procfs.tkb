@@ -439,14 +439,15 @@ fn procfs_pid_name(pid: usize, output: borrow [u8; 20..]) -> usize {
 }
 
 // A write to a procfs node: only /proc/takibi/profile accepts one. Answers
-// 0 for an accepted command, or the Linux errno to return.
+// 0 for an accepted command, or the Linux errno to return. A stop with no
+// session sampling is refused, so of two racing stops the loser can tell (#1339).
 fn procfs_write(inode: usize, bytes: []const u8) -> usize
         !{allocates, requires_mmu, unsafe} {
     if (inode != PROCFS_TAKIBI_PROFILE_INODE) { return LINUX_EBADF; }
     match profile_session_control(bytes) {
         ProfileControlResult::Started => { return 0; }
         ProfileControlResult::Stopped => { return 0; }
-        ProfileControlResult::NotSampling => { return 0; }
+        ProfileControlResult::NotSampling => { return LINUX_ESRCH; }
         ProfileControlResult::Busy => { return LINUX_EBUSY; }
         ProfileControlResult::NoPmu => { return LINUX_ENODEV; }
         ProfileControlResult::OutOfMemory => { return LINUX_ENOMEM; }
