@@ -1073,14 +1073,18 @@ def check_mmu_off_vector_stores(insns, mmu_off_functions=None):
 # kernel_syscall_child_exec_return, and the entry would otherwise have
 # outlived the call). The symbols below are compiler-generated assembly,
 # not Takibi functions, and are referenced by name for that reason.
+#
+# Each exemption holds for one assembly object and a stated number of
+# relocations, or None for any number; anything else is an undeclared entry
+# like any other, and an exemption nothing uses any more is refused (#1333).
 ASM_GENERATED_SYMBOLS = {
     # The exception vector table exception_frame.tkb declares; entry.S
     # installs it in VBAR_EL1.
-    "el1_vectors",
+    "el1_vectors": ("entry.o", None),
     # The generated restore: the boot probe's real eret into a hand-made El1
     # frame enters it, and the frame's PC brings it back to that assembly's
-    # own landing, which returns to its Takibi caller (#1194).
-    "el0_context_resume",
+    # own landing, which returns to its Takibi caller (#1194). Its one branch.
+    "el0_context_resume": ("user_entry.o", 1),
 }
 
 
@@ -1100,19 +1104,47 @@ def nm_symbols(obj):
     return functions, defined, undefined
 
 
-def asm_takibi_entry_problems(entries, takibi_symbols, asm_symbols):
+def relocation_counts(obj):
+    """How many relocations of `obj` name each symbol."""
+    out = subprocess.run(["llvm-objdump-19", "-r", obj], check=True,
+                         capture_output=True, text=True).stdout
+    counts = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[1].startswith("R_"):
+            name = parts[2].split("+")[0].split("-")[0]
+            counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def asm_takibi_entry_problems(entries, takibi_symbols, asm_symbols,
+                              relocations=None):
     """Problems with assembly's calls into Takibi.
 
     `takibi_symbols` is the Takibi object's function names; `asm_symbols`
-    maps each assembly object to its (defined, undefined) names."""
+    maps each assembly object to its (defined, undefined) names;
+    `relocations` maps each object to relocation_counts, to hold a generated
+    symbol to its stated number of references."""
+    relocations = relocations or {}
     asm_defined = set()
     for defined, _ in asm_symbols.values():
         asm_defined |= defined
     problems = []
     referenced = set()
+    generated_used = set()
     for obj, (_, undefined) in sorted(asm_symbols.items()):
         for name in sorted(undefined - asm_defined):
-            if name not in takibi_symbols or name in ASM_GENERATED_SYMBOLS:
+            if name not in takibi_symbols:
+                continue
+            allowed = ASM_GENERATED_SYMBOLS.get(name)
+            if allowed is not None and os.path.basename(obj) == allowed[0]:
+                generated_used.add(name)
+                count = relocations.get(obj, {}).get(name)
+                if allowed[1] is not None and count != allowed[1]:
+                    problems.append(
+                        f"{obj} references the generated {name} {count} times, "
+                        f"not the {allowed[1]} it is allowed (#1333): assembly "
+                        "is a leaf (#1133)")
                 continue
             referenced.add(name)
             if name not in entries:
@@ -1124,17 +1156,24 @@ def asm_takibi_entry_problems(entries, takibi_symbols, asm_symbols):
         problems.append(
             f"{name} is a declared assembly entry (KERNEL_ASM_ENTRIES) that "
             "no assembly object references any more; remove it")
+    for name, (obj, _) in sorted(ASM_GENERATED_SYMBOLS.items()):
+        if name in takibi_symbols and name not in generated_used:
+            problems.append(
+                f"the generated {name} is exempted for {obj}, which no longer "
+                "references it; remove the exemption")
     return problems
 
 
 def check_asm_takibi_entries(entries, takibi_object, asm_objects):
     takibi_functions, _, _ = nm_symbols(takibi_object)
     asm_symbols = {}
+    relocations = {}
     for obj in asm_objects:
         _, defined, undefined = nm_symbols(obj)
         asm_symbols[obj] = (defined, undefined)
+        relocations[obj] = relocation_counts(obj)
     return asm_takibi_entry_problems(set(entries), takibi_functions,
-                                     asm_symbols)
+                                     asm_symbols, relocations)
 
 
 def asm_takibi_entry_controls():
@@ -1155,6 +1194,27 @@ def asm_takibi_entry_controls():
             {"kernel_syscall_dispatch", "kernel_syscall_child_exec_return"},
             takibi, asm):
         failures.append("asm-entry control: a stale entry was accepted")
+    # The generated-symbol exemption (#1333): its object and its count pass;
+    # another object, a second reference and a retired probe do not.
+    generated = {"el1_vectors", "el0_context_resume"}
+    probe = {"build/entry.o": (set(), {"el1_vectors"}),
+             "build/user_entry.o": (set(), {"el0_context_resume"})}
+    one = {"build/user_entry.o": {"el0_context_resume": 1}}
+    if asm_takibi_entry_problems(set(), generated, probe, one):
+        failures.append("asm-entry control: the probe's own branch was refused")
+    elsewhere = dict(probe)
+    elsewhere["build/fpsimd.o"] = (set(), {"el0_context_resume"})
+    if not asm_takibi_entry_problems(set(), generated, elsewhere, one):
+        failures.append("asm-entry control: another object's branch to the "
+                        "generated restore was accepted")
+    if not asm_takibi_entry_problems(
+            set(), generated, probe,
+            {"build/user_entry.o": {"el0_context_resume": 2}}):
+        failures.append("asm-entry control: a second branch in the probe's "
+                        "object was accepted")
+    retired = {"build/entry.o": (set(), {"el1_vectors"})}
+    if not asm_takibi_entry_problems(set(), generated, retired, one):
+        failures.append("asm-entry control: an unused exemption was accepted")
     return failures
 
 
