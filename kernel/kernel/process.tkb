@@ -5413,6 +5413,21 @@ private fn kernel_activity_resume(guard: borrow ProcessRunGuard[lock], incoming:
         scheduled_process_record_live_locked(guard, incoming).parked_activity;
 }
 
+// GitHub issue #1322: an activity parked at a handoff comes back with its task,
+// whatever ran on the CPU in between. Its own function: the scheduler probe's
+// frame is at its budget.
+private fn kernel_activity_handoff_probe(root: ProcessHandle) -> bool {
+    let guard = process_run_lock();
+    let before: KernelActivity = kernel_activity_enter(KernelActivity::Syscall);
+    kernel_activity_park(guard, root);
+    kernel_activity_set(KernelActivity::IdleLoop);
+    kernel_activity_resume(guard, root);
+    let restored: bool = kernel_activity_code_here() == KernelActivity::Syscall as usize;
+    kernel_activity_leave(before);
+    process_run_unlock(guard);
+    return restored;
+}
+
 private fn kernel_process_stack_switch_take(frame: borrow FrameRef[process, level]) {
     let core: usize = cpu_id();
     if (core >= KERNEL_MAX_CORES) {
@@ -11654,19 +11669,7 @@ fn kernel_process_scheduler_probe() -> bool !{changes_witness_ProcessCurrent} {
     let mut root_handle: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
     // #1307: with no process current here, no witness is minted.
     let live_before: bool = execution_state[execution_cpu_index()].current_live;
-    // GitHub issue #1322: an activity parked at a handoff comes back with its
-    // task, whatever ran on the CPU in between.
-    if (live_before) {
-        let activity_guard = process_run_lock();
-        let activity_before: KernelActivity = kernel_activity_enter(KernelActivity::Syscall);
-        kernel_activity_park(activity_guard, root_handle);
-        kernel_activity_set(KernelActivity::IdleLoop);
-        kernel_activity_resume(activity_guard, root_handle);
-        let restored: bool = kernel_activity_code_here() == KernelActivity::Syscall as usize;
-        kernel_activity_leave(activity_before);
-        process_run_unlock(activity_guard);
-        if (restored == false) { return false; }
-    }
+    if (live_before && kernel_activity_handoff_probe(root_handle) == false) { return false; }
     execution_state[execution_cpu_index()].current_live = false;
     let idle_refused: bool = match process_running_here() {
         ProcessRunningHere::Idle => { true }
