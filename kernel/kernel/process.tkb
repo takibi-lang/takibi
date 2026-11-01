@@ -8778,8 +8778,12 @@ const PROCESS_CPU_TICKS_PER_SECOND: usize = 64;
 // One tick of CPU time to the process this CPU runs, if any: idle has no
 // current process, and one that has stopped being Running has finished using
 // CPU. The run lock masks interrupts, so this core cannot interrupt its own
-// holder, as kernel_process_tick_wake_if_due relies on too.
+// holder, as kernel_process_tick_wake_if_due relies on too. The scheduling
+// gate first, as every other tick path: kernel_process_execution_reset closes
+// it before it clears the table with interrupts on and current_live still set,
+// and a stale handle read here would count as a recycled read.
 fn kernel_process_tick_charge(user: bool) !{interrupt, unsafe} {
+    if (execution_state[execution_cpu_index()].scheduler_enabled == false) { return; }
     if (execution_state[execution_cpu_index()].current_live == false) { return; }
     let mut current: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
     let guard = process_run_lock();
