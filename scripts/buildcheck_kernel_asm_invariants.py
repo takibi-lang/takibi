@@ -1077,6 +1077,10 @@ ASM_GENERATED_SYMBOLS = {
     # The exception vector table exception_frame.tkb declares; entry.S
     # installs it in VBAR_EL1.
     "el1_vectors",
+    # The generated restore: the boot probe's real eret into a hand-made El1
+    # frame enters it, and the frame's PC brings it back to that assembly's
+    # own landing, which returns to its Takibi caller (#1194).
+    "el0_context_resume",
 }
 
 

@@ -379,6 +379,16 @@ def replace_once(path: Path, before: str, after: str) -> None:
 # pending, and sleeps on UartTx; the resume drain then gives it its room
 # outside the TX interrupt. --revert removes the owed wake's TXIM enable,
 # and the writer sleeps beside an empty queue.
+# GitHub issue #1194's negative control: the hand-made frame's SPSR says EL0t
+# rather than EL1h. The restore then takes the El0 path and erets to EL0 at
+# kernel text, which must stop the boot rather than reach the landing.
+WINDOWS["1194-el0-spsr"] = {
+    "spin": None,
+    "check": ("kernel/process.tkb",
+              "el1_resume_probe_landing_address(), KERNEL_PROCESS_PROBE_SPSR_EL1H,",
+              "el1_resume_probe_landing_address(), 0,"),
+}
+
 WINDOWS["1211"] = {
     "spin": None,
     "prepare": [

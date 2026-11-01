@@ -5518,6 +5518,46 @@ private fn kernel_process_scheduler_probe_frame_b() -> usize {
     return (kernel_process_trace_probe_child_frame as *usize) as usize;
 }
 
+// GitHub issue #1194: a frame on the current process's own kernel stack, at
+// the top, where a process's first frame sits. Its stack is otherwise unused:
+// this runs for the probe's child, which never executes. 0 when it has no stack.
+private fn kernel_process_el1_resume_probe_frame() -> usize {
+    let bottom: usize = kernel_stack_bottom(process_slot_of(
+        execution_state[execution_cpu_index()].current_handle.pool_index));
+    if (bottom == 0) { return 0; }
+    return bottom + KERNEL_PROCESS_STACK_SIZE - EXC_CONTEXT_SIZE;
+}
+
+const KERNEL_PROCESS_EL1_RESUME_X0: usize = 0x1194000000000000;
+const KERNEL_PROCESS_EL1_RESUME_X30: usize = 0x1194000000000030;
+const KERNEL_PROCESS_EL1_RESUME_V31: usize = 0x1194000000000031;
+const KERNEL_PROCESS_EL1_RESUME_SP_EL0: usize = 0x1194000000000e10;
+
+private fn kernel_process_el1_resume_probe_fill(frame: usize) {
+    frame_handmade_el1(frame, kernel_process_entry_generation(),
+                       el1_resume_probe_landing_address(), KERNEL_PROCESS_PROBE_SPSR_EL1H,
+                       KERNEL_PROCESS_EL1_RESUME_X0, KERNEL_PROCESS_EL1_RESUME_X30,
+                       KERNEL_PROCESS_EL1_RESUME_V31, KERNEL_PROCESS_EL1_RESUME_SP_EL0);
+}
+
+// The real eret: this CPU has departed the stack, and generated restore code
+// takes it back in kernel_process_stack_switch_complete, which reads the level
+// from the frame. What the landing recorded is what the frame made of the CPU:
+// reaching the landing at all is the PC. CurrentEL is 1 in bits 3:2, SPSel 1
+// is EL1h, DAIF is the frame's mask, and the stack is the frame's top.
+private fn kernel_process_el1_resume_probe_run(frame: usize) -> bool !{unsafe} {
+    let mut results: [usize; 8];
+    let mask: IrqMaskGuard[0] = irq_mask_take();
+    el1_resume_probe_run(frame, results as *usize);
+    irq_mask_give(mask);
+    return results[0] == frame + EXC_CONTEXT_SIZE &&
+        results[1] == KERNEL_PROCESS_EL1_RESUME_X0 &&
+        results[2] == KERNEL_PROCESS_EL1_RESUME_X30 &&
+        results[3] == KERNEL_PROCESS_EL1_RESUME_V31 &&
+        results[4] == KERNEL_PROCESS_EL1_RESUME_SP_EL0 &&
+        results[5] == 4 && results[6] == 1 && results[7] == 0x3C0;
+}
+
 // Fixed-size scheduler/process tail for fail-stop diagnostics.  This first
 // implementation has one producer CPU: core 1 is brought up only to prove
 // EL1 entry and then parks, while all process execution remains on core 0.
@@ -11353,20 +11393,26 @@ fn kernel_process_scheduler_probe() -> bool !{changes_witness_ProcessCurrent} {
     if (kernel_process_scheduler_probe_stack_depart() == false) {
         return false;
     }
+    // GitHub issue #1194: the child leaves with a hand-made El1 frame on its
+    // own stack, so the second tick's successor path picks it, and it is then
+    // really resumed rather than only chosen.
+    let el1_frame: usize = kernel_process_el1_resume_probe_frame();
+    if (el1_frame == 0) { return false; }
+    kernel_process_el1_resume_probe_fill(el1_frame);
     // GitHub issue #992: the parent's parked frame is a hand-made El1 one,
     // as a process preempted inside a syscall would leave, so the tick's
     // successor path must read its level and resume it as El1 -- and no
     // delivery may be aimed at it (scheduled_process_parked_frame would
     // fail-stop the boot here).
     kernel_process_scheduler_probe_frame_a_spsr(KERNEL_PROCESS_PROBE_SPSR_EL1H);
-    let parent_sp: usize = kernel_process_probe_tick_masked(kernel_process_scheduler_probe_frame_b());
+    let parent_sp: usize = kernel_process_probe_tick_masked(el1_frame);
     kernel_process_scheduler_probe_frame_a_spsr(0);
     if (kernel_process_scheduler_probe_stack_arrive() == false ||
         kernel_process_scheduler_probe_stack_depart() == false) {
         return false;
     }
     let child_sp: usize = kernel_process_probe_tick_masked(kernel_process_scheduler_probe_frame_a());
-    if (kernel_process_scheduler_probe_stack_arrive() == false) {
+    if (child_sp != el1_frame || kernel_process_el1_resume_probe_run(el1_frame) == false) {
         return false;
     }
     kernel_process_request_reschedule();
@@ -11396,7 +11442,7 @@ fn kernel_process_scheduler_probe() -> bool !{changes_witness_ProcessCurrent} {
             if (kind == ProcessTraceAddressSpaceActivate) { saw_activate = true; }
         }
     }
-    let ok: bool = parent_sp == kernel_process_scheduler_probe_frame_a() && child_sp == kernel_process_scheduler_probe_frame_b() &&
+    let ok: bool = parent_sp == kernel_process_scheduler_probe_frame_a() && child_sp == el1_frame &&
         deferred_parent_sp == kernel_process_scheduler_probe_frame_a() &&
         process_test_evidence_timer_switches() == 2 &&
         process_test_evidence_deferred_switches() == 1 &&

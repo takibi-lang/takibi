@@ -229,6 +229,95 @@ el0_context_retry_syscall:
 // silently undone by the other's unconditional reload (see commit 8db27e3's
 // first bug for the failure mode this replaces).
 //
+// GitHub issue #1194: the boot probe's real eret into a hand-made El1 frame.
+// el1_resume_probe_run(frame, results) saves on the caller's stack everything
+// the frame's restore overwrites and AAPCS or the caller needs back, and enters
+// the one generated restore. The frame names el1_resume_probe_landing as its
+// PC; the landing stores what the eret made of the CPU, then returns to the
+// run's caller. Results: sp, x0, x30, d31, sp_el0, CurrentEL (bits 3:2 hold the
+// level), SPSel, DAIF. Assembly stays a leaf: it comes back to its caller, and
+// every decision about the result is the caller's.
+    .section .bss
+    .balign 8
+el1_resume_probe_state:
+    .skip 16                    // the saved sp, the results pointer
+
+    .section .text, "ax"
+    .global el1_resume_probe_run
+    .type el1_resume_probe_run, %function
+el1_resume_probe_run:
+    sub     sp, sp, #208
+    stp     x19, x20, [sp, #0]
+    stp     x21, x22, [sp, #16]
+    stp     x23, x24, [sp, #32]
+    stp     x25, x26, [sp, #48]
+    stp     x27, x28, [sp, #64]
+    stp     x29, x30, [sp, #80]
+    stp     d8, d9, [sp, #96]
+    stp     d10, d11, [sp, #112]
+    stp     d12, d13, [sp, #128]
+    stp     d14, d15, [sp, #144]
+    mrs     x9, fpcr
+    mrs     x10, fpsr
+    stp     x9, x10, [sp, #160]
+    mrs     x9, sp_el0
+    mrs     x10, tpidr_el0
+    stp     x9, x10, [sp, #176]
+    mrs     x9, daif
+    str     x9, [sp, #192]
+    adrp    x9, el1_resume_probe_state
+    add     x9, x9, :lo12:el1_resume_probe_state
+    mov     x10, sp
+    stp     x10, x1, [x9]
+    b       el0_context_resume
+    .size el1_resume_probe_run, . - el1_resume_probe_run
+
+    .type el1_resume_probe_landing, %function
+el1_resume_probe_landing:
+    adrp    x9, el1_resume_probe_state
+    add     x9, x9, :lo12:el1_resume_probe_state
+    ldp     x10, x11, [x9]
+    mov     x12, sp
+    stp     x12, x0, [x11, #0]
+    fmov    x12, d31
+    stp     x30, x12, [x11, #16]
+    mrs     x12, sp_el0
+    mrs     x13, CurrentEL
+    stp     x12, x13, [x11, #32]
+    mrs     x12, SPSel
+    mrs     x13, daif
+    stp     x12, x13, [x11, #48]
+    mov     sp, x10
+    ldp     x19, x20, [sp, #0]
+    ldp     x21, x22, [sp, #16]
+    ldp     x23, x24, [sp, #32]
+    ldp     x25, x26, [sp, #48]
+    ldp     x27, x28, [sp, #64]
+    ldp     x29, x30, [sp, #80]
+    ldp     d8, d9, [sp, #96]
+    ldp     d10, d11, [sp, #112]
+    ldp     d12, d13, [sp, #128]
+    ldp     d14, d15, [sp, #144]
+    ldp     x9, x10, [sp, #160]
+    msr     fpcr, x9
+    msr     fpsr, x10
+    ldp     x9, x10, [sp, #176]
+    msr     sp_el0, x9
+    msr     tpidr_el0, x10
+    ldr     x9, [sp, #192]
+    msr     daif, x9
+    add     sp, sp, #208
+    ret
+    .size el1_resume_probe_landing, . - el1_resume_probe_landing
+
+    .global el1_resume_probe_landing_address
+    .type el1_resume_probe_landing_address, %function
+el1_resume_probe_landing_address:
+    adrp    x0, el1_resume_probe_landing
+    add     x0, x0, :lo12:el1_resume_probe_landing
+    ret
+    .size el1_resume_probe_landing_address, . - el1_resume_probe_landing_address
+
 // el0_context_resume itself is no longer hand-written here -- GitHub issue
 // #227 item 1's follow-up generates it from kernel/arch/arm64/kernel/
 // exception_frame.tkb's `exception_restore el0_context_resume { ... }`

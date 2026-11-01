@@ -247,6 +247,22 @@ fn frame_initial_user(frame: borrow FrameRef[process, ExceptionLevel::El0], entr
     frame_word_set(frame, offsetof(ExceptionFrame, sp_el0), stack);
 }
 
+// GitHub issue #1194: the one frame a kernel writes by hand with an EL1 mode,
+// for the boot probe that erets through it. Every other writer keeps M at EL0t
+// (the rule above), so this is the one write that moves a frame between levels,
+// and scripts/allowed_callers.tsv holds its caller to that probe. Takes the
+// address rather than a frame so that no El1 FrameRef is minted here.
+fn frame_handmade_el1(sp: usize, generation: usize @ process, entry: usize, spsr: usize,
+                      x0: usize, x30: usize, vector31_low: usize, stack_el0: usize)
+        !{unsafe} {
+    let mut low: FrameRef[process, ExceptionLevel::El0] = { sp };
+    frame_initial_user(low, entry, stack_el0);
+    frame_general_set(low, 0, x0);
+    frame_general_set(low, 30, x30);
+    frame_vector_word_set(low, 62, vector31_low);
+    frame_word_set(low, offsetof(ExceptionFrame, spsr_el1), spsr);
+}
+
 // x0..x30, one word each.
 fn frame_general(frame: borrow FrameRef[process, level], index: {0..<31 as usize}) -> usize
         !{unsafe} {

@@ -787,6 +787,10 @@ index trusts: that the SPSR word is what `el0_context_resume` restores
 syscall entry's lower-EL vector or a probe's stand-in, and that
 `frame_ref_fresh`'s two callers write the frame whole before it is resumed;
 `scripts/allowed_callers.tsv` holds the callers of all five mints.
+One writer sets an EL1 mode, `frame_handmade_el1`, for the boot probe that
+erets through such a frame and returns to its caller (GitHub issue #1194);
+the same table holds its one caller, and it takes an address, so it makes
+no frame of either level.
 What the index does not say is where it comes from at an entry: the entry
 mint is given the CPU's current generation, so that a frame entering on this
 CPU is indexed by whichever process this CPU runs, and the scheduler, which

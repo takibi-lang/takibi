@@ -151,12 +151,15 @@ owners are TaskMutex, the spare stack stays masked). #980
    apart); (3) an EL1
    frame in `saved_sp` (#992: `FrameRef` carries its exception level,
    deliveries take El0 only, `StackOwnership.tla` gains `PreemptEL1`;
-   done 2026-10-29 in QEMU, `FrameRef[process, ExceptionLevel]` provisional
-   until #1006, RPi5 evidence at the land); (4)
+   done 2026-11-01, `FrameRef[process, ExceptionLevel]` provisional
+   until #1006; the boot probe erets into a hand-made El1 frame through the
+   successor path, on QEMU and RPi5, #1194); (4)
    a non-stopping CPU-authority mint and the `!{interrupt}`-derives-
    `PreemptOff` rule (#641 item 1); (5) site migration (process_image's
    target root, the log's partial line with an owner word, done (#1159),
-   `syscall_ext2_reader`, exception_evidence); (6) the slot pools'
+   `syscall_ext2_reader`'s per-CPU store, done (#981), though the flag is
+   still held across the whole handler and must leave per-CPU state before
+   the flip, exception_evidence); (6) the slot pools'
    capacity premise (#993, done 2026-11-01: capacity unchanged, a full pool retries unmasked for the tick, the mutation lock before any slot, `SlotPool.tla`); (7) the lock-holder group with the `PreemptOff`
    token and #789; (8) the EL1 switch at IRQ return when the count is zero,
    shown once in a deterministic lane; (9) the flip, models passing without

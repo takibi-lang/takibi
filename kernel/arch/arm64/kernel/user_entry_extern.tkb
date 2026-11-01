@@ -8,6 +8,12 @@ extern fn el0_context_set_sp_el0(frame: borrow FrameRef[process, ExceptionLevel:
 extern fn el0_context_set_tpidr_el0(frame: borrow FrameRef[process, ExceptionLevel::El0], value: usize);
 extern fn el0_context_retry_syscall(frame: borrow FrameRef[process, ExceptionLevel::El0]);
 extern fn el0_context_resume(frame: sink FrameRef[process, level]) !{noreturn};
+// GitHub issue #1194: resume a hand-made El1 frame for real and come back. The
+// run saves what the eret would lose, enters el0_context_resume, and returns
+// here from el1_resume_probe_landing, the PC the frame names, with what the
+// landing saw in `results`.
+extern fn el1_resume_probe_run(frame_address: usize, results: *usize);
+extern fn el1_resume_probe_landing_address() -> usize;
 
 // Resume a frame whose process the caller does not name.
 fn frame_any_resume(any: sink AnyFrame) {
