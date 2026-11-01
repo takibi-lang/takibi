@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 from pass_line import report_pass
-from source_scan import code_only
+from source_scan import code_only, function_header
 
 SOURCE = Path("kernel/kernel/process.tkb")
 
@@ -61,7 +61,7 @@ LISTED = {
 
 READ = re.compile(
     r"execution_state\s*\[\s*(?:execution_cpu_index\s*\(\s*\)|index)\s*\]\s*\.\s*current_(?:live|handle)")
-FN = re.compile(r"^(?:private\s+|inline\s+|exception\s+)*fn\s+(\w+)", re.M)
+FN = function_header()
 
 
 def readers_of(text):
@@ -110,14 +110,15 @@ def controls():
 
 def main():
     count = controls()
-    problems = problems_of(SOURCE.read_text(encoding="ascii"), LISTED)
+    text = SOURCE.read_text(encoding="ascii")
+    problems = problems_of(text, LISTED)
     if problems:
         for problem in problems:
             print(f"ERROR current-task-reads: {problem}")
         sys.exit(1)
     report_pass("current-task-reads",
                 f"{len(LISTED)} functions read current directly, each with its "
-                f"authority; {count} controls", files=1)
+                f"authority; {count} controls", readers=len(readers_of(text)))
 
 
 if __name__ == "__main__":
