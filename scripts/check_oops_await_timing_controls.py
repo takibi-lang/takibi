@@ -149,7 +149,7 @@ def main():
             ({'events': [(2.0, b"FIRST\nSECOND\nddb> ")], 'reply_delay': None}, "did not complete all commands"),
             ({'events': [(2.0, b"")]}, "never saw 'FIRST'")):
         status, rows, sent, elapsed, output = run(**options)
-        require(isinstance(status, str) and diagnosis in status, "original failure diagnosis lost")
+        require(isinstance(status, str) and diagnosis in status + output, "original failure diagnosis lost")
         require(len(rows) == 8 and any(row['status'] == 'not-arrived' for row in rows),
                 "unfinished awaits were not retained")
         require(all(row['elapsed_seconds'] is None and row['fraction'] is None
@@ -157,6 +157,20 @@ def main():
         require(all(row['observed_seconds'] == elapsed for row in rows
                     if row['status'] == 'not-arrived'), "unfinished observations used another clock")
         require(elapsed <= 10.55, "measurement restarted or extended the deadline")
+    # GitHub issue #1337: a fail-stop record decides which failure this is. The
+    # runner's message for status 3 is the only thing that says the fault did
+    # not fire, and the prompt alone must not count as a record.
+    status, *_ = run([(2.0, b"booted\n/ # ")], awaited=())
+    require(status == "3", "a run with no fail-stop record was not told apart")
+    status, *_ = run([(2.0, b"FIRST\nddb> ")])
+    require(status == "3", "a missing await with no fail-stop record was not told apart")
+    status, *_ = run([(2.0, b"oops: fail-stop seq=1 cpu=0\nddb> ")], awaited=(), reply_delay=None)
+    require(status != "3" and "did not complete" in status,
+            "a console silent after a fail-stop record read as a fault that did not fire")
+    status, *_ = run([], connect_failure=True)
+    require(status != "3", "a UART that never connected read as a fault that did not fire")
+    require('"$console_status" -eq 3' in runner and "did not fire" in runner,
+            "the real oops runner no longer names the status")
     status, rows, sent, elapsed, output = run([(2.0, b"FIRST\nSECOND\nddb> ")], unavailable=True)
     require(status == 0 and 'timing unavailable' in output, "artifact failure replaced the lane verdict")
     status, rows, sent, elapsed, output = run([(2.0, b"FIRST\nSECOND\nddb> ")], timing=False)

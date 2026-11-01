@@ -3,10 +3,16 @@
 
 import argparse
 import socket
+import sys
 import time
 
 from await_timing import AwaitTiming
 
+# GitHub issue #1337: the exit status of a run that ended with no fail-stop
+# record on the UART. Nothing crashed, as far as the kernel said, so there was
+# no console to be silent; the lane reports that apart from a console that
+# failed to answer.
+NO_FAIL_STOP_STATUS = 3
 
 
 def main() -> int:
@@ -86,11 +92,16 @@ def drive(args, awaited, commands, deadline, timing):
     plain = bytes(received).replace(b"ddb> ", b"")
     missing = [text.decode("ascii") for text in awaited if text not in plain]
     if missing:
-        raise SystemExit(
-            "crash-console UART never saw " + ", ".join(repr(m) for m in missing)
-            + "; the console was never asked anything, so nothing here says "
-              "whether it works")
-    raise SystemExit("crash-console UART did not complete all commands")
+        diagnosis = ("crash-console UART never saw "
+                     + ", ".join(repr(m) for m in missing)
+                     + "; the console was never asked anything, so nothing "
+                       "here says whether it works")
+    else:
+        diagnosis = "crash-console UART did not complete all commands"
+    if b"oops: fail-stop " not in plain:
+        print(diagnosis, file=sys.stderr)
+        raise SystemExit(NO_FAIL_STOP_STATUS)
+    raise SystemExit(diagnosis)
 
 
 if __name__ == "__main__":

@@ -560,13 +560,21 @@ for _ in $(seq 1 50); do
     sleep 0.1
 done
 
-if ! wait "$console_driver_pid"; then
-    console_driver_pid=""
-    echo "FAIL kernel/qemu oops: read-only UART crash console did not respond" >&2
+console_status=0
+wait "$console_driver_pid" || console_status=$?
+console_driver_pid=""
+if [ "$console_status" -ne 0 ]; then
+    # GitHub issue #1337: a kernel that never reported anything has no crash
+    # console to be silent. #1194's PAN defect read as a silent console while
+    # el1_read_user's load had simply succeeded and boot went on to the shell.
+    if [ "$console_status" -eq 3 ]; then
+        echo "FAIL kernel/qemu oops: the injected fault did not fire (mode $MODE): GDB armed it and the UART has no fail-stop record" >&2
+    else
+        echo "FAIL kernel/qemu oops: read-only UART crash console did not respond" >&2
+    fi
     sed 's/^/  /' "$UART_LOG" >&2 || true
     exit 1
 fi
-console_driver_pid=""
 
 # The peer's fault is its own verdict. It is taken at EL1 during bring-up
 # (slot 0, before any process exists, so no trace), its report must have
