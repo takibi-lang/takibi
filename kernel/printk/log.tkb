@@ -96,6 +96,9 @@ const KERNEL_LOG_META_LENGTH_MASK: usize = 0xFFFF;
 const KERNEL_LOG_META_CPU_SHIFT: usize = 16;
 // This record continues the previous record's line.
 const KERNEL_LOG_META_CONTINUED: usize = 0x1000000;
+// Another writer came to this CPU's stage before this piece's newline, so the
+// piece was retained as it stood, with a newline added (#1159).
+const KERNEL_LOG_META_CUT: usize = 0x2000000;
 
 private let mut kernel_log_text: [AtomicWord; KERNEL_LOG_TEXT_WORDS];
 private let mut kernel_log_slots: [AtomicWord; KERNEL_LOG_SLOT_COUNT];
@@ -345,9 +348,8 @@ private fn kernel_log_reserve(span: usize) -> KernelLogReserve !{unsafe} {
 // Each CPU's line being assembled, and when it began (GitHub issue #465:
 // the tick is the writer's own, taken at its first byte). One per CPU,
 // static rather than on the stack (DECISIONS: static over stack), selected
-// by cpu_id() like the other per-CPU arrays; KERNEL_PREEMPTIBLE == 0 is what
-// keeps one CPU's line from being continued by another thread (see
-// kernel_log_execution_model_assumption).
+// by cpu_id() like the other per-CPU arrays, each byte in a preempt_off region;
+// the owner word keeps one CPU's line from being continued by another thread.
 //
 // - emergency: this CPU writes straight to the device until the next boot.
 // - capturing: a kernel_boot_log fragment on this CPU is building a line;
@@ -356,7 +358,14 @@ private fn kernel_log_reserve(span: usize) -> KernelLogReserve !{unsafe} {
 //   it (kernel_log_end_fragment).
 // - active: the first byte of the line has been staged.
 // - continued: this line already retained a stage-full piece.
+// - owner: the process whose stack staged this line's first byte, 0 for boot
+//   and idle. A byte from another owner cuts the line (kernel_log_cut_line), so two
+//   tasks' fragments are never mixed. An interrupt on a task's stack has that
+//   task's owner, so its bytes still join an open line.
+// - cut: the piece being retained is a cut one.
 struct KernelLogCoreState {
+    owner: usize;
+    cut: bool;
     emergency: bool;
     capturing: bool;
     active: bool;
@@ -418,6 +427,7 @@ private fn kernel_log_write(token: borrow LogReservation[0],
     let mut meta: usize = (length & KERNEL_LOG_META_LENGTH_MASK) |
         ((token.cpu & KERNEL_LOG_CPU_MASK) << KERNEL_LOG_META_CPU_SHIFT);
     if (kernel_log_core_state[core].continued) { meta = meta | KERNEL_LOG_META_CONTINUED; }
+    if (kernel_log_core_state[core].cut) { meta = meta | KERNEL_LOG_META_CUT; }
     kernel_log_publish(&kernel_log_ticks[first], kernel_log_core_state[core].tick as usize);
     kernel_log_publish(&kernel_log_meta[first], meta);
     log_ring_trace_writer(last_at, LOG_RING_TRACE_WRITE, token.seq, token.span,
@@ -506,6 +516,14 @@ fn kernel_log_init() {
 // Keeping `capturing` set across a fragment without '\n' captures
 // uart_put_udec/uart_put_hex output between fragments in the same line.
 fn kernel_log_begin_fragment() {
+    preempt_off (cpu) {
+        kernel_log_begin_fragment_here();
+    } else {
+        kernel_log_begin_fragment_here();
+    }
+}
+
+private fn kernel_log_begin_fragment_here() {
     if (kernel_log_core_is_emergency()) { return; }
     let core: {0..<KERNEL_MAX_CORES as usize} = kernel_log_core_here();
     kernel_log_core_state[core].capturing = true;
@@ -516,6 +534,14 @@ fn kernel_log_begin_fragment() {
 // still one record. Only a fragment that leaves no partial line behind lets
 // this CPU's later bare bytes go straight to the UART again.
 fn kernel_log_end_fragment() {
+    preempt_off (cpu) {
+        kernel_log_end_fragment_here();
+    } else {
+        kernel_log_end_fragment_here();
+    }
+}
+
+private fn kernel_log_end_fragment_here() {
     if (kernel_log_core_is_emergency()) { return; }
     let core: {0..<KERNEL_MAX_CORES as usize} = kernel_log_core_here();
     if (kernel_log_core_state[core].active == false) {
@@ -529,13 +555,17 @@ fn kernel_log_end_fragment() {
 // capturing, so "\nlabel: " still retains "label: ..." (GitHub issue #9).
 // A line that fills the stage is retained as it stands and continues in the
 // next record, marked as a continuation, so nothing is truncated.
-private fn kernel_log_stage_byte(core: {0..<KERNEL_MAX_CORES as usize}, value: u8,
+private fn kernel_log_stage_byte(core: {0..<KERNEL_MAX_CORES as usize}, owner: usize, value: u8,
                                  wire: bool) -> bool !{unsafe} {
+    if (kernel_log_core_state[core].active && kernel_log_core_state[core].owner != owner) {
+        kernel_log_cut_line(core, wire);
+    }
     if (kernel_log_core_state[core].active == false) {
         if (value == 10) { return true; }
         kernel_log_core_state[core].tick = read_cntpct() - (atomic_word_load(&kernel_log_boot_tick) as i64);
         kernel_log_core_state[core].length = 0;
         kernel_log_core_state[core].continued = false;
+        kernel_log_core_state[core].owner = owner;
         kernel_log_core_state[core].active = true;
     }
     if (kernel_log_core_state[core].length >= KERNEL_LOG_LINE_BYTES) {
@@ -554,6 +584,27 @@ private fn kernel_log_stage_byte(core: {0..<KERNEL_MAX_CORES as usize}, value: u
         kernel_log_core_state[core].capturing = false;
     }
     return false;
+}
+
+// The staged piece goes out as a record of its own, ending in a newline, so
+// nothing the next writer stages joins it (#1159, as Linux's pr_cont). Its
+// writer, if it comes back, starts a new record.
+private fn kernel_log_cut_line(core: {0..<KERNEL_MAX_CORES as usize}, wire: bool) !{unsafe} {
+    let length: usize = kernel_log_core_state[core].length;
+    if (length < KERNEL_LOG_LINE_BYTES) {
+        let safe_length: {0..<KERNEL_LOG_LINE_BYTES as usize} = length;
+        kernel_log_core_state[core].line[safe_length] = 10;
+        kernel_log_core_state[core].length = length + 1;
+    }
+    kernel_log_core_state[core].cut = true;
+    kernel_log_retain_line(core, wire);
+    kernel_log_core_state[core].cut = false;
+    kernel_log_core_state[core].active = false;
+}
+
+// The stack's owner for a line on this core.
+private fn kernel_log_owner_here(core: {0..<KERNEL_MAX_CORES as usize}) -> usize {
+    return kernel_process_cpu_stack_owner(core);
 }
 
 // GitHub issue #454: what the console costs its callers, in the units the
@@ -1456,15 +1507,26 @@ fn uart_tx_flush() !{unsafe} {
 
 // Whether a byte uart_putc was given goes to the UART now (true), or is part
 // of the line this CPU is building and goes with it (false). Each CPU stages
-// into its own state, so no lock is taken here; the line takes the console
-// lock once, when it is written out.
+// into its own state, one byte per preempt_off region, so no lock is taken
+// here; the line takes the console lock once, when it is written out. Where the
+// region cannot be minted (early boot, a stopping path) no task can switch.
 fn kernel_log_capture_uart_byte(value: u8) -> bool !{unsafe} {
+    let mut direct: bool = true;
+    preempt_off (cpu) {
+        direct = kernel_log_capture_here(value, true);
+    } else {
+        direct = kernel_log_capture_here(value, true);
+    }
+    return direct;
+}
+
+private fn kernel_log_capture_here(value: u8, wire: bool) -> bool !{unsafe} {
     let core: {0..<KERNEL_MAX_CORES as usize} = kernel_log_core_here();
     if (kernel_log_core_state[core].emergency ||
         kernel_log_core_state[core].capturing == false) {
         return true;
     }
-    return kernel_log_stage_byte(core, value, true);
+    return kernel_log_stage_byte(core, kernel_log_owner_here(core), value, wire);
 }
 
 // Read-only per-core mode query, through the one checked selection of the
@@ -2132,12 +2194,7 @@ fn kernel_log_raw_text_byte(seq: usize, index: usize) -> u8 !{unsafe} {
 // One byte of a probe line: staged and retained like any other, but never
 // written to the UART, so the destructive probe emits no console lines.
 private fn kernel_log_probe_byte(value: u8) -> bool !{unsafe} {
-    let core: {0..<KERNEL_MAX_CORES as usize} = kernel_log_core_here();
-    if (kernel_log_core_state[core].emergency ||
-        kernel_log_core_state[core].capturing == false) {
-        return true;
-    }
-    return kernel_log_stage_byte(core, value, false);
+    return kernel_log_capture_here(value, false);
 }
 
 // One retained record "<byte><byte>\n", written the way any CPU writes one.
@@ -2295,6 +2352,33 @@ private fn kernel_log_probe_line(byte: u8, count: usize) {
     let newline: bool = kernel_log_probe_byte(10);
 }
 
+// GitHub issue #1159: a second writer's byte on a CPU with another's line open.
+// The two owners are injected, since nothing switches tasks this early: the
+// first piece must be its own record, marked cut and ended by a newline, and
+// the second writer's line must hold only its own text.
+private fn kernel_log_second_writer_probe() -> bool !{unsafe} {
+    let core: {0..<KERNEL_MAX_CORES as usize} = kernel_log_core_here();
+    kernel_log_begin_fragment();
+    let start: usize = kernel_log_observe(&kernel_log_head);
+    let first_p: bool = kernel_log_stage_byte(core, 1, 112, false);
+    let first_q: bool = kernel_log_stage_byte(core, 1, 113, false);
+    if (kernel_log_observe(&kernel_log_head) != start) { return false; }
+    let second_r: bool = kernel_log_stage_byte(core, 2, 114, false);
+    let second_end: bool = kernel_log_stage_byte(core, 2, 10, false);
+    if (kernel_log_observe(&kernel_log_head) != start + 2) { return false; }
+    let cut: usize = kernel_log_probe_meta(start);
+    let whole: usize = kernel_log_probe_meta(start + 1);
+    return (cut & KERNEL_LOG_META_LENGTH_MASK) == 3 &&
+        (cut & KERNEL_LOG_META_CUT) != 0 &&
+        kernel_log_raw_text_byte(start, 0) == 112 &&
+        kernel_log_raw_text_byte(start, 1) == 113 &&
+        kernel_log_raw_text_byte(start, 2) == 10 &&
+        (whole & KERNEL_LOG_META_LENGTH_MASK) == 2 &&
+        (whole & KERNEL_LOG_META_CUT) == 0 &&
+        kernel_log_raw_text_byte(start + 1, 0) == 114 &&
+        kernel_log_raw_text_byte(start + 1, 1) == 10;
+}
+
 // Destructive boot-time probe, followed immediately by kernel_log_init(). It
 // exercises every loss signal without emitting UART lines: a reservation held
 // across a whole turn of the ring makes the claim that comes round to its
@@ -2337,6 +2421,7 @@ fn kernel_log_bounds_probe() -> bool !{unsafe} {
     }
     if (kernel_log_torn_read_probe() == false) { return false; }
     if (kernel_log_stray_continuation_probe() == false) { return false; }
+    if (kernel_log_second_writer_probe() == false) { return false; }
     let wide: usize = kernel_log_observe(&kernel_log_head);
     kernel_log_probe_line(121, KERNEL_LOG_SLOT_BYTES);
     let long: usize = kernel_log_observe(&kernel_log_head);
@@ -2557,13 +2642,16 @@ fn kernel_boot_log_resource_exhausted(resource: *u8, capacity: usize) {
 // KernelLogCoreState across several fragments, and the line is reserved only
 // at its newline, because one head compare-swap needs the record's slot
 // count first. Between two fragments the caller runs ordinary code, so a
-// thread preempted there would leave its half line for the next thread on
-// that CPU to continue, and would continue on its new CPU without it. The
-// reservation token itself never outlives one call; the staged line does.
-// Re-entry on one core would likewise alias that core's line state.
+// thread preempted there leaves a half line, which the next thread on that CPU
+// cuts (kernel_log_cut_line) rather than continues; the thread goes on as a new
+// record wherever it lands. A piece whose thread moved stays staged until
+// another writer comes to that CPU; DDB shows it. The reservation token never
+// outlives one call; the staged line does. The assertion is what remains: the
+// storm fixture holds one CPU's element across a whole line
+// (kernel_log_storm_write).
 fn kernel_log_execution_model_assumption() {
     static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "per-core kernel-log line state cannot survive preemption into another writer");
+                  "kernel_log_storm_write keeps one element across a line without a region");
 }
 
 // Encode within the available room before publishing. Every CPU holds the

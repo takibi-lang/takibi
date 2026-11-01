@@ -550,3 +550,6 @@ condition below applies, and reports the land afterwards.
 ## 2026-10-30 #1164 stopped observation and #1032 reference
 - #1164: (C) both `kernel_net_rx_frame_pending` functions borrow `MachineStopped[&kernel_world_stop]`, so a read outside the stop is a compile error; the two raw reads and their RAW_MINT_FILES rows stay. The `observe ... stopped` construct waits until #1006 takes up #777 and #789; #1164 stays open.
 - #1032: the GPL Linux bcm2712-iommu driver may be read as a register-layout reference; the clone stays under ~/.takibi-sessions, outside the repository, and no code is copied.
+
+## 2026-11-01 #1159 the log's partial line
+- `kernel_log_core_state` keeps one line per CPU with an owner word: a byte from another owner retains the staged piece as its own record, and each byte is staged in a `preempt_off` region. Space decides it: a task-owned line (#613 option b) costs 640 B per live process. The row stays allow-listed, its cross-CPU reads under the world stop. [active] #1159

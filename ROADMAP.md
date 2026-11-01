@@ -155,7 +155,7 @@ owners are TaskMutex, the spare stack stays masked). #980
    until #1006, RPi5 evidence at the land); (4)
    a non-stopping CPU-authority mint and the `!{interrupt}`-derives-
    `PreemptOff` rule (#641 item 1); (5) site migration (process_image's
-   target root, the log's partial line per #613 option b,
+   target root, the log's partial line with an owner word, done (#1159),
    `syscall_ext2_reader`, exception_evidence); (6) the slot pools'
    capacity premise (#993); (7) the lock-holder group with the `PreemptOff`
    token and #789; (8) the EL1 switch at IRQ return when the count is zero,

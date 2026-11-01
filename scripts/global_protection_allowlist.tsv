@@ -271,6 +271,6 @@ kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_output_claimed	read-by xhci_output_
 kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_rings_claimed	read-by xhci_rings_claim: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after
 kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_rings_quiesced	read-by xhci_ring_reset_seen,xhci_evt_reset: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after apart from a reset under the same lock
 kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_tables_claimed	read-by xhci_tables_start: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after
-kernel/printk/log.tkb	kernel_log_core_state	unreviewed; 2026-10-31 migrate to per_cpu or a task-owned line (#613 option b): task-context kernel_log_core_here takes cpu_id with IRQs on; a preempted writer continues another CPU's line. FLIP BREAKS FIRST
+kernel/printk/log.tkb	kernel_log_core_state	read-by kernel_log_raw_staged_length,scripts/kernel_console.gdb: 2026-11-01 partition: own element in a preempt_off region (or where no task can switch), an owner word keeps two writers' text apart; other CPUs read it only under the world stop
 kernel/printk/log.tkb	kernel_log_storm_found	read-by kernel_log_storm_check,kernel_log_storm_found_mask: 2026-10-31 retain-fixture: core 0 verifier after every writer of the round finished
 kernel/printk/log_ring_trace.tkb	log_ring_trace_from	read-by log_ring_trace_reader,log_ring_trace_report: 2026-10-31 retain-fixture: written by core 0 before the window opens, read-only inside it

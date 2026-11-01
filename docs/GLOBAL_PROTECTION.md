@@ -171,7 +171,7 @@ The rows that stayed `unreviewed`, because a task-context reader or writer can
 see them inconsistent, name the owner they should migrate to in their cells. The
 migration log below records the ones gone. Of the six the preemption flip breaks
 first, by selecting an element or a role by `cpu_id()` in task context with IRQs
-on, `kernel_log_core_state` remains.
+on, `kernel_log_core_state` stays listed with its premise, by decision.
 
 ## Measured, 2026-10-29
 

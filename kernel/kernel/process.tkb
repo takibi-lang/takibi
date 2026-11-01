@@ -1515,6 +1515,15 @@ fn kernel_process_cpu_current_pid(core: {0..<KERNEL_MAX_CORES as usize})
     return scheduled_process_pid_of_handle(state.current_handle);
 }
 
+// Who stands on this CPU's stack, as a word only ever compared: the record's
+// address, 0 for none (boot, idle). No lookup and no lock, so a logger may ask
+// from anywhere (#1159); a slot recycled mid-line reads as the same writer.
+fn kernel_process_cpu_stack_owner(core: {0..<KERNEL_MAX_CORES as usize}) -> usize {
+    let state: &mut ExecutionState = &execution_state[core];
+    if (state.stack_live == false) { return 0; }
+    return region_held_address(state.stack_handle.pool_index);
+}
+
 fn kernel_process_cpu_stack_pid(core: {0..<KERNEL_MAX_CORES as usize})
         -> usize {
     let state: &mut ExecutionState = &execution_state[core];

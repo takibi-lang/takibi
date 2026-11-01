@@ -91,8 +91,9 @@ kernel/printk/log.tkb (see "As built, slice 4" and "As built, slice 5").
 - Not done: the #638 dependency. A line is reserved at its newline, so the
   token never outlives one call, but the staged line lives across the
   caller's fragments, which is per-CPU state a preemption between fragments
-  would hand to another thread. KERNEL_PREEMPTIBLE == 0 stays asserted in
-  kernel_log_execution_model_assumption; the choice is on #613.
+  could hand to another thread. An owner word cuts the line when another
+  writer's byte arrives (#1159), and each byte is staged in a preempt_off
+  region.
 - Model: no new ordering. Peers use the same reserve/claim/commit actions
   LogRing.tla already runs with 2-3 writers; the emitted-instruction rows
   name the same functions.
@@ -287,7 +288,7 @@ Not expressible in the types, and where it lives instead:
 | No silent loss (every sequence returned or reported) | LogRing.tla NoSilentLoss; at run time the end-of-boot `discarded=` line and log_storm_evidence (all CPUs, every sequence accounted) | A global counting property over all writers |
 | Memory ordering of claim, commit, text stores, recheck | herd7 litmus tests in kernel/models/litmus (Never for fixed, Sometimes for unfixed controls) | Ordering is a comment on AtomicWord, not part of a type (atomic_word.tkb, first limitation) |
 | The litmus tests describe the emitted code | scripts/run_litmus_checks.py with emitted_map.txt (disassembly lint, CASAL/STLR/LDAR classes per function) | The compiler does not expose per-access ordering to check against; the lint follows addresses only through moves, adds and two call levels |
-| Per-CPU line stage not handed to another thread | `static_assert(KERNEL_PREEMPTIBLE == 0)` in kernel_log_execution_model_assumption | The stage lives across the caller's fragments, outside any preempt_off region (#638) |
+| Per-CPU line stage not handed to another thread | the owner word (`kernel_log_cut_line`); `static_assert(KERNEL_PREEMPTIBLE == 0)` in kernel_log_execution_model_assumption remains for the storm fixture | The stage lives across the caller's fragments, outside any preempt_off region (#638) |
 
 Slice 7 (#720's protocol declaration generator) would need, to replace the
 hand-written tokens:
