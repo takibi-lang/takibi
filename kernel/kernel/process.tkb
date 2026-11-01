@@ -5442,7 +5442,14 @@ private fn kernel_process_stack_switch_take(frame: borrow FrameRef[process, leve
                 scheduled_process_pid_of_handle(outgoing), core);
         }
     }
-    let mut incoming: ProcessHandle = kernel_process_current_required();
+    let mut incoming: ProcessHandle = match kernel_process_current_read() {
+        ProcessCurrentRead::Running(current_task) => { current_task }
+        ProcessCurrentRead::Idle => {
+            process_run_unlock(guard);
+            kernel_invariant_stop_with_frame(frame);
+            return;
+        }
+    };
     if (scheduled_process_handle_matches(incoming) == false ||
         scheduled_process_state_of_locked(guard, incoming) != ProcessSlotState::Running ||
         scheduled_process_record_live_locked(guard, incoming).stack_owner_cpu !=
@@ -5480,11 +5487,13 @@ private fn kernel_process_stack_switch_take(frame: borrow FrameRef[process, leve
 // is now physically free and may be reaped safely.
 fn kernel_process_stack_idle_complete() {
     let core: usize = cpu_id();
+    let mut has_current: bool = false;
     match kernel_process_current_read() {
-        ProcessCurrentRead::Running(_) => { kernel_invariant_stop(); }
+        ProcessCurrentRead::Running(_) => { has_current = true; }
         ProcessCurrentRead::Idle => {}
     }
-    if (core >= KERNEL_MAX_CORES || execution_state[execution_cpu_index()].stack_live == false) {
+    if (core >= KERNEL_MAX_CORES || has_current ||
+        execution_state[execution_cpu_index()].stack_live == false) {
         kernel_invariant_stop();
     }
     let guard = process_run_lock();
@@ -5527,11 +5536,13 @@ fn kernel_process_stack_idle_complete() {
 // together, and never while this core still stands on them.
 fn kernel_process_stack_idle_yield() {
     let core: usize = cpu_id();
+    let mut has_current: bool = false;
     match kernel_process_current_read() {
-        ProcessCurrentRead::Running(_) => { kernel_invariant_stop(); }
+        ProcessCurrentRead::Running(_) => { has_current = true; }
         ProcessCurrentRead::Idle => {}
     }
-    if (core >= KERNEL_MAX_CORES || execution_state[execution_cpu_index()].stack_live == false) {
+    if (core >= KERNEL_MAX_CORES || has_current ||
+        execution_state[execution_cpu_index()].stack_live == false) {
         kernel_invariant_stop();
     }
     let guard = process_run_lock();
@@ -5562,11 +5573,13 @@ fn kernel_process_stack_idle_yield() {
 // changes hands, so a wake from here on can start it on any CPU it may run.
 fn kernel_process_stack_idle_blocked() {
     let core: usize = cpu_id();
+    let mut has_current: bool = false;
     match kernel_process_current_read() {
-        ProcessCurrentRead::Running(_) => { kernel_invariant_stop(); }
+        ProcessCurrentRead::Running(_) => { has_current = true; }
         ProcessCurrentRead::Idle => {}
     }
-    if (core >= KERNEL_MAX_CORES || execution_state[execution_cpu_index()].stack_live == false) {
+    if (core >= KERNEL_MAX_CORES || has_current ||
+        execution_state[execution_cpu_index()].stack_live == false) {
         kernel_invariant_stop();
     }
     let guard = process_run_lock();
@@ -6842,13 +6855,13 @@ must_use variant SpreadTimerResult { Invalid; Armed; Pending; Observed; }
 fn kernel_process_spread_timer_progress(pid: usize, arm: bool)
         -> SpreadTimerResult !{unsafe} {
     let guard = process_run_lock();
-    // core-role: spread-timer fixture: its parent runs on CPU 1 by script
     let ProcessCurrentRead::Running(parent) = kernel_process_current_read() else {
         ProcessCurrentRead::Idle => {
             process_run_unlock(guard);
             return SpreadTimerResult::Invalid;
         }
     };
+    // core-role: spread-timer fixture: its parent runs on CPU 1 by script
     if (cpu_id() != 1 ||
         kernel_process_current_has_child_pid_locked(guard, pid) == false) {
         process_run_unlock(guard);
