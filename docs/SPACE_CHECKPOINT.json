@@ -1,9 +1,9 @@
 {
   "date": "2026-11-01",
   "event": "incremental",
-  "decision": "measured",
-  "source_sha256": "3316955fb2476a468e78978061da79ee14e634a83247933eee5d5815e025c0ef",
-  "workload": "#1321 and #1322: task context reads current through one preempt_off snapshot; kernel_activity is parked in the record at the stack handoff. Measured with scripts/space_delta.py origin/main: text 784348 -> 783212 B qemu, 4149868 -> 4148684 B rpi5; data unchanged; rpi5 bss 1712128 -> 1716224 from section alignment with text shift; no symbol changed size.",
+  "decision": "reuse",
+  "source_sha256": "af85814e586d967107fd75a467953582bbd5b284b83391b8f98e2d0fa58381ae",
+  "workload": "#1334: frame_ref.tkb's header comment changed; the only production source change on the branch, no code. Evidence reused. Previous: #1321 and #1322: task context reads current through one preempt_off snapshot; kernel_activity is parked in the record at the stack handoff. Measured with scripts/space_delta.py origin/main: text 784348 -> 783212 B qemu, 4149868 -> 4148684 B rpi5; data unchanged; rpi5 bss 1712128 -> 1716224 from section alignment with text shift; no symbol changed size.",
   "evidence": [
     "docs/AGGREGATE_MERGE_SPACE_2026-10-23.md",
     "docs/IRQ_PRIORITY_MASK_SPACE_2026-10-23.md",
