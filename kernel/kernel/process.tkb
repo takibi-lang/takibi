@@ -5653,7 +5653,7 @@ private fn kernel_process_scheduler_probe_frame_b() -> usize {
 // this runs for the probe's child, which never executes. 0 when it has no stack.
 private fn kernel_process_el1_resume_probe_frame() -> usize {
     let bottom: usize = kernel_stack_bottom(process_slot_of(
-        execution_state[execution_cpu_index()].current_handle.pool_index));
+        kernel_process_current_required().pool_index));
     if (bottom == 0) { return 0; }
     return bottom + KERNEL_PROCESS_STACK_SIZE - EXC_CONTEXT_SIZE;
 }
@@ -12755,7 +12755,7 @@ fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, Pro
     // `&`), where a child exit must not stop the survivors from running.
     let ProcessCurrentRead::Running(current_task) = kernel_process_current_read() else {
         ProcessCurrentRead::Idle => {
-            let mut __running_result: ExitSwitch = ExitSwitch::Idle;
+            let mut __running_result: ExitSwitch = ExitSwitch::Idle(span);
             process_current_end(current_authority);
             return __running_result;
         }
