@@ -169,7 +169,7 @@ private fn ext2_mutation_probe_mutator(phase: usize) !{unsafe} {
 
 // GitHub issue #993, phase 7: core 0 holds every ext2 slot while every peer
 // acquires one. Each peer finds the pool full, waits, and gets a slot once
-// core 0 lets go; a count of waits below the peers' number is the failure.
+// core 0 lets go; any other count of waits than the peers' number is the failure.
 private fn ext2_slot_pool_probe() -> bool !{unsafe} {
     let before: usize = slot_pool_wait_count(SlotPoolWaitPool::Ext2);
     if (ext2_slot_pool_probe_fill() != KERNEL_MAX_CORES) {
@@ -178,17 +178,23 @@ private fn ext2_slot_pool_probe() -> bool !{unsafe} {
         return false;
     }
     let sequence: usize = ext2_mutation_probe_arm(7);
-    // Until a peer's acquire has seen the pool full, bounded by peer ticks.
-    let mut window = peer_tick_window_policy(
-        peer_tick_window_peer(), PeerTickPolicy::Arrival);
-    while (slot_pool_wait_count(SlotPoolWaitPool::Ext2) == before &&
-           peer_tick_window_open(window)) { }
-    peer_tick_window_end(window);
+    // Until every peer's acquire has seen the pool full, each peer's wait
+    // bounded by that peer's ticks.
+    let peers: usize = peer_tally_peers(&ext2_mutation_probe_done);
+    let online: usize = peer_tally_online(&ext2_mutation_probe_done);
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        if (cpu < online) {
+            let mut window = peer_tick_window_policy(cpu, PeerTickPolicy::Arrival);
+            while (slot_pool_wait_count(SlotPoolWaitPool::Ext2) - before < peers &&
+                   peer_tick_window_open(window)) { }
+            peer_tick_window_end(window);
+        }
+    }
     ext2_slot_pool_probe_empty();
     let finished: bool = ext2_mutation_probe_finish(sequence);
     let waited: usize = slot_pool_wait_count(SlotPoolWaitPool::Ext2) - before;
     kernel_boot_log("ext2 slot pool wait: full-pool acquires by peers ");
-    if (finished && waited != 0) {
+    if (finished && waited == peers) {
         kernel_boot_log("waited and ended ok\n");
         return true;
     }
