@@ -153,7 +153,7 @@ private let mut fd_block_pool: RegionPool(FdBlock);
 const FD_BLOCK_CHUNK_PAGES: usize = 1;
 
 private fn fd_block_pool_lock(pool: *RegionPool(FdBlock) @ blocks)
-        -> RegionPoolGuard(FdBlock)[blocks] !{unsafe, acquires_lock_39_fd_block_pool, single_instance_lock, may_block,
+        -> RegionPoolGuard(FdBlock)[blocks] !{unsafe, acquires_lock_39_fd_block_pool, single_instance_lock, no_handler_lock,
           lock_guard_39_fd_block_pool} {
     if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::FdBlock); }
     preempt_lock_raise();
@@ -281,7 +281,7 @@ private let mut fd_context_pool: RegionPool(ProcessFdContext);
 const FD_CONTEXT_CHUNK_PAGES: usize = 1;
 
 private fn fd_context_pool_lock(pool: *RegionPool(ProcessFdContext) @ contexts)
-        -> RegionPoolGuard(ProcessFdContext)[contexts] !{unsafe, acquires_lock_39_fd_context_pool, single_instance_lock, may_block,
+        -> RegionPoolGuard(ProcessFdContext)[contexts] !{unsafe, acquires_lock_39_fd_context_pool, single_instance_lock, no_handler_lock,
           lock_guard_39_fd_context_pool} {
     if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::FdContext); }
     preempt_lock_raise();
@@ -883,7 +883,7 @@ private let mut object_pool: RegionPool(SharedObject);
 const OBJECT_CHUNK_PAGES: usize = 1;
 
 private fn object_pool_lock(pool: *RegionPool(SharedObject) @ objects)
-        -> RegionPoolGuard(SharedObject)[objects] !{unsafe, acquires_lock_39_object_pool, single_instance_lock, may_block,
+        -> RegionPoolGuard(SharedObject)[objects] !{unsafe, acquires_lock_39_object_pool, single_instance_lock, no_handler_lock,
           lock_guard_39_object_pool} {
     if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::Object); }
     preempt_lock_raise();
@@ -1101,7 +1101,7 @@ private let mut object_refcount_lock: TaskMutex;
 // in guarded_field_take, because kernel/lib/locked_cell.tkb also builds on the
 // host with no CPU authority.
 private fn object_refcount_take() -> GuardedFieldGuard[&object_refcount_lock]
-        !{may_block, acquires_lock_38_guarded_field, lock_guard_38_guarded_field} {
+        !{no_handler_lock, acquires_lock_38_guarded_field, lock_guard_38_guarded_field} {
     preempt_lock_raise();
     return guarded_field_take(&object_refcount_lock);
 }

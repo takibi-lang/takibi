@@ -664,7 +664,7 @@ const TCP_FRAME_CHUNK_PAGES: usize = 2;
 // name (#370), so it comes in through the pointer: callers pass
 // &tcp_frame_pool.
 private fn tcp_frame_pool_lock(pool: *RegionPool(NetFrame) @ frames)
-        -> RegionPoolGuard(NetFrame)[frames] !{unsafe, acquires_lock_39_tcp_frame_pool, single_instance_lock, may_block,
+        -> RegionPoolGuard(NetFrame)[frames] !{unsafe, acquires_lock_39_tcp_frame_pool, single_instance_lock, no_handler_lock,
           lock_guard_39_tcp_frame_pool} {
     if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::TcpFrame); }
     preempt_lock_raise();
@@ -1467,7 +1467,7 @@ must_use variant PinSharingSetupResult { NoMemory; InvalidLayout; Ready; }
 must_use variant PinSharingCleanupResult { Busy; InvalidChunk; Released; }
 
 private fn pin_sharing_lock() -> RegionPoolGuard(PinSharingCell)[&pin_sharing_pool]
-        !{unsafe, acquires_lock_39_pin_sharing_pool, single_instance_lock, may_block,
+        !{unsafe, acquires_lock_39_pin_sharing_pool, single_instance_lock, no_handler_lock,
           lock_guard_39_pin_sharing_pool} {
     preempt_lock_raise();
     return region_pool_lock(&pin_sharing_pool);
@@ -1970,7 +1970,7 @@ fn retx_kept_free(slot: usize) {
 }
 
 private fn tcp_retx_pool_lock(pool: *RegionPool(RetxEntry) @ entries)
-        -> RegionPoolGuard(RetxEntry)[entries] !{unsafe, acquires_lock_39_tcp_retx_pool, single_instance_lock, may_block,
+        -> RegionPoolGuard(RetxEntry)[entries] !{unsafe, acquires_lock_39_tcp_retx_pool, single_instance_lock, no_handler_lock,
           lock_guard_39_tcp_retx_pool} {
     if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::TcpRetx); }
     preempt_lock_raise();

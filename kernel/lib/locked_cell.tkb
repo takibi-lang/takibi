@@ -209,14 +209,14 @@ private linear struct GuardedFieldGuard[lock: addr] {
 
 // GitHub issue #966: a TaskMutex, which does not mask interrupts. The one
 // adopter (fd_table.tkb's object refcount) is reached from no interrupt
-// handler, and `may_block` keeps it that way: an `!{interrupt}` root that
+// handler, and `no_handler_lock` keeps it that way: an `!{interrupt}` root that
 // reaches this is a compile error naming the path. Its rank, below every
 // masking lock's 40, makes taking it while a masking guard is live a lock
 // order error too -- the lockdep rule that an interrupt-safe lock never
 // nests an interrupt-unsafe one (kernel/CONCURRENCY.md, "Lock classes").
 fn guarded_field_take(m: &mut TaskMutex @ id) -> GuardedFieldGuard[id]
-        !{may_block, acquires_lock_38_guarded_field, lock_guard_38_guarded_field} {
-    task_mutex_acquire(m);
+        !{no_handler_lock, acquires_lock_38_guarded_field, lock_guard_38_guarded_field} {
+    task_mutex_acquire_short(m);
     let mut g: GuardedFieldGuard[id] = { 1 };
     return g;
 }

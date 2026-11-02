@@ -81,6 +81,14 @@ fn task_mutex_acquire(m: *TaskMutex @ id)
     spin_lock(&m.word);
 }
 
+// GitHub issue #1350: the same acquire for a holder that holds the preempt
+// count and reaches no wait, so a waiter never waits for this core. A handler
+// still must not take it.
+fn task_mutex_acquire_short(m: *TaskMutex @ id)
+        !{locks, no_handler_lock, unsafe, acquires_lock_30_connection} {
+    spin_lock(&m.word);
+}
+
 fn task_mutex_release(m: *TaskMutex @ id) !{locks, unsafe} {
     spin_unlock(&m.word);
 }

@@ -2301,6 +2301,12 @@ fn Sync_Handler() !{exception} { dispatch_sync_exception(); }
 fn poll_callback() !{} { acknowledge_irq(); }
 ```
 
+`no_handler_lock` marks an unmasked lock whose holder keeps the preempt count
+(GitHub issue #1350): it never waits for its own core, but a handler on the
+holder's core would spin forever. It is inferred like `may_block` and refused
+wherever `may_block` is: interrupt, nmi, exception and debug-stopped roots, a
+bare `!{}` contract, and a `preempt_off` block.
+
 The operational call effects are `may_block`, `allocates`, `locks`, and
 `logs`. Each is inferred transitively through resolved direct calls and
 effect-contracted indirect calls. An explicit annotation is therefore an API

@@ -20,7 +20,7 @@ fn unranked_mutex_lock(lock: *Mutex @ address) -> SomeGuard[address] {
 }
 '''
 
-# GitHub issue #966: an unmasked wrapper without may_block, and a saving
+# GitHub issue #966: an unmasked wrapper without no_handler_lock, and a saving
 # wrapper that saves no mask.
 UNMASKED_NO_MAY_BLOCK = '''
 private fn unmasked_pool_lock() -> RegionPoolGuard(ProcessRecord)[&scheduled_process_pool]
@@ -31,14 +31,14 @@ private fn unmasked_pool_lock() -> RegionPoolGuard(ProcessRecord)[&scheduled_pro
 
 SAVING_ZERO = '''
 private fn saving_zero_pool_lock() -> RegionPoolGuard(ProcessRecord)[&scheduled_process_pool]
-        !{unsafe, acquires_lock_40_saving_zero_pool, may_block} {
+        !{unsafe, acquires_lock_40_saving_zero_pool, no_handler_lock} {
     return region_pool_lock_saving(&scheduled_process_pool, 0);
 }
 '''
 
 UNMASKED_HIGH_RANK = '''
 private fn unmasked_high_pool_lock() -> RegionPoolGuard(ProcessRecord)[&scheduled_process_pool]
-        !{unsafe, acquires_lock_40_unmasked_pool, may_block, lock_guard_40_unmasked_pool} {
+        !{unsafe, acquires_lock_40_unmasked_pool, no_handler_lock, lock_guard_40_unmasked_pool} {
     return region_pool_lock(&scheduled_process_pool);
 }
 '''
@@ -54,7 +54,7 @@ private fn masked_low_pool_lock() -> RegionPoolGuard(ProcessRecord)[&scheduled_p
 # GitHub issue #1350: an unmasked lock or release that leaves the count alone.
 UNRAISED_TAKE = '''
 private fn unraised_pool_lock() -> RegionPoolGuard(ProcessRecord)[&scheduled_process_pool]
-        !{unsafe, acquires_lock_39_unraised_pool, may_block, lock_guard_39_unraised_pool} {
+        !{unsafe, acquires_lock_39_unraised_pool, no_handler_lock, lock_guard_39_unraised_pool} {
     return region_pool_lock(&scheduled_process_pool);
 }
 '''
@@ -67,7 +67,7 @@ private fn unlowered_pool_unlock(guard: sink RegionPoolGuard(ProcessRecord)[&sch
 
 UNRAISED_FIELD = '''
 private fn unraised_field_take() -> GuardedFieldGuard[&some_lock]
-        !{may_block, acquires_lock_38_guarded_field, lock_guard_38_guarded_field} {
+        !{no_handler_lock, acquires_lock_38_guarded_field, lock_guard_38_guarded_field} {
     return guarded_field_take(&some_lock);
 }
 '''
@@ -96,7 +96,7 @@ def main() -> int:
         'new unranked region wrapper': UNRANKED_REGION,
         'new unranked mutex wrapper': UNRANKED_MUTEX,
         'one-line body': ONE_LINE,
-        'unmasked wrapper without may_block': UNMASKED_NO_MAY_BLOCK,
+        'unmasked wrapper without no_handler_lock': UNMASKED_NO_MAY_BLOCK,
         'saving wrapper that saves no mask': SAVING_ZERO,
         'unmasked lock in the masking band': UNMASKED_HIGH_RANK,
         'masking lock in the unmasked band': MASKED_LOW_RANK,
@@ -116,7 +116,7 @@ private fn ranked_neighbour() !{acquires_lock_40_neighbour} { }
     assert problems({**sources, added: neighbour}), 'neighbour rank'
     # The accepted unmasked shape (#966).
     assert not problems({**sources, added: UNMASKED_NO_MAY_BLOCK.replace(
-        'acquires_lock_40_unmasked_pool}', 'acquires_lock_39_unmasked_pool, may_block}'
+        'acquires_lock_40_unmasked_pool}', 'acquires_lock_39_unmasked_pool, no_handler_lock}'
     ).replace('return region_pool_lock', 'preempt_lock_raise(); return region_pool_lock')}), \
         'unmasked ok'
     # Exemptions are reviewed per name, and a stale one is refused.

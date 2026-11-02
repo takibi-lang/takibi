@@ -198,6 +198,14 @@ let rules = [
     function_pointer = true; propagates = true; effect_free_forbidden = true;
     excludes_declared = []; excludes_reachable = [];
     rejects_unknown_indirect = false; forbids_reentry = false };
+  (* GitHub issue #1350: an unmasked lock whose holder holds the preempt count.
+     It never waits for this core, so it is not may_block, but a handler on
+     the holder's core would spin forever, so every root that excludes
+     may_block excludes this too. #789 derives it from lock rank later. *)
+  { name = "no_handler_lock"; declaration = Inferred; declaration_role = false;
+    function_pointer = true; propagates = true; effect_free_forbidden = true;
+    excludes_declared = []; excludes_reachable = [];
+    rejects_unknown_indirect = false; forbids_reentry = false };
   { name = "allocates"; declaration = Inferred; declaration_role = false;
     function_pointer = true; propagates = true; effect_free_forbidden = true;
     excludes_declared = []; excludes_reachable = [];
@@ -220,8 +228,8 @@ let rules = [
     rejects_unknown_indirect = false; forbids_reentry = false };
   { name = "interrupt"; declaration = Required; declaration_role = true;
     function_pointer = false; propagates = false; effect_free_forbidden = false;
-    excludes_declared = ["may_block"; "allocates"; "logs"; "exception"; "mmu_off"];
-    excludes_reachable = ["may_block"; "allocates"; "logs"; "requires_irq_unmasked"];
+    excludes_declared = ["may_block"; "no_handler_lock"; "allocates"; "logs"; "exception"; "mmu_off"];
+    excludes_reachable = ["may_block"; "no_handler_lock"; "allocates"; "logs"; "requires_irq_unmasked"];
     rejects_unknown_indirect = true; forbids_reentry = false };
   (* GitHub issue #920: the handler of the pseudo-NMI -- the world-stop SGI,
      raised above the GIC priority mask so it reaches a core whose ordinary
@@ -231,9 +239,9 @@ let rules = [
      reach `locks`. *)
   { name = "nmi"; declaration = Required; declaration_role = true;
     function_pointer = false; propagates = false; effect_free_forbidden = false;
-    excludes_declared = ["may_block"; "allocates"; "logs"; "locks"; "interrupt";
+    excludes_declared = ["may_block"; "no_handler_lock"; "allocates"; "logs"; "locks"; "interrupt";
                          "exception"; "mmu_off"];
-    excludes_reachable = ["locks"; "may_block"; "allocates"; "logs";
+    excludes_reachable = ["locks"; "may_block"; "no_handler_lock"; "allocates"; "logs";
                           "requires_irq_unmasked"];
     rejects_unknown_indirect = true; forbids_reentry = false };
   (* GitHub issue #920 (maintainer decision 3): a function that begins the
@@ -245,14 +253,14 @@ let rules = [
      variant carrying one, so the stop token cannot leave the checked root. *)
   { name = "debug_stopped"; declaration = Required; declaration_role = true;
     function_pointer = false; propagates = false; effect_free_forbidden = false;
-    excludes_declared = ["may_block"; "allocates"; "locks"; "mmu_off"];
-    excludes_reachable = ["locks"; "may_block"; "allocates";
+    excludes_declared = ["may_block"; "no_handler_lock"; "allocates"; "locks"; "mmu_off"];
+    excludes_reachable = ["locks"; "may_block"; "no_handler_lock"; "allocates";
                           "requires_irq_unmasked"];
     rejects_unknown_indirect = true; forbids_reentry = false };
   { name = "exception"; declaration = Required; declaration_role = true;
     function_pointer = false; propagates = false; effect_free_forbidden = false;
-    excludes_declared = ["may_block"; "allocates"; "logs"; "interrupt"; "mmu_off"];
-    excludes_reachable = ["may_block"; "allocates"; "logs"; "requires_irq_unmasked"];
+    excludes_declared = ["may_block"; "no_handler_lock"; "allocates"; "logs"; "interrupt"; "mmu_off"];
+    excludes_reachable = ["may_block"; "no_handler_lock"; "allocates"; "logs"; "requires_irq_unmasked"];
     rejects_unknown_indirect = true; forbids_reentry = true };
   { name = "mmu_off"; declaration = Required; declaration_role = true;
     function_pointer = false; propagates = false; effect_free_forbidden = false;

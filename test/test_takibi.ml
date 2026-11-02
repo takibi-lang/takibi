@@ -28911,6 +28911,18 @@ let preempt_off_tests =
   let bad title fragment body = Alcotest.test_case title `Quick
       (expect_type_error_files fragment (files body)) in
   [
+    bad "block refuses no_handler_lock (#1350)" "may block via"
+      "extern fn short1350() !{no_handler_lock};
+       fn bad1350() { preempt_off (cpu) { short1350(); } }";
+    bad "interrupt root refuses no_handler_lock (#1350)" "short1350"
+      "extern fn short1350() !{no_handler_lock};
+       fn bad1350() !{interrupt} { short1350(); }";
+    bad "bare contract refuses no_handler_lock (#1350)" "short1350"
+      "extern fn short1350() !{no_handler_lock};
+       fn bad1350() !{} { short1350(); }";
+    good "ordinary code reaches no_handler_lock (#1350)"
+      "extern fn short1350() !{no_handler_lock};
+       fn good1350() { short1350(); }";
     good "block mints the authority for per-CPU access" "fn good638() {
       preempt_off (cpu) { bump638(cpu); }
     }";

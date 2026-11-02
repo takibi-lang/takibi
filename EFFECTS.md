@@ -5,22 +5,23 @@
 | Effect | Declaration | Declaration role | Function pointer row | Propagates | Excludes when co-declared | Forbidden in reachable calls | Unknown indirect call | Re-entry |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `may_block` | inferred | no | yes | yes | - | - | allowed | allowed |
+| `no_handler_lock` | inferred | no | yes | yes | - | - | allowed | allowed |
 | `allocates` | inferred | no | yes | yes | - | - | allowed | allowed |
 | `locks` | inferred | no | yes | yes | - | - | allowed | allowed |
 | `logs` | inferred | no | yes | yes | - | - | allowed | allowed |
 | `requires_mmu` | inferred | no | yes | yes | - | - | allowed | allowed |
 | `unsafe` | local explicit + inferred | no | yes | yes | - | - | allowed | allowed |
-| `interrupt` | explicit | yes | no | no | may_block, allocates, logs, exception, mmu_off | may_block, allocates, logs, requires_irq_unmasked | rejected | allowed |
-| `nmi` | explicit | yes | no | no | may_block, allocates, logs, locks, interrupt, exception, mmu_off | locks, may_block, allocates, logs, requires_irq_unmasked | rejected | allowed |
-| `debug_stopped` | explicit | yes | no | no | may_block, allocates, locks, mmu_off | locks, may_block, allocates, requires_irq_unmasked | rejected | allowed |
-| `exception` | explicit | yes | no | no | may_block, allocates, logs, interrupt, mmu_off | may_block, allocates, logs, requires_irq_unmasked | rejected | forbidden |
+| `interrupt` | explicit | yes | no | no | may_block, no_handler_lock, allocates, logs, exception, mmu_off | may_block, no_handler_lock, allocates, logs, requires_irq_unmasked | rejected | allowed |
+| `nmi` | explicit | yes | no | no | may_block, no_handler_lock, allocates, logs, locks, interrupt, exception, mmu_off | locks, may_block, no_handler_lock, allocates, logs, requires_irq_unmasked | rejected | allowed |
+| `debug_stopped` | explicit | yes | no | no | may_block, no_handler_lock, allocates, locks, mmu_off | locks, may_block, no_handler_lock, allocates, requires_irq_unmasked | rejected | allowed |
+| `exception` | explicit | yes | no | no | may_block, no_handler_lock, allocates, logs, interrupt, mmu_off | may_block, no_handler_lock, allocates, logs, requires_irq_unmasked | rejected | forbidden |
 | `mmu_off` | explicit | yes | no | no | interrupt, exception, requires_mmu | requires_mmu, requires_devices | rejected | allowed |
 | `requires_devices` | inferred | no | yes | yes | - | - | allowed | allowed |
 | `devices_unmapped` | explicit | yes | no | no | requires_devices | requires_devices | rejected | allowed |
 | `requires_irq_unmasked` | inferred | no | yes | yes | - | - | allowed | allowed |
 | `noreturn` | trusted extern only | no | no | no | - | - | allowed | allowed |
 
-A bare `!{}` contract forbids the transitive effects: `may_block`, `allocates`, `locks`, `logs`. `locks` propagates and is forbidden by `!{}`, but is intentionally allowed from `interrupt` and `exception` roots; an `nmi` root forbids it.
+A bare `!{}` contract forbids the transitive effects: `may_block`, `no_handler_lock`, `allocates`, `locks`, `logs`. `locks` propagates and is forbidden by `!{}`, but is intentionally allowed from `interrupt` and `exception` roots; an `nmi` root forbids it.
 
 # Checker-only words
 

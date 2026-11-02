@@ -220,7 +220,7 @@ fn process_image_record_missing_uses() -> usize {
 }
 
 private fn process_image_pool_lock(pool: *RegionPool(ProcessImageRecord) @ images)
-        -> RegionPoolGuard(ProcessImageRecord)[images] !{unsafe, acquires_lock_39_process_image_pool, single_instance_lock, may_block,
+        -> RegionPoolGuard(ProcessImageRecord)[images] !{unsafe, acquires_lock_39_process_image_pool, single_instance_lock, no_handler_lock,
           lock_guard_39_process_image_pool} {
     if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::ProcessImage); }
     preempt_lock_raise();
@@ -2898,7 +2898,7 @@ private let mut mmap_region_pool: RegionPool(MmapRegionBitmap);
 const MMAP_REGION_CHUNK_PAGES: usize = 1;
 
 private fn mmap_region_pool_lock(pool: *RegionPool(MmapRegionBitmap) @ bitmaps)
-        -> RegionPoolGuard(MmapRegionBitmap)[bitmaps] !{unsafe, acquires_lock_39_mmap_region_pool, single_instance_lock, may_block,
+        -> RegionPoolGuard(MmapRegionBitmap)[bitmaps] !{unsafe, acquires_lock_39_mmap_region_pool, single_instance_lock, no_handler_lock,
           lock_guard_39_mmap_region_pool} {
     if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::MmapRegion); }
     preempt_lock_raise();

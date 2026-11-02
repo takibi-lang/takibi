@@ -18,7 +18,7 @@ make a single-instance re-acquire an error.
 
 GitHub issue #966 adds the interrupt half. A pool wrapper that takes the
 lock WITHOUT masking interrupts (`region_pool_lock`, which saves nothing)
-must declare `may_block`: that effect is what makes an `!{interrupt}` root
+must declare `no_handler_lock`: that effect is what makes an `!{interrupt}` root
 reaching it a compile error with the call path, and an unmasked lock taken
 from a handler on the holder's own core never comes back. A wrapper that
 calls `region_pool_lock_saving` must save the mask in the same body
@@ -59,7 +59,7 @@ FN_RE = re.compile(r"\bfn\s+([A-Za-z_0-9]+)\s*[(<]")
 UNMASKED_RE = re.compile(r"\bregion_pool_lock\s*\(")
 SAVING_RE = re.compile(r"\bregion_pool_lock_saving\s*\(")
 MASK_SAVE_RE = re.compile(r"\bmutex_irq_save\s*\(")
-MAY_BLOCK_RE = re.compile(r"\bmay_block\b")
+NO_HANDLER_RE = re.compile(r"\bno_handler_lock\b")
 GUARD_RANK_RE = re.compile(r"\block_guard_([0-9]+)_[A-Za-z_0-9]+\b")
 UNMASKED_TAKE_RE = re.compile(r"\b(region_pool_lock|task_mutex_acquire)\s*\(")
 MASKED_TAKE_RE = re.compile(r"\b(mutex_irq_save|mutex_acquire|region_pool_lock_saving)\s*\(")
@@ -149,9 +149,9 @@ def file_scan(text: str):
     unranked = []
     unmasked = []
     for name, header, body in functions(text):
-        if UNMASKED_RE.search(body) and not MAY_BLOCK_RE.search(header):
+        if UNMASKED_RE.search(body) and not NO_HANDLER_RE.search(header):
             unmasked.append((name, "calls region_pool_lock, which does not mask "
-                             "interrupts, but declares no may_block (#966: without it an "
+                             "interrupts, but declares no no_handler_lock (#966, #1350: without it an "
                              "!{interrupt} root may reach this lock unchecked)"))
         for rank in (int(r) for r in GUARD_RANK_RE.findall(header)):
             if UNMASKED_TAKE_RE.search(body) and rank >= IRQ_LEVEL_RANK:
@@ -162,7 +162,7 @@ def file_scan(text: str):
                                  f"masking locks rank at or above the IRQ level (rank {IRQ_LEVEL_RANK}) (#966)"))
         if SAVING_RE.search(body) and not MASK_SAVE_RE.search(body):
             unmasked.append((name, "calls region_pool_lock_saving without mutex_irq_save "
-                             "in the same body (#966: use region_pool_lock and may_block "
+                             "in the same body (#966: use region_pool_lock and no_handler_lock "
                              "for a lock that does not mask)"))
         if RAISED_TAKE_RE.search(body) and not RAISE_RE.search(body):
             unmasked.append((name, "takes an unmasked short-hold lock without "

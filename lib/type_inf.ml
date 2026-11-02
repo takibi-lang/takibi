@@ -14696,16 +14696,21 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     let fail detail = raise (TypeError (loc, Printf.sprintf
       "preempt_off block in function '%s' %s; preemption stays disabled \
        for the whole block, so nothing in it may block" owner detail)) in
-    if StringSet.mem "may_block" direct then fail "may block directly"
-    else if StringSet.mem "may_block" indirect then
+    (* #1350: no_handler_lock split off may_block; the block still refuses
+       both, so the split accepts no new program. *)
+    let barred = ["may_block"; "no_handler_lock"] in
+    if List.exists (fun e -> StringSet.mem e direct) barred then
+      fail "may block directly"
+    else if List.exists (fun e -> StringSet.mem e indirect) barred then
       fail "may block through an indirect call with !{may_block}"
     else begin
-      StringSet.iter (fun callee ->
-        if StringSet.mem callee (closed_effect "may_block") then
-          let path = Option.value
-            (find_effect_path "may_block" StringSet.empty callee)
-            ~default:[display_effect_key callee] in
-          fail ("may block via " ^ String.concat " -> " path)) callees;
+      List.iter (fun eff ->
+        StringSet.iter (fun callee ->
+          if StringSet.mem callee (closed_effect eff) then
+            let path = Option.value
+              (find_effect_path eff StringSet.empty callee)
+              ~default:[display_effect_key callee] in
+            fail ("may block via " ^ String.concat " -> " path)) callees) barred;
       if unknown then fail "reaches a call with unknown effects"
       else
         StringSet.iter (fun callee ->
@@ -14996,6 +15001,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           ~default:[display_effect_key key] in
         let description = match eff with
           | "may_block" -> "may block"
+          | "no_handler_lock" -> "takes a lock no handler may reach"
           | "allocates" -> "may allocate"
           | "locks" -> "may acquire a lock"
           | "logs" -> "may log"

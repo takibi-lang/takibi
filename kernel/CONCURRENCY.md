@@ -636,7 +636,8 @@ write each way (about 20 ns per pair, #920), and these sit on every
 fd-using syscall and every TCP segment. Three rules keep that safe, and the
 build enforces each:
 
-1. **No handler reaches it.** Each unmasked acquire declares `may_block`, so an
+1. **No handler reaches it.** Each unmasked acquire declares `may_block`, or
+   `no_handler_lock` where its holder holds the preempt count, so an
    `!{interrupt}` root that reaches one is a compile error naming the path;
    `scripts/check_lock_rank_wrappers.py` refuses an unmasked pool wrapper
    without it.
