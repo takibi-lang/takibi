@@ -223,12 +223,14 @@ private fn process_image_pool_lock(pool: *RegionPool(ProcessImageRecord) @ image
         -> RegionPoolGuard(ProcessImageRecord)[images] !{unsafe, acquires_lock_39_process_image_pool, single_instance_lock, may_block,
           lock_guard_39_process_image_pool} {
     if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::ProcessImage); }
+    preempt_lock_raise();
     return region_pool_lock(pool);
 }
 
 private fn process_image_pool_unlock(
         guard: sink RegionPoolGuard(ProcessImageRecord)[images]) {
     region_pool_unlock(guard);
+    preempt_lock_lower();
 }
 
 // The initiator retains the allocator guard across a complete stop. The
@@ -2899,12 +2901,14 @@ private fn mmap_region_pool_lock(pool: *RegionPool(MmapRegionBitmap) @ bitmaps)
         -> RegionPoolGuard(MmapRegionBitmap)[bitmaps] !{unsafe, acquires_lock_39_mmap_region_pool, single_instance_lock, may_block,
           lock_guard_39_mmap_region_pool} {
     if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::MmapRegion); }
+    preempt_lock_raise();
     return region_pool_lock(pool);
 }
 
 private fn mmap_region_pool_unlock(
         guard: sink RegionPoolGuard(MmapRegionBitmap)[bitmaps]) {
     region_pool_unlock(guard);
+    preempt_lock_lower();
 }
 
 // Gives every empty chunk back: a bitmap lives as long as one image that

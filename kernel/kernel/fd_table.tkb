@@ -4,6 +4,7 @@ use "kernel/lib/peer_round.tkb";
 
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/pool_lock.tkb";
+use "kernel/kernel/cpu_authority.tkb";
 use "kernel/lib/locked_cell.tkb";
 use "kernel/kernel/pipe.tkb";
 
@@ -155,11 +156,13 @@ private fn fd_block_pool_lock(pool: *RegionPool(FdBlock) @ blocks)
         -> RegionPoolGuard(FdBlock)[blocks] !{unsafe, acquires_lock_39_fd_block_pool, single_instance_lock, may_block,
           lock_guard_39_fd_block_pool} {
     if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::FdBlock); }
+    preempt_lock_raise();
     return region_pool_lock(pool);
 }
 
 private fn fd_block_pool_unlock(guard: sink RegionPoolGuard(FdBlock)[blocks]) {
     region_pool_unlock(guard);
+    preempt_lock_lower();
 }
 
 // Keeps one empty chunk, as intrusive_pool's default did (#346's
@@ -281,12 +284,14 @@ private fn fd_context_pool_lock(pool: *RegionPool(ProcessFdContext) @ contexts)
         -> RegionPoolGuard(ProcessFdContext)[contexts] !{unsafe, acquires_lock_39_fd_context_pool, single_instance_lock, may_block,
           lock_guard_39_fd_context_pool} {
     if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::FdContext); }
+    preempt_lock_raise();
     return region_pool_lock(pool);
 }
 
 private fn fd_context_pool_unlock(
         guard: sink RegionPoolGuard(ProcessFdContext)[contexts]) {
     region_pool_unlock(guard);
+    preempt_lock_lower();
 }
 
 private fn fd_context_return_empty(
@@ -428,10 +433,10 @@ private fn fd_block_publish(pool: *RegionPool(FdBlock) @ blocks,
     let guard = fd_block_pool_lock(pool);
     let mut handle: RegionHandle(FdBlock) = region_give(guard, fresh);
     fd_block_pool_unlock(guard);
-    let count_guard = guarded_field_take(&object_refcount_lock);
+    let count_guard = object_refcount_take();
     let total = guarded_usize_load(count_guard, &fd_slot_total);
     guarded_usize_store(count_guard, &fd_slot_total, total + FD_BLOCK_SLOTS);
-    guarded_field_give(count_guard, &object_refcount_lock);
+    object_refcount_give(count_guard);
     return FdBlockAllocResult::Allocated(
         (region_handle_address(handle), region_handle_generation(handle)));
 }
@@ -473,14 +478,14 @@ private fn fd_block_free(address: usize, generation: usize) !{unsafe} {
         RegionRetire(FdBlock)::Pending => {}
         RegionRetire(FdBlock)::Retired(slot) => { fd_block_slot_free(slot); }
     }
-    let count_guard = guarded_field_take(&object_refcount_lock);
+    let count_guard = object_refcount_take();
     let total = guarded_usize_load(count_guard, &fd_slot_total);
     let current: usize = total;
     let count_valid: bool = current >= FD_BLOCK_SLOTS;
     if (current >= FD_BLOCK_SLOTS) {
         guarded_usize_store(count_guard, &fd_slot_total, current - FD_BLOCK_SLOTS);
     }
-    guarded_field_give(count_guard, &object_refcount_lock);
+    object_refcount_give(count_guard);
     if (count_valid == false) {
         kernel_boot_log("fd table: descriptor slot count underflow\n");
     }
@@ -881,11 +886,13 @@ private fn object_pool_lock(pool: *RegionPool(SharedObject) @ objects)
         -> RegionPoolGuard(SharedObject)[objects] !{unsafe, acquires_lock_39_object_pool, single_instance_lock, may_block,
           lock_guard_39_object_pool} {
     if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::Object); }
+    preempt_lock_raise();
     return region_pool_lock(pool);
 }
 
 private fn object_pool_unlock(guard: sink RegionPoolGuard(SharedObject)[objects]) {
     region_pool_unlock(guard);
+    preempt_lock_lower();
 }
 
 // Keeps one empty chunk, as intrusive_pool's default did (#346).
@@ -1026,11 +1033,11 @@ must_use variant UnifiedObjectReleaseResult { Invalid; StillHeld; Freed; }
 // because the handle no longer named anything.
 private fn unified_object_retain(handle: UnifiedObjectHandle)
         -> UnifiedObjectRetainResult !{unsafe} {
-    let guard = guarded_field_take(&object_refcount_lock);
+    let guard = object_refcount_take();
     let bound = guarded_usize_load(guard, &fd_slot_total);
     let result: UnifiedObjectRetainResult =
         unified_object_retain_locked(guard, handle, bound);
-    guarded_field_give(guard, &object_refcount_lock);
+    object_refcount_give(guard);
     return result;
 }
 
@@ -1039,10 +1046,10 @@ private fn unified_object_retain(handle: UnifiedObjectHandle)
 private fn unified_object_retain_at_limit(
         handle: UnifiedObjectHandle, limit: usize)
         -> UnifiedObjectRetainResult !{unsafe} {
-    let guard = guarded_field_take(&object_refcount_lock);
+    let guard = object_refcount_take();
     let result: UnifiedObjectRetainResult =
         unified_object_retain_locked(guard, handle, limit);
-    guarded_field_give(guard, &object_refcount_lock);
+    object_refcount_give(guard);
     return result;
 }
 
@@ -1089,6 +1096,21 @@ private let mut object_double_release_count: AtomicWord;
 // guard-derived accessor is what relates them.
 private let mut object_refcount_lock: TaskMutex;
 
+// GitHub issue #1350: the lock is reached inside a PreemptOff span, so its
+// short holder stays on its core while it holds it. The raise lives here, not
+// in guarded_field_take, because kernel/lib/locked_cell.tkb also builds on the
+// host with no CPU authority.
+private fn object_refcount_take() -> GuardedFieldGuard[&object_refcount_lock]
+        !{may_block, acquires_lock_38_guarded_field, lock_guard_38_guarded_field} {
+    preempt_lock_raise();
+    return guarded_field_take(&object_refcount_lock);
+}
+
+private fn object_refcount_give(guard: sink GuardedFieldGuard[&object_refcount_lock]) {
+    guarded_field_give(guard, &object_refcount_lock);
+    preempt_lock_lower();
+}
+
 // GitHub issue #452. The guard and the accessor are
 // kernel/lib/locked_cell.tkb's, deliberately, and not a pair declared
 // here: `private` is per FILE, so a guard type and an accessor written in
@@ -1126,15 +1148,15 @@ fn unified_fd_context_live_count() -> usize !{unsafe} {
 private fn unified_object_refs_of(handle: UnifiedObjectHandle) -> usize
         !{unsafe} {
     if (unified_object_matches(handle) == false) { return 0; }
-    let guard = guarded_field_take(&object_refcount_lock);
+    let guard = object_refcount_take();
     let RegionPinned(SharedObject)::Pinned(held_object_pin) =
             object_pin_handle(&object_pool, handle) else {
-        RegionPinned(SharedObject)::Stale => { guarded_field_give(guard, &object_refcount_lock); return 0; }
+        RegionPinned(SharedObject)::Stale => { object_refcount_give(guard); return 0; }
     };
     let held_object: &mut SharedObject = region_pin_record(held_object_pin);
     let refs = guarded_usize_load(guard, &held_object.refs);
     let held: usize = refs;
-    guarded_field_give(guard, &object_refcount_lock);
+    object_refcount_give(guard);
     { let __held_object_result: usize = held; object_unpin(held_object_pin); return __held_object_result; }
 }
 
@@ -1158,10 +1180,10 @@ private fn unified_object_release(handle: UnifiedObjectHandle)
     // object is gone. Read before the release, since the release frees the
     // record; written once at creation, so it cannot change in between.
     let (kind, pipe_address, pipe_generation) = unified_object_pipe_of(handle);
-    let guard = guarded_field_take(&object_refcount_lock);
+    let guard = object_refcount_take();
     let result: UnifiedObjectReleaseResult =
         unified_object_release_locked(guard, handle);
-    guarded_field_give(guard, &object_refcount_lock);
+    object_refcount_give(guard);
     match result {
         UnifiedObjectReleaseResult::Invalid => { return UnifiedObjectReleaseResult::Invalid; }
         UnifiedObjectReleaseResult::StillHeld => { return UnifiedObjectReleaseResult::StillHeld; }
@@ -1782,9 +1804,9 @@ private fn unified_object_publish(pool: *RegionPool(SharedObject) @ objects,
     // EVERY write to refs has one discipline. The pool lock is released
     // above, so this is fd-refcount taken alone (issue #479's order is
     // fd -> pool -> page).
-    let refcount_guard = guarded_field_take(&object_refcount_lock);
+    let refcount_guard = object_refcount_take();
     guarded_usize_store(refcount_guard, &object.refs, 0);
-    guarded_field_give(refcount_guard, &object_refcount_lock);
+    object_refcount_give(refcount_guard);
     let opening = object_pool_lock(pool);
     let mut region_handle: RegionHandle(SharedObject) = region_give(opening, fresh);
     object_pool_unlock(opening);
@@ -2214,15 +2236,15 @@ fn unified_fd_close_exec_descriptors(process: usize) !{unsafe} {
 // than deciding anything.
 fn unified_object_references(handle: UnifiedObjectHandle) -> usize !{unsafe} {
     if (unified_object_matches(handle) == false) { return 0; }
-    let guard = guarded_field_take(&object_refcount_lock);
+    let guard = object_refcount_take();
     let RegionPinned(SharedObject)::Pinned(held_object_pin) =
             object_pin_handle(&object_pool, handle) else {
-        RegionPinned(SharedObject)::Stale => { guarded_field_give(guard, &object_refcount_lock); return 0; }
+        RegionPinned(SharedObject)::Stale => { object_refcount_give(guard); return 0; }
     };
     let held_object: &mut SharedObject = region_pin_record(held_object_pin);
     let refs = guarded_usize_load(guard, &held_object.refs);
     let held: usize = refs;
-    guarded_field_give(guard, &object_refcount_lock);
+    object_refcount_give(guard);
     { let __held_object_result: usize = held; object_unpin(held_object_pin); return __held_object_result; }
 }
 
@@ -2254,19 +2276,19 @@ fn unified_listener_claim(handle: UnifiedObjectHandle) -> ListenerClaimResult
     if (unified_object_kind(handle) != UnifiedFdKind::Listener) {
         return ListenerClaimResult::Missing;
     }
-    let guard = guarded_field_take(&object_refcount_lock);
+    let guard = object_refcount_take();
     let RegionPinned(SharedObject)::Pinned(held_object_pin) =
             object_pin_handle(&object_pool, handle) else {
-        RegionPinned(SharedObject)::Stale => { guarded_field_give(guard, &object_refcount_lock); return ListenerClaimResult::Missing; }
+        RegionPinned(SharedObject)::Stale => { object_refcount_give(guard); return ListenerClaimResult::Missing; }
     };
     let held_object: &mut SharedObject = region_pin_record(held_object_pin);
     let busy = guarded_usize_load(guard, &held_object.listener_busy);
     if (busy != 0) {
-        guarded_field_give(guard, &object_refcount_lock);
+        object_refcount_give(guard);
         { let __held_object_result: ListenerClaimResult = ListenerClaimResult::Busy; object_unpin(held_object_pin); return __held_object_result; }
     }
     guarded_usize_store(guard, &held_object.listener_busy, 1);
-    guarded_field_give(guard, &object_refcount_lock);
+    object_refcount_give(guard);
     { let __held_object_result: ListenerClaimResult = ListenerClaimResult::Claimed(
         listener_claim_new(handle.slot, handle.generation)); object_unpin(held_object_pin); return __held_object_result; }
 }
@@ -2275,14 +2297,14 @@ fn unified_listener_release(claim: sink ListenerClaim[object]) !{unsafe} {
     let mut handle: UnifiedObjectHandle =
         unified_object_handle_new(claim.address, claim.generation);
     if (unified_object_matches(handle) == false) { return; }
-    let guard = guarded_field_take(&object_refcount_lock);
+    let guard = object_refcount_take();
     let RegionPinned(SharedObject)::Pinned(held_object_pin) =
             object_pin_handle(&object_pool, handle) else {
-        RegionPinned(SharedObject)::Stale => { guarded_field_give(guard, &object_refcount_lock); return; }
+        RegionPinned(SharedObject)::Stale => { object_refcount_give(guard); return; }
     };
     let held_object: &mut SharedObject = region_pin_record(held_object_pin);
     guarded_usize_store(guard, &held_object.listener_busy, 0);
-    guarded_field_give(guard, &object_refcount_lock);
+    object_refcount_give(guard);
     object_unpin(held_object_pin);
 }
 
@@ -2569,10 +2591,10 @@ fn unified_file_is_writable(handle: UnifiedObjectHandle) -> bool {
 // instrumentation with the bound deliberately set to one slot per process
 // reported 71, which is what says the counter was reached at all.
 fn unified_object_ref_bound() -> usize {
-    let guard = guarded_field_take(&object_refcount_lock);
+    let guard = object_refcount_take();
     let total = guarded_usize_load(guard, &fd_slot_total);
     let bound: usize = total;
-    guarded_field_give(guard, &object_refcount_lock);
+    object_refcount_give(guard);
     return bound;
 }
 

@@ -51,6 +51,27 @@ private fn masked_low_pool_lock() -> RegionPoolGuard(ProcessRecord)[&scheduled_p
 }
 '''
 
+# GitHub issue #1350: an unmasked lock or release that leaves the count alone.
+UNRAISED_TAKE = '''
+private fn unraised_pool_lock() -> RegionPoolGuard(ProcessRecord)[&scheduled_process_pool]
+        !{unsafe, acquires_lock_39_unraised_pool, may_block, lock_guard_39_unraised_pool} {
+    return region_pool_lock(&scheduled_process_pool);
+}
+'''
+
+UNLOWERED_GIVE = '''
+private fn unlowered_pool_unlock(guard: sink RegionPoolGuard(ProcessRecord)[&scheduled_process_pool]) {
+    region_pool_unlock(guard);
+}
+'''
+
+UNRAISED_FIELD = '''
+private fn unraised_field_take() -> GuardedFieldGuard[&some_lock]
+        !{may_block, acquires_lock_38_guarded_field, lock_guard_38_guarded_field} {
+    return guarded_field_take(&some_lock);
+}
+'''
+
 ONE_LINE = 'private fn unranked_one_line() { region_pool_lock(&p); }\n'
 
 
@@ -72,6 +93,9 @@ def main() -> int:
         'saving wrapper that saves no mask': original + SAVING_ZERO,
         'unmasked lock in the masking band': original + UNMASKED_HIGH_RANK,
         'masking lock in the unmasked band': original + MASKED_LOW_RANK,
+        'unmasked lock without the raise': original + UNRAISED_TAKE,
+        'unmasked release without the lower': original + UNLOWERED_GIVE,
+        'field lock without the raise': original + UNRAISED_FIELD,
     }
     for name, changed in controls.items():
         assert changed != original, name
@@ -83,7 +107,8 @@ private fn ranked_neighbour() !{acquires_lock_40_neighbour} { }
     assert problems({**sources, path: neighbour}), 'neighbour rank'
     # The accepted unmasked shape (#966).
     assert not problems({**sources, path: original + UNMASKED_NO_MAY_BLOCK.replace(
-        'acquires_lock_40_unmasked_pool}', 'acquires_lock_40_unmasked_pool, may_block}')}), \
+        'acquires_lock_40_unmasked_pool}', 'acquires_lock_39_unmasked_pool, may_block}'
+    ).replace('return region_pool_lock', 'preempt_lock_raise(); return region_pool_lock')}), \
         'unmasked ok'
     # Exemptions are reviewed per name, and a stale one is refused.
     assert not problems({**sources, path: original + UNRANKED_REGION},

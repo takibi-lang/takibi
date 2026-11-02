@@ -140,6 +140,23 @@ private inline fn preempt_off_exit() {
     preempt_counts[slot].depth = depth - 1;
 }
 
+// GitHub issue #1350: a short-hold unmasked lock (the rank-39 pools and the
+// object refcount) holds the count from before its acquire to after its
+// release, Linux's spin_lock shape, so its holder is never switched off a core
+// where a span's waiter could spin for it. Every such lock goes through this
+// pair (scripts/check_lock_rank_wrappers.py). Not a region: no authority is
+// minted, and the raise is no more migration-safe than the mint's.
+inline fn preempt_lock_raise() {
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+                  "preempt_lock_raise's raise is not yet migration-safe and no IRQ return consults the count");
+    let mut slot: CpuHere = preempt_slot();
+    preempt_counts[slot].depth = preempt_counts[slot].depth + 1;
+}
+
+inline fn preempt_lock_lower() {
+    preempt_off_exit();
+}
+
 // GitHub issue #638 stage 7 (maintainer, 2026-11-01, #1323 option A): a span
 // that cannot be a lexical preempt_off block, because it ends at an exception
 // return in another function. It holds the same count. The token is linear, so

@@ -101,6 +101,7 @@ use "kernel/net/icmp.tkb";
 // The pools here are built-in region_pools (#672), grown from the page
 // allocator's runs.
 use "kernel/mm/page.tkb";
+use "kernel/kernel/cpu_authority.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/mutex.tkb";
 use "kernel/lib/task_mutex.tkb";
@@ -666,11 +667,13 @@ private fn tcp_frame_pool_lock(pool: *RegionPool(NetFrame) @ frames)
         -> RegionPoolGuard(NetFrame)[frames] !{unsafe, acquires_lock_39_tcp_frame_pool, single_instance_lock, may_block,
           lock_guard_39_tcp_frame_pool} {
     if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::TcpFrame); }
+    preempt_lock_raise();
     return region_pool_lock(pool);
 }
 
 private fn tcp_frame_pool_unlock(guard: sink RegionPoolGuard(NetFrame)[frames]) {
     region_pool_unlock(guard);
+    preempt_lock_lower();
 }
 
 fn tcp_frame_live_count() -> usize !{unsafe} {
@@ -1466,11 +1469,13 @@ must_use variant PinSharingCleanupResult { Busy; InvalidChunk; Released; }
 private fn pin_sharing_lock() -> RegionPoolGuard(PinSharingCell)[&pin_sharing_pool]
         !{unsafe, acquires_lock_39_pin_sharing_pool, single_instance_lock, may_block,
           lock_guard_39_pin_sharing_pool} {
+    preempt_lock_raise();
     return region_pool_lock(&pin_sharing_pool);
 }
 
 private fn pin_sharing_unlock(guard: sink RegionPoolGuard(PinSharingCell)[&pin_sharing_pool]) {
     region_pool_unlock(guard);
+    preempt_lock_lower();
 }
 
 fn pin_sharing_setup() -> PinSharingSetupResult !{unsafe} {
@@ -1968,11 +1973,13 @@ private fn tcp_retx_pool_lock(pool: *RegionPool(RetxEntry) @ entries)
         -> RegionPoolGuard(RetxEntry)[entries] !{unsafe, acquires_lock_39_tcp_retx_pool, single_instance_lock, may_block,
           lock_guard_39_tcp_retx_pool} {
     if (region_pool_lock_contended_hint(pool)) { pool_lock_wait_contended(PoolLockWaitPool::TcpRetx); }
+    preempt_lock_raise();
     return region_pool_lock(pool);
 }
 
 private fn tcp_retx_pool_unlock(guard: sink RegionPoolGuard(RetxEntry)[entries]) {
     region_pool_unlock(guard);
+    preempt_lock_lower();
 }
 
 fn tcp_retx_live_count() -> usize !{unsafe} {

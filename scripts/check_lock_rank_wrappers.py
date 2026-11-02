@@ -33,6 +33,13 @@ Taking an unmasked lock while a masking guard is live is then a lock-order
 error. It has to be: a handler interrupting the unmasked holder may spin on
 the masking lock, whose holder on another core spins on the unmasked one.
 
+GitHub issue #1350 adds the preemption half. An unmasked short-hold lock
+(`region_pool_lock`, or `guarded_field_take` from a kernel wrapper) must raise
+the preempt count in the same body (`preempt_lock_raise`), and its release
+(`region_pool_unlock`, `guarded_field_give`) must lower it
+(`preempt_lock_lower`), so a holder is never switched off a core where a
+PreemptOff span's waiter spins for it.
+
 Lexical: comments are stripped, then each `fn` body is brace-matched.
 Controls: scripts/check_lock_rank_wrappers_controls.py.
 """
@@ -59,6 +66,11 @@ MASKED_TAKE_RE = re.compile(r"\b(mutex_irq_save|mutex_acquire|region_pool_lock_s
 # The IRQ level (#966, #1072): the one place the band boundary is named.
 # Unmasked locks rank below it, masking locks at or above it.
 IRQ_LEVEL_RANK = 40
+# GitHub issue #1350: the short-hold unmasked pair and the count it must hold.
+RAISED_TAKE_RE = re.compile(r"\b(region_pool_lock|guarded_field_take)\s*\(")
+RAISED_GIVE_RE = re.compile(r"\b(region_pool_unlock|guarded_field_give)\s*\(")
+RAISE_RE = re.compile(r"\bpreempt_lock_raise\s*\(")
+LOWER_RE = re.compile(r"\bpreempt_lock_lower\s*\(")
 RANK_RE = re.compile(r"\bacquires_lock_[0-9]+_[A-Za-z_0-9]+\b")
 
 # function name -> why it needs no rank of its own. Reviewed entries only.
@@ -152,6 +164,13 @@ def file_scan(text: str):
             unmasked.append((name, "calls region_pool_lock_saving without mutex_irq_save "
                              "in the same body (#966: use region_pool_lock and may_block "
                              "for a lock that does not mask)"))
+        if RAISED_TAKE_RE.search(body) and not RAISE_RE.search(body):
+            unmasked.append((name, "takes an unmasked short-hold lock without "
+                             "preempt_lock_raise (#1350: a preempted holder hangs "
+                             "a PreemptOff span's waiter on its core)"))
+        if RAISED_GIVE_RE.search(body) and not LOWER_RE.search(body):
+            unmasked.append((name, "releases an unmasked short-hold lock without "
+                             "preempt_lock_lower (#1350: the count stays raised)"))
         calls = sorted(set(m.group(1) for m in ACQUIRE_RE.finditer(body)))
         if calls:
             takers.append(name)
