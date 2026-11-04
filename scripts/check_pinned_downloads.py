@@ -16,6 +16,8 @@ import re
 import sys
 from pathlib import Path
 
+from pass_line import report_pass
+
 ROOT = Path(__file__).resolve().parent.parent
 
 URL_RE = re.compile(r"^([A-Z0-9_]+)_URL\s*:?=\s*\S", re.M)
@@ -52,9 +54,12 @@ def main() -> int:
     if len(problems(planted)) != 2:
         print("FAIL pinned-downloads: the planted control was not refused", file=sys.stderr)
         return 1
-    count = len(URL_RE.findall(text))
-    print(f"PASS pinned-downloads: {count} downloaded package(s), each fetched "
-          "through fetch_pinned with a sha256; a planted unpinned one is refused")
+    report_pass("pinned-downloads",
+                f"{len(URL_RE.findall(text))} downloaded package(s), each "
+                "fetched through fetch_pinned with a sha256; a planted "
+                "unpinned one is refused",
+                packages=len(URL_RE.findall(text)),
+                pins=len(SHA_RE.findall(text)))
     return 0
 
 
