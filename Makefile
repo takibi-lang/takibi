@@ -1077,18 +1077,25 @@ KERNEL_RPI5_CACHE_GEOMETRY_O := $(KERNEL_BUILD_DIR)/cache_geometry.o
 KERNEL_CACHE_GEOMETRY_EXTERN := $(KERNEL_DIR)/arch/arm64/kernel/cache_geometry_extern.tkb
 KERNEL_USER_BUILD_DIR    := $(KERNEL_DIR)/build/user
 KERNEL_BUSYBOX_URL       := https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/busybox-static-1.37.0-r31.apk
+KERNEL_BUSYBOX_SHA256    := 965777e06b94bf11981d5f4ecdfcd577879f4b0dda544294d1dd3f72b217bc75
 KERNEL_BUSYBOX_APK       := $(KERNEL_USER_BUILD_DIR)/busybox-static.apk
 KERNEL_BUSYBOX_STATIC    := $(KERNEL_USER_BUILD_DIR)/busybox-static
 KERNEL_BUSYBOX_EXTRAS_URL := https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/busybox-extras-1.37.0-r31.apk
+KERNEL_BUSYBOX_EXTRAS_SHA256 := 64a2c66f44f2218473f56dd63355d988c3da0bdae6384d6d94d32587328ccea3
 KERNEL_BUSYBOX_EXTRAS_APK := $(KERNEL_USER_BUILD_DIR)/busybox-extras.apk
 KERNEL_BUSYBOX_EXTRAS     := $(KERNEL_USER_BUILD_DIR)/busybox-extras
-KERNEL_MUSL_URL          := https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/musl-1.2.6-r2.apk
+# GitHub issue #1355: Alpine keeps only a branch's latest revision, and
+# r2 left dl-cdn for r3, so the URL 404'd. The Wayback Machine's raw (id_)
+# copy of the same file is pinned instead, and the bytes are checked.
+KERNEL_MUSL_URL          := https://web.archive.org/web/20261008084701id_/https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/musl-1.2.6-r2.apk
+KERNEL_MUSL_SHA256       := 5e9674b7f41152fe2119093b5cb4c13eaaadb19c2d5422b2d7267913e663ee6e
 KERNEL_MUSL_APK          := $(KERNEL_USER_BUILD_DIR)/musl.apk
 KERNEL_MUSL_LOADER       := $(KERNEL_USER_BUILD_DIR)/ld-musl-aarch64.so.1
 # util-linux taskset: pins the resident HTTPd to a peer from inittab
 # (GitHub issue #581). A stock dynamic musl binary, so the same loader as
 # busybox-extras serves it; no custom user ELF is needed for affinity.
 KERNEL_UTIL_LINUX_MISC_URL := https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/util-linux-misc-2.42.3-r1.apk
+KERNEL_UTIL_LINUX_MISC_SHA256 := b04d1b39317348f03872bcafb5f5662d0e3f957b44469bef70a688c8a54a7e71
 KERNEL_UTIL_LINUX_MISC_APK := $(KERNEL_USER_BUILD_DIR)/util-linux-misc.apk
 KERNEL_TASKSET            := $(KERNEL_USER_BUILD_DIR)/taskset
 KERNEL_EXT2_FIXTURE_DIR  := $(KERNEL_DIR)/tests/ext2
@@ -1257,29 +1264,39 @@ $(KERNEL_BUILD_DIR):
 $(KERNEL_USER_BUILD_DIR):
 	mkdir -p $@
 
+# GitHub issue #1355: every downloaded package is fetched through this, so
+# its bytes are checked against a pinned sha256 before any rule uses them.
+# $(1) is the URL, $(2) the sha256. scripts/check_pinned_downloads.py
+# refuses a curl in this Makefile outside it and a *_URL with no *_SHA256.
+define fetch_pinned
+	curl -sSLf --retry 3 $(1) -o $@.$(MAKE_PID).tmp
+	echo "$(2)  $@.$(MAKE_PID).tmp" | sha256sum -c --quiet - || { echo "FAIL pinned-download: $(1) does not have sha256 $(2); upstream may have replaced or removed it (see #1355)" >&2; rm -f $@.$(MAKE_PID).tmp; exit 1; }
+	mv $@.$(MAKE_PID).tmp $@
+endef
+
 $(KERNEL_BUSYBOX_APK): | $(KERNEL_USER_BUILD_DIR)
-	curl -sSLf $(KERNEL_BUSYBOX_URL) -o $@
+	$(call fetch_pinned,$(KERNEL_BUSYBOX_URL),$(KERNEL_BUSYBOX_SHA256))
 
 $(KERNEL_BUSYBOX_STATIC): $(KERNEL_BUSYBOX_APK)
 	tar -xOzf $< bin/busybox.static > $@
 	chmod +x $@
 
 $(KERNEL_BUSYBOX_EXTRAS_APK): | $(KERNEL_USER_BUILD_DIR)
-	curl -sSLf $(KERNEL_BUSYBOX_EXTRAS_URL) -o $@
+	$(call fetch_pinned,$(KERNEL_BUSYBOX_EXTRAS_URL),$(KERNEL_BUSYBOX_EXTRAS_SHA256))
 
 $(KERNEL_BUSYBOX_EXTRAS): $(KERNEL_BUSYBOX_EXTRAS_APK)
 	tar -xOzf $< bin/busybox-extras > $@
 	chmod +x $@
 
 $(KERNEL_UTIL_LINUX_MISC_APK): | $(KERNEL_USER_BUILD_DIR)
-	curl -sSLf $(KERNEL_UTIL_LINUX_MISC_URL) -o $@
+	$(call fetch_pinned,$(KERNEL_UTIL_LINUX_MISC_URL),$(KERNEL_UTIL_LINUX_MISC_SHA256))
 
 $(KERNEL_TASKSET): $(KERNEL_UTIL_LINUX_MISC_APK)
 	tar -xOzf $< usr/bin/taskset > $@
 	chmod +x $@
 
 $(KERNEL_MUSL_APK): | $(KERNEL_USER_BUILD_DIR)
-	curl -sSLf $(KERNEL_MUSL_URL) -o $@
+	$(call fetch_pinned,$(KERNEL_MUSL_URL),$(KERNEL_MUSL_SHA256))
 
 $(KERNEL_MUSL_LOADER): $(KERNEL_MUSL_APK)
 	tar -xOzf $< lib/ld-musl-aarch64.so.1 > $@
@@ -2154,6 +2171,7 @@ kernelbuild-qemu-debug: build
 # the actual compile below rather than being tied to a .o/.elf rule.
 .PHONY: kernel-lib-check
 kernel-lib-check:
+	python3 scripts/check_pinned_downloads.py
 	python3 scripts/check_kernel_lib_limitations_header.py $(KERNEL_DIR)/lib $(KERNEL_DIR)/kernel $(KERNEL_DIR)/net
 	python3 scripts/check_diagnostic_event_ids.py
 	python3 scripts/check_flag_guarded_fields.py $(KERNEL_DIR)
