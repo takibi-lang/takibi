@@ -82,44 +82,53 @@ def main() -> int:
     original = sources[path]
     ranked = 'acquires_lock_40_process_pool, single_instance_lock,'
     assert ranked in original
+    # GitHub issue #1332: an added shape goes in a file of its own, so only
+    # that snippet is scanned again rather than all of process.tkb per
+    # control. The scan is per file, so the verdict is the same.
+    added = 'kernel/kernel/lock_rank_control.tkb'
+    assert added not in sources
+    edits = {
+    }
     controls = {
         # The #745 regression itself: process_pool_lock loses its rank.
         'process pool rank dropped': replace_once(original, ranked, 'single_instance_lock,'),
         'commented rank': replace_once(original, ranked, '// ' + ranked + '\n'),
-        'new unranked region wrapper': original + UNRANKED_REGION,
-        'new unranked mutex wrapper': original + UNRANKED_MUTEX,
-        'one-line body': original + ONE_LINE,
-        'unmasked wrapper without may_block': original + UNMASKED_NO_MAY_BLOCK,
-        'saving wrapper that saves no mask': original + SAVING_ZERO,
-        'unmasked lock in the masking band': original + UNMASKED_HIGH_RANK,
-        'masking lock in the unmasked band': original + MASKED_LOW_RANK,
-        'unmasked lock without the raise': original + UNRAISED_TAKE,
-        'unmasked release without the lower': original + UNLOWERED_GIVE,
-        'field lock without the raise': original + UNRAISED_FIELD,
+        'new unranked region wrapper': UNRANKED_REGION,
+        'new unranked mutex wrapper': UNRANKED_MUTEX,
+        'one-line body': ONE_LINE,
+        'unmasked wrapper without may_block': UNMASKED_NO_MAY_BLOCK,
+        'saving wrapper that saves no mask': SAVING_ZERO,
+        'unmasked lock in the masking band': UNMASKED_HIGH_RANK,
+        'masking lock in the unmasked band': MASKED_LOW_RANK,
+        'unmasked lock without the raise': UNRAISED_TAKE,
+        'unmasked release without the lower': UNLOWERED_GIVE,
+        'field lock without the raise': UNRAISED_FIELD,
     }
-    for name, changed in controls.items():
+    for name, changed in edits.items():
         assert changed != original, name
         assert problems({**sources, path: changed}), name
+    for name, shape in controls.items():
+        assert problems({**sources, added: shape}), name
     # A rank on a neighbour does not cover an unranked wrapper.
-    neighbour = original + UNRANKED_REGION + '''
+    neighbour = UNRANKED_REGION + '''
 private fn ranked_neighbour() !{acquires_lock_40_neighbour} { }
 '''
-    assert problems({**sources, path: neighbour}), 'neighbour rank'
+    assert problems({**sources, added: neighbour}), 'neighbour rank'
     # The accepted unmasked shape (#966).
-    assert not problems({**sources, path: original + UNMASKED_NO_MAY_BLOCK.replace(
+    assert not problems({**sources, added: UNMASKED_NO_MAY_BLOCK.replace(
         'acquires_lock_40_unmasked_pool}', 'acquires_lock_39_unmasked_pool, may_block}'
     ).replace('return region_pool_lock', 'preempt_lock_raise(); return region_pool_lock')}), \
         'unmasked ok'
     # Exemptions are reviewed per name, and a stale one is refused.
-    assert not problems({**sources, path: original + UNRANKED_REGION},
+    assert not problems({**sources, added: UNRANKED_REGION},
                         {'unranked_pool_lock': 'control'}), 'exempt'
     assert problems(sources, {'no_such_function': 'stale'}), 'stale exempt'
     # Prose is not code.
-    assert not problems({**sources, path: original +
+    assert not problems({**sources, added:
                          '\n// fn x() { region_pool_lock(&p); }\n'}), 'comment'
     report_pass('lock-rank-wrappers controls',
-                f'production passes and {len(controls) + 2} unranked or stale shapes fail',
-                controls=len(controls) + 2)
+                f'production passes and {len(edits) + len(controls) + 2} unranked or stale shapes fail',
+                controls=len(edits) + len(controls) + 2)
     return 0
 
 
