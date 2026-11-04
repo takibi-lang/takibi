@@ -13,7 +13,10 @@
  *     not ignore it is ended by SIGPIPE, as wait4 reports;
  *   - two CPUs: a child pinned to CPU 1 writes PIPE_PROBE_STREAM bytes in
  *     100-byte writes (hackbench's message size) while this process, pinned
- *     to CPU 0, reads them; ten times the buffer, so the writer waits for
+ *     to CPU 0, reads them; three times the buffer (no more: the stream's two
+ *     cores contend on the global pool locks every pipe syscall looks up,
+ *     and at 40000 bytes it was half of the #680 wait count, #1287), so the
+ *     writer waits for
  *     room and the reader for bytes, and the ring wraps. Every byte is
  *     checked in order;
  *   - a ppoll with no timeout on an empty pipe sleeps until a child on
@@ -57,7 +60,7 @@ const LINUX_EFAULT: usize = 0xFFFFFFFFFFFFFFF2;
 const LINUX_EINVAL: usize = 0xFFFFFFFFFFFFFFEA;
 const LINUX_EPIPE: usize = 0xFFFFFFFFFFFFFFE0;
 const PIPE_PROBE_ERROR_FLOOR: usize = 0xFFFFFFFFFFFFF000;
-const PIPE_PROBE_STREAM: usize = 40000;
+const PIPE_PROBE_STREAM: usize = 12000;
 const PIPE_PROBE_MESSAGE: usize = 100;
 const PIPE_PROBE_READ: usize = 512;
 const PIPE_PROBE_ARRIVAL_POLLS: usize = 1000000;
@@ -296,7 +299,7 @@ private fn pipe_probe_stream() {
     if (received != PIPE_PROBE_STREAM || ordered == false) {
         pipe_probe_fail(bs"pipe-probe: the stream from cpu 1 arrived short or out of order\n");
     }
-    pipe_probe_say(bs"pipe-probe: 40000 bytes written on cpu 1 in 100-byte writes were read on cpu 0 whole and in order\n");
+    pipe_probe_say(bs"pipe-probe: 12000 bytes written on cpu 1 in 100-byte writes were read on cpu 0 whole and in order\n");
 }
 
 private fn pipe_probe_wake_child(read_end: usize, write_end: usize) {

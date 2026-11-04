@@ -32,8 +32,13 @@ Thresholds and their derivation:
   pool the acquires C that found the lock already held
   (kernel/kernel/pool_lock_wait.tkb), outside the deliberate contention
   probes, summed across every pool. An absolute count over one bounded
-  suite: the suite's workload is fixed, so its count moves only when the
-  kernel's contention does. Only contended acquires are counted, so the
+  suite. The workload is not fixed in the sense that matters: a two-CPU
+  test moves the count with how its cores happen to pace each other, not
+  only with the kernel's contention. /bin/pipe-probe's stream (#1287) was
+  about half the sum at 40000 bytes, its waits proportional to how many
+  reads the reader made; it is 12000 bytes since. Twelve alternated
+  runs each (2026-11-04): main 4961-7216, 12000 bytes 3593-4718. Adding a
+  two-CPU test can move the count by itself. Only contended acquires are counted, so the
   uncontended lock path pays no counter (counting every acquire, for a
   share, cost 6.1 ns per lock pair on RPi5; #953).
   Baseline: five RPi5 kernelcheck boots on 2026-10-24 found 2739, 2517,
