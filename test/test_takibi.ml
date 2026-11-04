@@ -12671,6 +12671,20 @@ linear struct Owner746b[page: usize] {
           callback();
         }");
 
+  Alcotest.test_case "#1350: a no_handler_lock function fills a may_block slot" `Quick
+    (expect_ok
+       "extern fn short1350a() !{no_handler_lock};
+        fn short_cb1350() !{no_handler_lock} { short1350a(); }
+        fn install1350(cb: fn !{may_block}() -> void) {}
+        fn use1350() { install1350(short_cb1350); }");
+
+  Alcotest.test_case "#1350: a may_block function cannot fill a no_handler_lock slot" `Quick
+    (expect_type_error "destination contract does not allow"
+       "extern fn sleep1350b() !{may_block};
+        fn sleep_cb1350() !{may_block} { sleep1350b(); }
+        fn install1350b(cb: fn !{no_handler_lock}() -> void) {}
+        fn use1350b() { install1350b(sleep_cb1350); }");
+
   Alcotest.test_case "Slice 5: blocking function cannot enter a non-blocking slot" `Quick
     (expect_type_error "destination contract does not allow"
        "fn effect_blocking24() !{may_block} {}

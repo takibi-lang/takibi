@@ -438,8 +438,13 @@ let rec unify t1 t2 =
            raise (Unify_error
              "function pointer has unknown effects; an explicit effect contract is required here")
        | Some actual, Some expected ->
-           let unexpected = List.filter (fun eff ->
-             not (List.mem eff expected)) actual in
+           (* GitHub issue #1350 (maintainer, option A): no_handler_lock is a
+              subeffect of may_block here, where a function value meets an
+              expected fn type, and nowhere else; each rule still checks
+              each effect by itself. The reverse stays an error. *)
+           let allowed eff = List.mem eff expected
+             || (eff = "no_handler_lock" && List.mem "may_block" expected) in
+           let unexpected = List.filter (fun eff -> not (allowed eff)) actual in
            if unexpected <> [] then
              raise (Unify_error (Printf.sprintf
                "function pointer may have effect%s %s, which the destination contract does not allow"

@@ -2306,6 +2306,10 @@ fn poll_callback() !{} { acknowledge_irq(); }
 holder's core would spin forever. It is inferred like `may_block` and refused
 wherever `may_block` is: interrupt, nmi, exception and debug-stopped roots, a
 bare `!{}` contract, and a `preempt_off` block.
+Where a function value meets an expected function type, and only there,
+`no_handler_lock` counts as a subeffect of `may_block`: such a function may
+fill a `fn !{may_block}` slot. The reverse is an error, and every other rule
+checks each effect by itself.
 
 The operational call effects are `may_block`, `allocates`, `locks`, and
 `logs`. Each is inferred transitively through resolved direct calls and

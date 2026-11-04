@@ -23,6 +23,8 @@
 
 A bare `!{}` contract forbids the transitive effects: `may_block`, `no_handler_lock`, `allocates`, `locks`, `logs`. `locks` propagates and is forbidden by `!{}`, but is intentionally allowed from `interrupt` and `exception` roots; an `nmi` root forbids it.
 
+A function value with `no_handler_lock` may fill a `fn !{may_block}` slot (a subeffect only there, #1350); the reverse is an error, and every other rule checks each effect by itself.
+
 # Checker-only words
 
 Accepted in an explicit `!{...}` row only; never in a function-pointer row, never propagated. No new word is added (DECISIONS.md, 2026-10-24); each row migrates to the replacing type.

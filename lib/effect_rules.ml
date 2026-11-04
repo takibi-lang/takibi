@@ -338,6 +338,8 @@ let markdown () =
   Buffer.add_string b
     ". `locks` propagates and is forbidden by `!{}`, but is intentionally allowed from `interrupt` and `exception` roots; an `nmi` root forbids it.\n";
   Buffer.add_string b
+    "\nA function value with `no_handler_lock` may fill a `fn !{may_block}` slot (a subeffect only there, #1350); the reverse is an error, and every other rule checks each effect by itself.\n";
+  Buffer.add_string b
     "\n# Checker-only words\n\nAccepted in an explicit `!{...}` row only; never in a function-pointer row, never propagated. No new word is added (DECISIONS.md, 2026-10-24); each row migrates to the replacing type.\n\n| Word | Marks | Read by | Replaced by |\n| --- | --- | --- | --- |\n";
   List.iter (fun w ->
     Printf.bprintf b "| `%s` | %s | %s | %s |\n"
