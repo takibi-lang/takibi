@@ -183,23 +183,6 @@ kernel/kernel/workload_evidence.tkb	workload_busy_starve_remaining	read-by workl
 kernel/kernel/workload_evidence.tkb	workload_busy_starve_worker	read-by workload_busy_starve_skips,workload_busy_note_tick_locked: 2026-10-31 retain-fixture: which worker the injection passes over
 kernel/kernel/workload_evidence.tkb	workload_busy_waits	read-by workload_busy_waits_report,workload_busy_wait_pick: 2026-10-31 retain-fixture: the busy pair's wait report, and the next-ready pick
 kernel/kernel/workload_evidence.tkb	workload_ddb_hold_park_since	read-by workload_peer_console_progress: 2026-10-31 lock: under the run lock, by its one function
-kernel/kernel/workload_evidence.tkb	workload_peer_exec_control	read-by workload_peer_exec_report: 2026-10-31 retain-fixture: the /bin/peer-exec verdict: an exec on core 0 was reported first
-kernel/kernel/workload_evidence.tkb	workload_peer_exec_cpu	read-by workload_peer_exec_report: 2026-10-31 retain-fixture: the /bin/peer-exec verdict: which CPU committed
-kernel/kernel/workload_evidence.tkb	workload_peer_exec_pid	read-by workload_peer_exec_report,workload_exec_commit_note: 2026-10-31 retain-fixture: the /bin/peer-exec verdict, and the filter that takes only that process's exec
-kernel/kernel/workload_evidence.tkb	workload_peer_fork_control	read-by workload_peer_fork_report: 2026-10-31 retain-fixture: the /bin/peer-fork verdict: a fork on core 0 was reported first
-kernel/kernel/workload_evidence.tkb	workload_peer_fork_cpu	read-by workload_peer_fork_report: 2026-10-31 retain-fixture: the /bin/peer-fork verdict: which CPU ran it
-kernel/kernel/workload_evidence.tkb	workload_peer_fork_pid	read-by workload_peer_fork_report,workload_clone_note: 2026-10-31 retain-fixture: the /bin/peer-fork verdict, and the filter that takes only that process's fork
-kernel/kernel/workload_evidence.tkb	workload_peer_mutation_pid	read-by workload_peer_mutation_report,workload_peer_mutation_note: 2026-10-31 retain-fixture: the /bin/peer-mutate verdict and its pid filter
-kernel/kernel/workload_evidence.tkb	workload_peer_mutation_seen	read-by workload_peer_mutation_report,workload_peer_mutation_note: 2026-10-31 retain-fixture: the set of mutations /bin/peer-mutate's verdict requires
-kernel/kernel/workload_evidence.tkb	workload_peer_net_wake_block_requested	read-by workload_peer_net_wake_progress: 2026-10-31 retain-fixture: one-shot of the NetRx publication test, tag-6 syscall
-kernel/kernel/workload_evidence.tkb	workload_peer_net_wake_pid	read-by workload_peer_net_wake_progress: 2026-10-31 retain-fixture: the one process owning that test
-kernel/kernel/workload_evidence.tkb	workload_peer_sleep_armed	read-by workload_peer_sleep_progress: 2026-10-31 lock: retain-fixture under the run lock
-kernel/kernel/workload_evidence.tkb	workload_peer_sleep_done	read-by workload_peer_sleep_progress: 2026-10-31 retain-fixture: one-shot of /bin/peer-sleep's single step 1 caller; a second caller is not excluded by its type
-kernel/kernel/workload_evidence.tkb	workload_peer_sleep_finished	read-by workload_peer_sleep_progress: 2026-10-31 lock: retain-fixture written and read under the run lock
-kernel/kernel/workload_evidence.tkb	workload_peer_sleep_pid	read-by workload_peer_sleep_progress: 2026-10-31 lock: retain-fixture under the run lock
-kernel/kernel/workload_evidence.tkb	workload_peer_wait_blocked	read-by workload_peer_wait_report: 2026-10-31 retain-fixture: /bin/peer-mutate's wait4 verdict: it blocked on CPU 1
-kernel/kernel/workload_evidence.tkb	workload_peer_wait_pid	read-by workload_peer_wait_report,workload_peer_wait_note: 2026-10-31 retain-fixture: that verdict and its pid filter
-kernel/kernel/workload_evidence.tkb	workload_peer_wait_reaped	read-by workload_peer_wait_report: 2026-10-31 retain-fixture: /bin/peer-mutate's wait4 verdict: it reaped on CPU 1
 kernel/kernel/workload_evidence.tkb	workload_profile_active	read-by workload_profile_transition,workload_profile_irq_enter,workload_profile_current_cpu: 2026-10-31 retain-fixture: the profile hooks' gate, on the hottest paths; start and finish write it, and a hook that read true just before finish is what the finish's stop excludes
 kernel/kernel/workload_evidence.tkb	workload_profile_cores	read-by workload_busy_pair_report,workload_profile_charge: 2026-10-31 retain-fixture: the busy-pair report on a stopped machine, and each core's own charge with IRQs masked
 kernel/kernel/workload_evidence.tkb	workload_settings_wake	read-by workload_settings_wake_progress,workload_settings_wake_ioctl_served: 2026-10-31 retain-fixture: the settings-wake fixture's phases, through its syscall tag

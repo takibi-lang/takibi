@@ -492,11 +492,61 @@ private fn workload_busy_waits_report() {
     kernel_boot_log("\n");
 }
 
-// One peer process owns this one-shot NetRx publication test. The tag-6
-// syscall registers it on CPU0, then asks the ordinary scheduler path to
-// publish it Blocked before the CPU0 timer wake scans all slots.
-private let mut workload_peer_net_wake_pid: usize;
-private let mut workload_peer_net_wake_block_requested: bool;
+// GitHub issue #1159: the peer fixtures' words are one linear record in a
+// Place guarded by the run lock, so the type says what each comment says: no
+// access without the run guard. Empty until the first note, which reads as
+// all zero; each access takes the record out and puts its successor back.
+//
+// net_wake: one peer process owns this one-shot NetRx publication test. The
+// tag-6 syscall registers it on CPU0, then asks the ordinary scheduler path to
+// publish it Blocked before the CPU0 timer wake scans all slots. The mutation,
+// wait, exec, fork and sleep fields are described at their fixtures.
+linear struct WorkloadPeerRecord[unit: usize] {
+    net_wake_pid: usize;
+    net_wake_block_requested: bool;
+    mutation_pid: usize;
+    mutation_seen: usize;
+    wait_pid: usize;
+    wait_blocked: bool;
+    wait_reaped: bool;
+    exec_pid: usize;
+    exec_cpu: usize;
+    exec_control: bool;
+    fork_pid: usize;
+    fork_cpu: usize;
+    fork_control: bool;
+    sleep_pid: usize;
+    sleep_armed: bool;
+    sleep_finished: bool;
+}
+struct WorkloadPeerStore {
+    private record: Place(WorkloadPeerRecord[0]) guarded_by(scheduled_process_run_lock);
+}
+private let mut workload_peer_store: WorkloadPeerStore;
+
+private fn workload_peer_take(guard: borrow ProcessRunGuard[&scheduled_process_run_lock])
+        -> WorkloadPeerRecord[0] {
+    match place_take(guard, workload_peer_store.record) {
+        Place::Empty => {
+            let mut fresh: WorkloadPeerRecord[0] = {
+                0, false, 0, 0, 0, false, false, 0, 0, false, 0, 0, false, 0, false, false };
+            return fresh;
+        }
+        Place::Full(taken) => { return taken; }
+    }
+}
+
+private fn workload_peer_put(guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+                             record: sink WorkloadPeerRecord[0]) {
+    match place_put(guard, workload_peer_store.record, record) {
+        Place::Empty => {}
+        Place::Full(previous) => { workload_peer_retire(previous); }
+    }
+}
+
+// Every caller took the record first, so the place is Empty here; a Full one
+// would be a put without a take, and the older record is dropped.
+private fn workload_peer_retire(record: sink WorkloadPeerRecord[0]) {}
 
 // GitHub issue #503: what one move between cores costs, asked by #582.
 // /bin/movecost brackets each pass over its working set with tag 13, and
@@ -548,25 +598,14 @@ const PEER_MUTATION_MKDIR: usize = 1;
 const PEER_MUTATION_RENAME: usize = 2;
 const PEER_MUTATION_RMDIR: usize = 4;
 const PEER_MUTATION_WRITE: usize = 8;
-private let mut workload_peer_mutation_pid: usize;
 // GitHub issue #609: /bin/peer-mutate's wait4 on CPU 1 -- that it blocked
 // there in ChildExit, and that it reaped there. Same pid discipline as the
 // mutation set below.
-private let mut workload_peer_wait_pid: usize;
-private let mut workload_peer_wait_blocked: bool;
-private let mut workload_peer_wait_reaped: bool;
-private let mut workload_peer_mutation_seen: usize;
 // GitHub issue #610: /bin/peer-exec -- the CPU each exec of one process
 // committed on, and whether an exec on core 0 was reported (and told apart)
 // before the one on a peer.
-private let mut workload_peer_exec_pid: usize;
-private let mut workload_peer_exec_cpu: usize;
-private let mut workload_peer_exec_control: bool;
 // GitHub issue #611: /bin/peer-fork -- the CPU each fork by one process ran
 // on, and whether one on core 0 was reported first.
-private let mut workload_peer_fork_pid: usize;
-private let mut workload_peer_fork_cpu: usize;
-private let mut workload_peer_fork_control: bool;
 
 enum WorkloadCpuMode { Idle; El0; El1; Irq; }
 
@@ -1403,23 +1442,30 @@ fn workload_peer_net_wake_progress(current_authority: borrow ProcessCurrent[curr
         -> WorkloadPeerNetWakeResult !{unsafe} {
     let guard = process_run_lock();
     let pid: usize = kernel_process_current_pid();
-    if (step == 0 && workload_peer_net_wake_pid == 0) {
-        workload_peer_net_wake_pid = pid;
+    let mut record: WorkloadPeerRecord[0] = workload_peer_take(guard);
+    let owner: usize = record.net_wake_pid;
+    let requested: bool = record.net_wake_block_requested;
+    if (step == 0 && owner == 0) {
+        record.net_wake_pid = pid;
+        workload_peer_put(guard, record);
         process_run_unlock(guard);
         return WorkloadPeerNetWakeResult::Cpu(SECONDARY_CORE_ID);
     }
-    if (pid != workload_peer_net_wake_pid ||
+    if (pid != owner ||
         cpu_id() != SECONDARY_CORE_ID) {
+        workload_peer_put(guard, record);
         workload_busy_pair.refused = workload_busy_pair.refused + 1;
         process_run_unlock(guard);
         return WorkloadPeerNetWakeResult::Refused;
     }
-    if (step == 1 && workload_peer_net_wake_block_requested == false) {
-        workload_peer_net_wake_block_requested = true;
+    if (step == 1 && requested == false) {
+        record.net_wake_block_requested = true;
+        workload_peer_put(guard, record);
         process_run_unlock(guard);
         return WorkloadPeerNetWakeResult::Block;
     }
-    if (step == 1 && workload_peer_net_wake_block_requested &&
+    workload_peer_put(guard, record);
+    if (step == 1 && requested &&
         kernel_process_current_pending_block_reason(current_authority) ==
             ProcessWaitReason::None) {
         process_run_unlock(guard);
@@ -2027,11 +2073,13 @@ fn workload_peer_mutation_note(kind: usize) {
     if (cpu_id() == 0) { return; }
     let guard = process_run_lock();
     let pid: usize = kernel_process_current_pid();
-    if (workload_peer_mutation_pid != pid) {
-        workload_peer_mutation_pid = pid;
-        workload_peer_mutation_seen = 0;
+    let mut record: WorkloadPeerRecord[0] = workload_peer_take(guard);
+    if (record.mutation_pid != pid) {
+        record.mutation_pid = pid;
+        record.mutation_seen = 0;
     }
-    workload_peer_mutation_seen = workload_peer_mutation_seen | kind;
+    record.mutation_seen = record.mutation_seen | kind;
+    workload_peer_put(guard, record);
     process_run_unlock(guard);
 }
 
@@ -2041,16 +2089,18 @@ fn workload_peer_wait_note(blocked: bool) {
     if (cpu_id() == 0) { return; }
     let guard = process_run_lock();
     let pid: usize = kernel_process_current_pid();
-    if (workload_peer_wait_pid != pid) {
-        workload_peer_wait_pid = pid;
-        workload_peer_wait_blocked = false;
-        workload_peer_wait_reaped = false;
+    let mut record: WorkloadPeerRecord[0] = workload_peer_take(guard);
+    if (record.wait_pid != pid) {
+        record.wait_pid = pid;
+        record.wait_blocked = false;
+        record.wait_reaped = false;
     }
     if (blocked) {
-        workload_peer_wait_blocked = true;
+        record.wait_blocked = true;
     } else {
-        workload_peer_wait_reaped = true;
+        record.wait_reaped = true;
     }
+    workload_peer_put(guard, record);
     process_run_unlock(guard);
 }
 
@@ -2058,9 +2108,11 @@ fn workload_peer_wait_note(blocked: bool) {
 // on a peer.
 fn workload_peer_wait_report() -> usize {
     let guard = process_run_lock();
+    let record: WorkloadPeerRecord[0] = workload_peer_take(guard);
     let complete: bool =
-        workload_peer_wait_pid == kernel_process_current_pid() &&
-        workload_peer_wait_blocked && workload_peer_wait_reaped;
+        record.wait_pid == kernel_process_current_pid() &&
+        record.wait_blocked && record.wait_reaped;
+    workload_peer_put(guard, record);
     process_run_unlock(guard);
     if (complete == false) { return 0; }
     kernel_boot_log(
@@ -2072,11 +2124,13 @@ fn workload_peer_wait_report() -> usize {
 fn workload_exec_commit_note() {
     let guard = process_run_lock();
     let pid: usize = kernel_process_current_pid();
-    if (workload_peer_exec_pid != pid) {
-        workload_peer_exec_pid = pid;
-        workload_peer_exec_control = false;
+    let mut record: WorkloadPeerRecord[0] = workload_peer_take(guard);
+    if (record.exec_pid != pid) {
+        record.exec_pid = pid;
+        record.exec_control = false;
     }
-    workload_peer_exec_cpu = cpu_id();
+    record.exec_cpu = cpu_id();
+    workload_peer_put(guard, record);
     process_run_unlock(guard);
 }
 
@@ -2087,17 +2141,20 @@ fn workload_exec_commit_note() {
 // committed on core 0 too -- a peer's exec was handed there. 0 otherwise.
 fn workload_peer_exec_report() -> usize {
     let guard = process_run_lock();
-    let ours: bool = workload_peer_exec_pid == kernel_process_current_pid();
-    let committed: usize = workload_peer_exec_cpu;
+    let mut record: WorkloadPeerRecord[0] = workload_peer_take(guard);
+    let ours: bool = record.exec_pid == kernel_process_current_pid();
+    let committed: usize = record.exec_cpu;
+    let control: bool = record.exec_control;
     let mut answer: usize = 0;
-    if (ours && committed == 0 && workload_peer_exec_control) {
+    if (ours && committed == 0 && control) {
         answer = 3;
     } else if (ours && committed == 0) {
-        workload_peer_exec_control = true;
+        record.exec_control = true;
         answer = 2;
-    } else if (ours && committed == cpu_id() && workload_peer_exec_control) {
+    } else if (ours && committed == cpu_id() && control) {
         answer = 1;
     }
+    workload_peer_put(guard, record);
     process_run_unlock(guard);
     if (answer == 1) {
         kernel_boot_log(
@@ -2110,11 +2167,13 @@ fn workload_peer_exec_report() -> usize {
 // record.
 fn workload_clone_note(parent: usize) {
     let guard = process_run_lock();
-    if (workload_peer_fork_pid != parent) {
-        workload_peer_fork_pid = parent;
-        workload_peer_fork_control = false;
+    let mut record: WorkloadPeerRecord[0] = workload_peer_take(guard);
+    if (record.fork_pid != parent) {
+        record.fork_pid = parent;
+        record.fork_control = false;
     }
-    workload_peer_fork_cpu = cpu_id();
+    record.fork_cpu = cpu_id();
+    workload_peer_put(guard, record);
     process_run_unlock(guard);
 }
 
@@ -2125,17 +2184,20 @@ fn workload_clone_note(parent: usize) {
 // handed there. 0 otherwise.
 fn workload_peer_fork_report() -> usize {
     let guard = process_run_lock();
-    let ours: bool = workload_peer_fork_pid == kernel_process_current_pid();
-    let cpu: usize = workload_peer_fork_cpu;
+    let mut record: WorkloadPeerRecord[0] = workload_peer_take(guard);
+    let ours: bool = record.fork_pid == kernel_process_current_pid();
+    let cpu: usize = record.fork_cpu;
+    let control: bool = record.fork_control;
     let mut answer: usize = 0;
-    if (ours && cpu == 0 && workload_peer_fork_control) {
+    if (ours && cpu == 0 && control) {
         answer = 3;
     } else if (ours && cpu == 0) {
-        workload_peer_fork_control = true;
+        record.fork_control = true;
         answer = 2;
-    } else if (ours && workload_peer_fork_control) {
+    } else if (ours && control) {
         answer = 1;
     }
+    workload_peer_put(guard, record);
     process_run_unlock(guard);
     if (answer == 1) {
         kernel_boot_log(
@@ -2147,11 +2209,13 @@ fn workload_peer_fork_report() -> usize {
 // Tag 14: 1 and the line when this process made all three on a peer.
 fn workload_peer_mutation_report() -> usize {
     let guard = process_run_lock();
+    let record: WorkloadPeerRecord[0] = workload_peer_take(guard);
     let complete: bool =
-        workload_peer_mutation_pid == kernel_process_current_pid() &&
-        workload_peer_mutation_seen ==
+        record.mutation_pid == kernel_process_current_pid() &&
+        record.mutation_seen ==
             (PEER_MUTATION_MKDIR | PEER_MUTATION_RENAME | PEER_MUTATION_RMDIR |
              PEER_MUTATION_WRITE);
+    workload_peer_put(guard, record);
     process_run_unlock(guard);
     if (complete == false) { return 0; }
     kernel_boot_log(
@@ -2565,45 +2629,51 @@ private fn workload_busy_pair_report() !{unsafe} {
 // The masked spin is the long core-0 mask the per-CPU tick-wake lists exist
 // for. Nothing but the sleeper's own core's tick can wake it here: no
 // signal is sent, and core 0 takes no interrupt.
-private let mut workload_peer_sleep_pid: usize;
-private let mut workload_peer_sleep_done: bool;
-// Set under the run lock once core 0 is masked and watching the sleeper.
-private let mut workload_peer_sleep_armed: bool;
-// Set once step 1 has unmasked; the competitor (step 2) then exits.
-private let mut workload_peer_sleep_finished: bool;
+//
+// The peer record's sleep_pid, sleep_armed (set once core 0 is masked and
+// watching the sleeper) and sleep_finished (set once step 1 has unmasked; the
+// competitor, step 2, then exits) are behind the run guard. Step 1's one-shot
+// is a swap, so a second caller is excluded, not only unexpected.
+private let mut workload_peer_sleep_done: AtomicWord;
 
 fn workload_peer_sleep_progress(step: usize, child: usize) -> usize !{unsafe} {
     if (step == 0) {
         let guard = process_run_lock();
         let mut answer: usize = 0;
         let caller: usize = kernel_process_current_pid();
-        if (workload_peer_sleep_pid == 0 && cpu_id() == SECONDARY_CORE_ID) {
-            workload_peer_sleep_pid = caller;
+        let mut record: WorkloadPeerRecord[0] = workload_peer_take(guard);
+        if (record.sleep_pid == 0 && cpu_id() == SECONDARY_CORE_ID) {
+            record.sleep_pid = caller;
         }
-        if (workload_peer_sleep_pid == caller && cpu_id() == SECONDARY_CORE_ID) {
-            if (workload_peer_sleep_armed) { answer = 1; } else { answer = 2; }
+        if (record.sleep_pid == caller && cpu_id() == SECONDARY_CORE_ID) {
+            if (record.sleep_armed) { answer = 1; } else { answer = 2; }
         }
+        workload_peer_put(guard, record);
         process_run_unlock(guard);
         return answer;
     }
     // The sleeper's competitor on CPU 1 asks whether it may exit yet.
     if (step == 2) {
         let finished_guard = process_run_lock();
-        let finished: bool = workload_peer_sleep_finished;
+        let record: WorkloadPeerRecord[0] = workload_peer_take(finished_guard);
+        let finished: bool = record.sleep_finished;
+        workload_peer_put(finished_guard, record);
         process_run_unlock(finished_guard);
         if (finished) { return 1; }
         return 0;
     }
     // core-role: the experiment masks core 0, whose tick alone woke every sleeper before #829
-    if (step != 1 || cpu_id() != 0 || workload_peer_sleep_done || child == 0) {
+    if (step != 1 || cpu_id() != 0 || child == 0) {
         return 0;
     }
-    workload_peer_sleep_done = true;
+    if (atomic_word_swap(&workload_peer_sleep_done, 1) != 0) { return 0; }
     let frequency: usize = read_cntfrq() as usize;
     let saved_irq: usize = mutex_irq_save();
     let arm_guard = process_run_lock();
     kernel_process_tick_wake_watch(arm_guard, child);
-    workload_peer_sleep_armed = true;
+    let mut armed: WorkloadPeerRecord[0] = workload_peer_take(arm_guard);
+    armed.sleep_armed = true;
+    workload_peer_put(arm_guard, armed);
     process_run_unlock(arm_guard);
     let start: usize = read_cntpct() as usize;
     let mut now: usize = start;
@@ -2618,7 +2688,9 @@ fn workload_peer_sleep_progress(step: usize, child: usize) -> usize !{unsafe} {
     }
     let stop_guard = process_run_lock();
     kernel_process_tick_wake_watch(stop_guard, 0);
-    let registered: bool = workload_peer_sleep_pid == child;
+    let seen: WorkloadPeerRecord[0] = workload_peer_take(stop_guard);
+    let registered: bool = seen.sleep_pid == child;
+    workload_peer_put(stop_guard, seen);
     process_run_unlock(stop_guard);
     mutex_irq_restore(saved_irq);
     workload_peer_sleep_finish();
@@ -2655,6 +2727,8 @@ private fn workload_peer_sleep_pause(frequency: usize) -> usize {
 
 private fn workload_peer_sleep_finish() {
     let guard = process_run_lock();
-    workload_peer_sleep_finished = true;
+    let mut record: WorkloadPeerRecord[0] = workload_peer_take(guard);
+    record.sleep_finished = true;
+    workload_peer_put(guard, record);
     process_run_unlock(guard);
 }
