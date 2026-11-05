@@ -56,7 +56,10 @@ concurrency:
 
 jobs:
   hardware-free:
-    runs-on: ubuntu-latest
+    # Pinned to 24.04 (noble), not ubuntu-latest: clang-19, llvm-19 and
+    # lld-19 come from noble's own signed archive (#1359), and a moved
+    # `latest` would change which LLVM major the archive offers.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -87,9 +90,10 @@ jobs:
       - name: Toolchain packages
         run: |
           bash scripts/run_lane.sh ci-apt bash -euo pipefail -c '
-            wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-            chmod +x /tmp/llvm.sh
-            sudo /tmp/llvm.sh 19
+            # GitHub issue #1359: clang-19 comes from the runner image's
+            # Ubuntu archive, verified by apt's signed index, not from an
+            # unpinned https://apt.llvm.org/llvm.sh run as root.
+            sudo apt-get update
             # ipxe-qemu carries efi-virtio.rom. It arrives as a Recommends
             # of qemu-system-arm, which --no-install-recommends drops, and
             # without it a lane using a virtio PCI device dies at
@@ -97,7 +101,7 @@ jobs:
             # runs at all. qemu-user carries qemu-aarch64, the host oracle
             # of scripts/ext2_eq.py and scripts/busybox_reference.sh (#1131).
             sudo apt-get install -y --no-install-recommends \
-              llvm-19 llvm-19-dev lld-19 libzstd-dev cmake \
+              clang-19 llvm-19 llvm-19-dev lld-19 libzstd-dev cmake \
               qemu-system-arm qemu-user ipxe-qemu gdb-multiarch \
               mtools cpio e2fsprogs e2tools python3-serial
           '

@@ -19,6 +19,9 @@ In scripts/*.sh (#1358) it refuses:
     (`local url=$1`) of a script that checks sha256sum. A command with
     `--noproxy` talks to the board on the test LAN, not the internet.
 
+In .github/workflows/*.yml (#1359) the scripts/*.sh rules apply to the
+`run:` text: CI must not fetch a URL that no sha256 pins.
+
 Planted inputs with one of each are refused too, so the check cannot pass
 by matching nothing.
 """
@@ -121,7 +124,17 @@ def main() -> int:
         for item in sh_problems(script):
             sh_found += 1
             print(f"FAIL pinned-downloads: scripts/{path.name} {item}", file=sys.stderr)
+    workflows = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+    for path in workflows:
+        for item in sh_problems(path.read_text()):
+            sh_found += 1
+            print(f"FAIL pinned-downloads: .github/workflows/{path.name} {item}", file=sys.stderr)
     if sh_found:
+        return 1
+    planted_yml = ("    steps:\n      - run: |\n"
+                   "          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh\n")
+    if len(sh_problems(planted_yml)) != 1:
+        print("FAIL pinned-downloads: the planted workflow was not refused", file=sys.stderr)
         return 1
     planted_sh = ("a_url=https://example.invalid/a.tgz\n"
                   "curl -o a.tgz \"$a_url\"\n"
@@ -145,7 +158,8 @@ def main() -> int:
                 f"{len(URL_RE.findall(text))} downloaded package(s), each "
                 "fetched through fetch_pinned with a sha256, and "
                 f"{sh_urls} in {len(scripts)} scripts/*.sh, each with a "
-                "sha256 partner; planted unpinned ones are refused",
+                "sha256 partner, and no unpinned fetch in "
+                f"{len(workflows)} workflow(s); planted unpinned ones are refused",
                 packages=len(URL_RE.findall(text)),
                 script_urls=sh_urls,
                 pins=len(SHA_RE.findall(text)))
