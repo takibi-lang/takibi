@@ -87,7 +87,11 @@ def armed_errors(tree):
                           'for this core: pass core_id (GitHub issue #860)')
         body = None
         for path, source in tree.items():
-            if re.search(rf'\bfn\s+{name}\s*\(', masked_sources(source)):
+            # The substring test first: the regex's leading \b tries every
+            # position of every file, per name and per control (GitHub
+            # issue #1356; #780 measured the same shape).
+            if name in source and re.search(
+                    rf'\bfn\s+{name}\s*\(', masked_sources(source)):
                 body = function_body(name, source)
                 break
         if body is None:
