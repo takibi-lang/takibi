@@ -117,3 +117,4 @@ kernel/init/boot_prologue.tkb	boot_once_unwritten_stop	ladder	1	-	#732	a BootOnc
 kernel/mm/process_image.tkb	process_image_record_lost	ladder	1	-	#1308	an image-record read or set under ProcessImageRecordExists found no record: process ownership should keep it until reap
 kernel/mm/process_image.tkb	process_image_record_read	ladder	1	-	#1308	as process_image_record_lost, for a read
 kernel/kernel/process.tkb	kernel_process_current_root	ladder	1	-	#1308	a ProcessCurrent witness on a CPU with no current process: its mints should exclude that
+kernel/kernel/cpu_authority.tkb	preempt_count_el1_resume_check	unmodelled	1	-	#638	an El1 frame resumes with its own stack count at zero: it was switched away only at zero, and the stack keeps its count while it is away

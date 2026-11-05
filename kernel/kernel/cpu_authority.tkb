@@ -54,7 +54,9 @@
 // - preempt_count_after_switch resets the stack it lands on and asserts
 //   nothing: a stack keeps the count it had when it was left, so the check
 //   that at most one span reached a resume no longer reads the right word.
-//   An El1 resume's own check (its count is zero) comes with the consult.
+//   An El1 resume checks its own stack's count is zero first
+//   (preempt_count_el1_resume_check). The IRQ-return consult, which reads the
+//   interrupted stack's count, comes with the stage 8 window that calls it.
 
 use "kernel/lib/execution_model.tkb";
 use "kernel/arch/arm64/kernel/cpu_stop_extern.tkb";
@@ -181,6 +183,16 @@ inline fn preempt_span_adopt() -> PreemptOff[0] {
 // that stack kept whatever count it had when it was left, a span's included.
 fn preempt_count_after_switch() {
     preempt_count_reset();
+}
+
+// GitHub issue #638 slice 3: the check an El1 resume makes before
+// preempt_count_after_switch resets its stack's count. A frame is switched
+// away from only at count zero and its stack keeps that count while it is
+// away, so a resume that finds anything else resumes a raise that leaked.
+fn preempt_count_el1_resume_check() {
+    if (KERNEL_PREEMPT_ASSERTS != 0 && preempt_count_here() != 0) {
+        kernel_invariant_stop();
+    }
 }
 
 // This stack's preempt count.

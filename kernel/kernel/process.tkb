@@ -5412,6 +5412,13 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
     // The span of whichever path chose this frame ends here, first (#1323): SP
     // has moved, IRQs are masked, and a default-action signal below can exit
     // the process through a span and a resume of its own.
+    // GitHub issue #638 slice 3: an El1 frame was switched away from only at
+    // count zero, and its stack kept its count while it was away, so that
+    // count is still zero here; anything else leaked a raise onto the stack.
+    match frame_ref_from_entry(frame_sp, kernel_process_entry_generation()) {
+        LeveledFrame::El1(resumed) => { preempt_count_el1_resume_check(); }
+        LeveledFrame::El0(resumed) => {}
+    }
     preempt_count_after_switch();
     match frame_ref_from_entry(frame_sp, kernel_process_entry_generation()) {
         LeveledFrame::El0(frame) => {
