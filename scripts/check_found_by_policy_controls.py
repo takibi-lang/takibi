@@ -5,6 +5,7 @@ Both agents' PreToolUse hooks and .githooks/commit-msg call that one policy,
 so these controls cover every path a closing commit can take.
 """
 
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -55,6 +56,14 @@ def main() -> int:
         got = command_status(command)
         assert got == want, f"{name}: {got} != {want}"
         controls.append(name)
+    # Under `set -o pipefail`, `printf | grep -q` fails when grep exits on
+    # its first match before printf has written: SIGPIPE turns a match into
+    # a miss, and cicheck once saw a closing commit pass as non-closing.
+    for hook in sorted((ROOT / "scripts/hooks").glob("*.sh")):
+        for number, line in enumerate(hook.read_text().splitlines(), 1):
+            assert not re.search(r"\|\s*(LC_ALL=C\s+)?grep\s+-q", line), (
+                f"{hook.name}:{number}: pipe into grep -q; use a here-string")
+    controls.append("no pipe into grep -q")
     report_pass("found-by-policy",
                 "issue-closing commits need Found-by and Protocol trailers",
                 controls=len(controls))

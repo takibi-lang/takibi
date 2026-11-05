@@ -65,13 +65,13 @@ HELP
 }
 
 has_found_by() {
-  printf '%s' "$1" | LC_ALL=C grep -qP "$FOUND_BY_RE"
+  LC_ALL=C grep -qP "$FOUND_BY_RE" <<<"$1"
 }
 
 # Distinguishes "no field at all" from "field present, value not in the
 # vocabulary", so the message the author reads names the actual problem.
 missing_or_unknown() {
-  if printf '%s' "$1" | LC_ALL=C grep -qP 'Found-by:'; then
+  if LC_ALL=C grep -qP 'Found-by:' <<<"$1"; then
     printf '%s' 'has a `Found-by:` field whose value is not one of the recognized ones'
   else
     printf '%s' 'has no `Found-by:` field'
@@ -94,14 +94,14 @@ case "$mode" in
     fi
 
     if printf '%s' "$cmd" | grep -Eq '(^|[;&|]|[[:space:]])git[[:space:]]+commit([[:space:]]|$)'; then
-      if printf '%s' "$cmd" | LC_ALL=C grep -qP "$CLOSES_RE" && ! has_found_by "$cmd"; then
+      if LC_ALL=C grep -qP "$CLOSES_RE" <<<"$cmd" && ! has_found_by "$cmd"; then
         {
           printf 'This commit closes a GitHub issue and %s. Add a `Found-by:` trailer line to the commit message body.\n\n' "$(missing_or_unknown "$cmd")"
           vocabulary_help
         }
         exit 10
       fi
-      if printf '%s' "$cmd" | LC_ALL=C grep -qP "$CLOSES_RE" && ! printf '%s' "$cmd" | LC_ALL=C grep -qP "$PROTOCOL_FIELD_RE"; then
+      if LC_ALL=C grep -qP "$CLOSES_RE" <<<"$cmd" && ! LC_ALL=C grep -qP "$PROTOCOL_FIELD_RE" <<<"$cmd"; then
         {
           printf '%s\n\n' 'This commit closes a GitHub issue and has no valid `Protocol:` trailer.'
           protocol_help
@@ -117,15 +117,15 @@ case "$mode" in
     # Drop the comment block git appends; it quotes the diff and the branch name.
     message="$(grep -v '^#' "$path" || true)"
 
-    if printf '%s' "$message" | LC_ALL=C grep -qP "$CLOSES_RE"; then
-      if ! printf '%s' "$message" | LC_ALL=C grep -qP "^$FOUND_BY_RE"; then
+    if LC_ALL=C grep -qP "$CLOSES_RE" <<<"$message"; then
+      if ! LC_ALL=C grep -qP "^$FOUND_BY_RE" <<<"$message"; then
         {
           printf '%s\n\n' 'This commit message closes a GitHub issue but carries no valid `Found-by:` trailer. The trailer must be a line of its own in the message body.'
           vocabulary_help
         }
         exit 10
       fi
-      if ! printf '%s' "$message" | LC_ALL=C grep -qP "^$PROTOCOL_FIELD_RE"; then
+      if ! LC_ALL=C grep -qP "^$PROTOCOL_FIELD_RE" <<<"$message"; then
         {
           printf '%s\n\n' 'This commit message closes a GitHub issue but carries no valid `Protocol:` trailer. The trailer must be a line of its own in the message body.'
           protocol_help
