@@ -1,9 +1,9 @@
 {
   "date": "2026-11-05",
   "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "1309c3e009927e9bc3603643229779b515b31aec7c8aaf6e24b1f2d837d66604",
-  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto a8b25ff1: this branch's review, rebound to the merged sources (upstream's record was 2026-11-05 incremental/measured). #1314: wait4 zero-fills a non-null rusage; a few syscall-path instructions, no field, pool, data or allocation change.",
+  "decision": "measured",
+  "source_sha256": "f95d8993c9675283f7b1546de0f41d301afcb408e8276b4840192fef0ed47191",
+  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 40ca854f: this branch's review, rebound to the merged sources (upstream's record was 2026-11-05 incremental/reuse). #638 slice 3 over slice 2: an El1 resume checks its own stack's preempt count is zero. Measured with scripts/space_delta.py against slice 2: text qemu 783724 -> 783812, rpi5 4149308 -> 4149404 (+88 B, +96 B); data, bss and usable_ram_start unchanged; no symbol changed size. Slice 2 against main a8b25ff1: text qemu -2344 B, rpi5 -2248 B; data -8 B; preempt_counts (32 B) removed; RPi5 bss +4096 B by section alignment. No allocation changes.",
   "evidence": [
     "docs/AGGREGATE_MERGE_SPACE_2026-10-23.md",
     "docs/IRQ_PRIORITY_MASK_SPACE_2026-10-23.md",
@@ -14,6 +14,6 @@
     "docs/VERIFICATION_DESIGN.md",
     "kernel/MEMORY_MAP.md"
   ],
-  "assessment": "No storage change; text grows by one range check and zero fill call. Adopted. Previous: No kernel image change. Adopted. Previous: No space or time change in the kernel or images. Adopted. Previous: No storage change. Adopted. Previous: No storage grows; a few inlined instructions at nine lock pairs, text not measured separately. Time on RPi5: +0.9 ns per unmasked pair. Adopted. Previous: Text fell about 1.2 KiB; ProcessRecord ",
+  "assessment": "Slice 3 adds about 90 B of text for the check. Adopted. Previous: About 2.3 KiB of text and the 32 B per-CPU count go; RPi5's bss moves one alignment page with no symbol behind it. Adopted. Previous: 96 bytes of text and 16 bytes of each stack, no storage or allocation change. Adopted. Previous: No space or time change in the kernel or images. Adopted. Previous: No storage change. Adopted. Previous: No storage grows; a few inlined instructions at nine lock pairs, text not measured separately. Time on RPi5: +0.9 ns per unmasked pair. Adopted. Previous: Text fell about 1.2 KiB; ProcessRecord gains one byte in padding, no storage grows. Adopted. Previous: About 1.5 KiB of text, no storage. Adopted. Previous: About 1 KiB of probe text, the price of executing the resume at boot on both platforms. Adopted. Previous: A small saving; one word more on the",
   "next_trigger": "The flip's first RECORDED slot pool wait figures: a sustained nonzero count beyond the probe's ext2 waits reopens capacity. Previous: A second security_floor member. Previous: A new RP1 DMA object that overflows the 256 KiB arena (a link error), or a per-device IOMMU replacing the arena. Previous: #1087 (holes) if it changes the write path's scratch. Previous: #638 stage 8 (the EL1 switch) or #1000's delivery index on FrameRef. Previous: #1172: a load-qemu sample with many armed timers, if the per-tick fire walk shows in a profile. Previous: The PAN slice of #1032 or any change to the identity mapping granularity. Previous: Unchanged by #1166. Previous: A load-qemu stress-ng sample of region occupancy per process, or a change to MMAP_REGION_PAGES or the eager MAP_SHARED population. Previous: A load-qemu stress-ng sample of region occupancy per process, or a change to MMAP_REGION_PAGES or the eager MAP_SHARED population. Previous: A captured pool sample with the pipe row in use (ash transcript or hackbench), or a change to the pipe buffer size or SharedObject layout. The RPi5 lane's SWD load time measured in the land (coordinator), or the next program added to the fixture rootfs (shrink /pad first). A change to the release pass pipeline or split_aggregate_merges, a compact variant union layout, or the next change to process record storage."
 }
