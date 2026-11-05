@@ -57,7 +57,7 @@
 | `--internal-range-obligation-fault-control` | - | plant known-unsound range rules (z3 check's failing control) |
 | `--internal-allow-unused` | - | accept a function nothing reachable uses (rejected by default) |
 
-## Fact files (13)
+## Fact files (14)
 
 `--facts DIR` writes every one of these, under these names.
 
