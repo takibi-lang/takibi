@@ -13,6 +13,22 @@ kernel_cpu_offset:
     xor %eax, %eax
     ret
 
+// preempt_count_add and preempt_count_reset reach the preempt word at the top
+// of the board's stack run (#638). The host process is one task on a stack the
+// kernel did not lay out, so its one count is a word of its own here.
+// preempt_count_add(delta) returns the count before the add.
+    .global preempt_count_add
+preempt_count_add:
+    mov .Lpreempt_count(%rip), %rax
+    add %rax, %rdi
+    mov %rdi, .Lpreempt_count(%rip)
+    ret
+
+    .global preempt_count_reset
+preempt_count_reset:
+    movq $0, .Lpreempt_count(%rip)
+    ret
+
     .global kernel_invariant_stop
 kernel_invariant_stop:
     mov $1, %rax
@@ -26,6 +42,11 @@ kernel_invariant_stop:
 .Lstop_halt:
     hlt
     jmp .Lstop_halt
+
+    .bss
+    .balign 8
+.Lpreempt_count:
+    .skip 8
 
     .section .rodata
 .Lstop_msg:
