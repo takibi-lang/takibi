@@ -50,6 +50,7 @@ let fact_files = [
   ("globals.tsv", "each mutable global's protection, then every use (docs/GLOBAL_PROTECTION.md)");
   ("fields.tsv", "each struct field, with reads and writes of that field name (docs/GLOBAL_PROTECTION.md)");
   ("heldguards.tsv", "the guards held at each call");
+  ("spanblocking.tsv", "calls that may block while a PreemptOff token is live (#1350, report-only)");
   ("overflow.tsv", "each checked arithmetic site and its operand facts");
   ("rangeobl", "a directory: one SMT-LIB file per range obligation (docs/RANGE_OBLIGATIONS.md)");
   ("structs.tsv", "every struct's LLVM field offsets, then its .size and .members");
@@ -552,6 +553,16 @@ let () =
     end;
 
     if facts_on then begin
+      (* GitHub issue #1350 slice 3: report-only span blocking sites. *)
+      let spans = open_out (fact "spanblocking.tsv") in
+      Printf.fprintf spans "file\tline\tcaller\tcallee\ttoken\tstate\tpath\n";
+      List.iter (fun site ->
+        Printf.fprintf spans "%s\t%d\t%s\t%s\t%s\t%s\t%s\n"
+          site.Type_inf.span_loc.Lexing.pos_fname site.span_loc.pos_lnum
+          site.span_caller site.span_callee site.span_binding
+          (if site.span_definite then "held" else "maybe-held") site.span_path)
+        (Type_inf.span_blocking_sites ());
+      close_out spans;
       let out = open_out (fact "heldguards.tsv") in
       Printf.fprintf out "file\tline\tcolumn\tcaller\tcallee\tguard\tbinding_id\tguard_type\trank\tlock\tstate\n";
       List.iter (fun site ->

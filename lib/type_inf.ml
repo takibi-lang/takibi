@@ -195,6 +195,23 @@ let record_held_guard_site site =
   held_guard_table := HeldGuardSites.add key
     { site with held_guards = guards } !held_guard_table
 
+(* GitHub issue #1350 slice 3: a call made while a PreemptOff token (or a
+   value carrying one) is live in the caller and not handed to that call,
+   whose callee may block. Report-only: written to the facts directory as
+   spanblocking.tsv, rejected nothing. *)
+type span_blocking_site = {
+  span_loc : Lexing.position;
+  span_caller : string;
+  span_callee : string;
+  span_binding : string;
+  span_definite : bool;
+  span_path : string;
+}
+
+let span_call_table : (string * int * string * string * string * bool) list ref = ref []
+let span_blocking_table : span_blocking_site list ref = ref []
+let span_blocking_sites () = List.rev !span_blocking_table
+
 let merge_overflow_audit_facts left right =
   match left, right with
   | Some a, Some b
@@ -8841,6 +8858,8 @@ let reset_compilation_state () =
   unsafe_site_table := UnsafeSites.empty;
   raw_reference_mint_table := UnsafeSites.empty;
   held_guard_table := HeldGuardSites.empty;
+  span_call_table := [];
+  span_blocking_table := [];
   active_audit_function := "<global>";
   Hashtbl.reset divisor_proven_nonzero_at;
   pending_divisor_proofs := [];
@@ -12204,6 +12223,41 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         " (" ^ String.concat " -> " chain ^ ")"
     | _ -> ""
   in
+  (* GitHub issue #1350: the types that carry a PreemptOff token: the token
+     itself and every struct or variant with a field or payload that does. *)
+  let rec type_mentions_any names (t : Ast.type_expr) =
+    let again = type_mentions_any names in
+    match t with
+    | Ast.TypeNamed n | Ast.TypeIndexed (n, _) | Ast.TypeView (n, _) ->
+        StringSet.mem n names
+    | Ast.TypeVariant (n, _, args) | Ast.TypeGenericInst (n, args) ->
+        StringSet.mem n names || List.exists again args
+    | Ast.TypeTuple ts -> List.exists again ts
+    | Ast.TypeSingleton (t, _) | Ast.TypeRefined (_, _, t)
+    | Ast.TypeExists (_, _, t) | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _, _)
+    | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t | Ast.TypeRef t
+    | Ast.TypeRefMut t | Ast.TypePtr t | Ast.TypeAlignedPtr (_, t) -> again t
+    | _ -> false
+  in
+  let span_token_carriers =
+    let fields_of = List.filter_map (function
+      | Ast.StructDef (n, fields, _, _, _, _)
+      | Ast.OwnedStructDef (n, _, _, fields, _, _, _, _, _) ->
+          Some (n, List.map snd fields)
+      | Ast.VariantDef (n, _, cases, _, _)
+      | Ast.GenericVariantDef (n, _, _, cases, _, _) ->
+          Some (n, List.filter_map snd cases)
+      | _ -> None) prog in
+    let rec grow carriers =
+      let next = List.fold_left (fun acc (n, types) ->
+        if List.exists (type_mentions_any carriers) types then
+          StringSet.add n acc
+        else acc) carriers fields_of in
+      if StringSet.equal next carriers then carriers else grow next
+    in
+    grow (StringSet.singleton Per_cpu_registry.preempt_token_name)
+  in
+  let carries_span_token t = type_mentions_any span_token_carriers t in
   let check_affine_func fdef =
     let finfo = StringMap.find (overload_key fdef.Ast.name fdef.params) functions in
     let binding_resolution = finfo.bindings in
@@ -13263,6 +13317,19 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   held_rank = held.Effect_rules.rank; held_lock = held.label;
                   held_definite = definite })
                 (live_guards guard_bindings) };
+          if !held_guard_audit_enabled then begin
+            let handed = List.filter_map (fun (arg : Ast.expr) ->
+              match arg.desc with Ast.Var n -> Some n | _ -> None) args in
+            List.iter (fun (visible_name, id) ->
+              let path = PVar (id, visible_name) in
+              if carries_span_token (binding_type id visible_name)
+                 && not (List.mem visible_name handed)
+                 && not (ResourceFlow.is_consumed_on_all_paths path moved) then
+                span_call_table := (Ast.source_file_of_loc e.loc, e.loc.Lexing.pos_lnum,
+                                    fdef.name, target, visible_name,
+                                    not (ResourceFlow.may_be_consumed path moved))
+                                   :: !span_call_table) guard_bindings
+          end;
           (match StringMap.find_opt target !lock_acquire_summaries with
            | None -> ()
            | Some acquired ->
@@ -14764,6 +14831,29 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   List.iter (function
     | Ast.FuncDef f -> preempt_off_stmts f.name f.body
     | _ -> ()) prog;
+  (* GitHub issue #1350 slice 3, report-only: the recorded span calls whose
+     callee may block, or reaches an unknown indirect call. *)
+  let span_seen = Hashtbl.create 64 in
+  List.iter (fun (file, line, caller, callee, binding, definite) ->
+    let path =
+      if StringSet.mem callee (closed_effect "may_block") then
+        Some (String.concat " -> " (Option.value
+          (find_effect_path "may_block" StringSet.empty callee)
+          ~default:[display_effect_key callee]))
+      else if StringSet.mem callee may_reach_unknown then
+        Some ("unknown effects: " ^ String.concat " -> " (Option.value
+          (find_unknown_path StringSet.empty callee)
+          ~default:[display_effect_key callee; "<indirect call>"]))
+      else None in
+    match path with
+    | Some path when not (Hashtbl.mem span_seen (file, line, callee, binding)) ->
+        Hashtbl.replace span_seen (file, line, callee, binding) ();
+        let loc = { Lexing.dummy_pos with pos_fname = file; pos_lnum = line } in
+        span_blocking_table := { span_loc = loc; span_caller = caller;
+                                 span_callee = display_effect_key callee;
+                                 span_binding = binding; span_definite = definite;
+                                 span_path = path } :: !span_blocking_table
+    | _ -> ()) (List.rev !span_call_table);
   (* GitHub issue #809: a bare mask. `msr_daifset_irq` reached with no
      IRQ-masking guard live (a plain disable_irq, or a mutex_irq_save whose
      flags are not yet restored) leaves IRQs masked for the rest of the
