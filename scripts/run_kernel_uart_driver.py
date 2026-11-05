@@ -308,10 +308,23 @@ def peer_fixture_failure(output: bytes, peer_settings: bool,
     return None
 
 
+# GitHub issue #1366: the host peer's guard defers the BREAK while its own
+# bounded wait runs, but it cannot outlast this driver. The peer renews its
+# guard only on UART bytes, so a wait it STARTS after the guest's last byte
+# ends a full no-progress budget after that start -- later than this driver's
+# deadline, which counts from the byte itself. The 40ca854f fd-context stall
+# (#876) was exactly that: the guard ran 0.3s past the deadline, no BREAK was
+# sent, and the capture held no CPU or process state. Within the last
+# GUARD_LAST_SECONDS of the budget the lane is lost whatever the peer is
+# doing, so the guard yields; the walk then gets its own budget, as above.
+GUARD_LAST_SECONDS = 1.0
+
+
 def postmortem_break_due(now: float, deadline: float, last_chunk_at: float,
                          timeout: float, peer_guard_until: float) -> bool:
+    guard_yields_at = min(peer_guard_until, deadline - GUARD_LAST_SECONDS)
     return (now >= deadline - postmortem_budget(timeout) and
-            now >= peer_guard_until and
+            now >= guard_yields_at and
             now - last_chunk_at >= timeout * STOPPED_FRACTION)
 
 

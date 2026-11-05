@@ -114,7 +114,7 @@ def main(root: Path = ROOT) -> int:
             '"$HTTPD_GUARD_FILE"' not in qemu_runner.split("rm -f", 1)[1] or
             "guard_httpd_peer(HTTPD_IDLE_SECONDS + 2.0)" not in peer or
             peer.count("guard_httpd_peer(12.0)") != 2 or
-            "now >= peer_guard_until" not in uart_driver):
+            "min(peer_guard_until, deadline - GUARD_LAST_SECONDS)" not in uart_driver):
         print("ERROR\tQEMU HTTPd peer deadlines are not shared with the UART watchdog")
         failed = True
     for runner in RUNNERS:

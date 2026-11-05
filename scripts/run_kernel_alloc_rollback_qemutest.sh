@@ -130,7 +130,7 @@ mkdir -p "$ARTIFACT_POINT_DIR"
 POSTMORTEM_REQUEST="$ARTIFACT_POINT_DIR/postmortem.request"
 rm -f "$INTERACTIVE_HTTPD_LISTENER" "$INTERACTIVE_HTTPD_READY" \
     "$INTERACTIVE_HTTPD_DONE" "$INIT_LISTENER" "$NETWORK_READY" "$FOREGROUND_HTTPD_LISTENER" \
-    "$HTTPD_GUARD_FILE" "$POSTMORTEM_REQUEST"
+    "$HTTPD_GUARD_FILE" "$POSTMORTEM_REQUEST" "$ARTIFACT_POINT_DIR/console-state.log"
 cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
 exec 9>"$ARTIFACT_POINT_DIR/runner.lock"
 if ! flock -n 9; then
@@ -197,6 +197,12 @@ cleanup_and_archive() {
 trap cleanup_and_archive EXIT
 trap 'stop_qemu; exit 130' INT TERM HUP
 
+# GitHub issue #1366: on a stall the driver stops the guest through a QMP-
+# opened GDB stub before its serial BREAK and writes every CPU's PC/ELR/ESR/
+# DAIF (scripts/kernel_cpu_state.gdb) and the console state to
+# console-state.log; the BREAK's DDB walk (bt per CPU, sched, wait, ps) goes
+# to ddb-postmortem.log. Both sit in the point directory the archive keeps.
+#
 # No --validate-ash here, unlike every other lane: one process creation in
 # this boot is deliberately refused, so whichever fixture loses its process
 # says so, and holding the shell transcript to the normal lane's fixture
@@ -224,6 +230,7 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --interactive-httpd-ready-file "$INTERACTIVE_HTTPD_READY" \
     --interactive-httpd-done-file "$INTERACTIVE_HTTPD_DONE" \
     --qmp-port "$QMP_PORT" \
+    --console-elf "$ELF" --console-log "$ARTIFACT_POINT_DIR/console-state.log" \
     --httpd-peer-guard-file "$HTTPD_GUARD_FILE" \
     --postmortem-request-file "$POSTMORTEM_REQUEST" \
     >"$UART_DRIVER_LOG" 2>&1 &

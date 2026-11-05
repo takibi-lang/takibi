@@ -79,6 +79,11 @@ def capture(port, elf, output, phase, gdb_endpoint=None):
                 commands = [
                     "set pagination off", "set remotetimeout 2",
                     f"target remote {endpoint}",
+                    # GitHub issue #1366: every CPU's PC, ELR, ESR, DAIF and
+                    # symbol, from registers alone, before anything that
+                    # reads guest memory can fail.
+                    f"source {repo}/scripts/kernel_cpu_state.gdb",
+                    "takibi-cpus",
                     f"source {repo}/scripts/kernel_debug_metadata.gdb",
                     f"takibi-debug-metadata {repo}/_build/kernel-debug-metadata.json",
                     f"source {repo}/_build/kernel-console-layout.gdb",

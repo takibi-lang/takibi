@@ -403,6 +403,15 @@ def check_planned_httpd_idle(driver) -> list[str]:
         failures.append("an expired request guard still suppressed a stall")
     if due(1073.0, 1090.0, 1072.0, 90.0, 1073.0):
         failures.append("fresh UART output was ignored after HTTPd idle")
+    # GitHub issue #1366, the 40ca854f fd-context stall (#876): last byte at
+    # 1000, driver deadline 1090; the peer started its 80s listener wait at
+    # 1010 and guarded to 1090.3, past the deadline. The guard must yield in
+    # the budget's last second, or the lane ends with no BREAK at all.
+    if due(1088.0, 1090.0, 1000.0, 90.0, 1090.3):
+        failures.append("a guard yielded before the budget's last second")
+    if not due(1089.0, 1090.0, 1000.0, 90.0, 1090.3):
+        failures.append("a peer guard that outlasts the driver's deadline "
+                        "suppressed the stall's only BREAK")
     return failures
 
 
