@@ -310,3 +310,10 @@ file's comment lines are not rows.
   reviewed row: on every outermost mask, release stores took the RPi5 lock pair to
   101.1 ns against the 100 ns ceiling, and no relaxed store exists. 268 -> 262
   unprotected, with `kernel_log_core_state` reviewed. No row is unreviewed.
+- 2026-11-05: the `/bin/peer-*` fixtures' sixteen words in
+  `kernel/kernel/workload_evidence.tkb` (net-wake, mutation, wait, exec, fork and
+  sleep pids, CPUs and flags), whose rows said "under the run lock", are one
+  linear `WorkloadPeerRecord` in a `Place` `guarded_by(scheduled_process_run_lock)`,
+  taken and put back by every access. The peer-sleep step-1 one-shot, read with no
+  lock, is an `AtomicWord` swap. Text +2.3 KiB per kernel from the record copies.
+  262 -> 245 unprotected.
