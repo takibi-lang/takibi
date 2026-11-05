@@ -9,8 +9,8 @@ SP stands when the stack is empty, is the run's end less 16 and no frame is
 placed above it:
 
 - in both linker scripts, each of boot_stack_top, secondary_stack_top,
-  overflow_stack_top and irq_stack_top is defined as `. - 16`, directly
-  after the `. += 0x4000` that ends its run;
+  overflow_stack_top and irq_stack_top is defined once, as `. - 16`, at
+  the end of its run;
 - kernel/kernel/process.tkb defines KERNEL_STACK_TOP_RESERVE as 16, places
   a process's first saved SP and its first frames below it, and zeroes the
   word when it fills a fresh stack with poison;
@@ -24,6 +24,8 @@ text and expects it to be refused.
 import re
 import sys
 from pathlib import Path
+
+from pass_line import report_pass
 
 ROOT = Path(__file__).resolve().parent.parent
 LINKERS = ("kernel/arch/arm64/boot/link.ld",
@@ -39,9 +41,8 @@ RESERVE = 16
 def linker_errors(name, text):
     errors = []
     for top in TOPS:
-        found = re.search(r"\.\s*\+=\s*0x4000;\s*(?:/\*.*?\*/\s*)?"
-                          + top + r"\s*=\s*\.\s*-\s*(\d+)\s*;", text, re.S)
-        if found is None or int(found.group(1)) != RESERVE:
+        found = re.findall(r"\b" + top + r"\s*=\s*\.\s*-\s*(\d+)\s*;", text)
+        if len(found) != 1 or int(found[0]) != RESERVE:
             errors.append(f"{name}: {top} is not the end of its run less "
                           f"{RESERVE}")
     return errors
@@ -68,9 +69,9 @@ def process_errors(text):
 
 def entry_errors(name, text):
     errors = []
-    if not re.search(r"add\s+x0, x0, :lo12:boot_stack_top\n(?:\s*//.*\n)*"
-                     r"\s*str\s+xzr, \[x0\]", text):
-        errors.append(f"{name}: the boot stack's preempt word is not zeroed")
+    if text.count("    str     xzr, [x0]\n") != 2:
+        errors.append(f"{name}: the boot and secondary stacks' preempt "
+                      "words are not both zeroed")
     for top in ("overflow_stack_top", "irq_stack_top"):
         if text.count(f"add     x9, x9, :lo12:{top}\n    str     xzr, [x9") != 2:
             errors.append(f"{name}: {top}'s preempt word is not zeroed on "
@@ -97,15 +98,18 @@ def self_test(files):
          "KERNEL_PROCESS_STACK_SIZE - EXC_CONTEXT_SIZE"),
         (ENTRIES[0], ":lo12:irq_stack_top\n    str     xzr, [x9, x0]",
          ":lo12:irq_stack_top\n    nop"),
+        (ENTRIES[1], "    str     xzr, [x0]\n", ""),
     ]
+    refused = 0
     for name, before, after in plants:
         if before not in files[name]:
-            return f"control anchor missing in {name}: {before!r}"
+            return f"control anchor missing in {name}: {before!r}", refused
         copy = dict(files)
         copy[name] = files[name].replace(before, after, 1)
         if not check(copy):
-            return f"a planted break in {name} was accepted"
-    return None
+            return f"a planted break in {name} was accepted", refused
+        refused += 1
+    return None, refused
 
 
 def main():
@@ -118,13 +122,16 @@ def main():
         print("FAIL kernel-stack-top-reserve: a stack's top no longer "
               "leaves room for its preempt word")
         return 1
-    failure = self_test(files)
+    failure, refused = self_test(files)
     if failure:
         print(f"FAIL kernel-stack-top-reserve controls: {failure}")
         return 1
-    print("PASS kernel-stack-top-reserve: 4 stack tops in 2 linker scripts, "
-          "the process stack and 2 entry files leave the last 16 bytes of "
-          "each run to its preempt word; 4 planted breaks refused")
+    report_pass("kernel-stack-top-reserve",
+                "every stack top in the linker scripts, the process stack "
+                "and the entry files leaves the last 16 bytes of its run to "
+                "its preempt word; planted breaks refused",
+                stack_tops=len(TOPS) * len(LINKERS),
+                files=len(files), controls=refused)
     return 0
 
 
