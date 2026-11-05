@@ -161,7 +161,7 @@ owners are TaskMutex, the spare stack stays masked). #980
    (6) the slot pools'
    capacity premise (#993, done 2026-11-01: capacity unchanged, a full pool retries unmasked for the tick, the mutation lock before any slot, `SlotPool.tla`); (7) the lock-holder group with the `PreemptOff`
    token (lifecycle spans done 2026-11-01, #1323; #789 is not needed for the flip: #638 comment); (8) the EL1 switch at IRQ return when the count is zero,
-   shown once in a deterministic lane; (9) the flip (its per_cpu field list is done, #1331: `scripts/per_cpu_carried_fields.tsv`), models passing without
+   shown once in a deterministic lane (slices 1-3 done 2026-11-05: the per-stack count word, its leaves, the El1-resume zero check; next #1352, wait4(pid) answering a sibling, fixed first by decision, then slice 4, the window with the IRQ-return consult; the El1 PMR reset is dropped, asserted at stage 9, typed under #850); (9) the flip (its per_cpu field list is done, #1331: `scripts/per_cpu_carried_fields.tsv`), models passing without
    their no-preemption guards, the three boot-phase stand-ins rewritten,
    never while #584's soak runs. The flip's precondition is a number:
    #1012's ratchet reports no production global outside the typed set.
@@ -194,6 +194,8 @@ Low-dependency issues A does not hold, in this order; compiler work in
 this list is authorized; an item that reaches a decision is parked and the
 next one taken. The done record of the previous queue is in HISTORY.md
 (2026-10-25).
+
+Now, before band 0: #1366 (a stalled guest's CPU and process state in the lane archive; in progress 2026-11-05, the DDB BREAK fixed, the GDB snapshot to reuse the lane's endpoint), then #876 with it.
 
 0. **Stop the silent growth (now).** The remaining `.tkb`-reading checks
    move to #987's call-graph table one by one (#567; the table names
