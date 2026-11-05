@@ -351,6 +351,33 @@ el1_resume_probe_landing_address:
  * builtin for TPIDR_EL1 (DECISIONS 2026-10-25, after the 2026-10-19 rule),
  * and everything decided from the value is in cpu_authority.tkb's
  * preempt_slot(), its one caller (scripts/buildcheck_allowed_callers.py). */
+/* GitHub issue #638: the preempt count of the stack SP stands on, the 16-byte
+ * word at the top of its 0x8000-aligned run (KERNEL_STACK_TOP_RESERVE,
+ * scripts/check_kernel_stack_top_reserve.py): sp | 0x7fff is the run's last
+ * byte, so the word is 15 below it. Only the task on that stack writes it, so
+ * the read-modify-write needs no mask and no atomic.
+ * preempt_count_add(delta) -> the count before the add. */
+    .global preempt_count_add
+    .type preempt_count_add, %function
+preempt_count_add:
+    mov     x1, sp
+    orr     x1, x1, #0x7fff
+    ldur    x2, [x1, #-15]
+    add     x3, x2, x0
+    stur    x3, [x1, #-15]
+    mov     x0, x2
+    ret
+    .size preempt_count_add, . - preempt_count_add
+
+    .global preempt_count_reset
+    .type preempt_count_reset, %function
+preempt_count_reset:
+    mov     x1, sp
+    orr     x1, x1, #0x7fff
+    stur    xzr, [x1, #-15]
+    ret
+    .size preempt_count_reset, . - preempt_count_reset
+
     .global kernel_cpu_offset
     .type kernel_cpu_offset, %function
 kernel_cpu_offset:

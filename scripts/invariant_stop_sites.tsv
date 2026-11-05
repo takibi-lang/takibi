@@ -48,11 +48,9 @@ kernel/drivers/net/virtio_net.tkb	net_rx_acquire	unmodelled	1	handler	#1031	a us
 kernel/drivers/net/virtio_net.tkb	virtio_net_tx_finish	ladder	1	handler	#740	TX packet slot empty after the completion wait; returns false after the stop
 kernel/drivers/net/virtio_net_tx_dma.tkb	virtio_pkt_lost	ladder	1	-	#131	a displaced or misplaced packet owner: a slot never holds two owners
 kernel/drivers/virtio_used.tkb	virtio_used_lost	ladder	1	-	#131	a displaced used-ring owner: a slot never holds two owners
-kernel/kernel/cpu_authority.tkb	preempt_slot	unmodelled	1	-	#638	TPIDR_EL1's per-CPU offset names a slot below KERNEL_MAX_CORES: a register the boot path sets, no type states it
 kernel/kernel/cpu_authority.tkb	preempt_off_enter	unmodelled	2	-	#638	TPIDR_EL1 and MPIDR name the same CPU, and the CPU is active: register facts no type states
 kernel/kernel/cpu_authority.tkb	preempt_off_exit	ladder	1	-	#638	an exit with no open region: the compiler emits enter/exit pairs, so the count is balanced by construction and the stop restates a compile-time fact
 kernel/kernel/cpu_authority.tkb	preempt_span_adopt	unmodelled	1	-	#1323	the assembly hop arrives with exactly the clone span open: the token crossed assembly as a count, which no type states
-kernel/kernel/cpu_authority.tkb	preempt_count_after_switch	unmodelled	1	-	#1323	at most one span is open at a resume: a lexical region cannot hold a resume only if every noreturn resume is outside one, which no rule states
 kernel/kernel/cpu_authority.tkb	preempt_assert_blockable	ladder	1	-	#638	blocking inside a preempt_off region: the may_block effect inside a preempt_off block could be refused by the compiler
 kernel/kernel/process.tkb	scheduled_process_pin_release	ladder	1	-	#652	a pin released while a CPU owns the stack: StackOwnership.tla states the rule; trace conformance (#652) would take it over
 kernel/kernel/syscall.tkb	kernel_syscall_block_return	frame	1	-	#1017	the block return reached with no current process: no caller exists to take an answer, and the entry path had a process

@@ -11,42 +11,50 @@
 // a block that can reach may_block. A span the block cannot express holds the
 // same count through the linear PreemptOff below (#638 option A).
 //
-// Stage 2 (#638, maintainer 2026-10-25): the region is a per-CPU preempt
-// count, as Linux's preempt_disable/preempt_enable. preempt_off_enter
-// raises this CPU's count and preempt_off_exit lowers it; the compiler
-// calls preempt_off_exit at the closing brace and before every return,
-// break or continue that leaves the block, so regions nest. The count is
-// reached through TPIDR_EL1, not through a CpuHere, because the places
-// that must read it (a blocking point here, the EL1 IRQ return later)
-// hold no authority. Independent of the IRQ mask.
+// Stage 2 (#638, maintainer 2026-10-25): the region is a preempt count, as
+// Linux's preempt_disable/preempt_enable. preempt_off_enter raises it and
+// preempt_off_exit lowers it; the compiler calls preempt_off_exit at the
+// closing brace and before every return, break or continue that leaves the
+// block, so regions nest. Independent of the IRQ mask.
+//
+// Slice 2 of the per-task count (maintainer, 2026-11-04, #638 (b)): the count
+// is the stack's, not the CPU's. It is the 16-byte word at the top of the
+// stack's run (KERNEL_STACK_TOP_RESERVE, scripts/check_kernel_stack_top_reserve.py),
+// which the assembly leaf preempt_count_add reaches from SP alone. A raise is
+// a read-modify-write of a word only the task standing on that stack writes,
+// so a move to another CPU between the read and the store changes nothing;
+// the CPU-indexed slot it replaces could be raised on the CPU the task had
+// just left (seen on QEMU and RPi5, the #638 stage 8 investigation). The
+// CpuHere is minted after the raise, so the CPU it names stays the CPU until
+// the region ends.
 //
 // The region helpers are inline: they run three levels deep on every mask and
 // unmask, so as out-of-line calls they cost 21 ns of a lock pair (GitHub issue
-// #1288, measured on RPi5).
+// #1288, measured on RPi5). The count's leaf is one call, as TPIDR_EL1's was.
 //
 // Trusted here, and only here:
-// - preempt_off_enter reads cpu_id() (MPIDR) and is the CPU it says;
+// - preempt_off_enter reads cpu_id() (MPIDR) after the raise and is the CPU
+//   it says;
+// - every stack's preempt word is the last 16 bytes of its 0x8000-aligned
+//   run and starts at zero (the entry code and the process stack fill zero
+//   it), so preempt_count_add names this stack's count;
 // - TPIDR_EL1 is this core's index times the per-core stack group stride
 //   (each core's entry path sets it once, before any Takibi code runs; the
-//   linker scripts assert the stride is 1 << PERCPU_STACK_GROUP_SHIFT), so
-//   preempt_slot() names this core's count. It is read by the assembly
-//   helper kernel_cpu_offset (user_entry.S; no compiler builtin, DECISIONS
-//   2026-10-25), and preempt_slot_index() is its one caller
-//   (scripts/buildcheck_allowed_callers.py). With
-//   KERNEL_PREEMPT_ASSERTS, every region entry checks the two agree.
+//   linker scripts assert the stride is 1 << PERCPU_STACK_GROUP_SHIFT). It is
+//   read by the assembly helper kernel_cpu_offset (user_entry.S; no compiler
+//   builtin, DECISIONS 2026-10-25), and preempt_slot_index() is its one
+//   caller (scripts/buildcheck_allowed_callers.py). With
+//   KERNEL_PREEMPT_ASSERTS, every region entry checks it agrees with MPIDR.
 //   No public function mints one (scripts/check_cpu_authority_mints.py);
 //   the boot probe's any-CPU mint went with the exec argv slot (#1080).
 //
-// Current limitations (2026-10-25):
-// - The count is not yet consulted by any switch: KERNEL_PREEMPTIBLE is 0
-//   (static_assert below), and the EL1 IRQ return never switches (#638
-//   stage 8).
-// - The raise is a plain read-modify-write of this CPU's slot. That is
-//   sound while nothing preempts: an interrupt on this CPU that enters a
-//   region leaves the count as it found it. Once the IRQ return can switch
-//   at count 0, a migration between the TPIDR_EL1 read and the store would
-//   raise the old CPU's count; the flip must close that window (mask IRQs
-//   across the raise, or make it one instruction on this CPU's slot).
+// Current limitations (2026-11-05):
+// - The count is not yet consulted by any switch: KERNEL_PREEMPTIBLE is 0,
+//   and the EL1 IRQ return never switches (#638 stage 8).
+// - preempt_count_after_switch resets the stack it lands on and asserts
+//   nothing: a stack keeps the count it had when it was left, so the check
+//   that at most one span reached a resume no longer reads the right word.
+//   An El1 resume's own check (its count is zero) comes with the consult.
 
 use "kernel/lib/execution_model.tkb";
 use "kernel/arch/arm64/kernel/cpu_stop_extern.tkb";
@@ -67,42 +75,17 @@ const KERNEL_PREEMPT_ASSERTS: usize = 1;
 // (see link.ld and link_qemu.ld, which assert it).
 const PERCPU_STACK_GROUP_SHIFT: usize = 16;
 
-// This CPU's preempt count: how many preempt_off regions (and, later,
-// PreemptOff tokens) are open on it. Reached only through preempt_slot().
-struct per_cpu PreemptCount {
-    private depth: usize;
-}
-
-private let mut preempt_counts: [PreemptCount; KERNEL_MAX_CORES];
-
-// This CPU's slot, from TPIDR_EL1 alone: no cpu_id() and no CpuHere, so a
-// blocking point (and later the EL1 IRQ return) can find it.
 // TPIDR_EL1's slot number, unchecked: the one read of kernel_cpu_offset
 // (scripts/allowed_callers.tsv).
 private inline fn preempt_slot_index() -> usize {
     return kernel_cpu_offset() >> PERCPU_STACK_GROUP_SHIFT;
 }
 
-private inline fn preempt_slot() -> CpuHere {
-    let slot: usize = preempt_slot_index();
-    if (slot < KERNEL_MAX_CORES) {
-        let id: {0..<KERNEL_MAX_CORES as usize} = slot;
-        let mut cpu: CpuHere = { id };
-        return cpu;
-    }
-    kernel_invariant_stop();
-    let mut unreachable: CpuHere = { 0 };
-    return unreachable;
-}
-
 private inline fn preempt_off_enter() -> CpuHere {
-    static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "preempt_off's raise is not yet migration-safe and no IRQ return consults the count");
+    preempt_count_add(1);
     let core: usize = cpu_id();
-    let mut slot: CpuHere = preempt_slot();
-    preempt_counts[slot].depth = preempt_counts[slot].depth + 1;
     if (core < KERNEL_MAX_CORES) {
-        if (KERNEL_PREEMPT_ASSERTS != 0 && slot.id != core) {
+        if (KERNEL_PREEMPT_ASSERTS != 0 && preempt_slot_index() != core) {
             // TPIDR_EL1 names another CPU than MPIDR does.
             kernel_invariant_stop();
         }
@@ -117,27 +100,23 @@ private inline fn preempt_off_enter() -> CpuHere {
 }
 
 // GitHub issue #638 stage 4 (maintainer, D2 (i)): the test of a fallible
-// `preempt_off (cpu) { ... } else { ... }`. True exactly when
-// preempt_off_enter would neither stop nor find TPIDR_EL1 disagreeing with
-// MPIDR, so the region's mint cannot reach kernel_invariant_stop from
-// here; false sends the caller to its else arm with no authority. The IRQ
-// mask needs this: the stop path masks IRQs, so a mask that stopped would
-// re-enter itself.
+// `preempt_off (cpu) { ... } else { ... }`. True exactly when the CPU MPIDR
+// names is one this kernel runs, so the region's mint cannot reach its
+// inactive-CPU stop from here; false sends the caller to its else arm with no
+// authority. The IRQ mask needs this: the stop path masks IRQs, so a mask that
+// stopped would re-enter itself. TPIDR_EL1 is not compared here: read before
+// the raise, a move between the two reads would answer false for a CPU that
+// is fine.
 private inline fn preempt_off_available() -> bool {
-    let core: usize = cpu_id();
-    if (core >= KERNEL_MAX_CORES) { return false; }
-    return preempt_slot_index() == core;
+    return cpu_id() < KERNEL_MAX_CORES;
 }
 
 // Called by the compiler at every exit of a preempt_off block.
 private inline fn preempt_off_exit() {
-    let mut slot: CpuHere = preempt_slot();
-    let depth: usize = preempt_counts[slot].depth;
-    if (depth == 0) {
-        // An exit with no open region: the count would wrap.
+    if (preempt_count_add(0xFFFFFFFFFFFFFFFF) == 0) {
+        // An exit with no open region: the count wrapped.
         kernel_invariant_stop();
     }
-    preempt_counts[slot].depth = depth - 1;
 }
 
 // GitHub issue #1350: a short-hold unmasked lock (the rank-39 pools and the
@@ -145,12 +124,9 @@ private inline fn preempt_off_exit() {
 // release, Linux's spin_lock shape, so its holder is never switched off a core
 // where a span's waiter could spin for it. Every such lock goes through this
 // pair (scripts/check_lock_rank_wrappers.py). Not a region: no authority is
-// minted, and the raise is no more migration-safe than the mint's.
+// minted.
 inline fn preempt_lock_raise() {
-    static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "preempt_lock_raise's raise is not yet migration-safe and no IRQ return consults the count");
-    let mut slot: CpuHere = preempt_slot();
-    preempt_counts[slot].depth = preempt_counts[slot].depth + 1;
+    preempt_count_add(1);
 }
 
 inline fn preempt_lock_lower() {
@@ -169,10 +145,7 @@ linear struct PreemptOff[unit: usize] {
 }
 
 inline fn preempt_span_begin() -> PreemptOff[0] {
-    static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "preempt_span_begin's raise is not yet migration-safe and no IRQ return consults the count");
-    let mut slot: CpuHere = preempt_slot();
-    preempt_counts[slot].depth = preempt_counts[slot].depth + 1;
+    preempt_count_add(1);
     let mut span: PreemptOff[0] = { 1 };
     return span;
 }
@@ -183,9 +156,9 @@ inline fn preempt_span_end(span: sink PreemptOff[0]) {
 }
 
 // The span ends at the exception return (or idle entry) that follows. The
-// count stays raised until preempt_count_after_switch, on the far side of the
-// stack change. The callers are the resume paths
-// (scripts/allowed_callers.tsv).
+// count stays raised on the stack the span began on; the stack the return
+// lands on has its own reset by preempt_count_after_switch. The callers are
+// the resume paths (scripts/allowed_callers.tsv).
 inline fn preempt_span_resume(span: sink PreemptOff[0]) {
 }
 
@@ -204,20 +177,15 @@ inline fn preempt_span_adopt() -> PreemptOff[0] {
 // The Linux schedule_tail shape: the after_switch hook of every exception
 // return, and every idle entry, on the far side of the stack change. What it
 // resumes runs at count zero by construction (only a zero count is ever
-// switched away from), so the count of a resume path's span is simply reset.
-// More than one open means a lexical region or a second span reached a resume.
+// switched away from), so the count of the stack it now stands on is reset:
+// that stack kept whatever count it had when it was left, a span's included.
 fn preempt_count_after_switch() {
-    let mut slot: CpuHere = preempt_slot();
-    if (KERNEL_PREEMPT_ASSERTS != 0 && preempt_counts[slot].depth > 1) {
-        kernel_invariant_stop();
-    }
-    preempt_counts[slot].depth = 0;
+    preempt_count_reset();
 }
 
-// This CPU's preempt count.
+// This stack's preempt count.
 private fn preempt_count_here() -> usize {
-    let mut slot: CpuHere = preempt_slot();
-    return preempt_counts[slot].depth;
+    return preempt_count_add(0);
 }
 
 // A blocking point's runtime check: nothing may block inside a region.

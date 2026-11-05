@@ -6,3 +6,7 @@
 // carries.
 extern fn kernel_invariant_stop() !{noreturn};
 extern fn kernel_cpu_offset() -> usize;
+// GitHub issue #638: the preempt word of the stack SP stands on (user_entry.S).
+// preempt_count_add returns the count before the add.
+extern fn preempt_count_add(delta: usize) -> usize;
+extern fn preempt_count_reset();
