@@ -8583,6 +8583,25 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             (wait_options != 0 && wait_options != LINUX_WNOHANG)) {
             return syscall_wait4_resume(frame, LINUX_EINVAL, current_authority, 0);
         }
+        // GitHub issue #1314: a non-null rusage (x3) gets a zeroed 144-byte
+        // struct rusage, written before any wait so the blocked wake path
+        // needs no second pointer. An unwritable one is EFAULT here, with
+        // nothing reaped, where Linux reaps first and then faults.
+        if (x3 != 0) {
+            match user_range_check_write(current_authority, x3, 144) {
+                UserWriteRangeResult::Fault => {
+                    return syscall_wait4_resume(frame, LINUX_EFAULT, current_authority, 0);
+                }
+                UserWriteRangeResult::Ok(range) => {
+                    match user_zero_fill(range) {
+                        UserWriteResult::Fault => {
+                            return syscall_wait4_resume(frame, LINUX_EFAULT, current_authority, 0);
+                        }
+                        UserWriteResult::Written => {}
+                    }
+                }
+            }
+        }
         // GitHub issue #571: ONE decision, not two unlocked walks with a gap
         // between them. "Is there a zombie to collect" and "is there a live
         // child to wait for" are separate walks of the same child list, and

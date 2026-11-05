@@ -1459,11 +1459,17 @@ fn shared_mapping_probe() !{unsafe} {
     }
     fail_if(umask_child >= 0x8000000000000000);
     payload_write_u64(status_base, 0, 0xFF);
-    fail_if(svc5(260, umask_child, ptr_of(status_base, 0), 0, 0, 0) != umask_child);
-    fail_if((payload_read_u64(status_base, 0) & 0xFFFFFFFF) != 0);
-
     let mut usage: [u8; 144];
     let usage_base: *u8 = usage as *u8;
+    // GitHub issue #1314: wait4 writes its rusage argument; the bytes
+    // poisoned here would read as tv_usec past a second if it did not.
+    for index: usize in 0..<144 { usage[index] = 0xFF; }
+    fail_if(svc5(260, umask_child, ptr_of(status_base, 0), 0,
+                 ptr_of(usage_base, 0), 0) != umask_child);
+    fail_if((payload_read_u64(status_base, 0) & 0xFFFFFFFF) != 0);
+    fail_if(payload_read_u64(usage_base, 8) >= 1000000);
+    fail_if(payload_read_u64(usage_base, 24) >= 1000000);
+
     fail_if(svc5(GETRUSAGE_SYSCALL, 0, ptr_of(usage_base, 0), 0, 0, 0) != 0);
     fail_if(svc5(GETRUSAGE_SYSCALL, 0xFFFFFFFFFFFFFFFF, ptr_of(usage_base, 0), 0, 0, 0) != 0);
     fail_if(svc5(GETRUSAGE_SYSCALL, 5, ptr_of(usage_base, 0), 0, 0, 0) != EINVAL_RC);
