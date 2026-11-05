@@ -164,6 +164,13 @@ const KERNEL_STACK_RUN_BYTES: usize = KERNEL_STACK_RUN_PAGES * PAGE_SIZE;
 // scheduled_process_table_init checks it against the size it claims to be
 // the log of.
 const KERNEL_STACK_SHIFT: usize = 14;
+
+// GitHub issue #638 (maintainer, option A): the last 16 bytes of every
+// kernel stack run hold that stack's preempt word, so a stack's top, where
+// SP stands when it is empty, is the run's end less this. The linker
+// scripts' *_stack_top symbols say the same;
+// scripts/check_kernel_stack_top_reserve.py holds the two together.
+const KERNEL_STACK_TOP_RESERVE: usize = 16;
 // No hardware CPU has this identity. A Ready process carrying any smaller
 // value still has an old CPU physically using its saved-frame stack and is
 // not selectable, even though its logical state is already public.
@@ -3893,6 +3900,9 @@ private fn scheduled_process_adopt_stack_run(
         creating: borrow ScheduledProcessOwner[process],
         run: sink PageRunOwner[r]) !{unsafe} {
     stack_run_poison_fill(run, 0, KERNEL_STACK_RUN_BYTES, KERNEL_STACK_POISON);
+    // The preempt word starts at zero (#638).
+    stack_run_poison_fill(run, KERNEL_STACK_RUN_BYTES - KERNEL_STACK_TOP_RESERVE,
+                          KERNEL_STACK_TOP_RESERVE, 0);
     scheduled_process_record_owned(creating).stack_run =
         page_run_physical_address(run);
     // The record accessor takes the pool lock itself, so it is called
@@ -4185,7 +4195,7 @@ private fn scheduled_process_alloc_finish(address: RegionHeld(ProcessRecord),
         { let mut __creating_result: ScheduledProcessAllocResult = ScheduledProcessAllocResult::Full; scheduled_process_owner_drop(creating); return __creating_result; }
     }
     scheduled_process_record_owned(creating).saved_sp =
-        bottom + KERNEL_PROCESS_STACK_SIZE;
+        bottom + KERNEL_PROCESS_STACK_SIZE - KERNEL_STACK_TOP_RESERVE;
     scheduled_process_record_owned(creating).stack_owner_cpu =
         PROCESS_STACK_UNOWNED;
     // GitHub issue #392: the one place a pid is minted. Past every branch
@@ -4488,7 +4498,7 @@ fn kernel_process_init_publish(handle: ProcessHandle, entry: usize,
     let bottom: usize = kernel_stack_bottom(slot);
     if (bottom == 0) { return false; }
     let frame = frame_ref_fresh(
-        bottom + KERNEL_PROCESS_STACK_SIZE - EXC_CONTEXT_SIZE,
+        bottom + KERNEL_PROCESS_STACK_SIZE - KERNEL_STACK_TOP_RESERVE - EXC_CONTEXT_SIZE,
         handle.generation);
     frame_initial_user(frame, entry, stack);
     let guard = process_run_lock();
@@ -5126,7 +5136,7 @@ fn scheduled_process_table_probe() -> bool !{unsafe} {
     // named an offset within one page. This one names the allocation.
     for i: usize in 0..<PROCESS_TABLE_PROBE_COUNT {
         let stack: usize = scheduled_process_stack_top(handles[i]);
-        if (stack == 0 || stack % KERNEL_STACK_RUN_BYTES != 0 ||
+        if (stack == 0 || (stack + KERNEL_STACK_TOP_RESERVE) % KERNEL_STACK_RUN_BYTES != 0 ||
             stack % 16 != 0) { return false; }
         for j: usize in 0..<PROCESS_TABLE_PROBE_COUNT {
             if (j != i && stack == scheduled_process_stack_top(handles[j])) {
@@ -5718,7 +5728,7 @@ private fn kernel_process_el1_resume_probe_frame() -> usize {
     let bottom: usize = kernel_stack_bottom(process_slot_of(
         kernel_process_current_required().pool_index));
     if (bottom == 0) { return 0; }
-    return bottom + KERNEL_PROCESS_STACK_SIZE - EXC_CONTEXT_SIZE;
+    return bottom + KERNEL_PROCESS_STACK_SIZE - KERNEL_STACK_TOP_RESERVE - EXC_CONTEXT_SIZE;
 }
 
 const KERNEL_PROCESS_EL1_RESUME_X0: usize = 0x1194000000000000;
@@ -8140,14 +8150,14 @@ extern symbol irq_stack_top;
 // every path that is not standing on a process's stack, which is most of
 // them.
 fn kernel_linker_stacks_well_shaped() -> bool {
-    if (boot_stack_top % KERNEL_STACK_RUN_BYTES != 0 ||
-        boot_stack_top - boot_stack_bottom != KERNEL_PROCESS_STACK_SIZE ||
+    if ((boot_stack_top + KERNEL_STACK_TOP_RESERVE) % KERNEL_STACK_RUN_BYTES != 0 ||
+        boot_stack_top - boot_stack_bottom != KERNEL_PROCESS_STACK_SIZE - KERNEL_STACK_TOP_RESERVE ||
         boot_stack_bottom - boot_stack_run_bottom != KERNEL_PROCESS_STACK_SIZE) {
         return false;
     }
-    if (secondary_stack_top % KERNEL_STACK_RUN_BYTES != 0 ||
+    if ((secondary_stack_top + KERNEL_STACK_TOP_RESERVE) % KERNEL_STACK_RUN_BYTES != 0 ||
         secondary_stack_top - secondary_stack_bottom !=
-            KERNEL_PROCESS_STACK_SIZE ||
+            KERNEL_PROCESS_STACK_SIZE - KERNEL_STACK_TOP_RESERVE ||
         secondary_stack_bottom - secondary_stack_run_bottom !=
             KERNEL_PROCESS_STACK_SIZE) {
         return false;
@@ -8157,9 +8167,9 @@ fn kernel_linker_stacks_well_shaped() -> bool {
     // to overflow it -- and exempting it is exactly what would turn a
     // second exception during the report into a loop on the check that
     // brought it there.
-    if (overflow_stack_top % KERNEL_STACK_RUN_BYTES != 0 ||
+    if ((overflow_stack_top + KERNEL_STACK_TOP_RESERVE) % KERNEL_STACK_RUN_BYTES != 0 ||
         overflow_stack_top - overflow_stack_bottom !=
-            KERNEL_PROCESS_STACK_SIZE ||
+            KERNEL_PROCESS_STACK_SIZE - KERNEL_STACK_TOP_RESERVE ||
         overflow_stack_bottom - overflow_stack_run_bottom !=
             KERNEL_PROCESS_STACK_SIZE) {
         return false;
@@ -8167,8 +8177,8 @@ fn kernel_linker_stacks_well_shaped() -> bool {
     // And the IRQ stack, which every interrupt this kernel takes stands
     // on: it is the one an entry-time test is most likely to be asked
     // about, since an interrupt can arrive at any instruction.
-    return irq_stack_top % KERNEL_STACK_RUN_BYTES == 0 &&
-           irq_stack_top - irq_stack_bottom == KERNEL_PROCESS_STACK_SIZE &&
+    return (irq_stack_top + KERNEL_STACK_TOP_RESERVE) % KERNEL_STACK_RUN_BYTES == 0 &&
+           irq_stack_top - irq_stack_bottom == KERNEL_PROCESS_STACK_SIZE - KERNEL_STACK_TOP_RESERVE &&
            irq_stack_bottom - irq_stack_run_bottom == KERNEL_PROCESS_STACK_SIZE;
 }
 

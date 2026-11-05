@@ -47,6 +47,9 @@ kernel_warm_el1_entry:
     str     x19, [x0]
     adrp    x0, boot_stack_top
     add     x0, x0, :lo12:boot_stack_top
+    // GitHub issue #638: zero this stack's preempt word, the 16 bytes at
+    // boot_stack_top (link.ld), before anything stands on it.
+    str     xzr, [x0]
     cbnz    x21, .Lwarm_el1_entry
     adr     x1, .Lel1_entry
     bl      el2_drop_to_el1
@@ -81,6 +84,14 @@ kernel_warm_el1_entry:
      * field and multiplies this linker-derived stride for cores 1 through
      * 3. */
     msr     tpidr_el1, xzr
+    // GitHub issue #638: and the preempt words of this core's overflow and
+    // IRQ stacks.
+    adrp    x9, overflow_stack_top
+    add     x9, x9, :lo12:overflow_stack_top
+    str     xzr, [x9]
+    adrp    x9, irq_stack_top
+    add     x9, x9, :lo12:irq_stack_top
+    str     xzr, [x9]
     bl      el1_fpsimd_enable
     bl      kernel_mmu_init
     mov     x29, xzr
@@ -157,6 +168,7 @@ kernel_secondary_warm_el1_entry:
     sub     x1, x1, x2
     sub     x2, x20, #1
     madd    x0, x2, x1, x0
+    str     xzr, [x0]
     cbnz    x21, .Lsecondary_warm_el1
     adr     x1, .Lsecondary_el1
     bl      el2_drop_to_el1
@@ -181,6 +193,12 @@ kernel_secondary_warm_el1_entry:
     sub     x0, x0, x1
     mul     x0, x0, x20
     msr     tpidr_el1, x0
+    adrp    x9, overflow_stack_top
+    add     x9, x9, :lo12:overflow_stack_top
+    str     xzr, [x9, x0]
+    adrp    x9, irq_stack_top
+    add     x9, x9, :lo12:irq_stack_top
+    str     xzr, [x9, x0]
     bl      el1_fpsimd_enable
     bl      kernel_mmu_init_secondary
     mov     x0, x19

@@ -53,6 +53,9 @@ _start:
     str     x19, [x0]
     adrp    x0, boot_stack_top
     add     x0, x0, :lo12:boot_stack_top
+    // GitHub issue #638: zero this stack's preempt word, the 16 bytes at
+    // boot_stack_top (link.ld), before anything stands on it.
+    str     xzr, [x0]
     mov     sp, x0
 
     /* GitHub issue #477: this core's byte offset into the per-core stack
@@ -71,6 +74,14 @@ _start:
      * The primary offset is zero. Secondary entry reads QEMU's Aff0 field
      * and multiplies this linker-derived stride for cores 1 through 3. */
     msr     tpidr_el1, xzr
+    // GitHub issue #638: and the preempt words of this core's overflow and
+    // IRQ stacks.
+    adrp    x9, overflow_stack_top
+    add     x9, x9, :lo12:overflow_stack_top
+    str     xzr, [x9]
+    adrp    x9, irq_stack_top
+    add     x9, x9, :lo12:irq_stack_top
+    str     xzr, [x9]
 
     adrp    x0, el1_vectors
     add     x0, x0, :lo12:el1_vectors
@@ -125,6 +136,7 @@ kernel_secondary_entry:
     sub     x1, x1, x2
     sub     x2, x20, #1
     madd    x0, x2, x1, x0
+    str     xzr, [x0]
     mov     sp, x0
 
     /* GitHub issue #477/#9: this core's offset into the per-core stack
@@ -138,6 +150,12 @@ kernel_secondary_entry:
     sub     x0, x0, x1
     mul     x0, x0, x20
     msr     tpidr_el1, x0
+    adrp    x9, overflow_stack_top
+    add     x9, x9, :lo12:overflow_stack_top
+    str     xzr, [x9, x0]
+    adrp    x9, irq_stack_top
+    add     x9, x9, :lo12:irq_stack_top
+    str     xzr, [x9, x0]
 
     adrp    x0, el1_vectors
     add     x0, x0, :lo12:el1_vectors

@@ -107,7 +107,11 @@ SECTIONS {
         . += 0x4000;
         boot_stack_bottom = .;
         . += 0x4000;
-        boot_stack_top = .;
+        /* GitHub issue #638 (maintainer, option A): the last 16 bytes of
+           every stack run are the stack's preempt word, so every *_stack_top
+           is the run's end less 16. scripts/check_kernel_stack_top_reserve.py
+           holds the linker scripts and the process stack code to it. */
+        boot_stack_top = . - 16;
         stack_top = boot_stack_top;
         /* 0x8000-aligned again by construction, the run above being
            exactly 0x8000 long. */
@@ -127,7 +131,7 @@ SECTIONS {
         . += 0x4000;
         secondary_stack_bottom = .;
         . += 0x4000;
-        secondary_stack_top = .;
+        secondary_stack_top = . - 16;
         secondary_stack_group_end = .;
         /* Core 1's named group above plus identical groups for cores 2 and
            3. Entry code derives the stride from these symbols. */
@@ -164,7 +168,7 @@ SECTIONS {
         . += 0x4000;
         overflow_stack_bottom = .;
         . += 0x4000;
-        overflow_stack_top = .;
+        overflow_stack_top = . - 16;
         /* Where an IRQ handler runs.  The frame stays on whichever stack
            was interrupted -- it is the interrupted context, and a
            preempted process's context cannot live on a stack the next
@@ -177,7 +181,7 @@ SECTIONS {
         . += 0x4000;
         irq_stack_bottom = .;
         . += 0x4000;
-        irq_stack_top = .;
+        irq_stack_top = . - 16;
         percpu_stack_group_end = .;
         /* Three more groups, one for each possible secondary. */
         secondary_percpu_stack_base = .;

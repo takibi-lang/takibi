@@ -148,19 +148,19 @@ assert that the block is whole runs and under 2 MiB.
 |---|---|---|---|
 | `boot_stack_run_bottom` | `+0x00000` | linker script `.stack` | CHECKED (ELF offset) |
 | `boot_stack_bottom` | `+0x04000` | linker script `.stack` | CHECKED (ELF offset) |
-| `boot_stack_top` | `+0x08000` | linker script `.stack` | CHECKED (ELF offset) |
+| `boot_stack_top` | `+0x07ff0` | linker script `.stack` | CHECKED (ELF offset) |
 | `secondary_stack_base` | `+0x08000` | linker script `.stack` | CHECKED (ELF offset) |
 | `secondary_stack_run_bottom` | `+0x08000` | linker script `.stack` | CHECKED (ELF offset) |
 | `secondary_stack_bottom` | `+0x0c000` | linker script `.stack` | CHECKED (ELF offset) |
-| `secondary_stack_top` | `+0x10000` | linker script `.stack` | CHECKED (ELF offset) |
+| `secondary_stack_top` | `+0x0fff0` | linker script `.stack` | CHECKED (ELF offset) |
 | `secondary_stack_group_end` | `+0x10000` | linker script `.stack` | CHECKED (ELF offset) |
 | `percpu_stack_base` | `+0x20000` | linker script `.stack` | CHECKED (ELF offset) |
 | `overflow_stack_run_bottom` | `+0x20000` | linker script `.stack` | CHECKED (ELF offset) |
 | `overflow_stack_bottom` | `+0x24000` | linker script `.stack` | CHECKED (ELF offset) |
-| `overflow_stack_top` | `+0x28000` | linker script `.stack` | CHECKED (ELF offset) |
+| `overflow_stack_top` | `+0x27ff0` | linker script `.stack` | CHECKED (ELF offset) |
 | `irq_stack_run_bottom` | `+0x28000` | linker script `.stack` | CHECKED (ELF offset) |
 | `irq_stack_bottom` | `+0x2c000` | linker script `.stack` | CHECKED (ELF offset) |
-| `irq_stack_top` | `+0x30000` | linker script `.stack` | CHECKED (ELF offset) |
+| `irq_stack_top` | `+0x2fff0` | linker script `.stack` | CHECKED (ELF offset) |
 | `percpu_stack_group_end` | `+0x30000` | linker script `.stack` | CHECKED (ELF offset) |
 | `secondary_percpu_stack_base` | `+0x30000` | linker script `.stack` | CHECKED (ELF offset) |
 | `percpu_stack_end` | `+0x60000` | linker script `.stack` | CHECKED (ELF offset) |
