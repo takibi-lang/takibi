@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Expected-fail signal conformance rows differ from host Linux (#999).
 
-Usage: check_signal_xfail_rows.py HOST_OUTPUT VIEW_EXPECTED
+Usage: signal_xfail_rows.py HOST_OUTPUT VIEW_EXPECTED
 
 HOST_OUTPUT is what user_payload's `signal_xfail_probe_alone` printed under
 qemu-aarch64 on the host; VIEW_EXPECTED is the linux_file view, which holds

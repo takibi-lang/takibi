@@ -1033,7 +1033,7 @@ linuxcheck: linuxbuild compiler-fuzz
 	@# than the kernel's line in the view.
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) --no-print-directory $(KERNEL_SIGNAL_XFAIL_LINUX_ELF)
 	@qemu-aarch64 $(KERNEL_SIGNAL_XFAIL_LINUX_ELF) >$(KERNEL_SIGNAL_XFAIL_LINUX_ELF).host
-	@python3 scripts/check_signal_xfail_rows.py $(KERNEL_SIGNAL_XFAIL_LINUX_ELF).host \
+	@python3 scripts/signal_xfail_rows.py $(KERNEL_SIGNAL_XFAIL_LINUX_ELF).host \
 		kernel/tests/common/views/linux_file.expected
 	@bash scripts/lane_timing.sh end linuxcheck 0
 

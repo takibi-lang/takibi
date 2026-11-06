@@ -2181,7 +2181,7 @@ fn signal_conformance_probe() !{unsafe} {
  * does, one line per row; Linux's answer is the first text. The linux_file
  * view holds the kernel's present answer, and `make linuxcheck` runs
  * `signal_xfail_probe_alone` under qemu-aarch64 and requires each of its
- * lines to differ from the view's (scripts/check_signal_xfail_rows.py), so
+ * lines to differ from the view's (scripts/signal_xfail_rows.py), so
  * a row that starts passing on the kernel fails its view and is flipped to
  * a conformance row when its issue closes. */
 const SIGSEGV: usize = 11;
