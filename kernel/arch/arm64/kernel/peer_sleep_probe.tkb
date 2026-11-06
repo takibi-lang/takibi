@@ -80,6 +80,12 @@ private fn peer_sleep_competitor() {
                 PEER_SLEEP_COMPETITOR, 0, 0, 0) != 1) {
         polls = polls + 1;
     }
+    // GitHub issue #904: a competitor that ran out of polls left CPU 1
+    // before the experiment ended; say so, and exit nonzero so the
+    // sleeper's wait4 check fails too.
+    if (polls >= PEER_SLEEP_COMPETITOR_POLLS) {
+        peer_sleep_fail(bs"peer-sleep: the competitor ran out of polls before the end\n");
+    }
     svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
 }
 

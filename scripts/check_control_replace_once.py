@@ -42,6 +42,29 @@ def first_occurrence_calls(source: str) -> list[int]:
     return sorted(lines)
 
 
+def _has_len_call(node) -> bool:
+    return any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+               and n.func.id == "len" for n in ast.walk(node))
+
+
+def splice_calls(source: str) -> list[int]:
+    """GitHub issue #904: `text[:at] + new + text[at + len(old):]`, a patch
+    at a position found by index/find, retargets as silently as
+    str.replace(..., 1) when an earlier copy appears."""
+    lines = []
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)):
+            continue
+        subs = [n for n in ast.walk(node) if isinstance(n, ast.Subscript)
+                and isinstance(n.slice, ast.Slice)]
+        head = any(s.slice.lower is None and s.slice.upper is not None for s in subs)
+        tail = any(s.slice.lower is not None and s.slice.upper is None
+                   and _has_len_call(s.slice.lower) for s in subs)
+        if head and tail:
+            lines.append(node.lineno)
+    return sorted(set(lines))
+
+
 def problems(files: dict[str, str]) -> list[str]:
     found = []
     for name, source in sorted(files.items()):
@@ -50,6 +73,10 @@ def problems(files: dict[str, str]) -> list[str]:
         for line in first_occurrence_calls(source):
             found.append(f"scripts/{name}:{line}: str.replace(..., 1) in a control; "
                          "use control_patch.replace_once (GitHub issue #845)")
+        for line in splice_calls(source):
+            found.append(f"scripts/{name}:{line}: a splice at a found position in a "
+                         "control; use control_patch.replace_once or "
+                         "replace_in_function (GitHub issue #904)")
     return found
 
 
@@ -71,6 +98,12 @@ def main() -> int:
     planted = {"planted_controls.py": "text = 'a'\ntext = text.replace('a', 'b', 1)\n"}
     if not problems(planted):
         print("FAIL control-replace-once: planted str.replace(..., 1) passed")
+        return 1
+    # #904: a splice at a found position is caught too.
+    spliced = {"spliced_controls.py":
+               "at = text.index(old)\ntext = text[:at] + new + text[at + len(old):]\n"}
+    if not problems(spliced):
+        print("FAIL control-replace-once: planted splice passed")
         return 1
     # Positive control: the helper call is accepted.
     clean = {"clean_controls.py":
@@ -94,7 +127,7 @@ def main() -> int:
         return 1
     report_pass("control-replace-once",
                 f"{len(files) - len(EXEMPT)} control scripts patch through replace_once; "
-                f"{len(EXEMPT)} exempt with a reason; 4 self-controls",
+                f"{len(EXEMPT)} exempt with a reason; 5 self-controls",
                 scripts=len(files))
     return 0
 

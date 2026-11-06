@@ -14,6 +14,15 @@ the WORKLOAD_PROGRESS syscall must either
     saying what ends it instead (a kernel answer that is guaranteed, or a
     persistent worker that is meant never to stop).
 
+A counted loop must also NAME its failure when the count runs out
+(GitHub issue #904): either a branch in the body that tests the count
+against the bound calls something with a byte-string literal (a `*_fail`
+or `*_say` helper that prints the line and exits), or the statement right
+after the loop is an `if` whose block does. Without one a lost report
+ends the loop silently and the fixture carries on as if it had its
+answer. `// poll-bound-quiet: <reason>` above the `while` says why a quiet
+end is right instead.
+
 `for` loops over a range are bounded by construction and are not looked at.
 Comments and string literals are masked before matching. There are no
 WORKLOAD_PROGRESS callers under linux_user/.
@@ -47,7 +56,7 @@ def loops(masked: str):
         while j < len(masked) and depth:
             depth += {"{": 1, "}": -1}.get(masked[j], 0)
             j += 1
-        yield match.start(), condition, masked[brace + 1:j - 1]
+        yield match.start(), condition, masked[brace + 1:j - 1], brace + 1, j
 
 
 def counted(condition: str, body: str) -> bool:
@@ -58,13 +67,50 @@ def counted(condition: str, body: str) -> bool:
     return False
 
 
+QUIET = re.compile(r"//\s*poll-bound-quiet:\s*\S")
+BYTES = re.compile(r'\w+\(\s*bs"')
+
+
+def block_after(masked: str, at: int) -> tuple[int, int] | None:
+    """(start, end) of the `{...}` block of an `if` that is the first
+    statement at or after `at`, else None."""
+    m = re.compile(r"\s*if\s*\(").match(masked, at)
+    if not m:
+        return None
+    depth, i = 1, m.end()
+    while i < len(masked) and depth:
+        depth += {"(": 1, ")": -1}.get(masked[i], 0)
+        i += 1
+    brace = masked.find("{", i)
+    if brace < 0:
+        return None
+    depth, j = 1, brace + 1
+    while j < len(masked) and depth:
+        depth += {"{": 1, "}": -1}.get(masked[j], 0)
+        j += 1
+    return brace, j
+
+
+def names_failure(source: str, masked: str, condition: str, body: str,
+                  body_start: int, end: int) -> bool:
+    """A counted loop's bound reaches a printed, named failure."""
+    names = re.findall(r"\b([a-z_][a-z0-9_]*)\s*=\s*\1\s*\+\s*1\b", body)
+    for name in names:
+        for m in re.finditer(rf"\bif\s*\(\s*{name}\s*>=\s*[A-Z][A-Z0-9_]+\s*\)", body):
+            inner = block_after(masked, body_start + m.start())
+            if inner and BYTES.search(source[inner[0]:inner[1]]):
+                return True
+    after = block_after(masked, end)
+    return bool(after and BYTES.search(source[after[0]:after[1]]))
+
+
 def problems(files: dict[str, str]) -> tuple[list[str], int]:
     found, examined = [], 0
     for path, source in sorted(files.items()):
         masked = code_skeleton(source)
         skeleton = masked.splitlines()
         lines = source.splitlines()
-        for offset, condition, body in loops(masked):
+        for offset, condition, body, body_start, end in loops(masked):
             if SYSCALL not in condition and SYSCALL not in body:
                 continue
             examined += 1
@@ -74,7 +120,15 @@ def problems(files: dict[str, str]) -> tuple[list[str], int]:
             while k >= 0 and lines[k].strip() and not skeleton[k].strip():
                 block.append(lines[k])
                 k -= 1
-            if counted(condition, body) or any(ANNOTATION.search(c) for c in block):
+            if any(ANNOTATION.search(c) for c in block):
+                continue
+            if counted(condition, body):
+                if (names_failure(source, masked, condition, body, body_start, end)
+                        or any(QUIET.search(c) for c in block)):
+                    continue
+                found.append(f"{path}:{line}: a counted {SYSCALL} poll ends silently at its "
+                             "bound: no named failure line in a bound branch or right after "
+                             "the loop, and no `// poll-bound-quiet:` reason (GitHub issue #904)")
                 continue
             found.append(f"{path}:{line}: a loop polls {SYSCALL} with no count bound and no "
                          "`// poll-bound:` reason above it (GitHub issue #844)")
@@ -102,8 +156,11 @@ def main() -> int:
         "answer compare": (f"fn f() {{\n    while ({poll} < 4) {{ nap(); }}\n}}\n", 1),
         "counter in comment": (f"fn f() {{\n    while ({poll} == 0) {{ // polls = polls + 1; polls < LIMIT\n    }}\n}}\n", 1),
         "reason in a string": (f"fn f() {{\n    let s = \"// poll-bound: no\";\n    while ({poll} == 0) {{ }}\n}}\n", 1),
-        "counted": (f"fn f() {{ let mut polls: usize = 0;\n    while (polls < LIMIT && {poll} == 0) {{ polls = polls + 1; }}\n}}\n", 0),
-        "counted in body": (f"fn f() {{ let mut polls: usize = 0;\n    while ({poll} == 0) {{\n        polls = polls + 1;\n        if (polls >= LIMIT) {{ fail(); }}\n    }}\n}}\n", 0),
+        "counted": (f"fn f() {{ let mut polls: usize = 0;\n    while (polls < LIMIT && {poll} == 0) {{ polls = polls + 1; }}\n    if (polls >= LIMIT) {{ x_fail(bs\"x: lost\\n\"); }}\n}}\n", 0),
+        "counted in body": (f"fn f() {{ let mut polls: usize = 0;\n    while ({poll} == 0) {{\n        polls = polls + 1;\n        if (polls >= LIMIT) {{ x_say(bs\"x: lost\\n\"); }}\n    }}\n}}\n", 0),
+        "counted, silent": (f"fn f() {{ let mut polls: usize = 0;\n    while (polls < LIMIT && {poll} == 0) {{ polls = polls + 1; }}\n    exit(0);\n}}\n", 1),
+        "counted, unnamed branch": (f"fn f() {{ let mut polls: usize = 0;\n    while ({poll} == 0) {{\n        polls = polls + 1;\n        if (polls >= LIMIT) {{ fail(); }}\n    }}\n}}\n", 1),
+        "counted, quiet reason": (f"fn f() {{ let mut polls: usize = 0;\n    // poll-bound-quiet: the parent reports\n    while (polls < LIMIT && {poll} == 0) {{ polls = polls + 1; }}\n}}\n", 0),
         "annotated": (f"fn f() {{\n    // poll-bound: the kernel answers 2 within one call\n    while ({poll} != 2) {{ }}\n}}\n", 0),
     }
     for name, (text, wanted) in controls.items():

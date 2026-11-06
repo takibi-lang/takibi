@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Mutation controls for the trusted current-process witness boundary."""
 
-from control_patch import replace_once
+from control_patch import replace_in_function, replace_once
 from check_process_running_mints import ROOT, problems
 from pass_line import report_pass
 
@@ -58,11 +58,9 @@ fn unreviewed(owner: borrow ScheduledProcessOwner[process],
     for function in ['scheduled_process_finish_clone', 'scheduled_process_cancel_clone',
                      'scheduled_process_yield', 'scheduled_process_block',
                      'scheduled_process_exit', 'scheduled_process_release_every_process']:
-        start = original.index('fn ' + function + '(')
-        marker = original.index('changes_witness_ProcessCurrent', start)
-        # Cut at the found position: unique by construction.
-        changed = (original[:marker] +
-                   original[marker + len('changes_witness_ProcessCurrent'):])
+        # GitHub issue #904: inside that function only, never a later copy.
+        changed = replace_in_function(original, 'fn ' + function + '(',
+                                      'changes_witness_ProcessCurrent', '')
         assert problems({**sources, path: changed}), function
         controls[function] = changed
     assert not problems({**sources, added:

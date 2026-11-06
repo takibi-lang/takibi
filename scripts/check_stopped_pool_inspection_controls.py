@@ -3,6 +3,7 @@
 import pathlib
 import tempfile
 
+from control_patch import replace_in_function
 from check_stopped_pool_inspection import MINTS, ROOT, problems
 from pass_line import CaseCount, report_pass
 
@@ -45,13 +46,9 @@ def main():
                 target.write_text((ROOT / relative).read_text(encoding='ascii'), encoding='ascii')
             target = root / file
             source = target.read_text(encoding='ascii')
-            position = source.index(start)
-            tail = source[position:]
-            # GitHub issue #845: the first copy after `start`, required to
-            # lie inside that function so a copy elsewhere is never patched.
-            at = tail.index(old)
-            assert at < tail.index('\n}\n'), (start, old)
-            target.write_text(source[:position] + tail[:at] + new + tail[at + len(old):],
+            # GitHub issue #845/#904: the one copy inside that function, so a
+            # copy elsewhere is never patched.
+            target.write_text(replace_in_function(source, start, old, new),
                               encoding='ascii')
             found = problems(root)
             assert any(diagnostic in item for item in found), (start, old, found)
