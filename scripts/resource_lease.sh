@@ -184,8 +184,24 @@ resource_lease_acquire() {
 # Board runners must keep using resource_lease_acquire directly: their
 # descendants are part of the physical-device ownership boundary.
 resource_lease_run_suite() {
-    local target="$1"
+    local target="$1" root
     shift
+    # GitHub issue #1396: a suite (allcheck, cicheck*) belongs to the
+    # coordinator's land. A territory worker that ran cicheck-qemu in its
+    # worktree held the suite lease for 54 minutes, and a land went red
+    # waiting for it. A worktree under .claude/worktrees/ is a worker's;
+    # TAKIBI_ALLOW_WORKER_SUITE=1 is for this script's own controls.
+    root="${TAKIBI_SUITE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+    case "$root" in
+        */.claude/worktrees/*)
+            if [ "${TAKIBI_ALLOW_WORKER_SUITE:-0}" != 1 ]; then
+                echo "FAIL $target: refused in a worker worktree ($root); suites run" \
+                     "only in the coordinator's land (#1396). Run the lanes you need" \
+                     "by name instead." >&2
+                return 1
+            fi
+            ;;
+    esac
     resource_lease_acquire suite "$target" || return 1
     env -u TAKIBI_RESOURCE_LEASE_HELD "$@" 7>&-
 }

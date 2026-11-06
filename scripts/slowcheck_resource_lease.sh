@@ -163,8 +163,23 @@ esac
 # Unlike a board child, an aggregate child must not retain the suite lease
 # after its runner dies. It may keep doing harmless build work, but another
 # clone must not wait for an aggregate that no longer exists.
+# GitHub issue #1396: a suite is refused in a worker worktree, before it
+# takes the lease, and runs in any other checkout.
+refused_log="$tmp_dir/worker-suite.log"
+if env -u TAKIBI_RESOURCE_LEASE_HELD TAKIBI_SESSION_REGISTRY="$registry" \
+    TAKIBI_SESSION=agent-worker TAKIBI_SUITE_ROOT=/repo/.claude/worktrees/agent-x \
+    bash -c ". '$helper'; resource_lease_run_suite cicheck-qemu true" 2>"$refused_log"; then
+    fail "a suite ran in a worker worktree"
+fi
+grep -F "refused in a worker worktree" "$refused_log" >/dev/null \
+    && claim || fail "the worker-worktree refusal did not say why"
+env -u TAKIBI_RESOURCE_LEASE_HELD TAKIBI_SESSION_REGISTRY="$registry" \
+    TAKIBI_SESSION=agent-main TAKIBI_SUITE_ROOT=/repo \
+    bash -c ". '$helper'; resource_lease_run_suite cicheck-qemu true" \
+    && claim || fail "a suite was refused outside a worker worktree"
+
 env -u TAKIBI_RESOURCE_LEASE_HELD \
-    TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_SESSION=agent-suite \
+    TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_SESSION=agent-suite TAKIBI_SUITE_ROOT=/repo \
     bash -c ". '$helper'; resource_lease_run_suite allcheck \
         bash -c 'echo \$\$ >\"$tmp_dir/suite-child.pid\"; exec sleep 30'" &
 suite_runner=$!
