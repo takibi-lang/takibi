@@ -87,7 +87,10 @@ grep -q "abandoned.*did not finish" <<<"$summary" \
 # scripts/lane_cpu_shell.sh. A line whose CPU cannot be read leaves the
 # receipt without CPU, which the budget refuses, never a zero.
 timing="$work/cpu"
-spin='end=$((SECONDS + 2)); while [ "$SECONDS" -lt "$end" ]; do :; done'
+# A fixed amount of work, never a fixed wall time: inside a loaded allcheck a
+# two-second spin got 0.7 s of CPU and failed the land of b70bc4c8. About 1 s
+# of CPU on this host whatever else runs.
+spin='for ((i = 0; i < 400000; i++)); do :; done'
 TAKIBI_LANE_TIMING_DIR="$timing" bash "$RUN_LANE" spinner bash -c "$spin" >/dev/null \
     && claim || fail "the spinning lane failed"
 TAKIBI_LANE_TIMING_DIR="$timing" bash "$RUN_LANE" sleeper sleep 2 >/dev/null \
@@ -107,9 +110,12 @@ import json, pathlib, sys
 d = pathlib.Path(sys.argv[1])
 cpu = {r["lane"]: r.get("cpu") for r in
        (json.loads(p.read_text().strip()) for p in d.glob("*.jsonl"))}
-assert 1.5 <= cpu["spinner"] <= 3.0, cpu
 assert cpu["sleeper"] < 0.5, cpu
-assert 1.5 <= cpu["shelled"] <= 3.0, cpu
+# Load-independent: the work is fixed, so only a broken measurement (a zero,
+# or the sleeper's figure) falls under these bounds.
+for lane in ("spinner", "shelled"):
+    assert 0.2 <= cpu[lane] <= 20.0, cpu
+    assert cpu[lane] > 4 * cpu["sleeper"], cpu
 assert cpu["unread"] is None, cpu
 PY
 [ ! -e "$timing/shelled.cpu" ] && claim || fail "end left the lane's CPU lines behind"
