@@ -14875,6 +14875,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      consumed on only some paths ("maybe-held") is rejected too. *)
   List.iter (fun (call_loc, _file, _line, caller, callee, binding, definite) ->
     let path =
+      (* An indirect call made in the span holder itself has no resolved
+         target to close over: its own row decides (maintainer, 2026-11-06,
+         #1350 (a)+(d)). *)
+      match StringMap.find_opt (loc_key call_loc) !resolved_indirect_call_effects with
+      | Some (Some effects) when List.mem "may_block" effects ->
+          Some "<indirect call !{may_block}>"
+      | Some None -> Some "unknown effects: <indirect call>"
+      | Some (Some _) -> None
+      | None ->
       if StringSet.mem callee (closed_effect "may_block") then
         Some (String.concat " -> " (Option.value
           (find_effect_path "may_block" StringSet.empty callee)

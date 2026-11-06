@@ -19658,6 +19658,27 @@ variant Carry1350 { Stay; Go(PreemptOff[0]); }
     Carry1350::Stay => {}
     Carry1350::Go(inner) => { span_end(inner); }
   }
+}|}) ();
+      (* An indirect call written in the span holder: its own row decides. *)
+      expect_type_error "PreemptOff 'span' is held"
+        (base ^ {|fn direct_blocking1350(h: fn !{may_block}(u8) -> void) {
+  let span = span_begin();
+  h(1);
+  span_end(span);
+}|}) ();
+      expect_type_error "unknown effects: <indirect call>"
+        (base ^ {|fn direct_unknown1350(h: fn(u8) -> void) {
+  let span = span_begin();
+  h(1);
+  span_end(span);
+}|}) ();
+      expect_ok (base ^ {|fn direct_known1350(h: fn !{}(u8) -> void, g: fn !{no_handler_lock}(u8) -> void) {
+  let span = span_begin();
+  h(1);
+  g(2);
+  span_end(span);
+  let late: fn(u8) -> void = h;
+  late(3);
 }|}) ());
 
   Alcotest.test_case "held guard report follows scope, moves and borrowed parameters" `Quick
