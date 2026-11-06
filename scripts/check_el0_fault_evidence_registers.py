@@ -17,10 +17,11 @@ el1_exception_evidence_from_frame must write esr_el1, far_el1, elr_el1 and
 spsr_el1 after its last call and before that branch.
 
 Usage: check_el0_fault_evidence_registers.py [FILE]   (default: user_entry.S)
-       check_el0_fault_evidence_registers.py --controls
 """
 import re
 import sys
+
+from pass_line import report_pass
 
 DEFAULT = "kernel/arch/arm64/kernel/user_entry.S"
 TARGET = "el1_exception_evidence_from_frame"
@@ -49,7 +50,9 @@ def blocks(text):
 
 
 def check(text):
+    """(errors, judged): judged counts evidence branches after an unmask."""
     errors = []
+    judged = 0
     for name, insns in blocks(text):
         unmasked = False
         restored = set()
@@ -64,11 +67,12 @@ def check(text):
             if m and m.group(1) in REGS:
                 restored.add(m.group(1))
             if re.match(r"b\s+" + TARGET + r"\b", ins) and unmasked:
+                judged += 1
                 missing = [r for r in REGS if r not in restored]
                 if missing:
                     errors.append(f"{name}: branches to {TARGET} after unmasking IRQs "
                                   f"without restoring {', '.join(missing)}")
-    return errors
+    return errors, judged
 
 
 GOOD = """
@@ -100,21 +104,16 @@ MASKED = """
 def controls():
     ok = True
     for name, text, want in (("restored", GOOD, 0), ("unrestored", BAD, 1), ("masked", MASKED, 0)):
-        got = len(check(text))
+        got = len(check(text)[0])
         if got != want:
             print(f"FAIL el0-fault-evidence-registers control {name}: {got} error(s), expected {want}")
             ok = False
-    if ok:
-        print("PASS el0-fault-evidence-registers controls: a restored block passes, "
-              "an unrestored one is refused, a masked path is not judged")
     return ok
 
 
 def main(argv):
-    if argv[1:2] == ["--controls"]:
-        return 0 if controls() else 1
     path = argv[1] if len(argv) > 1 else DEFAULT
-    errors = check(open(path).read())
+    errors, judged = check(open(path).read())
     for e in errors:
         print(f"ERROR el0-fault-evidence-registers: {path}: {e}")
     if errors:
@@ -122,8 +121,11 @@ def main(argv):
         return 1
     if not controls():
         return 1
-    print(f"PASS el0-fault-evidence-registers: {path}: every fail-stop after an unmasked call "
-          f"restores {', '.join(REGS)}")
+    report_pass("el0-fault-evidence-registers",
+                f"{path}: {judged} fail-stop branch(es) after an unmasked call "
+                f"restore {', '.join(REGS)}; planted restored, unrestored and "
+                "masked blocks are judged as expected",
+                branches=judged)
     return 0
 
 
