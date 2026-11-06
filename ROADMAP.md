@@ -195,7 +195,7 @@ this list is authorized; an item that reaches a decision is parked and the
 next one taken. The done record of the previous queue is in HISTORY.md
 (2026-10-25).
 
-Now, before band 0: #1366 (a stalled guest's CPU and process state in the lane archive; in progress 2026-11-05, the DDB BREAK fixed, the GDB snapshot to reuse the lane's endpoint), then #876 with it.
+Now, before band 0: #876 (its stalled-guest archive now holds every CPU's registers, DDB backtraces and process list since #1366, closed 2026-11-06).
 
 0. **Stop the silent growth (now).** The remaining `.tkb`-reading checks
    move to #987's call-graph table one by one (#567; the table names
