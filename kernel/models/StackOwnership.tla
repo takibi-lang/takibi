@@ -52,6 +52,14 @@
 (*   core take a stack this core still runs on. TLC reports StackSafety    *)
 (*   violated.                                                             *)
 (*                                                                         *)
+(* TICK_IDLE_RESETS = FALSE -- the stage 8 land's idle-loop stop (#638,  *)
+(*   #1381). Each core's idle stack has its own preempt word. The idle    *)
+(*   loop's start raises a span there (kernel_process_secondary_start)    *)
+(*   and resumes the process without ending it, so every idle entry must  *)
+(*   reset the word before the loop's next wfi asks it to be zero.        *)
+(*   kernel_idle_tick_reenter did not. TLC reports IdleWaitsUnraised      *)
+(*   violated.                                                             *)
+(*                                                                         *)
 (* The actions name no process: who is whose child is ParentOf, so the  *)
 (* same actions describe the model's two (or three) processes and every   *)
 (* process of a real run. StackOwnershipTrace.tla instantiates them with  *)
@@ -71,6 +79,8 @@ CONSTANTS
     WAKE_START_CHECKS_STACK,
     \* @type: Bool;
     PREEMPT_EL1_KEEPS_STACK,
+    \* @type: Bool;
+    TICK_IDLE_RESETS,
     \* @type: Set(Str);
     Cores,
     \* @type: Set(Str);
@@ -104,9 +114,12 @@ VARIABLES
     \* @type: Str -> Bool;
     interrupted, \* per core: inside an interrupt taken from EL0
     \* @type: Str -> Str;
-    reapPending \* per process: the exited child it was woken in wait4 to reap, or None
+    reapPending, \* per process: the exited child it was woken in wait4 to reap, or None
+    \* @type: Str -> Bool;
+    idleRaised  \* per core: its idle stack's preempt word holds a span (#1381)
 
-vars == <<state, current, reserved, stands, owner, interrupted, reapPending>>
+vars == <<state, current, reserved, stands, owner, interrupted, reapPending,
+          idleRaised>>
 
 \* "Blocked" is the parent in wait4 (ProcessWaitReason::ChildExit);
 \* "Napping" is any other block, here the child's nanosleep.
@@ -159,6 +172,8 @@ Init ==
     /\ owner = [p \in Procs |-> IF p = "parent" THEN "c0" ELSE None]
     /\ interrupted = [c \in Cores |-> FALSE]
     /\ reapPending = [p \in Procs |-> None]
+    \* kernel_idle_boot_reenter and the secondary entry reset the word.
+    /\ idleRaised = [c \in Cores |-> FALSE]
 
 ----------------------------------------------------------------------------
 (* Actions *)
@@ -172,7 +187,7 @@ CloneBegin(c, q) ==
     /\ state[q] = "Constructing"
     /\ reserved[c] = None
     /\ current' = [current EXCEPT ![c] = q]
-    /\ UNCHANGED <<state, reserved, stands, owner, interrupted, reapPending>>
+    /\ UNCHANGED <<state, reserved, stands, owner, interrupted, reapPending, idleRaised>>
 
 \* The child's frame is installed: it is Running and the parent Ready.
 CloneFinish(c) ==
@@ -181,7 +196,7 @@ CloneFinish(c) ==
     /\ ParentOf[current[c]] # None
     /\ state' = [state EXCEPT ![ParentOf[current[c]]] = "Ready",
                                ![current[c]] = "Running"]
-    /\ UNCHANGED <<current, reserved, stands, owner, interrupted, reapPending>>
+    /\ UNCHANGED <<current, reserved, stands, owner, interrupted, reapPending, idleRaised>>
 
 \* The exception return completes the physical switch: the core leaves the
 \* stack it stood on (releasing it unless it is the idle stack) and takes
@@ -197,7 +212,7 @@ SwitchComplete(c) ==
                    ELSE owner[p]]
     /\ stands' = [stands EXCEPT ![c] = current[c]]
     /\ interrupted' = [interrupted EXCEPT ![c] = FALSE]
-    /\ UNCHANGED <<state, current, reserved, reapPending>>
+    /\ UNCHANGED <<state, current, reserved, reapPending, idleRaised>>
 
 \* A core reserves a takeable Ready process as its successor. An idle core
 \* reserves from its idle stack; a core running a process reserves the
@@ -224,6 +239,11 @@ Reserve(c, p) ==
     /\ Takeable(p)
     /\ state' = [state EXCEPT ![p] = "Running"]
     /\ reserved' = [reserved EXCEPT ![c] = p]
+    \* #1381: from the idle loop (kernel_process_secondary_start) the span
+    \* is raised on the idle stack and never ended there: the start resumes
+    \* the process, and the idle stack is left with the word raised.
+    /\ idleRaised' = IF current[c] = None /\ stands[c] = Idle
+                     THEN [idleRaised EXCEPT ![c] = TRUE] ELSE idleRaised
     /\ UNCHANGED <<current, stands, owner, interrupted, reapPending>>
 
 \* The reserved successor becomes current on a core with no running
@@ -234,7 +254,7 @@ Commit(c) ==
        \/ current[c] # None /\ state[current[c]] = "Exited"
     /\ current' = [current EXCEPT ![c] = reserved[c]]
     /\ reserved' = [reserved EXCEPT ![c] = None]
-    /\ UNCHANGED <<state, stands, owner, interrupted, reapPending>>
+    /\ UNCHANGED <<state, stands, owner, interrupted, reapPending, idleRaised>>
 
 \* The reserved successor replaces a running current process, which is
 \* preempted (Ready), napping, or the parent blocking in wait4. The core
@@ -256,7 +276,7 @@ SwitchAway(c, how) ==
     /\ current' = [current EXCEPT ![c] = reserved[c]]
     /\ reserved' = [reserved EXCEPT ![c] = None]
     /\ interrupted' = [interrupted EXCEPT ![c] = FALSE]
-    /\ UNCHANGED <<stands, owner, reapPending>>
+    /\ UNCHANGED <<stands, owner, reapPending, idleRaised>>
 
 \* A deferred timer request may select another process from the child's
 \* clone return before the physical stack switch. The child's installed
@@ -275,7 +295,7 @@ CloneReschedule(c) ==
     /\ state' = [state EXCEPT ![current[c]] = "Ready"]
     /\ current' = [current EXCEPT ![c] = reserved[c]]
     /\ reserved' = [reserved EXCEPT ![c] = None]
-    /\ UNCHANGED <<stands, owner, interrupted, reapPending>>
+    /\ UNCHANGED <<stands, owner, interrupted, reapPending, idleRaised>>
 
 \* The parent calls wait4 before the child has exited and blocks with no
 \* successor. The core has no current process and still stands on the
@@ -287,7 +307,7 @@ Wait4Block(c) ==
     /\ WaitsForChild(current[c])
     /\ state' = [state EXCEPT ![current[c]] = "Blocked"]
     /\ current' = [current EXCEPT ![c] = None]
-    /\ UNCHANGED <<reserved, stands, owner, interrupted, reapPending>>
+    /\ UNCHANGED <<reserved, stands, owner, interrupted, reapPending, idleRaised>>
 
 \* A process naps with no successor, the same way.
 Nap(c) ==
@@ -296,14 +316,14 @@ Nap(c) ==
     /\ reserved[c] = None
     /\ state' = [state EXCEPT ![current[c]] = "Napping"]
     /\ current' = [current EXCEPT ![c] = None]
-    /\ UNCHANGED <<reserved, stands, owner, interrupted, reapPending>>
+    /\ UNCHANGED <<reserved, stands, owner, interrupted, reapPending, idleRaised>>
 
 \* The nap's deadline passes: the process is Ready, wherever its stack is.
 \* @type: (Str) => Bool;
 Wake(p) ==
     /\ state[p] = "Napping"
     /\ state' = [state EXCEPT ![p] = "Ready"]
-    /\ UNCHANGED <<current, reserved, stands, owner, interrupted, reapPending>>
+    /\ UNCHANGED <<current, reserved, stands, owner, interrupted, reapPending, idleRaised>>
 
 \* The child exits and becomes a zombie. A parent Blocked in wait4 is woken
 \* and left Ready with its continuation -- that parent and no other process.
@@ -326,7 +346,7 @@ ChildExit(c) ==
            /\ reapPending' = IF wakes THEN [reapPending EXCEPT ![parent] = child]
                                       ELSE reapPending
     /\ current' = [current EXCEPT ![c] = None]
-    /\ UNCHANGED <<reserved, stands, owner, interrupted>>
+    /\ UNCHANGED <<reserved, stands, owner, interrupted, idleRaised>>
 
 \* The same exit, when the parent is Blocked in wait4 and this core may run
 \* it: the parent is woken and reserved for this core at once, and a later
@@ -345,7 +365,7 @@ ChildExitStart(c) ==
            /\ state' = [state EXCEPT ![child] = "Exited", ![parent] = "Running"]
            /\ reserved' = [reserved EXCEPT ![c] = parent]
            /\ reapPending' = [reapPending EXCEPT ![parent] = child]
-    /\ UNCHANGED <<current, stands, owner, interrupted>>
+    /\ UNCHANGED <<current, stands, owner, interrupted, idleRaised>>
 
 \* A core with no current process moves to its idle stack and releases the
 \* stack it stood on: an exited process's (kernel_process_stack_idle_complete),
@@ -360,6 +380,8 @@ IdleEnter(c) ==
     /\ EXIT_IDLES \/ state[stands[c]] # "Exited"
     /\ owner' = [owner EXCEPT ![stands[c]] = None]
     /\ stands' = [stands EXCEPT ![c] = Idle]
+    \* kernel_idle_exit_reenter, kernel_idle_block_reenter: the reset (#1381).
+    /\ idleRaised' = [idleRaised EXCEPT ![c] = FALSE]
     /\ UNCHANGED <<state, current, reserved, interrupted, reapPending>>
 
 \* The parent finishes wait4 by reaping the zombie q: woken from its wait
@@ -373,7 +395,7 @@ Wait4Reap(c, q) ==
     /\ owner[q] = None
     /\ state' = [state EXCEPT ![q] = "Reaped"]
     /\ reapPending' = [p \in Procs |-> IF reapPending[p] = q THEN None ELSE reapPending[p]]
-    /\ UNCHANGED <<current, reserved, stands, owner, interrupted>>
+    /\ UNCHANGED <<current, reserved, stands, owner, interrupted, idleRaised>>
 
 \* A running process stops being this core's current process without
 \* exiting: an excluded process at a syscall return
@@ -387,7 +409,7 @@ LeaveBegin(c) ==
     /\ stands[c] # Idle
     /\ LEAVE_CHECKS_STACK => stands[c] = current[c]
     /\ current' = [current EXCEPT ![c] = None]
-    /\ UNCHANGED <<state, reserved, stands, owner, interrupted, reapPending>>
+    /\ UNCHANGED <<state, reserved, stands, owner, interrupted, reapPending, idleRaised>>
 
 \* An interrupt taken from EL0: its entry moves the core to its IRQ stack
 \* and releases the interrupted process's stack, which stays current and
@@ -400,7 +422,7 @@ InterruptDepart(c) ==
     /\ owner' = [owner EXCEPT ![current[c]] = None]
     /\ stands' = [stands EXCEPT ![c] = Idle]
     /\ interrupted' = [interrupted EXCEPT ![c] = TRUE]
-    /\ UNCHANGED <<state, current, reserved, reapPending>>
+    /\ UNCHANGED <<state, current, reserved, reapPending, idleRaised>>
 
 \* GitHub issue #992: a tick taken at EL1, inside a syscall the current
 \* process runs on its own stack, switches to the reserved successor. The
@@ -426,7 +448,7 @@ PreemptEL1(c) ==
     /\ reserved' = [reserved EXCEPT ![c] = None]
     /\ owner' = IF PREEMPT_EL1_KEEPS_STACK THEN owner
                 ELSE [owner EXCEPT ![current[c]] = None]
-    /\ UNCHANGED <<stands, interrupted, reapPending>>
+    /\ UNCHANGED <<stands, interrupted, reapPending, idleRaised>>
 
 \* Inside that interrupt, the tick finds the process may no longer run
 \* here and nothing else may: it is made Ready, its stack already free, and
@@ -439,6 +461,10 @@ TickLeave(c) ==
     /\ state' = [state EXCEPT ![current[c]] = "Ready"]
     /\ current' = [current EXCEPT ![c] = None]
     /\ interrupted' = [interrupted EXCEPT ![c] = FALSE]
+    \* kernel_idle_tick_reenter resets the idle stack's word (#1381);
+    \* TICK_IDLE_RESETS = FALSE is the stage 8 land's missing reset.
+    /\ idleRaised' = IF TICK_IDLE_RESETS THEN [idleRaised EXCEPT ![c] = FALSE]
+                     ELSE idleRaised
     /\ UNCHANGED <<reserved, stands, owner, reapPending>>
 
 \* On its idle stack, kernel_process_stack_idle_yield makes Ready the
@@ -451,6 +477,8 @@ LeaveComplete(c) ==
     /\ state' = [state EXCEPT ![stands[c]] = "Ready"]
     /\ owner' = [owner EXCEPT ![stands[c]] = None]
     /\ stands' = [stands EXCEPT ![c] = Idle]
+    \* kernel_idle_yield_reenter: the reset (#1381).
+    /\ idleRaised' = [idleRaised EXCEPT ![c] = FALSE]
     /\ UNCHANGED <<current, reserved, interrupted, reapPending>>
 
 Next ==
@@ -518,6 +546,7 @@ TypeOK ==
     /\ \A p \in Procs : owner[p] \in Cores \union {None}
     /\ \A c \in Cores : interrupted[c] \in BOOLEAN
     /\ \A p \in Procs : reapPending[p] \in Procs \union {None}
+    /\ \A c \in Cores : idleRaised[c] \in BOOLEAN
 
 \* #601's safety property. A core stands only on a stack it owns; since
 \* `owner` names one core per stack, no stack is used by two cores at once.
@@ -563,6 +592,15 @@ NoLostWakeup ==
     \A p \in Procs :
         state[p] = "Blocked" => \A q \in ChildrenOf(p) : state[q] # "Exited"
 
+\* GitHub issue #1381: a core in its idle loop with nothing reserved -- the
+\* wfi, whose blockable check asks the idle stack's preempt word to be zero
+\* -- finds no span raised there. Every idle entry resets the word; the
+\* tick's did not (#638 stage 8 land).
+IdleWaitsUnraised ==
+    \A c \in Cores :
+        (current[c] = None /\ reserved[c] = None /\ stands[c] = Idle)
+            => ~idleRaised[c]
+
 \* The one invariant Apalache's shallow check is given: both defects that
 \* break a safety property are found through it.
 CoreInvariants == RunningMatchesCores /\ StartsOnFreeStack
@@ -579,29 +617,33 @@ TwoProcs ==
     /\ ParentOf = [p \in {"parent", "child"} |-> IF p = "child" THEN "parent" ELSE "none"]
 CInitFixed ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
-    /\ PREEMPT_EL1_KEEPS_STACK = TRUE
+    /\ PREEMPT_EL1_KEEPS_STACK = TRUE /\ TICK_IDLE_RESETS = TRUE
     /\ TwoProcs
 CInitOther ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
-    /\ PREEMPT_EL1_KEEPS_STACK = TRUE
+    /\ PREEMPT_EL1_KEEPS_STACK = TRUE /\ TICK_IDLE_RESETS = TRUE
     /\ Cores = {"c0", "c1"}
     /\ Procs = {"parent", "child", "other"}
     /\ ParentOf = [p \in {"parent", "child", "other"} |-> IF p = "child" THEN "parent" ELSE "none"]
 CInitExitWaits ==
     EXIT_IDLES = FALSE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
-    /\ PREEMPT_EL1_KEEPS_STACK = TRUE
+    /\ PREEMPT_EL1_KEEPS_STACK = TRUE /\ TICK_IDLE_RESETS = TRUE
     /\ TwoProcs
 CInitLeaveUnchecked ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = FALSE /\ WAKE_START_CHECKS_STACK = TRUE
-    /\ PREEMPT_EL1_KEEPS_STACK = TRUE
+    /\ PREEMPT_EL1_KEEPS_STACK = TRUE /\ TICK_IDLE_RESETS = TRUE
     /\ TwoProcs
 CInitPreemptReleases ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
-    /\ PREEMPT_EL1_KEEPS_STACK = FALSE
+    /\ PREEMPT_EL1_KEEPS_STACK = FALSE /\ TICK_IDLE_RESETS = TRUE
     /\ TwoProcs
 CInitWakeStartUnchecked ==
     EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = FALSE
-    /\ PREEMPT_EL1_KEEPS_STACK = TRUE
+    /\ PREEMPT_EL1_KEEPS_STACK = TRUE /\ TICK_IDLE_RESETS = TRUE
+    /\ TwoProcs
+CInitTickIdleKeeps ==
+    EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
+    /\ PREEMPT_EL1_KEEPS_STACK = TRUE /\ TICK_IDLE_RESETS = FALSE
     /\ TwoProcs
 
 =============================================================================

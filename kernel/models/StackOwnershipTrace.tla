@@ -15,8 +15,8 @@
 (* from the model.                                                         *)
 (*                                                                         *)
 (* Observed: state, owner, current, stands. Not observed, and so chosen by *)
-(* TLC among every value the model allows: reserved, interrupted and       *)
-(* reapPending. Each locked hold that changes an observed variable is one  *)
+(* TLC among every value the model allows: reserved, interrupted,         *)
+(* reapPending and idleRaised. Each locked hold that changes an observed variable is one  *)
 (* step of the model; a hold that changes nothing observed is a stutter;   *)
 (* an unlocked hold may change nothing observed at all (RecordLifetime's   *)
 (* REMOVE_UNDER_LOCK, and every other change the model orders by the run   *)
@@ -43,6 +43,7 @@ CONSTANTS
     LEAVE_CHECKS_STACK,
     WAKE_START_CHECKS_STACK,
     PREEMPT_EL1_KEEPS_STACK,
+    TICK_IDLE_RESETS,
     \* An action left out of the next-state relation, or "none": the
     \* negative control that a path the model lacked fails a passing run.
     WITHOUT,
@@ -53,10 +54,12 @@ CONSTANTS
 
 VARIABLES
     state, current, reserved, stands, owner, interrupted, reapPending,
+    idleRaised,
     l,      \* the index in Trace of the last hold taken in
     act     \* the model action the last step was, for the report
 
-vars == <<state, current, reserved, stands, owner, interrupted, reapPending>>
+vars == <<state, current, reserved, stands, owner, interrupted, reapPending,
+          idleRaised>>
 
 \* TraceParent is each process's parent over the whole window: the link its
 \* lines report. The model's ParentOf is a constant, so a window in which a
@@ -85,6 +88,8 @@ Init ==
     /\ stands = Trace[1].stands
     /\ reserved = [c \in TraceCores |-> None]
     /\ reapPending = [p \in TraceProcs |-> None]
+    \* Not observed, and no action's guard reads it: any start matches.
+    /\ idleRaised = [c \in TraceCores |-> FALSE]
     /\ interrupted = [c \in TraceCores |->
                         /\ Trace[1].current[c] # None
                         /\ Trace[1].stands[c] = Idle
