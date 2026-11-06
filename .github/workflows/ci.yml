@@ -90,8 +90,8 @@ jobs:
       - name: Toolchain packages
         run: |
           bash scripts/run_lane.sh ci-apt bash -euo pipefail -c '
-            # GitHub issue #1359: clang-19 comes from the runner image's
-            # Ubuntu archive, verified by apt's signed index, not from an
+            # GitHub issue #1359: clang-19 comes from the runner image
+            # Ubuntu archive, verified by the signed apt index, not from an
             # unpinned https://apt.llvm.org/llvm.sh run as root.
             sudo apt-get update
             # ipxe-qemu carries efi-virtio.rom. It arrives as a Recommends

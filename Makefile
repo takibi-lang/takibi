@@ -2193,6 +2193,7 @@ kernelbuild-qemu-debug: build
 .PHONY: kernel-lib-check
 kernel-lib-check:
 	python3 scripts/check_pinned_downloads.py
+	python3 scripts/check_workflow_shell.py
 	python3 scripts/check_kernel_lib_limitations_header.py $(KERNEL_DIR)/lib $(KERNEL_DIR)/kernel $(KERNEL_DIR)/net
 	python3 scripts/check_diagnostic_event_ids.py
 	python3 scripts/check_flag_guarded_fields.py $(KERNEL_DIR)
