@@ -6658,15 +6658,8 @@ private fn syscall_signal_resume(current_authority: ProcessCurrent[current_proce
                                  entry: SignalEntry)
         -> SyscallAction !{unsafe} {
     match signal_deliver(current_authority, here, entry) {
-        SignalDelivery::Continue(value) => {
+        SignalDelivery::Resume(value) => {
             process_current_end(current_authority); return SyscallAction::Resume(value);
-        }
-        SignalDelivery::Handler(signum) => {
-            process_current_end(current_authority); return SyscallAction::Resume(signum);
-        }
-        SignalDelivery::LeftPending => {
-            process_current_end(current_authority);
-            return SyscallAction::Resume(frame_general(here, 0));
         }
         SignalDelivery::Terminate(end) => {
             return kernel_syscall_exit_current_process(current_authority, end);
@@ -6684,15 +6677,15 @@ must_use variant SignalEntry {
     ReturnToUser;
 }
 
-// What signal_deliver decided for the frame. Continue: no handler, x0 is
-// the value; Handler: the frame now enters the handler, x0 is the signal;
-// LeftPending: a caught signal stays pending for the syscall the frame
-// resumes at; Terminate: the process ends so, which the caller carries
-// out on its own exit path.
+// What signal_deliver decided for the frame. Resume: the frame resumes
+// with x0 the value -- the result when no handler runs, the signal number
+// when the frame now enters a handler, and the frame's own x0 when a caught
+// signal stays pending for the syscall the frame resumes at. Terminate: the
+// process ends so, which the caller carries out on its own exit path.
+// GitHub issue #1379: one Resume arm instead of three (Continue, Handler,
+// LeftPending) that every caller treated alike, to win back #1000's text.
 must_use variant SignalDelivery {
-    Continue(usize);
-    Handler(usize);
-    LeftPending;
+    Resume(usize);
     Terminate(ProcessEnd);
 }
 
@@ -6755,7 +6748,7 @@ fn signal_deliver(current_authority: borrow ProcessCurrent[current_process, Proc
         ProcessSignalPendingResult::Missing => {
             // A syscall's return ends an rt_sigsuspend mask swap here.
             if (at_return == false) { kernel_process_current_suspend_mask_restore(); }
-            return SignalDelivery::Continue(value);
+            return SignalDelivery::Resume(value);
         }
         ProcessSignalPendingResult::Pending(taken) => {
             // At a return to user, a frame resuming at an SVC keeps the
@@ -6763,14 +6756,14 @@ fn signal_deliver(current_authority: borrow ProcessCurrent[current_process, Proc
             // kernel_signal_return_deliver).
             if (at_return && signal_resumes_at_svc(current_authority, here)) {
                 taken_signal_restore(taken);
-                return SignalDelivery::LeftPending;
+                return SignalDelivery::Resume(value);
             }
             if (signal_handler_enter(current_authority, here, value, taken) == false) {
                 // Linux forces SIGSEGV when the frame cannot be written.
                 let lost: usize = taken_signal_delivered(taken);
                 return SignalDelivery::Terminate(process_end_signaled(LINUX_SIGSEGV));
             }
-            return SignalDelivery::Handler(taken_signal_delivered(taken));
+            return SignalDelivery::Resume(taken_signal_delivered(taken));
         }
     }
 }
@@ -6871,10 +6864,10 @@ fn kernel_signal_return_deliver(frame: borrow FrameRef[process, ExceptionLevel::
         ProcessRunningHere::Idle => { return; }
     };
     match signal_deliver(current_authority, frame, SignalEntry::ReturnToUser) {
-        SignalDelivery::Continue(value) => { process_current_end(current_authority); }
-        SignalDelivery::LeftPending => { process_current_end(current_authority); }
-        SignalDelivery::Handler(signum) => {
-            frame_general_set(frame, 0, signum);
+        SignalDelivery::Resume(value) => {
+            // At a return to user, value is the frame's own x0 unless a
+            // handler was entered, so the store changes x0 only for one.
+            frame_general_set(frame, 0, value);
             process_current_end(current_authority);
         }
         SignalDelivery::Terminate(end) => {
