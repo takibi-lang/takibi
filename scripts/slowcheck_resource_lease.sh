@@ -7,6 +7,9 @@ set -euo pipefail
 # The planted vCPU waits below (lane-a, lane-b, ...) are not the run's own:
 # without this they land in the enclosing allcheck's lease-wait summary (#914).
 unset TAKIBI_LANE_TIMING_DIR TAKIBI_AWAIT_TIMING_LANE
+# GitHub issue #1145: run inside a land, the outer land.sh exports this, and
+# every simulated worker below would skip the land wait (land 905dab71 red).
+unset TAKIBI_LAND_ALLCHECK
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 helper="$repo_root/scripts/resource_lease.sh"
@@ -295,7 +298,7 @@ fi
 grep -F "waiting for a land's allcheck to finish before starting QEMU: land running land allcheck abc123" \
     "$tmp_dir/land-wait.log" >/dev/null \
     && claim || fail "the land wait did not say who holds it: $(cat "$tmp_dir/land-wait.log")"
-TAKIBI_LAND_ALLCHECK=1 vcpu land 1 'resource_lease_vcpu_acquire 1 lane-l' \
+vcpu land 1 'TAKIBI_LAND_ALLCHECK=1 resource_lease_vcpu_acquire 1 lane-l' \
     && claim || fail "the land's own runner waited for its own land"
 vcpu worker 10 "resource_lease_vcpu_acquire 1 lane-w && : > '$tmp_dir/worker.ran'" 2>/dev/null &
 worker_pid=$!
