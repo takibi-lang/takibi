@@ -198,14 +198,21 @@ fn kernel_boot_log_xhci_capability() {
     kernel_boot_log("\n");
 }
 
-fn kernel_test_platform_storage() {
-    // The bring-up drives the transport rings, so it holds the block device
-    // guard as every later disk access does (GitHub issue #1012).
+// The bring-up drives the transport rings, so it holds the block device
+// guard as every later disk access does (GitHub issue #1012). Its own
+// function, so the BlockSlot it holds is visibly given back before the
+// caller reaches ext2 (scripts/check_slot_pool_entries.py).
+fn kernel_usb_disk_initialize() -> DiskIoResult {
     let slot: BlockSlot[0] = block_slot_acquire();
     let guard = block_device_take(slot);
-    let init_result: DiskIoResult = disk_initialize(guard);
+    let result: DiskIoResult = disk_initialize(guard);
     block_device_give(guard);
     block_slot_release(slot);
+    return result;
+}
+
+fn kernel_test_platform_storage() {
+    let init_result: DiskIoResult = kernel_usb_disk_initialize();
     kernel_boot_log_xhci_capability();
     match init_result {
         DiskIoResult::Err(error) => {
