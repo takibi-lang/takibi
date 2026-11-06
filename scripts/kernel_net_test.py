@@ -196,6 +196,8 @@ IPV4_ETHERTYPE = bytes([0x08, 0x00])
 
 RETRIES = 30
 RETRY_TIMEOUT_SECS = 0.5
+# GitHub issue #876: past the guest's ~0.8 s half-open give-up.
+INIT_LATE_ACK_SECS = 1.5
 SILENCE_TIMEOUT_SECS = 1.0
 
 FLAG_FIN = 0x01
@@ -513,7 +515,8 @@ def recv_matching(sock: socket.socket, predicate, timeout: float = 5.0):
     return None
 
 
-def init_handshake(sock: socket.socket, client_port: int, client_isn: int):
+def init_handshake(sock: socket.socket, client_port: int, client_isn: int,
+                   late_ack: bool = False):
     syn = build_tcp_frame(client_port, client_isn, 0, FLAG_SYN,
                           server_port=INIT_SERVER_PORT)
     reply = None
@@ -539,6 +542,12 @@ def init_handshake(sock: socket.socket, client_port: int, client_isn: int):
         return None
     client_seq = client_isn + 1
     server_next = server_seq + 1
+    if late_ack:
+        # GitHub issue #876: answer only after the guest has given up on
+        # this half-open handshake (TCP_RETRY_LIMIT SYN-ACK retries 200 ms
+        # apart), as a peer descheduled on a loaded host does. The late ACK
+        # must still complete the accept.
+        time.sleep(INIT_LATE_ACK_SECS)
     sock.sendto(build_tcp_frame(client_port, client_seq, server_next, FLAG_ACK,
                                 server_port=INIT_SERVER_PORT),
                 (QEMU_HOST, QEMU_PORT))
@@ -569,7 +578,8 @@ def init_script_fixture(sock: socket.socket) -> bool:
         print("  init.sh fixture: handshake A got no SYN-ACK; gave up")
         print("  init.sh connected I/O fixture: FAIL")
         return False
-    second = init_handshake(sock, INIT_CLIENT_PORTS[1], INIT_CLIENT_ISNS[1])
+    second = init_handshake(sock, INIT_CLIENT_PORTS[1], INIT_CLIENT_ISNS[1],
+                            late_ack=True)
     if second is None:
         print("  init.sh fixture: handshake B got no SYN-ACK; gave up")
         print("  init.sh connected I/O fixture: FAIL")

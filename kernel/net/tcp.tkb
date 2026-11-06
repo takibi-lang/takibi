@@ -146,6 +146,15 @@ const TCP_ECHO_PORT: u16 = 7;
 // see that function's comment.
 const TCP_MAX_PAYLOAD: u16 = 1460;
 const TCP_RETRY_LIMIT: usize = 3;
+// GitHub issue #876: accept_syn_ack_retries holds this, one past the limit,
+// while a listener is back in Listen after giving up on a half-open
+// handshake whose SYN-ACK the peer may still answer. The tuple and sequence
+// numbers of that handshake stay in the connection, so a late final ACK that
+// matches them completes it, as Linux's request socket (alive for about a
+// minute of SYN-ACK retransmissions) would. Before this, the late ACK was
+// dropped in silence: the peer believed it was connected and the accept
+// waited for a SYN that never came.
+const TCP_ACCEPT_ABANDONED: usize = TCP_RETRY_LIMIT + 1;
 
 enum ConnState: u8 {
     Listen;
@@ -3385,9 +3394,12 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection_pool, conn
                                     (header.flags & TCP_FLAG_RST) != 0) {
                                     handled_current = true;
                                     conn.state = ConnState::Listen;
+                                    syn_ack_retries = 0;
                                     atomic_word_store(&tcp_injected_syn_pending, 0);
                                 } else if (
-                                    conn.state == ConnState::SynRcvd &&
+                                    (conn.state == ConnState::SynRcvd ||
+                                     (conn.state == ConnState::Listen &&
+                                      syn_ack_retries == TCP_ACCEPT_ABANDONED)) &&
                                     header.src_port == conn.remote_port &&
                                     slice_eq(ip[IP_SRC..<IP_DST],
                                         remote_ip_bytes[0..<4]) &&
@@ -3497,6 +3509,7 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection_pool, conn
                 atomic_word_store(&tcp_drop_next_syn_ack, 1);
             }
             conn.state = ConnState::Listen;
+            syn_ack_retries = TCP_ACCEPT_ABANDONED;
         }
     tcp_connection_frame_unhold(owner, TcpFrameRole::Tx, tx);
     conn.accept_syn_ack_sent_at = syn_ack_sent_at;
