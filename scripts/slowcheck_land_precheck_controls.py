@@ -69,6 +69,10 @@ def run_case(source, fail='', equal=False, real_model=False, diff='compiler/main
         (root / 'scripts/land.sh').write_text(source)
         repo_scripts = Path(__file__).resolve().parent
         (root / 'scripts/land_light_paths').write_text((repo_scripts / 'land_light_paths').read_text())
+        # GitHub issue #1145: land.sh holds the land lock from these, in a
+        # registry of the fixture's own, never the host's.
+        for helper in ('vcpu_lease.sh', 'resource_lease.sh'):
+            (root / 'scripts' / helper).write_text((repo_scripts / helper).read_text())
         bin_dir = root / 'bin'
         bin_dir.mkdir()
         for name in ('git', 'make', 'python3'):
@@ -95,6 +99,7 @@ def run_case(source, fail='', equal=False, real_model=False, diff='compiler/main
                    TAKIBI_LAND_CONTROL_ROOT=str(root), TAKIBI_LAND_CONTROL_FAIL=fail,
                    TAKIBI_LAND_CONTROL_EQUAL='1' if equal else '',
                    TAKIBI_LAND_CONTROL_DIFF=diff,
+                   TAKIBI_SESSION_REGISTRY=str(root / 'registry'),
                    TAKIBI_LAND_CONTROL_MODEL=model_runner, TAKIBI_LAND_CONTROL_PYTHON=sys.executable)
         result = subprocess.run(['bash', str(root / 'scripts/land.sh')],
                                 env=env, capture_output=True, text=True)
