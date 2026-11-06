@@ -57,7 +57,7 @@
 | `--internal-range-obligation-fault-control` | - | plant known-unsound range rules (z3 check's failing control) |
 | `--internal-allow-unused` | - | accept a function nothing reachable uses (rejected by default) |
 
-## Fact files (14)
+## Fact files (13)
 
 `--facts DIR` writes every one of these, under these names.
 
@@ -70,7 +70,6 @@
 | `globals.tsv` | each mutable global's protection, then every use (docs/GLOBAL_PROTECTION.md) |
 | `fields.tsv` | each struct field, with reads and writes of that field name (docs/GLOBAL_PROTECTION.md) |
 | `heldguards.tsv` | the guards held at each call |
-| `spanblocking.tsv` | calls that may block while a PreemptOff token is live (#1350, report-only) |
 | `overflow.tsv` | each checked arithmetic site and its operand facts |
 | `rangeobl` | a directory: one SMT-LIB file per range obligation (docs/RANGE_OBLIGATIONS.md) |
 | `structs.tsv` | every struct's LLVM field offsets, then its .size and .members |

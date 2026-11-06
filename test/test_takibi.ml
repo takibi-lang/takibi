@@ -19624,12 +19624,9 @@ fn shadow_irq_enable(value: usize) { msr_daifclr_irq(); }
   { let g: usize = 0; shadow_irq_enable(g); }
 }|}) ());
 
-  Alcotest.test_case "#1350: span report lists a may_block call made while a PreemptOff is live" `Quick
+  Alcotest.test_case "#1350: a may_block call made while a PreemptOff is live is rejected" `Quick
     (fun () ->
-      Type_inf.set_held_guard_audit_enabled true;
-      Fun.protect ~finally:(fun () -> Type_inf.set_held_guard_audit_enabled false)
-        (fun () ->
-          ignore (infer_files ["span1350.tkb", {|
+      let base = {|
 linear struct PreemptOff[unit: usize] { private held: usize; }
 fn span_begin() -> PreemptOff[0] { let mut span: PreemptOff[0] = { 1 }; return span; }
 fn span_end(span: sink PreemptOff[0]) { }
@@ -19638,28 +19635,30 @@ extern fn short1350() !{no_handler_lock};
 fn wait_inside() { sleep1350(); }
 fn hand_over(span: sink PreemptOff[0]) { span_end(span); sleep1350(); }
 variant Carry1350 { Stay; Go(PreemptOff[0]); }
-fn caller1350(flag: bool) {
+|} in
+      (* After the span ends or is handed over, and a short lock inside it:
+         accepted. *)
+      expect_ok (base ^ {|fn caller1350(flag: bool) {
   let span = span_begin();
   short1350();
-  wait_inside();
   if (flag) { span_end(span); } else { hand_over(span); }
   sleep1350();
+}|}) ();
+      expect_type_error "calls 'wait_inside' while PreemptOff 'span' is held"
+        (base ^ {|fn held1350() {
+  let span = span_begin();
+  wait_inside();
+  span_end(span);
+}|}) ();
+      expect_type_error "calls 'wait_inside' while PreemptOff 'carried' is held"
+        (base ^ {|fn carried1350() {
   let carried = Carry1350::Go(span_begin());
   wait_inside();
   match carried {
     Carry1350::Stay => {}
     Carry1350::Go(inner) => { span_end(inner); }
   }
-}
-|}]);
-          let sites = Type_inf.span_blocking_sites ()
-            |> List.map (fun s -> s.Type_inf.span_caller, s.Type_inf.span_callee,
-                                  s.Type_inf.span_binding)
-            |> List.sort compare in
-          Alcotest.(check (list (triple string string string)))
-            "a blocking call while the token or its carrier is live, nothing after it ends or is handed over"
-            [("caller1350", "wait_inside", "carried"); ("caller1350", "wait_inside", "span")]
-            sites));
+}|}) ());
 
   Alcotest.test_case "held guard report follows scope, moves and borrowed parameters" `Quick
     (fun () ->

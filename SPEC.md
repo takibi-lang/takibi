@@ -2227,7 +2227,7 @@ The region is the lexical form of the linear `PreemptOff` token the kernel's
 authority file declares for spans that end at an exception return in another
 function (GitHub issue #1323): an ordinary linear struct, so a path that drops
 one does not compile, with no language rule of its own. Unlike the block, a
-token span's ban on blocking is a run-time check, not yet a compile-time one: `--facts DIR` writes `DIR/spanblocking.tsv` (GitHub issue #1350, report-only), each call made while a binding whose type carries `PreemptOff` (the token, or a struct, variant or tuple holding one) is live and not handed to that call, whose callee may reach `may_block` or an unknown indirect call. The columns are `file`, `line`, `caller`, `callee`, `token`, `state` (`held` or `maybe-held`) and one `path`. It is read from the linear checker's own ownership flow, so a span ends where the token is consumed. The
+token span's ban on blocking is checked at compile time too (GitHub issue #1350): a call made while a binding whose type carries `PreemptOff` (the token, or a struct, variant or tuple holding one) is live, possibly live, and not handed to that call is rejected if its callee may reach `may_block` or an unknown indirect call. Liveness is read from the linear checker's own ownership flow, so a span ends where the token is consumed. `no_handler_lock` alone does not trip it (a short lock raises the preempt count itself). The
 kernel's pair raises and lowers a per-CPU preempt
 count, as Linux's `preempt_disable`/`preempt_enable`, independent of the IRQ
 mask. It finds the count through TPIDR_EL1 rather than through an

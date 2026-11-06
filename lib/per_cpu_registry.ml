@@ -26,7 +26,7 @@ let rewritten : (string * int, string) Hashtbl.t = Hashtbl.create 8
    preempt count the mint raised is lowered on every exit. *)
 (* GitHub issue #1350: the linear token of a span that is not lexical. A
    call made while one is live in its caller is held to the block's may_block
-   rule (report-only for now: spanblocking.tsv). *)
+   rule, and rejected (type_inf.ml). *)
 let preempt_token_name = "PreemptOff"
 let preempt_off_mint_name = "preempt_off_enter"
 let preempt_off_exit_name = "preempt_off_exit"
