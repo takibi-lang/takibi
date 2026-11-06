@@ -2981,6 +2981,7 @@ allcheck:
 	@status=0; . scripts/resource_lease.sh; \
 	rm -rf "$(LANE_TIMING_DIR)"; mkdir -p "$(LANE_TIMING_DIR)"; \
 	export TAKIBI_LANE_TIMING_DIR="$(LANE_TIMING_DIR)"; bash scripts/lane_timing.sh origin; \
+	python3 scripts/untracked_leaks.py snapshot "$(LANE_TIMING_DIR)" || true; \
 	rm -rf "$(AWAIT_TIMING_DIR)"; mkdir -p "$(AWAIT_TIMING_DIR)"; \
 	export TAKIBI_AWAIT_TIMING_DIR="$(AWAIT_TIMING_DIR)"; \
 	resource_lease_run_suite allcheck bash -c \
@@ -2989,6 +2990,7 @@ allcheck:
 	echo; \
 	python3 scripts/summarize_lane_timing.py "$(LANE_TIMING_DIR)" || true; \
 	python3 scripts/summarize_await_timing.py "$(AWAIT_TIMING_DIR)" || true; \
+	python3 scripts/untracked_leaks.py report "$(LANE_TIMING_DIR)" || true; \
 	echo "lane timing artifact: $(LANE_TIMING_DIR:$(CURDIR)/%=%)"; \
 	if [ $$status -eq 0 ]; then \
 		echo "PASS allcheck: langcheck slowcheck test linuxcheck modelcheck $(KERNELCHECK_LANES)"; \
@@ -3049,6 +3051,7 @@ cicheck cicheck-lang cicheck-models cicheck-qemu cicheck-race:
 	@status=0; . scripts/resource_lease.sh; \
 	rm -rf "$(LANE_TIMING_DIR)"; mkdir -p "$(LANE_TIMING_DIR)"; \
 	export TAKIBI_LANE_TIMING_DIR="$(LANE_TIMING_DIR)"; bash scripts/lane_timing.sh origin; \
+	python3 scripts/untracked_leaks.py snapshot "$(LANE_TIMING_DIR)" || true; \
 	rm -rf "$(AWAIT_TIMING_DIR)"; mkdir -p "$(AWAIT_TIMING_DIR)"; \
 	export TAKIBI_AWAIT_TIMING_DIR="$(AWAIT_TIMING_DIR)"; \
 	resource_lease_run_suite $@ \
@@ -3057,6 +3060,7 @@ cicheck cicheck-lang cicheck-models cicheck-qemu cicheck-race:
 	echo; \
 	python3 scripts/summarize_lane_timing.py "$(LANE_TIMING_DIR)" || true; \
 	python3 scripts/summarize_await_timing.py "$(AWAIT_TIMING_DIR)" || true; \
+	python3 scripts/untracked_leaks.py report "$(LANE_TIMING_DIR)" || true; \
 	echo "lane timing artifact: $(LANE_TIMING_DIR:$(CURDIR)/%=%)"; \
 	if [ $$status -eq 0 ]; then \
 		echo "PASS $@: $(cicheck_lanes_$@)"; \
