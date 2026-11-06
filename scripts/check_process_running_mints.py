@@ -4,6 +4,12 @@
 The type checker enforces witness consumption. This source check keeps the
 private physical mint boundary and context/phase writer annotation inventory closed.
 It does not prove physical generation association or remote CPU protocols.
+
+GitHub issue #567: the callers of the five mint functions are also rows of
+scripts/allowed_callers.tsv, read from the compiler's call-graph table, which
+matches file and function and refuses a function-pointer reference. That table
+holds callers, not call counts, so the per-function counts below stay here
+(DECISIONS.md, 2026-11-06) until the compiler states them (#1376).
 """
 
 from collections import Counter

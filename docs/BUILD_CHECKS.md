@@ -179,7 +179,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_wall_clock_bounds_controls.py` | an undeclared bound, a stale row, a wrong count and an unknown class are each refused |
 | `check_control_replace_once.py` | every negative control patches source text through `control_patch.replace_once`, which refuses an anchor that does not occur exactly once (#845); capture-mutating controls are exempt with a reason |
 | `check_process_running_mints_controls.py` | mutation controls reject missing context/phase markers, additional mints, public constructors, and unmarked writers |
-| `check_process_running_mints.py` | current-process witness entry and transition mint counts, private constructors, and context/phase writer annotations match the reviewed boundary |
+| `check_process_running_mints.py` | current-process witness entry and transition mint counts per function, private constructors, and context/phase writer annotations match the reviewed boundary; the five mint functions' caller sets are also `scripts/allowed_callers.tsv` rows (#567), the counts stay here until #1376 |
 | `check_process_record_bare_uses.py` | no bare ProcessRecord lookup bodies; reviewed authority mints, private constructors, loan transfers and destructive record contracts |
 | `check_process_record_bare_uses_controls.py` | negative controls for changed lookup/mint scopes, constructor visibility and missing destructive annotations |
 | `check_lock_discipline.py` | global mutexes are not force-reset (raw atomics: the compiler's mint list, #989) |
