@@ -49,10 +49,6 @@ let mut virtio_blk_base: i32 = 0;
 // The transport's registers, attached by the platform device map when it
 // finds the block device; virtio_blk_base stays its discovery record.
 let mut virtio_blk_regs: IoHandle(VirtioMmioRegs);
-let mut virtio_blk_ready: bool;
-// A reset that never completes leaves the submitted RX ranges device-owned.
-// Do not reinitialize the queue or reuse those buffers in that case.
-let mut virtio_blk_disabled: bool;
 let mut virtio_blk_queue: VirtioBlkQueue align(64);
 // The request header, TX data, and RX data with its one-byte status are
 // protected allocations in virtio_blk_dma.tkb (#716, #717). The block-device TaskMutex
@@ -66,7 +62,55 @@ const VIRTIO_BLK_TRANSFER_BYTES: usize = 1024;
 // Virtio's avail/used idx fields are free-running u16 counters. The nominal
 // domain keeps the driver shadow at that width and makes comparison with a
 // widened counter a type error before the mandatory 65535 -> 0 wrap.
-let mut virtio_blk_used_seen: VirtioRingIndex;
+//
+// GitHub issue #1012: the driver's state words -- ready, disabled, and that
+// shadow -- are one linear record in a Place guarded by memory.tkb's
+// block_device_lock, so every entry below takes the BlockDeviceGuard and the
+// "one command at a time" premise is in the signatures, not in a comment.
+// `disabled`: a reset that never completed left the submitted RX ranges
+// device-owned; the queue is never reinitialized nor those buffers reused.
+linear struct VirtioBlkState[unit: usize] {
+    ready: bool;
+    disabled: bool;
+    used_seen: VirtioRingIndex;
+}
+struct VirtioBlkStatus {
+    ready: bool;
+    disabled: bool;
+    used_seen: VirtioRingIndex;
+}
+struct VirtioBlkStateStore {
+    private state: Place(VirtioBlkState[0]) guarded_by(block_device_lock);
+}
+private let mut virtio_blk_store: VirtioBlkStateStore;
+
+private fn virtio_blk_state_retire(state: sink VirtioBlkState[0]) {}
+
+// A copy of the record; Empty (never stored) reads as the boot state.
+fn virtio_blk_status(guard: borrow BlockDeviceGuard[&block_device_lock])
+        -> VirtioBlkStatus {
+    let mut status: VirtioBlkStatus = { false, false, virtio_ring_index_zero() };
+    match place_take(guard, virtio_blk_store.state) {
+        Place::Empty => {}
+        Place::Full(state) => {
+            status.ready = state.ready;
+            status.disabled = state.disabled;
+            status.used_seen = state.used_seen;
+            let Place::Empty = place_put(guard, virtio_blk_store.state, state);
+        }
+    }
+    return status;
+}
+
+fn virtio_blk_status_store(guard: borrow BlockDeviceGuard[&block_device_lock],
+                           status: VirtioBlkStatus) {
+    let mut state: VirtioBlkState[0] = {
+        status.ready, status.disabled, status.used_seen };
+    match place_put(guard, virtio_blk_store.state, state) {
+        Place::Empty => {}
+        Place::Full(previous) => { virtio_blk_state_retire(previous); }
+    }
+}
 
 // What the queue looked like when a completion wait ran out, for DDB: the
 // count, and the first and latest timeout's avail.idx, used.idx, the
@@ -136,12 +180,14 @@ fn virtio_blk_setup_queue() -> bool !{unsafe} {
     return true;
 }
 
-fn virtio_blk_init() -> bool !{unsafe} {
-    if (virtio_blk_disabled) { return false; }
-    if (virtio_blk_ready) { return true; }
+fn virtio_blk_init(guard: borrow BlockDeviceGuard[&block_device_lock])
+        -> bool !{unsafe} {
+    let mut status: VirtioBlkStatus = virtio_blk_status(guard);
+    if (status.disabled) { return false; }
+    if (status.ready) { return true; }
     if (virtio_blk_base == 0) { return false; }
     if (virtio_blk_regs.version != VIRTIO_MMIO_VERSION_MODERN) { return false; }
-    if (virtio_blk_reset() == false) { return false; }
+    if (virtio_blk_reset(guard) == false) { return false; }
     if (virtio_blk_used_claim() == false) { return false; }
     // A previous timed-out request may have left ring indices and descriptors
     // behind. Reset returns queue ownership before the next initialization.
@@ -168,8 +214,10 @@ fn virtio_blk_init() -> bool !{unsafe} {
     }
     virtio_blk_regs.status = base_status | VIRTIO_STATUS_FEATURES_OK |
                              VIRTIO_STATUS_DRIVER_OK;
-    virtio_blk_used_seen = virtio_ring_index_zero();
-    virtio_blk_ready = true;
+    status = virtio_blk_status(guard);
+    status.used_seen = virtio_ring_index_zero();
+    status.ready = true;
+    virtio_blk_status_store(guard, status);
     return true;
 }
 
@@ -233,7 +281,8 @@ private fn virtio_blk_submit_write_data(source: borrow [u8; 1024..]) !{unsafe} {
     }
 }
 
-private fn virtio_blk_submit_owned(request_type: u32, sector: u32,
+private fn virtio_blk_submit_owned(guard: borrow BlockDeviceGuard[&block_device_lock],
+                                  request_type: u32, sector: u32,
                                   buffer: borrow [u8; 1024..],
                                   write: bool,
                                   receive_cpu: sink *VirtioBlkReceiveCpu)
@@ -272,9 +321,9 @@ private fn virtio_blk_submit_owned(request_type: u32, sector: u32,
     let completion_ticks: i64 =
         read_cntfrq() * VIRTIO_BLK_COMPLETION_SECONDS;
     while (read_cntpct() - completion_start < completion_ticks &&
-           virtio_blk_used_pending()) {
+           virtio_blk_used_pending(guard)) {
     }
-    match virtio_blk_receive_settle_used(receive_device) {
+    match virtio_blk_receive_settle_used(guard, receive_device) {
         VirtioBlkReceiveUsed::Observed => {}
         VirtioBlkReceiveUsed::Pending(pending_device) => {
             // No used entry was observed. Only a completed reset, not the
@@ -282,7 +331,7 @@ private fn virtio_blk_submit_owned(request_type: u32, sector: u32,
             let mut snapshot: VirtioBlkTimeoutSnapshot = {
                 (virtio_blk_queue.avail.idx as u16) as usize,
                 virtio_blk_used_index(),
-                (virtio_blk_used_seen as u16) as usize,
+                (virtio_blk_status(guard).used_seen as u16) as usize,
                 virtio_blk_regs.status as usize,
                 virtio_blk_regs.interrupt_status as usize,
                 0 };
@@ -291,7 +340,7 @@ private fn virtio_blk_submit_owned(request_type: u32, sector: u32,
             virtio_blk_timeout_last = snapshot;
             atomic_word_fetch_add(&virtio_blk_timeouts, 1);
             let reset_confirmed: bool =
-                virtio_blk_receive_settle_reset(pending_device);
+                virtio_blk_receive_settle_reset(guard, pending_device);
             return false;
         }
     }
@@ -325,13 +374,14 @@ private fn virtio_blk_submit_owned(request_type: u32, sector: u32,
     }
 }
 
-fn virtio_blk_submit(request_type: u32, sector: u32,
+fn virtio_blk_submit(guard: borrow BlockDeviceGuard[&block_device_lock],
+                     request_type: u32, sector: u32,
                      buffer: borrow [u8; 1024..],
                      write: bool) -> bool !{unsafe} {
-    if (virtio_blk_init() == false) { return false; }
+    if (virtio_blk_init(guard) == false) { return false; }
     match virtio_blk_receive_take() {
         VirtioBlkReceiveAuthority::Cpu(receive_cpu) => {
-            return virtio_blk_submit_owned(request_type, sector, buffer,
+            return virtio_blk_submit_owned(guard, request_type, sector, buffer,
                                            write, receive_cpu);
         }
         VirtioBlkReceiveAuthority::Device(stale) => {
@@ -341,18 +391,21 @@ fn virtio_blk_submit(request_type: u32, sector: u32,
 }
 
 // A whole block: `sector` is its first 512-byte sector.
-fn virtio_blk_read_block(sector: u32,
+fn virtio_blk_read_block(guard: borrow BlockDeviceGuard[&block_device_lock],
+                         sector: u32,
                          destination: borrow [u8; 1024..]) -> bool {
-    return virtio_blk_submit(VIRTIO_BLK_T_IN, sector, destination, false);
+    return virtio_blk_submit(guard, VIRTIO_BLK_T_IN, sector, destination, false);
 }
 
-fn virtio_blk_write_block(sector: u32,
+fn virtio_blk_write_block(guard: borrow BlockDeviceGuard[&block_device_lock],
+                          sector: u32,
                           source: borrow [u8; 1024..]) -> bool {
-    return virtio_blk_submit(VIRTIO_BLK_T_OUT, sector, source, true);
+    return virtio_blk_submit(guard, VIRTIO_BLK_T_OUT, sector, source, true);
 }
 
-fn virtio_blk_capacity_sectors() -> usize !{unsafe} {
-    if (virtio_blk_init() == false) { return 0; }
+fn virtio_blk_capacity_sectors(guard: borrow BlockDeviceGuard[&block_device_lock])
+        -> usize !{unsafe} {
+    if (virtio_blk_init(guard) == false) { return 0; }
     let low: u32 = virtio_blk_regs.config_word[0];
     let high: u32 = virtio_blk_regs.config_word[1];
     return ((low as u64) | ((high as u64) << 32)) as usize;

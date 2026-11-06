@@ -317,3 +317,12 @@ file's comment lines are not rows.
   taken and put back by every access. The peer-sleep step-1 one-shot, read with no
   lock, is an `AtomicWord` swap. Text +2.3 KiB per kernel from the record copies.
   262 -> 245 unprotected.
+- 2026-11-06: virtio_blk's state words. `virtio_blk_ready`, `virtio_blk_disabled` and
+  the used-ring shadow `virtio_blk_used_seen`, whose rows said "after boot the only
+  callers hold block_device_lock, a premise the signature does not carry", are one
+  linear `VirtioBlkState` in a `Place` `guarded_by(block_device_lock)`. Every
+  virtio_blk entry (`virtio_blk_read_block`, `_write_block`, `_capacity_sectors`,
+  init, reset, the settle paths) takes `BlockDeviceGuard[&block_device_lock]`, so
+  the lock is now public, and the boot capacity probe takes the guard too. The
+  timeout snapshots stay listed (DDB reads them with the world stopped), as does
+  the queue (its address is the device's). 245 -> 242 unprotected.

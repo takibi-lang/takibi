@@ -209,10 +209,13 @@ private fn virtio_blk_data_settle() {
 
 // The device has not yet published a used entry beyond the driver's shadow.
 // No snapshot (the ring is not live) counts as pending.
-fn virtio_blk_used_pending() -> bool {
+fn virtio_blk_used_pending(guard: borrow BlockDeviceGuard[&block_device_lock])
+        -> bool {
     match virtio_used_snapshot(VIRTIO_USED_BLK) {
         VirtioUsedSeen::Unavailable => { return true; }
-        VirtioUsedSeen::Seen(ring) => { return virtio_blk_used_seen == ring.idx; }
+        VirtioUsedSeen::Seen(ring) => {
+            return virtio_blk_status(guard).used_seen == ring.idx;
+        }
     }
 }
 
@@ -224,8 +227,11 @@ fn virtio_blk_used_index() -> usize {
     }
 }
 
-fn virtio_blk_reset() -> bool !{unsafe} {
-    virtio_blk_ready = false;
+fn virtio_blk_reset(guard: borrow BlockDeviceGuard[&block_device_lock])
+        -> bool !{unsafe} {
+    let mut status: VirtioBlkStatus = virtio_blk_status(guard);
+    status.ready = false;
+    virtio_blk_status_store(guard, status);
     virtio_blk_regs.status = 0;
     // A zero readback is the virtio reset completion point: the device must
     // stop interacting with the queue before it reports that status.
@@ -235,7 +241,8 @@ fn virtio_blk_reset() -> bool !{unsafe} {
            virtio_blk_regs.status != 0) {
     }
     if (virtio_blk_regs.status != 0) {
-        virtio_blk_disabled = true;
+        status.disabled = true;
+        virtio_blk_status_store(guard, status);
         return false;
     }
     virtio_used_reclaim_after_reset(VIRTIO_USED_BLK);
@@ -249,13 +256,16 @@ must_use variant VirtioBlkReceiveUsed {
 
 // Observed puts the CPU token back in the owner slot; Pending hands the
 // device token back unchanged for the reset path.
-fn virtio_blk_receive_settle_used(device: sink *VirtioBlkReceiveDevice)
+fn virtio_blk_receive_settle_used(guard: borrow BlockDeviceGuard[&block_device_lock],
+                                  device: sink *VirtioBlkReceiveDevice)
         -> VirtioBlkReceiveUsed !{unsafe} {
-    if (virtio_blk_used_pending()) {
+    if (virtio_blk_used_pending(guard)) {
         return VirtioBlkReceiveUsed::Pending(device);
     }
     dma_consume();
-    virtio_blk_used_seen = virtio_ring_index_next(virtio_blk_used_seen);
+    let mut status: VirtioBlkStatus = virtio_blk_status(guard);
+    status.used_seen = virtio_ring_index_next(status.used_seen);
+    virtio_blk_status_store(guard, status);
     let restored = dma_finish_owned_rx(device, VirtioBlkReceive);
     virtio_blk_receive_put(VirtioBlkReceiveAuthority::Cpu(restored));
     virtio_blk_request_settle();
@@ -265,9 +275,10 @@ fn virtio_blk_receive_settle_used(device: sink *VirtioBlkReceiveDevice)
 
 // A failed reset keeps every device token in its slot, so no range is
 // reused in this boot.
-fn virtio_blk_receive_settle_reset(device: sink *VirtioBlkReceiveDevice)
+fn virtio_blk_receive_settle_reset(guard: borrow BlockDeviceGuard[&block_device_lock],
+                                   device: sink *VirtioBlkReceiveDevice)
         -> bool !{unsafe} {
-    if (virtio_blk_reset() == false) {
+    if (virtio_blk_reset(guard) == false) {
         virtio_blk_receive_put(VirtioBlkReceiveAuthority::Device(device));
         return false;
     }

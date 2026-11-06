@@ -46,13 +46,10 @@ kernel/drivers/block/memory.tkb	block_run_first	read-by block_run_hit_here,block
 kernel/drivers/block/memory.tkb	block_run_next	read-by block_run_wanted: 2026-10-31 slot: the BlockSlot holder's sequential-read hint
 kernel/drivers/block/memory.tkb	block_run_next_backend	read-by block_run_wanted: 2026-10-31 slot: backend of that hint, same holder
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_base	read-by virtio_blk_init,main: 2026-10-31 boot: set by the DTB device map on core 0 before the first init; never written after
-kernel/drivers/block/virtio_blk.tkb	virtio_blk_disabled	read-by virtio_blk_init: 2026-10-31 lock: set by a failed reset; after boot the only callers hold block_device_lock, a premise the signature does not carry
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_queue	read-by virtio_blk_submit_owned,virtio_blk_setup_queue: 2026-10-31 lock: one request at a time under block_device_lock, a TaskMutex a preempted holder keeps
-kernel/drivers/block/virtio_blk.tkb	virtio_blk_ready	read-by virtio_blk_init: 2026-10-31 lock: as virtio_blk_disabled; QEMU init reaches it unlocked only on core 0 before userspace
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_regs	read-by virtio_blk_capacity_sectors,virtio_blk_init,virtio_blk_submit_owned: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_timeout_first	read-by virtio_blk_timeout_first_snapshot: 2026-10-31 lock: written under block_device_lock on the first timeout; DDB reads it with the world stopped and may catch a stopped writer mid-record, a diagnostic
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_timeout_last	read-by virtio_blk_timeout_last_snapshot: 2026-10-31 lock: as virtio_blk_timeout_first, for the latest timeout
-kernel/drivers/block/virtio_blk.tkb	virtio_blk_used_seen	read-by virtio_blk_used_pending,virtio_blk_receive_settle_used,virtio_blk_submit_owned: 2026-10-31 lock: the driver shadow of used.idx, under block_device_lock
 kernel/drivers/block/virtio_blk_dma.tkb	virtio_blk_used_claimed	read-by virtio_blk_used_claim: 2026-10-31 lock: one-shot reached from virtio_blk_init only
 kernel/drivers/net/rp1_gem.tkb	gem	read-by gem_halt,gem_irq_handler,gem_mdio_read: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
 kernel/drivers/net/rp1_gem.tkb	gem_pkt_kept_len	read-by net_packet_kept_claim: 2026-10-31 token: written before the Kept packet is parked in its slot and read after a claim takes it out of the slot's lock

@@ -93,11 +93,14 @@ fn dma_fixture_run() !{unsafe} {
         IoAttach::TooSmall => { dma_fixture_require(false, "register window"); }
     }
     virtio_blk_base = 1;
+    // The driver's entries take the device guard, as memory.tkb's callers do.
+    let slot: BlockSlot[0] = block_slot_acquire();
+    let guard = block_device_take(slot);
     // A modern transport offering a queue of eight.
     dma_fixture_registers[1] = 2;
     dma_fixture_registers[13] = 8;
     dma_fixture_mode = 0;
-    dma_fixture_require(virtio_blk_write_block(0, dma_fixture_buffer[0..<1024]) == false,
+    dma_fixture_require(virtio_blk_write_block(guard, 0, dma_fixture_buffer[0..<1024]) == false,
                         "completed error accepted");
     dma_fixture_authority(true);
     dma_fixture_require(virtio_blk_completion_count() == 1 &&
@@ -105,30 +108,34 @@ fn dma_fixture_run() !{unsafe} {
     dma_fixture_print("PASS dma: completed error returns all CPU authority\n");
 
     dma_fixture_mode = 1;
-    dma_fixture_require(virtio_blk_write_block(0, dma_fixture_buffer[0..<1024]) == false,
+    dma_fixture_require(virtio_blk_write_block(guard, 0, dma_fixture_buffer[0..<1024]) == false,
                         "timeout accepted");
     dma_fixture_authority(true);
-    dma_fixture_require(virtio_blk_ready == false && virtio_blk_disabled == false &&
+    dma_fixture_require(virtio_blk_status(guard).ready == false &&
+                        virtio_blk_status(guard).disabled == false &&
                         virtio_blk_timeout_count() == 1, "confirmed reset state");
     dma_fixture_mode = 3;
-    dma_fixture_require(virtio_blk_write_block(0, dma_fixture_buffer[0..<1024]), "reset reuse");
+    dma_fixture_require(virtio_blk_write_block(guard, 0, dma_fixture_buffer[0..<1024]), "reset reuse");
     dma_fixture_authority(true);
     dma_fixture_require(virtio_blk_completion_count() == 2, "reuse completion");
     dma_fixture_print("PASS dma: timeout and confirmed reset permit reuse\n");
 
     dma_fixture_mode = 2;
-    dma_fixture_require(virtio_blk_write_block(0, dma_fixture_buffer[0..<1024]) == false,
+    dma_fixture_require(virtio_blk_write_block(guard, 0, dma_fixture_buffer[0..<1024]) == false,
                         "failed reset accepted");
     dma_fixture_authority(false);
-    dma_fixture_require(virtio_blk_disabled && virtio_blk_ready == false &&
+    dma_fixture_require(virtio_blk_status(guard).disabled &&
+                        virtio_blk_status(guard).ready == false &&
                         virtio_blk_timeout_count() == 2, "failed reset state");
     let submitted: usize = dma_fixture_submissions;
-    dma_fixture_require(virtio_blk_write_block(0, dma_fixture_buffer[0..<1024]) == false,
+    dma_fixture_require(virtio_blk_write_block(guard, 0, dma_fixture_buffer[0..<1024]) == false,
                         "disabled driver reused");
     dma_fixture_require(dma_fixture_submissions == submitted,
                         "disabled driver submitted");
     dma_fixture_authority(false);
     dma_fixture_print("PASS dma: failed reset retains all Device authority and refuses reuse\n");
+    block_device_give(guard);
+    block_slot_release(slot);
     dma_fixture_print("PASS dma: fixture complete\n");
     while (true) {}
 }

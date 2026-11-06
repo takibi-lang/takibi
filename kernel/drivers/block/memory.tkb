@@ -51,7 +51,11 @@ fn usb_mass_storage_block_device() -> KernelBlockDeviceResult {
 }
 
 fn virtio_block_device_ext2() -> KernelBlockDeviceResult {
-    let sectors: usize = virtio_blk_capacity_sectors();
+    let slot: BlockSlot[0] = block_slot_acquire();
+    let guard = block_device_take(slot);
+    let sectors: usize = virtio_blk_capacity_sectors(guard);
+    block_device_give(guard);
+    block_slot_release(slot);
     if (sectors == 0 || sectors % 2 != 0) {
         return KernelBlockDeviceResult::Invalid;
     }
@@ -103,7 +107,7 @@ linear struct BlockSlot[unit: usize] {
 // A free slot, waiting for one if every slot is held. The compare-exchange
 // is an acquire, pairing with the release store in block_slot_release, so
 // the previous holder's last writes happen before this holder's first read.
-private fn block_slot_acquire() -> BlockSlot[0] !{may_block} {
+fn block_slot_acquire() -> BlockSlot[0] !{may_block} {
     preempt_assert_blockable();
     let mut index: {0..<KERNEL_MAX_CORES as usize} = 0;
     let mut held: bool = false;
@@ -135,7 +139,7 @@ private fn block_slot_acquire() -> BlockSlot[0] !{may_block} {
     return slot;
 }
 
-private fn block_slot_release(slot: sink BlockSlot[0]) {
+fn block_slot_release(slot: sink BlockSlot[0]) {
     atomic_word_store(&block_slot_words[slot.index], 0);
 }
 
@@ -223,7 +227,9 @@ fn block_device_wait_count(slot: usize) -> usize {
 //
 // usb_provision.tkb writes around this lock, once, on core 0, before any
 // process exists -- so before any other core can reach a block device.
-private let mut block_device_lock: TaskMutex;
+// Public since GitHub issue #1012: virtio_blk.tkb's state is a Place
+// guarded_by it, so its entries name BlockDeviceGuard[&block_device_lock].
+let mut block_device_lock: TaskMutex;
 
 // `[lock: addr]` names the one lock it came from, and linear, so no path
 // through a device access can leave it held.
@@ -231,7 +237,7 @@ linear struct BlockDeviceGuard[lock: addr] {
     private cpu: usize;
 }
 
-private fn block_device_take(slot: borrow BlockSlot[0])
+fn block_device_take(slot: borrow BlockSlot[0])
         -> BlockDeviceGuard[&block_device_lock]
         !{acquires_lock_30_block_device, lock_guard_30_block_device} {
     if (task_mutex_trylock(&block_device_lock) == false) {
@@ -242,7 +248,7 @@ private fn block_device_take(slot: borrow BlockSlot[0])
     return guard;
 }
 
-private fn block_device_give(guard: sink BlockDeviceGuard[&block_device_lock]) {
+fn block_device_give(guard: sink BlockDeviceGuard[&block_device_lock]) {
     task_mutex_release(&block_device_lock);
 }
 
@@ -537,7 +543,7 @@ private fn block_run_transfer_locked(
                 let base: usize = row * KERNEL_BLOCK_SIZE;
                 let sector: u32 = ((first + offset) * 2) as u32;
                 if (virtio_blk_read_block(
-                        sector,
+                        guard, sector,
                         block_run_data[base..<base + KERNEL_BLOCK_SIZE]) == false) {
                     return false;
                 }
@@ -631,7 +637,7 @@ private fn block_read_device_locked(
         }
     } else {
         // One virtio request per block, as the USB backend's one command.
-        if (virtio_blk_read_block((block * 2) as u32,
+        if (virtio_blk_read_block(guard, (block * 2) as u32,
                                   destination[0..<KERNEL_BLOCK_SIZE]) == false) {
             return BlockIoResult::Invalid;
         }
@@ -662,7 +668,7 @@ private fn block_write_device_locked(
             DiskIoResult::Ok => { return BlockIoResult::Ok; }
         }
     } else {
-        if (virtio_blk_write_block((block * 2) as u32,
+        if (virtio_blk_write_block(guard, (block * 2) as u32,
                                    source[0..<KERNEL_BLOCK_SIZE]) == false) {
             return BlockIoResult::Invalid;
         }

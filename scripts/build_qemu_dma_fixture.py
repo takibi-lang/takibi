@@ -69,11 +69,11 @@ def main():
                      "    virtio_blk_data_settle();\n    return true;",
                      "    virtio_blk_request_settle();\n    return true;")
     elif control == "failed":
-        replace_once(mint, "        virtio_blk_disabled = true;\n        return false;",
-                     "        virtio_blk_disabled = true;\n        return true;")
+        replace_once(mint, "        virtio_blk_status_store(guard, status);\n        return false;",
+                     "        virtio_blk_status_store(guard, status);\n        return true;")
     elif control == "disabled":
-        replace_once(driver, "    if (virtio_blk_init() == false) { return false; }",
-                     "    if (virtio_blk_init() == false) { return true; }")
+        replace_once(driver, "    if (virtio_blk_init(guard) == false) { return false; }",
+                     "    if (virtio_blk_init(guard) == false) { return true; }")
 
 
 if __name__ == "__main__":
