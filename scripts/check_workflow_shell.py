@@ -55,7 +55,7 @@ def run_blocks(text: str) -> list[tuple[int, str]]:
 
 def bash_n(script: str) -> str | None:
     r = subprocess.run(["bash", "-n"], input=script, text=True,
-                       capture_output=True)
+                       capture_output=True, timeout=5)
     return (r.stderr.strip() or "bash -n failed") if r.returncode else None
 
 

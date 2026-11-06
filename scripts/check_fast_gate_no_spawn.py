@@ -68,6 +68,8 @@ REVIEWED = {
     "check_symbolize_ddb_controls.py": "compiles one tiny C file twice with cc (timeout 4 s), 0.3 s",
     "check_ci_parts.py": "one `make -s --eval` that parses the Makefile and echoes the part "
                          "variables; no recipe runs (timeout 10 s), 0.1 s standalone",
+    "check_workflow_shell.py": "`bash -n` (parse only, timeout 5 s) on each workflow run "
+                               "script, payload and planted control; 0.04 s standalone",
 }
 
 
