@@ -124,12 +124,26 @@ el0_sync_body:
      * this frame's evidence, as before #1373. */
     mrs     x0, esr_el1
     mrs     x1, far_el1
+    /* Kept across the call (callee-saved) for the fail-stop below. */
+    mov     x19, x0
+    mov     x20, x1
     msr     DAIFClr, #0x2
     bl      kernel_el0_fault_dispatch
     cbnz    x0, .Lsyscall_action
     /* The fail-stop answer enters the evidence path with IRQs masked, as
-     * every lower-EL fault did before #1373. */
+     * every lower-EL fault did before #1373. That path reads ESR, FAR, ELR
+     * and SPSR from the registers, and an IRQ taken at EL1 while the
+     * dispatch ran unmasked overwrote ELR and SPSR with the interrupted
+     * kernel PC (a land's oops lane reported elr in irq_priority_mask_write).
+     * Put the fault's own values back first: ESR and FAR as read above,
+     * ELR and SPSR from this frame. */
     msr     DAIFSet, #0x2
+    msr     esr_el1, x19
+    msr     far_el1, x20
+    ldr     x2, [sp, #EXC_CONTEXT_ELR_EL1]
+    msr     elr_el1, x2
+    ldr     x2, [sp, #EXC_CONTEXT_SPSR_EL1]
+    msr     spsr_el1, x2
     mov     x0, #8
     mov     x1, sp
     b       el1_exception_evidence_from_frame
