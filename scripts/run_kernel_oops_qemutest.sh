@@ -24,6 +24,16 @@ GDB_PORT="${KERNEL_QEMU_OOPS_GDB_PORT:-18697}"
 SERIAL_PORT="${KERNEL_QEMU_OOPS_SERIAL_PORT:-18698}"
 MODE="${KERNEL_QEMU_OOPS_MODE:-brk}"
 CONTEXT_CONTROL="${KERNEL_QEMU_OOPS_CONTEXT_CONTROL:-none}"
+# GitHub issue #1404: `frame` moves the saved frame's ELR by 4 at the
+# evidence stop, standing in for #1403's IRQ that overwrote the live ELR,
+# and requires the oops to flag the difference. Brk mode only.
+ELR_CONTROL="${KERNEL_QEMU_OOPS_ELR_CONTROL:-none}"
+case "$ELR_CONTROL" in
+    none) ;;
+    frame) [ "${KERNEL_QEMU_OOPS_MODE:-brk}" = brk ] || {
+        echo "error: the ELR control requires brk mode" >&2; exit 1; } ;;
+    *) echo "error: unknown ELR control: $ELR_CONTROL" >&2; exit 1 ;;
+esac
 case "$CONTEXT_CONTROL" in
     none|invalid_address|invalid_generation) ;;
     *) echo "error: unknown context control: $CONTEXT_CONTROL" >&2; exit 1 ;;
@@ -525,8 +535,11 @@ PYLINE
             -ex "break el1_exception_evidence_from_frame"
             -ex "continue"
             -ex "set {long}(\$x1 + 0x320) = 0xfeedfacefeedface"
-            -ex "detach"
         )
+        if [ "$ELR_CONTROL" = frame ]; then
+            gdb_commands+=(-ex "set {long}(\$x1 + 0x100) = {long}(\$x1 + 0x100) + 4")
+        fi
+        gdb_commands+=(-ex "detach")
         fi
     fi
     # Bounded: a breakpoint the kernel never reaches leaves gdb waiting in
@@ -587,6 +600,23 @@ else
 fi
 if ! grep -Eq "$expected_origin" "$UART_LOG"; then
     echo "FAIL kernel/qemu oops: incorrect exception/invariant provenance" >&2
+    exit 1
+fi
+# GitHub issue #1404: live and saved ELR/SPSR differ only when the
+# registers were overwritten after entry (#1403); an ordinary oops must not
+# say so, and the frame control must.
+if [ "$ELR_CONTROL" = frame ]; then
+    if ! grep -Eq '^oops: registers-differ live elr=0x[0-9a-f]+ spsr=0x[0-9a-f]+ frame elr=0x[0-9a-f]+ spsr=0x[0-9a-f]+ ' "$UART_LOG"; then
+        echo "FAIL kernel/qemu oops: a frame ELR that differs from the live one was not flagged" >&2
+        sed 's/^/  /' "$UART_LOG" >&2 || true
+        exit 1
+    fi
+    ext2_postcheck_after_stop
+    echo "PASS kernel/qemu oops: a saved ELR that differs from the live register is flagged"
+    exit 0
+elif grep -Eq '^oops: registers-differ ' "$UART_LOG"; then
+    echo "FAIL kernel/qemu oops: the live ELR/SPSR were overwritten after entry (#1403 shape):" >&2
+    grep -E '^oops: registers-differ ' "$UART_LOG" | sed 's/^/  /' >&2
     exit 1
 fi
 

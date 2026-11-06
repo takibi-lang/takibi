@@ -2570,6 +2570,8 @@ kernelcheck-oops-qemu: kernelbuild-check
 
 _kernelcheck-oops-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_oops_qemutest.sh
+	@# GitHub issue #1404: a frame ELR that differs from the live one must be flagged.
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_ELR_CONTROL=frame KERNEL_QEMU_OOPS_GDB_PORT=18537 KERNEL_QEMU_OOPS_SERIAL_PORT=18538 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-oops-qemu-elr-control" bash scripts/run_kernel_oops_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=data_abort_write KERNEL_QEMU_OOPS_GDB_PORT=18693 KERNEL_QEMU_OOPS_SERIAL_PORT=18694 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-oops-qemu-data-abort" bash scripts/run_kernel_oops_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=child_exec KERNEL_QEMU_OOPS_GDB_PORT=18695 KERNEL_QEMU_OOPS_SERIAL_PORT=18696 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-oops-qemu-child-exec" bash scripts/run_kernel_oops_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=child_exec_prepare_failure KERNEL_QEMU_OOPS_GDB_PORT=18691 KERNEL_QEMU_OOPS_SERIAL_PORT=18692 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-oops-qemu-child-exec-prepare-failure" bash scripts/run_kernel_oops_qemutest.sh

@@ -34,7 +34,7 @@ point, one more GDB stop in affinity-gdb), not to a lane of its own.
 | kernelcheck-gdb-helpers-qemu | 5 | integration | documented gdb helpers against a live debug kernel (#744) |
 | kernelcheck-console-gdb-qemu | 165 | integration | crash/console layout read back with GDB |
 | kernelcheck-churn-gdb-qemu | 235 | integration | process and ASID churn, MMU state read by GDB |
-| kernelcheck-oops-qemu | 388 | integration | terminal fail-stop and read-only UART crash console |
+| kernelcheck-oops-qemu | 388 | integration | terminal fail-stop and read-only UART crash console; a frame ELR moved by GDB must be flagged registers-differ, and no ordinary oops may be (#1404) |
 | kernelcheck-ddb-qemu | 236 | integration | real PL011 BREAK enters DDB and `continue` resumes |
 | kernelcheck-stack-overflow-qemu | 175 | integration | exception-entry stack guard at a real IRQ entry (#377) |
 | kernelcheck-debug-return-abi-qemu | 2 | integration | debug sidecar variant return ABI, executed (#713) |

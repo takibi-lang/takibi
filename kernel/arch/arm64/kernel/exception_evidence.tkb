@@ -3304,9 +3304,27 @@ private fn crash_snapshot_render_from(record: *CrashSnapshot,
     if (record.saved_frame_available != 0) {
         ddb_puts("oops: saved sp_el0="); ddb_put_hex(record.saved_sp_el0);
         ddb_puts(" tpidr_el0="); ddb_put_hex(record.saved_tpidr_el0);
-        ddb_puts(" elr="); ddb_put_hex(record.saved_elr_el1);
-        ddb_puts(" spsr="); ddb_put_hex(record.saved_spsr_el1);
+        // Each read once: these are raw reads of the per-CPU record.
+        let frame_elr: usize = record.saved_elr_el1;
+        let frame_spsr: usize = record.saved_spsr_el1;
+        ddb_puts(" elr="); ddb_put_hex(frame_elr);
+        ddb_puts(" spsr="); ddb_put_hex(frame_spsr);
         ddb_puts("\n");
+        // GitHub issue #1404: the frame was saved at entry; the live ELR
+        // and SPSR were read at capture. They differ only when something
+        // after entry overwrote the registers -- #1403's IRQ taken while the
+        // EL0 fault dispatch ran unmasked -- and then the frame's are the
+        // fault's. Say so rather than leave a kernel PC standing as the
+        // fault's ELR.
+        let live_elr: usize = record.elr_el1;
+        let live_spsr: usize = record.spsr_el1;
+        if (record.origin == 0 && (frame_elr != live_elr || frame_spsr != live_spsr)) {
+            ddb_puts("oops: registers-differ live elr="); ddb_put_hex(live_elr);
+            ddb_puts(" spsr="); ddb_put_hex(live_spsr);
+            ddb_puts(" frame elr="); ddb_put_hex(frame_elr);
+            ddb_puts(" spsr="); ddb_put_hex(frame_spsr);
+            ddb_puts(" (overwritten after entry; the frame's are the fault's)\n");
+        }
     } else {
         ddb_puts("oops: saved-frame=unavailable\n");
     }
