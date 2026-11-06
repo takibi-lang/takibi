@@ -105,7 +105,12 @@ deadlock; `scripts/check_slot_pool_entries.py` holds the source to it.
 Lifecycle spans that end at an exception return, in another function, hold the
 same count through a linear `PreemptOff` (#1323): the reserved successor, the
 switch, block and exit tails, the clone window, and a syscall's return. A path
-that ends neither the span nor hands it to a resume does not compile; the
+that ends neither the span nor hands it to a resume does not compile, and
+neither does a call made while the token is live whose callee may reach
+`may_block` (#1350): a span keeps the task on its CPU, so a wait there can be
+for a holder preempted on the same core. A failed clone's descriptor releases,
+which can close a pipe end under its TaskMutex, therefore run after the clone
+window's span ends (`unified_fd_clone_undo_finish`). The
 `after_switch` hook, and each idle entry, resets the count on the far side of
 the stack change, as Linux's `schedule_tail` does. Exit and clone cross the
 syscall action table's assembly on the way, where the count stands in for the
