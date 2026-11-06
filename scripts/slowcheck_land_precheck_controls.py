@@ -6,6 +6,7 @@ The trace verifies which make/git operations the shell really requests.
 """
 from control_patch import replace_once
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -62,17 +63,57 @@ esac
 '''
 
 
+LAND_PATH_RE = re.compile(r'scripts/[A-Za-z0-9_.-]+')
+
+
+SOURCED_SIBLING_RE = re.compile(r'dirname "\$\{BASH_SOURCE\[0\]\}"\)/([A-Za-z0-9_.-]+)')
+
+
+def code_paths(text):
+    """scripts/ paths a shell text names outside comments, plus siblings it
+    sources as `. "$(dirname "${BASH_SOURCE[0]}")/x.sh"`."""
+    names = set()
+    for line in text.splitlines():
+        if line.lstrip().startswith('#'):
+            continue
+        names.update(LAND_PATH_RE.findall(line))
+        names.update('scripts/' + n for n in SOURCED_SIBLING_RE.findall(line))
+    return names
+
+
+def land_script_files(source):
+    """GitHub issue #1384: every scripts/ file land.sh needs, derived from
+    the script and, transitively, from each shell file it pulls in (#1145's
+    vcpu_lease.sh sources resource_lease.sh), so a file it starts to read is
+    in the fixture without a hand-kept list. Python entries are stubbed by
+    the provider; copying them is harmless."""
+    repo = Path(__file__).resolve().parents[1]
+    names = code_paths(source)
+    names.discard('scripts/land.sh')
+    todo = sorted(n for n in names if n.endswith('.sh'))
+    while todo:
+        name = todo.pop()
+        if not (repo / name).is_file():
+            continue
+        for found in code_paths((repo / name).read_text()):
+            if found not in names and found != 'scripts/land.sh':
+                names.add(found)
+                if found.endswith('.sh'):
+                    todo.append(found)
+    missing = sorted(n for n in names if not (repo / n).is_file())
+    assert not missing, f'land.sh names files that do not exist: {missing}'
+    assert 'scripts/land_light_paths' in names, sorted(names)
+    return sorted(names)
+
+
 def run_case(source, fail='', equal=False, real_model=False, diff='compiler/main.ml\n'):
     with tempfile.TemporaryDirectory(prefix='takibi-land-precheck-') as tmp:
         root = Path(tmp)
         (root / 'scripts').mkdir()
         (root / 'scripts/land.sh').write_text(source)
-        repo_scripts = Path(__file__).resolve().parent
-        (root / 'scripts/land_light_paths').write_text((repo_scripts / 'land_light_paths').read_text())
-        # GitHub issue #1145: land.sh holds the land lock from these, in a
-        # registry of the fixture's own, never the host's.
-        for helper in ('vcpu_lease.sh', 'resource_lease.sh'):
-            (root / 'scripts' / helper).write_text((repo_scripts / helper).read_text())
+        repo = Path(__file__).resolve().parents[1]
+        for name in land_script_files(source):
+            (root / name).write_bytes((repo / name).read_bytes())
         bin_dir = root / 'bin'
         bin_dir.mkdir()
         for name in ('git', 'make', 'python3'):
@@ -202,6 +243,18 @@ def main():
         except AssertionError:
             continue
         raise AssertionError('broken precheck control was accepted')
+    # #1384: the fixture's file list follows the script. A commented path
+    # is not copied, a named one is, and a named file that does not exist
+    # is refused rather than skipped.
+    planted = 'x < scripts/land_light_paths\n# scripts/no_such_file\npython3 scripts/land_figures.py\n'
+    assert land_script_files(planted) == ['scripts/land_figures.py', 'scripts/land_light_paths']
+    cases.note()
+    try:
+        land_script_files(planted + 'cat scripts/no_such_file\n')
+    except AssertionError:
+        cases.note()
+    else:
+        raise AssertionError('a land.sh naming a missing file was accepted')
     report_pass('land-precheck-controls',
                 f'{total} publication traces and {cases.ran} broken-gate refusals; failures name the lane, skip clean/allcheck/push, and green retains the clean aggregate',
                 cases=total + cases.ran)
