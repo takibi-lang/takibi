@@ -2121,6 +2121,39 @@
         "static_assert_premises": "#638 stage 8: the window premise KERNEL_PREEMPTIBLE == 0",
         "per_cpu_stores": "#638 stage 8: El1SwitchPending, a row in per_cpu_carried_fields.tsv"
       }
+    },
+    {
+      "date": "2026-11-06",
+      "head": "e07819bd",
+      "counts": {
+        "raw_mint_files": 14,
+        "frame_lines": 12030,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 197,
+        "raw_deref_io": 7,
+        "raw_deref_builtin_region": 113,
+        "raw_deref_generated": 0,
+        "unsafe_blocks": 153,
+        "extern_fns": 73,
+        "invariant_stop_sites": 130,
+        "static_assert_premises": 23,
+        "assembly_lines": 2831,
+        "per_cpu_ordinary_arrays": 65,
+        "per_cpu_stores": 6,
+        "raw_cpu_id_calls": 147,
+        "trust_build_checks": 17,
+        "tla_review_stamps": 131,
+        "judge_defects_range": 1,
+        "judge_defects_init": 0,
+        "judge_defects_region_overlay": 0,
+        "unprotected_globals": 245,
+        "frame_api_ratchet": 7
+      },
+      "changes": {
+        "assembly_lines": "#1373 the EL0 fault path in user_entry.S and three fault children in user_payload_asm.S",
+        "extern_fns": "#1373 the three user_payload fault children",
+        "frame_lines": "#1373 the EL0 fault path reads ESR/FAR and enters the exit tail"
+      }
     }
   ]
 }
