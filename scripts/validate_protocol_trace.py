@@ -50,7 +50,7 @@ Usage: validate_protocol_trace.py UART_LOG [--without ACTION]
 negative control that a path the model lacked fails a passing run.
 --model sets one of StackOwnership's defect constants (EXIT_IDLES,
 LEAVE_CHECKS_STACK, WAKE_START_CHECKS_STACK, PREEMPT_EL1_KEEPS_STACK,
-TICK_IDLE_RESETS), so a control can show which
+TICK_IDLE_RESETS, IRQ_ENTRY_RESETS), so a control can show which
 guard refused a step.
 
 Exit code only (0 = pass, 1 = fail).
@@ -84,7 +84,7 @@ ACTIONS = ("CloneBegin", "CloneFinish", "SwitchComplete", "Reserve", "Commit",
            "PreemptEL1")
 MODEL_CONSTANTS = ("EXIT_IDLES", "LEAVE_CHECKS_STACK",
                    "WAKE_START_CHECKS_STACK", "PREEMPT_EL1_KEEPS_STACK",
-                   "TICK_IDLE_RESETS")
+                   "TICK_IDLE_RESETS", "IRQ_ENTRY_RESETS")
 
 # What /bin/protocol-trace makes the kernel do on every run, whatever the
 # timing, one entry per step; where timing decides which of two actions the
@@ -346,7 +346,7 @@ def trace_module(cores, obs):
 def trace_config(without, model, stop_at):
     constants = {"EXIT_IDLES": True, "LEAVE_CHECKS_STACK": True,
                  "WAKE_START_CHECKS_STACK": True, "PREEMPT_EL1_KEEPS_STACK": True,
-                 "TICK_IDLE_RESETS": True}
+                 "TICK_IDLE_RESETS": True, "IRQ_ENTRY_RESETS": True}
     constants.update(model)
     lines = ["SPECIFICATION Spec", "CONSTANTS"]
     lines += [f"  {k} = {'TRUE' if v else 'FALSE'}" for k, v in constants.items()]

@@ -8254,7 +8254,16 @@ let gen_exception_entry name frame dispatch tail before after_switch guard dispa
              "BUG: exception_entry '%s' dispatch_stack without a stack guard \
               -- type_inf.ml should have already rejected this" name)) in
        a "\tsub\tx3, x1, #1\n\teor\tx3, x3, x19\n\tlsr\tx3, x3, #%d\n" shift;
-       a "\tcbz\tx3, .L%s_nested\n\tmov\tsp, x1\n.L%s_nested:\n" name name;
+       (* GitHub issue #1382: an entry that is not nested starts the
+          dispatch stack empty, so it also starts the stack's preempt word,
+          the 8 bytes at its top (the kernel's linker scripts reserve them
+          above every stack top; scripts/check_kernel_stack_top_reserve.py),
+          at zero. A tick that switched resumed another frame without ending
+          the span it opened here, and nothing else ever resets this stack.
+          A nested entry keeps the word: the handler it interrupted still
+          holds its regions. *)
+       a "\tcbz\tx3, .L%s_nested\n\tmov\tsp, x1\n\tstr\txzr, [x1]\n.L%s_nested:\n"
+         name name;
        Option.iter (fun b -> a "\tbl\t%s\n" b) before;
        a "\tmov\tx0, x19\n"
    | None ->

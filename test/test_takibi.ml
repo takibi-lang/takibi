@@ -18468,7 +18468,16 @@ let codegen_tests = [
          (contains_substring asm
             "sub\tx3, x1, #1\n\teor\tx3, x3, x19\n\tlsr\tx3, x3, #14\n\
              \tcbz\tx3, .Lel1_current_irq_entry_nested\n\tmov\tsp, x1\n\
+             \tstr\txzr, [x1]\n\
              .Lel1_current_irq_entry_nested:\n\tbl\tmy_before");
+       (* GitHub issue #1382: only the entry that is not nested zeroes the
+          dispatch stack's preempt word; a nested one must not, or the
+          interrupted handler's regions would lose their count. *)
+       Alcotest.(check bool) "only an outer entry resets the preempt word" true
+         (contains_substring asm
+            "mov\tsp, x1\n\tstr\txzr, [x1]\n.Lel1_current_irq_entry_nested:"
+          && not (contains_substring asm
+            ".Lel1_current_irq_entry_nested:\n\tstr\txzr"));
        Target_info.configure "thumbv7em-none-eabi");
 
   Alcotest.test_case "exception_entry rejects dispatch_stack without a stack guard" `Quick

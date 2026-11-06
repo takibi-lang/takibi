@@ -105,7 +105,8 @@ check_model StackOwnership CoreInvariants 6 \
     leaveunchecked:CInitLeaveUnchecked:RunningMatchesCores:violated \
     preemptreleases:CInitPreemptReleases:StackSafety:ok \
     wakestartunchecked:CInitWakeStartUnchecked:StartsOnFreeStack:violated:8 \
-    tickidlekeeps:CInitTickIdleKeeps:IdleWaitsUnraised:ok
+    tickidlekeeps:CInitTickIdleKeeps:IdleWaitsUnraised:ok \
+    irqentrykeeps:CInitIrqEntryKeeps:IrqEntersUnraised:ok
 
 # GitHub issue #613: the multi-writer log ring, option B with records of up
 # to two slots; kernel/printk/log.tkb implements it (slice 4). The bound

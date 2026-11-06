@@ -175,8 +175,20 @@ locked hold and the loop, so it folds into the entry's action.
 `kernel_idle_tick_reenter` once did, and TLC reports `IdleWaitsUnraised` in
 seven steps: nap, idle entry, the idle start's reserve, commit, switch,
 interrupt from EL0, tick leave. Apalache's shallow run shows only that it
-runs. The IRQ stack's own word (#1382) is not modelled: `stands = Idle`
-stands for both stacks, and `idleRaised` is the idle stack's alone.
+runs. `stands = Idle` stands for both the idle and the IRQ stack, so the
+IRQ stack's word is a variable of its own.
+
+A sixth constant is #1382. `irqRaised` is each core's IRQ-stack preempt
+word: a `Reserve` inside an interrupt taken from EL0 (the tick's
+`kernel_process_schedule`) raises a span there, and the switch it leads to
+resumes the successor without ending it. The generated `exception_entry`
+with a `dispatch_stack` zeroes the word when the entry is not nested
+(`InterruptDepart`); a nested entry keeps it, since the handler it
+interrupted still holds its regions. `IRQ_ENTRY_RESETS = FALSE` drops the
+reset, and TLC reports `IrqEntersUnraised`. Apalache's shallow run shows only
+that it runs. The EL1 entry resets the same word, but the model's
+`PreemptEL1` reserves from a settled core, where the model cannot tell a
+tick from a syscall, so its raise is not modelled.
 
 A fourth configuration widens the model rather than breaking it. Variant
 `other` adds a third process to `Procs`, Ready from the start. With only the parent and the child no process is ever free to be
@@ -211,7 +223,7 @@ model, not of the kernel.
 | `Wait4Reap` | `kernel_syscall_wait4_deliver` | the parent reaps once the child's stack is free | which process reaps (a deferred reap, an exiting parent's drain) -- guarded: `scheduled_process_exited_take` fail-stops with `reap-on-owned-stack` | `9f89ff99da25` |
 | `LeaveBegin` | `kernel_process_core0_leave_excluded`, `kernel_process_migrate_current` | a running process stops being its core's current process and stays Running | why it leaves (affinity, a refused syscall, the tick) -- irrelevant to `StackSafety`: the model lets a running process leave at any step, which covers every reason | `d1e1e9ff20f7` |
 | `LeaveComplete` | `kernel_process_stack_idle_yield`, `kernel_idle_yield_reenter` | on the idle stack, the process the core stood on is made Ready and its stack released; the reenter resets the idle stack's preempt word (#1381) | the parked `kernel_activity` word (#1322) -- irrelevant to `StackSafety`: a diagnostic byte in the record under the run lock, it moves no stack | `3be5889889c3` |
-| `InterruptDepart` | `kernel_process_stack_interrupt_depart` | an interrupt from EL0 moves the core to its IRQ stack and releases the interrupted process's stack; the process stays current and Running, and `SwitchComplete` takes it back at the return | which interrupt it was -- irrelevant to `StackSafety`: every lower-EL IRQ enters through the same hook; the parked `kernel_activity` word (#1322) -- irrelevant to `StackSafety`: a diagnostic byte in the record under the run lock, it moves no stack | `3affb34223c2` |
+| `InterruptDepart` | `kernel_process_stack_interrupt_depart` | an interrupt from EL0 moves the core to its IRQ stack and releases the interrupted process's stack; the process stays current and Running, and `SwitchComplete` takes it back at the return; the generated entry zeroes the IRQ stack's preempt word (#1382, `IRQ_ENTRY_RESETS`) | which interrupt it was -- irrelevant to `StackSafety`: every lower-EL IRQ enters through the same hook; the parked `kernel_activity` word (#1322) -- irrelevant to `StackSafety`: a diagnostic byte in the record under the run lock, it moves no stack | `3affb34223c2` |
 | `TickLeave` | `kernel_process_tick_leave_excluded`, `kernel_idle_tick_reenter` | inside that interrupt, a process that may no longer run here is made Ready, its stack already free, and the core idles; the reenter resets the idle stack's preempt word (#1381, `TICK_IDLE_RESETS`) | why it may not run here (its mask), including the spread test hook, and the hook's observation after Ready publication -- irrelevant to `StackSafety`: the model lets it leave at any interrupt, and the observation changes neither stack ownership nor process state | `f84258af727c` |
 | `PreemptEL1` | `kernel_tick`, `kernel_process_stack_switch_complete` | a tick taken at EL1 inside a syscall leaves the process Ready while this core still owns and stands on its stack, which still holds live kernel frames; the release is `SwitchComplete`'s, at the return into the successor, and the core that takes the process takes the stack (GitHub issue #992) | that an EL1 switch is produced only inside the stage 8 window (`kernel/kernel/el1_preempt_scenario.tkb`) -- irrelevant to `StackSafety`: outside it `kernel_tick`'s El1 branch requests a reschedule, taken at the syscall return as `SwitchAway`, so the kernel's behaviours are a subset of the model's, and /bin/protocol-trace's window replays the real ones; the tick's CPU-time charge (#1309) -- irrelevant to `StackSafety`: it adds to a counter under the run lock, on both levels, and changes no state, owner or current process; the El1 frame's registers -- irrelevant to `StackSafety`: the frame type (`FrameRef[process, ExceptionLevel::El1]`) keeps deliveries out of it, and no register moves a stack; the preempt count the switch leaves on the preempted stack (#638 slices 2 and 3: a per-stack word, zero at a switch and checked zero at the resume) -- irrelevant to `StackSafety`: a word on that stack's own run, it moves no stack | `bfc41ad2ba8f` |
 
@@ -241,6 +253,12 @@ Properties:
   word to be zero -- finds no span raised there. In the kernel the run-time
   assert at the wfi watches it, and `scripts/check_kernel_stack_top_reserve.py`
   refuses an idle entry that does not reset before the loop.
+- `IrqEntersUnraised` (#1382, TLC): inside an interrupt, before the tick
+  reserves a successor, the IRQ stack's preempt word holds no span. In the
+  compiler the reset is part of the dispatch-stack sequence (an Alcotest case
+  checks it is on the outer path only), and
+  `scripts/check_kernel_stack_top_reserve.py` refuses an IRQ entry without
+  `dispatch_stack: irq_stack_top` or a sequence without the reset.
 - `ChildReaped` (liveness, TLC only): the parent's wait4 completes.
 - Deadlock freedom: TLC's own check, which the exit variant fails.
 
