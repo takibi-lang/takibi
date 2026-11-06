@@ -802,12 +802,24 @@ and static_smt t =
   | SAdd (a, b) -> Printf.sprintf "(+ %s %s)" (static_smt a) (static_smt b)
   | SSub (a, b) -> Printf.sprintf "(- %s %s)" (static_smt a) (static_smt b)
   | SMul (a, b) -> Printf.sprintf "(* %s %s)" (static_smt a) (static_smt b)
-  | SGlobal _ | SEnum _ | SVar { contents = SLink _ } -> "0"
+  (* GitHub issue #1232: a global address or an enum case is an
+     uninterpreted integer constant, so an identity z3 proves holds for every
+     value it could stand for. Spelling them all "0" would let z3 prove
+     `&a = &b`. static_repr never returns a link. *)
+  | SGlobal _ | SEnum _ -> static_opaque_atom t
+  | SVar { contents = SLink _ } -> assert false
+
+and static_opaque_atom t =
+  match static_repr t with
+  | SGlobal name -> Printf.sprintf "x_g_%s" name
+  | SEnum (name, case) -> Printf.sprintf "x_e_%s__%s" name case
+  | _ -> assert false
 
 and static_atoms t acc =
   match static_repr t with
   | SParam (id, _) -> Printf.sprintf "x_p%d" id :: acc
   | SVar { contents = SUnbound id } -> Printf.sprintf "x_v%d" id :: acc
+  | (SGlobal _ | SEnum _) as a -> static_opaque_atom a :: acc
   | SAdd (a, b) | SSub (a, b) | SMul (a, b) -> static_atoms a (static_atoms b acc)
   | _ -> acc
 

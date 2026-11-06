@@ -7267,6 +7267,33 @@ fn stored_release(holder: sink StoredHolder[k]) { stored_drop(holder.token); }
             (has "; rule: max\n; claim: {5..<9 as u8}")));
 
   Alcotest.test_case
+    "issue #1232: global and enum atoms in a region identity are distinct z3 constants" `Quick
+    (fun () ->
+      Hashtbl.reset Range_obligation.table;
+      Range_obligation.enabled := true;
+      Fun.protect ~finally:(fun () ->
+          Range_obligation.enabled := false;
+          Hashtbl.reset Range_obligation.table)
+        (fun () ->
+          let open Types in
+          record_static_identity (SAdd (SGlobal "a1232", SConst 1))
+            (SAdd (SConst 1, SGlobal "a1232"));
+          record_static_identity (SGlobal "a1232") (SGlobal "b1232");
+          record_static_identity (SAdd (SEnum ("E1232", "X"), SConst 0))
+            (SEnum ("E1232", "Y"));
+          let texts = Hashtbl.fold (fun _ (t, _) acc -> t :: acc)
+              Range_obligation.table [] in
+          let has needle = List.exists (fun t -> contains_substring t needle) texts in
+          Alcotest.(check int) "three obligations" 3 (List.length texts);
+          Alcotest.(check bool) "global declared" true
+            (has "(declare-const x_g_a1232 Int)");
+          (* Before #1232 both spelled 0, so z3 proved &a = &b. *)
+          Alcotest.(check bool) "two globals differ" true
+            (has "(assert (not (= x_g_a1232 x_g_b1232)))");
+          Alcotest.(check bool) "two enum cases differ" true
+            (has "(declare-const x_e_E1232__Y Int)")));
+
+  Alcotest.test_case
     "issue #983: a literal index past 2^63 is out of bounds, not -1" `Quick
     (expect_type_error "index 18446744073709551615 is out of bounds for array of size 4"
        "fn f983(a: [u8; 4]) -> u8 { return a[0xFFFFFFFFFFFFFFFF]; }");
