@@ -254,7 +254,7 @@ next one taken. The done record of the previous queue is in HISTORY.md
 6. **Other compiler and language work, respecting design gates.** #709 (done
    2026-10-30, a last-generation slot is retired) and #710 (generation exhaustion;
    done 2026-10-30, a closed Exhausted outcome), #203 stage 3 (cross-call contracts,
-   byte ranges), #732's later slices, #793 (proofs on type variables),
+   byte ranges), #732's later slices, #793 (proofs on type variables; done 2026-11-06, retried after types resolve),
    #762 (no vector stores in MMU-off code; done 2026-10-30), #774 (every IRQ dispatch arm
    acknowledges its source; done 2026-10-30, per-source linear claims), #752 (typestate in more of the kernel), #755
    (an immutable integer binding keeps one static; done 2026-10-30), #751 (per-element
