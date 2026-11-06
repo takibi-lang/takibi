@@ -2308,7 +2308,7 @@ _kernel-memory-map-check: _kernelbuild-rpi5 _kernelbuild-qemu
 ## tables (scripts/checkpoint_rebase.py runs it after a stamp-only conflict).
 MODEL_MAP_TABLES = $(KERNEL_QEMU_MAIN_O).facts/callgraph.tsv $(KERNEL_RPI5_MAIN_O).facts/callgraph.tsv
 MODEL_MAP_STAMP  = $(KERNEL_DIR)/build/model_function_map.ok
-$(MODEL_MAP_STAMP): $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_DIR)/models/README.md $(wildcard $(KERNEL_DIR)/models/*.tla) scripts/buildcheck_model_function_map.py scripts/call_graph_table.py
+$(MODEL_MAP_STAMP): $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_DIR)/models/README.md $(KERNEL_DIR)/models/function_map_digests.tsv $(wildcard $(KERNEL_DIR)/models/*.tla) scripts/buildcheck_model_function_map.py scripts/call_graph_table.py
 	python3 scripts/buildcheck_model_function_map.py $(MODEL_MAP_TABLES)
 	@touch $@
 

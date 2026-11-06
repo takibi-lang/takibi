@@ -896,7 +896,9 @@ together. Three things keep them in step:
    dropped paths name. Any token change to that code fails the kernel build
    until someone re-reads the row against the model and runs
    `make model-map-restamp`; the commit that restamps says what was
-   reviewed. A comment-only edit keeps the stamp. The
+   reviewed. A comment-only edit keeps the stamp. The restamp also
+   writes `function_map_digests.tsv`, so a stale row names each function
+   whose digest moved, old and new (#1029). The
    stamp says only "look again", not what is wrong, and it fires whether or
    not any test exercises the change.
 

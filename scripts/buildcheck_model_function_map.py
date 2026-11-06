@@ -51,6 +51,13 @@ and the call must also be a resolved callee.
 The hash says only "look again", not what is wrong, and it fires whether or
 not any test exercises the change.
 
+GitHub issue #1029: a row's stamp is one hash over several functions, so a
+stale stamp alone does not say which function moved. --restamp also writes
+kernel/models/function_map_digests.tsv, each stamped function's digest as
+reviewed, and a stale row names every function whose digest differs from it,
+old and new. A row whose stamp matches must agree with that file too, so the
+file cannot fall behind the stamps it explains.
+
 Exit code only (0 = pass, 1 = fail, 2 = usage).
 """
 
@@ -66,6 +73,7 @@ from source_scan import compact
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 MODELS = ROOT / "kernel" / "models"
 README = MODELS / "README.md"
+DIGESTS = MODELS / "function_map_digests.tsv"
 # Function identifiers in mapping cells are not restricted to a prefix.
 NAME_RE = re.compile(r"`([a-z][a-z0-9_]*)`")
 SECTION_RE = re.compile(r"^## (\w+)\.tla\b")
@@ -214,7 +222,7 @@ def dropped_errors(model: str, cell: str, tla_defs: dict[str, set[str]],
 
 
 def row_errors(model: str, cells: list[str], tla_defs: dict[str, set[str]],
-               program: Program) -> list[str]:
+               program: Program, reviewed: dict[str, str] | None = None) -> list[str]:
     if len(cells) != 5:
         return [f"{cells[0]} has {len(cells)} cells, not 5"]
     errors = [f"{model}.tla does not define action {action}"
@@ -228,11 +236,47 @@ def row_errors(model: str, cells: list[str], tla_defs: dict[str, set[str]],
     errors += dropped_errors(model, cells[3], tla_defs, program)
     stamp = f"`{row_hash(stamped_names(cells), program)}`"
     if not errors and cells[4] != stamp:
+        moved = moved_names(cells, program, reviewed or {})
+        which = ("; ".join(moved) if moved else
+                 "no function differs from kernel/models/function_map_digests.tsv, "
+                 "so that file is stale")
         errors.append(f"{cells[0]}: a function it maps changed since the "
-                      f"row was reviewed ({cells[4]}, now {stamp}). Re-read "
-                      "the row and the model's action against the code, "
+                      f"row was reviewed ({cells[4]}, now {stamp}; {which}). "
+                      "Re-read the row and the model's action against the code, "
                       "then run `make model-map-restamp`")
+    elif not errors and reviewed is not None and (
+            moved := moved_names(cells, program, reviewed)):
+        errors.append(f"{cells[0]}: its stamp matches but "
+                      "kernel/models/function_map_digests.tsv disagrees "
+                      f"({'; '.join(moved)}); run `make model-map-restamp`")
     return errors
+
+
+def read_digests(text: str) -> dict[str, str]:
+    """name -> digest as last reviewed, from function_map_digests.tsv."""
+    out = {}
+    for line in text.splitlines():
+        if line and not line.startswith("#"):
+            name, _, digest = line.partition("\t")
+            out[name] = digest
+    return out
+
+
+def write_digests(readme_rows: list[tuple[str, list[str]]], program: Program) -> str:
+    names = sorted({name for _, cells in readme_rows if len(cells) == 5
+                    for name in stamped_names(cells)})
+    return ("# Written by `make model-map-restamp` (GitHub issue #1029): each\n"
+            "# function a kernel/models/README.md row stamps, and its digest as\n"
+            "# reviewed. Do not edit by hand.\n"
+            + "".join(f"{name}\t{program.digest(name)}\n" for name in names))
+
+
+def moved_names(cells: list[str], program: Program, reviewed: dict[str, str]) -> list[str]:
+    """'name: old -> new' for every stamped function whose digest moved."""
+    return [f"{name}: {reviewed.get(name, '(not recorded)') or '(none)'} -> "
+            f"{program.digest(name) or '(none)'}"
+            for name in dict.fromkeys(stamped_names(cells))
+            if reviewed.get(name) != program.digest(name)]
 
 
 def restamp(text: str, program: Program) -> str:
@@ -286,9 +330,13 @@ def controls_fail(tla_defs: dict[str, set[str]], rows: list[dict],
         if not names or not program.defined(names[0]):
             continue
         moved = Program(changed(rows, names[0], "body_hash", "0" * 32))
-        if not any("a function it maps changed" in error
-                   for error in row_errors(model, cells, tla_defs, moved)):
+        reviewed = {name: program.digest(name) for name in names}
+        errors = row_errors(model, cells, tla_defs, moved, reviewed)
+        if not any("a function it maps changed" in error for error in errors):
             failed.append(f"{cells[0]} keeps its stamp when {names[0]} changes")
+        elif not any(f"{names[0]}: {program.digest(names[0])} -> " in error
+                     for error in errors):
+            failed.append(f"{cells[0]}'s stale stamp does not name {names[0]}")
     guarded = next(((model, cells) for model, cells in readme_rows
                     if len(cells) == 5 and "guarded: `" in cells[3]), None)
     if guarded is None:
@@ -348,9 +396,13 @@ def main() -> int:
         README.write_text(restamp(README.read_text(encoding="utf-8"), program),
                           encoding="utf-8")
     readme_rows = table_rows(README.read_text(encoding="utf-8"))
+    if restamping:
+        DIGESTS.write_text(write_digests(readme_rows, program), encoding="utf-8")
+    reviewed = (read_digests(DIGESTS.read_text(encoding="utf-8"))
+                if DIGESTS.exists() else {})
     failed = False
     for model, cells in readme_rows:
-        for error in row_errors(model, cells, tla_defs, program):
+        for error in row_errors(model, cells, tla_defs, program, reviewed):
             print(f"ERROR model-function-map: kernel/models/README.md "
                   f"{model}: {error}")
             failed = True
