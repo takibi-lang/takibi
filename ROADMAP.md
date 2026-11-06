@@ -235,7 +235,7 @@ next one taken. The done record of the previous queue is in HISTORY.md
    (printf) and #1070 (sendfile to a file) are writers the rows avoid.
    Signals: #999 (host-Linux conformance suite; done 2026-11-06, its #946 row runs on the kernel since #1373), #1000 (one delivery
    chokepoint and `SignalDelivery.tla`, designed with #992; done 2026-11-06,
-   `signal_deliver`); #948 (the
+   `signal_deliver`; #1379 won back 80 B and 64 B of its text, done 2026-11-06); #948 (the
    terminal-read EINTR fixture) and #432 (timed blocking) done 2026-10-30;
    #1373 (an unresolved EL0 fault ends the process with SIGSEGV, SIGBUS,
    SIGTRAP or SIGILL instead of fail-stopping the kernel) done 2026-11-06,
