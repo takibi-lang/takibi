@@ -97,8 +97,7 @@ def idle_entry_errors(entry_text, secondary_text):
         if body is None:
             errors.append(f"{SECONDARY}: {name} is not defined")
             continue
-        first = [l.strip() for l in body.group(1).split("\n")
-                 if l.strip() and not l.strip().startswith("//")]
+        first = [l.strip() for l in body.group(1).split("\n")]
         if ("preempt_count_after_switch();" not in first or
                 "kernel_idle_loop();" not in first or
                 first.index("preempt_count_after_switch();") >
@@ -128,8 +127,7 @@ def self_test(files):
         (ENTRIES[0], ":lo12:irq_stack_top\n    str     xzr, [x9, x0]",
          ":lo12:irq_stack_top\n    nop"),
         (ENTRIES[1], "    str     xzr, [x0]\n", ""),
-        (SECONDARY, "    preempt_count_after_switch();\n    workload_profile_idle_enter();",
-         "    workload_profile_idle_enter();"),
+        (SECONDARY, "preempt_count_after_switch();", ""),
     ]
     refused = 0
     for name, before, after in plants:
