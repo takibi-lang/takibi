@@ -46,7 +46,7 @@ point, one more GDB stop in affinity-gdb), not to a lane of its own.
 | kernelcheck-race-window-678-qemu | 330 | error-case | race window #678, armed and reverted |
 | kernelcheck-race-window-705-qemu | 353 | error-case | removing ToIdle must be observed as failure (#705) |
 | kernelcheck-race-window-761-qemu | 100 | error-case | connected read copying the wrong length must fail (#761) |
-| kernelcheck-race-window-830-qemu | 136 | error-case | NIC fixture pinned to core 0 must fail (#830) |
+| kernelcheck-race-window-830-qemu | 136 | error-case | NIC fixture pinned to core 0 must fail (#830); a tick-wake one tick late must fail peer_sleep_mask (#905) |
 | kernelcheck-probe-ticks-qemu | 499 | error-case | console contention window #651, probe refusals, a hand-made frame with an EL0t SPSR must not reach the El1 landing, and one without PAN must be refused (#1194), an IRQ return ignoring the preempt count must be seen (#638) |
 | kernelcheck-uart-wake-qemu | 405 | error-case | UART and NetRx publication windows held by GDB (#546, #547, #587) |
 | kernelcheck-affinity-gdb-qemu | 387 | error-case | migration gate (#9) and wait4 double walk (#571) under GDB |

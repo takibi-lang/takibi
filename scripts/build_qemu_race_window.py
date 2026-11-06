@@ -427,6 +427,21 @@ WINDOWS["1211"] = {
               ""),
 }
 
+# GitHub issue #905: #863's negative control. A tick-wake that runs only
+# once its core's PREVIOUS tick was already at or past the earliest deadline
+# wakes every deadline sleeper one tick late. The peer_sleep_mask view reads
+# the waking tick's record and must refuse that wake as not the first tick
+# after the deadline, which shows its verdict discriminates.
+WINDOWS["905-late-wake"] = {
+    "spin": None,
+    "check": ("kernel/process.tkb",
+              "    kernel_process_tick_wake_note(core, now);\n"
+              "    if (due == 0 || now < due) { return; }\n",
+              "    kernel_process_tick_wake_note(core, now);\n"
+              "    if (due == 0 ||\n"
+              "        atomic_word_load(&kernel_process_tick_wake_tick_before[core]) < due) { return; }\n"),
+}
+
 # GitHub issue #1339: the session mode claimed by a load and a store instead of
 # a compare-and-swap, the two held apart so that two writers released together
 # both pass the load. kernelcheck-profile-qemu must then see two winners, of a

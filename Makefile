@@ -2000,7 +2000,7 @@ KERNEL_QEMU_NET_WAKE_CONTROL_ELF := $(KERNEL_QEMU_BUILD_DIR)/kernel-net-wake-con
 # check it exercises reverted. scripts/build_qemu_race_window.py names them.
 KERNEL_QEMU_RACE_WINDOWS := 609 603 633 678 651 1211
 # Controls only: a reverted kernel, and no armed one (the ordinary kernel is it).
-KERNEL_QEMU_RACE_CONTROLS := 635 705 705-missed-arrival 651-no-peer 651-resume-old 830-core0 761-unbounded 1339-load-store 1194-el0-spsr 1194-no-pan 638-no-consult
+KERNEL_QEMU_RACE_CONTROLS := 635 705 705-missed-arrival 651-no-peer 651-resume-old 830-core0 761-unbounded 905-late-wake 1339-load-store 1194-el0-spsr 1194-no-pan 638-no-consult
 KERNEL_QEMU_RACE_WINDOW_ELFS := $(foreach w,$(KERNEL_QEMU_RACE_WINDOWS),$(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-armed.elf $(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-reverted.elf) $(foreach w,$(KERNEL_QEMU_RACE_CONTROLS),$(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-reverted.elf)
 KERNEL_QEMU_LINK_LD      := $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld
 KERNEL_QEMU_ELF          := $(KERNEL_QEMU_BUILD_DIR)/kernel.elf
@@ -2709,6 +2709,9 @@ kernelcheck-race-window-830-qemu: kernelbuild-check
 
 _kernelcheck-race-window-830-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_RACE_WINDOW=830-core0 KERNEL_QEMU_RACE_WINDOW_ARMED=skip KERNEL_QEMU_RACE_WINDOW_REQUIRE_FAILURE=1 KERNEL_QEMU_RACE_WINDOW_SIGNATURE='^nic irq: pinned phase FAILED: cpu 0 ' KERNEL_QEMU_SERIAL_PORT=18618 KERNEL_QEMU_QMP_PORT=18619 KERNEL_QEMU_NETDEV_LOCAL_PORT=18620 KERNEL_QEMU_NETDEV_REMOTE_PORT=18621 bash scripts/run_kernel_race_window_qemutest.sh
+	@# GitHub issue #905: a tick-wake one tick late must fail peer_sleep_mask
+	@# (#863's first-tick verdict), in this lane rather than one of its own.
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_RACE_WINDOW=905-late-wake KERNEL_QEMU_RACE_WINDOW_ARMED=skip KERNEL_QEMU_RACE_WINDOW_REQUIRE_FAILURE=1 KERNEL_QEMU_RACE_WINDOW_SIGNATURE='^workload: peer sleeper not woken on time while core 0 was masked, registered=1 woken_core_plus_one=2 first_tick=0' KERNEL_QEMU_SERIAL_PORT=18533 KERNEL_QEMU_QMP_PORT=18534 KERNEL_QEMU_NETDEV_LOCAL_PORT=18535 KERNEL_QEMU_NETDEV_REMOTE_PORT=18536 bash scripts/run_kernel_race_window_qemutest.sh
 
 # A functional negative control: removing ToIdle must be observed as failure.
 .PHONY: kernelcheck-race-window-705-qemu _kernelcheck-race-window-705-qemu
