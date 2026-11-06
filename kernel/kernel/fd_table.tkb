@@ -1311,10 +1311,32 @@ variant UnifiedFdCloneFault {
     AfterSuccessfulInstalls(usize);
 }
 
+// GitHub issue #1350 slice 4: a failed clone's undo, carried out of the
+// clone window. Releasing the child's descriptors can be the last release of
+// a pipe end, and closing that end takes the pipe's TaskMutex, which may wait
+// on a holder preempted on this core; the clone window holds a PreemptOff
+// span, where no such wait may happen. So the failure detaches the child's
+// descriptor-block chain (the only place those references are named) and
+// hands it to the caller, which releases it with unified_fd_clone_undo_finish
+// once the span has ended. `installs` is how many descriptors the clone
+// installed before it failed (the fault-injection probe asks).
+linear struct UnifiedFdCloneUndo[child: usize] {
+    private block_head: usize;
+    private block_head_generation: usize;
+    private installs: usize;
+}
+
 must_use variant UnifiedFdCloneRunResult {
     Invalid;
     Ok;
-    InjectedAfter(usize);
+    Failed(exists child: usize. UnifiedFdCloneUndo[child]);
+    InjectedAfter(exists child: usize. UnifiedFdCloneUndo[child]);
+}
+
+must_use variant UnifiedFdCloneResult {
+    Ok;
+    Invalid;
+    Failed(exists child: usize. UnifiedFdCloneUndo[child]);
 }
 // GitHub issue #391: `slot` is the pool ADDRESS of the object now, not an
 // index into an array, so there is no range for a refinement to state --
@@ -2724,35 +2746,10 @@ fn unified_fd_close(process: usize, fd: usize) -> UnifiedFdResult !{unsafe} {
     { let __ctx_result: UnifiedFdResult = UnifiedFdResult::Invalid; fd_context_unpin(ctx_pin); { let __entries_result: UnifiedFdResult = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
 }
 
-// GitHub issue #295: shared undo for unified_fd_clone's copy+retain loop.
-// GitHub issue #393 turns it into a scan: it closes every descriptor the
-// child has below `limit`, which is what "release what was already
-// retained and reset those slots" means once the slots are allocated
-// rather than always there. unified_fd_close is the release and the reset
-// in one, and it is the same function the successful path would have used
-// later, so there is no second copy of that logic to get wrong.
-private fn unified_fd_clone_rollback_prefix(child: usize, limit: usize)
-        !{unsafe} {
-    let mut from: usize = 0;
-    let mut scanning: bool = true;
-    while (scanning) {
-        scanning = false;
-        match unified_fd_next_open(child, from) {
-            UnifiedFdScanResult::Done => {}
-            UnifiedFdScanResult::Found(fd) => {
-                if (fd < limit) {
-                    match unified_fd_close(child, fd) {
-                        UnifiedFdResult::Invalid => {}
-                        UnifiedFdResult::Ok => {}
-                    }
-                    from = fd + 1;
-                    scanning = true;
-                }
-            }
-        }
-    }
-}
-
+// GitHub issue #295: shared undo for unified_fd_clone's copy+retain loop,
+// once a scan closing the child's descriptors below the installed limit
+// (#393). #1350 slice 4 moved the closes out of the clone window: see
+// unified_fd_clone_detach and unified_fd_clone_undo_finish below.
 private fn unified_fd_clone_begin(child_value: usize @ child)
         -> UnifiedFdCloneTxn[child] {
     let mut transaction: UnifiedFdCloneTxn[child] = { child_value, 0 };
@@ -2801,10 +2798,76 @@ private fn unified_fd_clone_install(
     }
 }
 
-private fn unified_fd_clone_rollback(
-        transaction: sink UnifiedFdCloneTxn[child]) !{unsafe} {
-    unified_fd_clone_rollback_prefix(transaction.child_value,
-                                     transaction.limit);
+// The rollback, split at the span (#1350 slice 4): every descriptor the
+// child has was installed by this clone (it started empty), so the child's
+// whole block chain is the prefix to undo. It leaves the child here, with
+// the obligation; unified_fd_clone_undo_finish releases it later.
+private fn unified_fd_clone_detach(
+        transaction: sink UnifiedFdCloneTxn[child],
+        child_ctx: borrow &mut ProcessFdContext, installs: usize)
+        -> UnifiedFdCloneUndo[child] {
+    let mut undo: UnifiedFdCloneUndo[child] = {
+        child_ctx.block_head, child_ctx.block_head_generation, installs
+    };
+    child_ctx.block_head = 0;
+    child_ctx.block_head_generation = 0;
+    return undo;
+}
+
+// One exit for every failure after the copy began: kept out of line so the
+// caller's frame does not hold an undo per failure site (#1081's ceiling).
+private fn unified_fd_clone_failed(
+        transaction: sink UnifiedFdCloneTxn[child],
+        child_ctx: borrow &mut ProcessFdContext, installs: usize,
+        injected: bool) -> UnifiedFdCloneRunResult {
+    let undo = unified_fd_clone_detach(transaction, child_ctx, installs);
+    if (injected) { return UnifiedFdCloneRunResult::InjectedAfter(undo); }
+    return UnifiedFdCloneRunResult::Failed(undo);
+}
+
+fn unified_fd_clone_undo_installs(undo: borrow UnifiedFdCloneUndo[child]) -> usize {
+    return undo.installs;
+}
+
+// Releases what a failed clone had installed, outside any PreemptOff span:
+// the release of a pipe end's last reference closes the end under the pipe's
+// TaskMutex. The same walk as fd_blocks_release, closing each live slot the
+// way unified_fd_close does before its block goes back.
+fn unified_fd_clone_undo_finish(undo: sink UnifiedFdCloneUndo[child]) !{unsafe} {
+    let mut address: usize = undo.block_head;
+    let mut generation: usize = undo.block_head_generation;
+    while (fd_block_matches(address, generation)) {
+        match fd_block_pin(&fd_block_pool, address, generation) {
+            RegionPinned(FdBlock)::Stale => { break; }
+            RegionPinned(FdBlock)::Pinned(block_pin) => {
+                let block: &mut FdBlock = region_pin_record(block_pin);
+                for index: usize in 0..<FD_BLOCK_SLOTS {
+                    if (block.slot[index].kind != UnifiedFdKind::Empty) {
+                        let mut handle: UnifiedObjectHandle = {
+                            block.slot[index].object, block.slot[index].generation
+                        };
+                        if (unified_object_matches(handle)) {
+                            match unified_object_release(handle) {
+                                UnifiedObjectReleaseResult::Invalid => {}
+                                UnifiedObjectReleaseResult::StillHeld => {}
+                                UnifiedObjectReleaseResult::Freed => {}
+                            }
+                        }
+                        block.slot[index].kind = UnifiedFdKind::Empty;
+                        block.slot[index].object = 0;
+                        block.slot[index].generation = 0;
+                        block.slot[index].close_on_exec = false;
+                    }
+                }
+                let next: usize = block.next;
+                let next_generation: usize = block.next_generation;
+                fd_block_free(address, generation);
+                address = next;
+                generation = next_generation;
+                fd_block_unpin(block_pin);
+            }
+        }
+    }
 }
 
 private fn unified_fd_clone_commit(
@@ -2907,12 +2970,11 @@ private fn unified_fd_clone_run(parent: usize, child: usize,
             UnifiedFdScanResult::Found(fd) => {
                 let (block, block_generation) = fd_block_lookup(parent_ctx, fd);
                 if (block == 0) {
-                    unified_fd_clone_rollback(transaction);
-                    { let __child_ctx_result: UnifiedFdCloneRunResult = UnifiedFdCloneRunResult::Invalid; fd_context_unpin(child_ctx_pin); { let __parent_ctx_result: UnifiedFdCloneRunResult = __child_ctx_result; fd_context_unpin(parent_ctx_pin); return __parent_ctx_result; } }
+                    { let __child_ctx_result: UnifiedFdCloneRunResult = unified_fd_clone_failed(transaction, child_ctx, successful_installs, false); fd_context_unpin(child_ctx_pin); { let __parent_ctx_result: UnifiedFdCloneRunResult = __child_ctx_result; fd_context_unpin(parent_ctx_pin); return __parent_ctx_result; } }
                 }
                 let RegionPinned(FdBlock)::Pinned(entries_pin) =
                         fd_block_pin(&fd_block_pool, block, block_generation) else {
-                    RegionPinned(FdBlock)::Stale => { unified_fd_clone_rollback(transaction); fd_context_unpin(child_ctx_pin); fd_context_unpin(parent_ctx_pin); return UnifiedFdCloneRunResult::Invalid; }
+                    RegionPinned(FdBlock)::Stale => { let __child_ctx_result: UnifiedFdCloneRunResult = unified_fd_clone_failed(transaction, child_ctx, successful_installs, false); fd_context_unpin(child_ctx_pin); fd_context_unpin(parent_ctx_pin); return __child_ctx_result; }
                 };
                 let entries: &mut FdBlock = region_pin_record(entries_pin);
                 let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
@@ -2933,22 +2995,15 @@ private fn unified_fd_clone_run(parent: usize, child: usize,
                         successful_installs = successful_installs + 1;
                     }
                     UnifiedFdInstallResult::Invalid => {
-                        unified_fd_clone_rollback(transaction);
-                        { let __child_ctx_result: UnifiedFdCloneRunResult = UnifiedFdCloneRunResult::Invalid; fd_context_unpin(child_ctx_pin); { let __parent_ctx_result: UnifiedFdCloneRunResult = __child_ctx_result; fd_context_unpin(parent_ctx_pin); { let __entries_result: UnifiedFdCloneRunResult = __parent_ctx_result; fd_block_unpin(entries_pin); return __entries_result; } } }
+                        { let __child_ctx_result: UnifiedFdCloneRunResult = unified_fd_clone_failed(transaction, child_ctx, successful_installs, false); fd_context_unpin(child_ctx_pin); { let __parent_ctx_result: UnifiedFdCloneRunResult = __child_ctx_result; fd_context_unpin(parent_ctx_pin); { let __entries_result: UnifiedFdCloneRunResult = __parent_ctx_result; fd_block_unpin(entries_pin); return __entries_result; } } }
                     }
                     // install already logged the bound break; this only
                     // has to undo the descriptors that came before.
                     UnifiedFdInstallResult::RefOverflow => {
-                        unified_fd_clone_rollback(transaction);
-                        { let __child_ctx_result: UnifiedFdCloneRunResult = UnifiedFdCloneRunResult::Invalid; fd_context_unpin(child_ctx_pin); { let __parent_ctx_result: UnifiedFdCloneRunResult = __child_ctx_result; fd_context_unpin(parent_ctx_pin); { let __entries_result: UnifiedFdCloneRunResult = __parent_ctx_result; fd_block_unpin(entries_pin); return __entries_result; } } }
+                        { let __child_ctx_result: UnifiedFdCloneRunResult = unified_fd_clone_failed(transaction, child_ctx, successful_installs, false); fd_context_unpin(child_ctx_pin); { let __parent_ctx_result: UnifiedFdCloneRunResult = __child_ctx_result; fd_context_unpin(parent_ctx_pin); { let __entries_result: UnifiedFdCloneRunResult = __parent_ctx_result; fd_block_unpin(entries_pin); return __entries_result; } } }
                     }
                     UnifiedFdInstallResult::NoMemory => {
-                        unified_fd_clone_rollback(transaction);
-                        if (inject_failure) {
-                            { let __child_ctx_result: UnifiedFdCloneRunResult = UnifiedFdCloneRunResult::InjectedAfter(
-                                successful_installs); fd_context_unpin(child_ctx_pin); { let __parent_ctx_result: UnifiedFdCloneRunResult = __child_ctx_result; fd_context_unpin(parent_ctx_pin); { let __entries_result: UnifiedFdCloneRunResult = __parent_ctx_result; fd_block_unpin(entries_pin); return __entries_result; } } }
-                        }
-                        { let __child_ctx_result: UnifiedFdCloneRunResult = UnifiedFdCloneRunResult::Invalid; fd_context_unpin(child_ctx_pin); { let __parent_ctx_result: UnifiedFdCloneRunResult = __child_ctx_result; fd_context_unpin(parent_ctx_pin); { let __entries_result: UnifiedFdCloneRunResult = __parent_ctx_result; fd_block_unpin(entries_pin); return __entries_result; } } }
+                        { let __child_ctx_result: UnifiedFdCloneRunResult = unified_fd_clone_failed(transaction, child_ctx, successful_installs, inject_failure); fd_context_unpin(child_ctx_pin); { let __parent_ctx_result: UnifiedFdCloneRunResult = __child_ctx_result; fd_context_unpin(parent_ctx_pin); { let __entries_result: UnifiedFdCloneRunResult = __parent_ctx_result; fd_block_unpin(entries_pin); return __entries_result; } } }
                     }
                 }
                 // install clears close-on-exec because a fresh descriptor
@@ -2956,8 +3011,7 @@ private fn unified_fd_clone_run(parent: usize, child: usize,
                 if (inherited) {
                     match unified_fd_set_close_on_exec(child, fd, true) {
                         UnifiedFdResult::Invalid => {
-                            unified_fd_clone_rollback(transaction);
-                            { let __child_ctx_result: UnifiedFdCloneRunResult = UnifiedFdCloneRunResult::Invalid; fd_context_unpin(child_ctx_pin); { let __parent_ctx_result: UnifiedFdCloneRunResult = __child_ctx_result; fd_context_unpin(parent_ctx_pin); { let __entries_result: UnifiedFdCloneRunResult = __parent_ctx_result; fd_block_unpin(entries_pin); return __entries_result; } } }
+                            { let __child_ctx_result: UnifiedFdCloneRunResult = unified_fd_clone_failed(transaction, child_ctx, successful_installs, false); fd_context_unpin(child_ctx_pin); { let __parent_ctx_result: UnifiedFdCloneRunResult = __child_ctx_result; fd_context_unpin(parent_ctx_pin); { let __entries_result: UnifiedFdCloneRunResult = __parent_ctx_result; fd_block_unpin(entries_pin); return __entries_result; } } }
                         }
                         UnifiedFdResult::Ok => {}
                     }
@@ -2972,12 +3026,13 @@ private fn unified_fd_clone_run(parent: usize, child: usize,
     { let __child_ctx_result: UnifiedFdCloneRunResult = UnifiedFdCloneRunResult::Ok; fd_context_unpin(child_ctx_pin); { let __parent_ctx_result: UnifiedFdCloneRunResult = __child_ctx_result; fd_context_unpin(parent_ctx_pin); return __parent_ctx_result; } }
 }
 
-fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult !{unsafe} {
+fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdCloneResult !{unsafe} {
     match unified_fd_clone_run(parent, child, UnifiedFdCloneFault::Disabled) {
-        UnifiedFdCloneRunResult::Invalid => { return UnifiedFdResult::Invalid; }
-        UnifiedFdCloneRunResult::Ok => { return UnifiedFdResult::Ok; }
-        UnifiedFdCloneRunResult::InjectedAfter(count) => {
-            return UnifiedFdResult::Invalid;
+        UnifiedFdCloneRunResult::Invalid => { return UnifiedFdCloneResult::Invalid; }
+        UnifiedFdCloneRunResult::Ok => { return UnifiedFdCloneResult::Ok; }
+        UnifiedFdCloneRunResult::Failed(undo) => { return UnifiedFdCloneResult::Failed(undo); }
+        UnifiedFdCloneRunResult::InjectedAfter(undo) => {
+            return UnifiedFdCloneResult::Failed(undo);
         }
     }
 }
@@ -3812,7 +3867,14 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
             scheduled_process_probe_slot_release(child_slot);
             { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; }
         }
-        UnifiedFdCloneRunResult::InjectedAfter(successful_installs) => {
+        UnifiedFdCloneRunResult::Failed(undo) => {
+            unified_fd_clone_undo_finish(undo);
+            scheduled_process_probe_slot_release(child_slot);
+            { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; }
+        }
+        UnifiedFdCloneRunResult::InjectedAfter(undo) => {
+            let successful_installs: usize = unified_fd_clone_undo_installs(undo);
+            unified_fd_clone_undo_finish(undo);
             if (successful_installs != 1) {
                 scheduled_process_probe_slot_release(child_slot);
                 { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; }
@@ -3838,9 +3900,11 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
         { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; }
     }
     match unified_fd_clone(process, child) {
-        UnifiedFdResult::Invalid => { scheduled_process_probe_slot_release(child_slot);
+        UnifiedFdCloneResult::Invalid => { scheduled_process_probe_slot_release(child_slot);
  { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; } }
-        UnifiedFdResult::Ok => {}
+        UnifiedFdCloneResult::Failed(undo) => { unified_fd_clone_undo_finish(undo); scheduled_process_probe_slot_release(child_slot);
+ { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; } }
+        UnifiedFdCloneResult::Ok => {}
     }
     match unified_process_heap_configure(child, child_context, 0x50001000) {
         UnifiedFdResult::Invalid => { scheduled_process_probe_slot_release(child_slot);

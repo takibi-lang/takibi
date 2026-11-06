@@ -1896,28 +1896,35 @@ fn kernel_syscall_process_configure(slot: ProcessSlot, heap_start: usize,
 // pool_index kernel_process_clone_begin() actually allocated, passed in
 // by the caller once it knows it (see the CLONE syscall handler below,
 // which now calls kernel_process_clone_begin() first for exactly this).
+private fn kernel_syscall_clone_file_state_set(child_slot: ProcessSlot, live: bool) {
+    let mut state: CloneFileState = { live };
+    let state_guard = process_run_lock();
+    scheduled_process_set_clone_file_state(state_guard, child_slot, state);
+    process_run_unlock(state_guard);
+}
+
+// GitHub issue #1350 slice 4: a failure hands back the descriptors the clone
+// had installed, detached from the child, for the caller to release once its
+// PreemptOff span has ended (unified_fd_clone_undo_finish).
 fn kernel_syscall_clone_files_begin(parent_slot: ProcessSlot, child_slot: ProcessSlot)
-        -> UnifiedFdResult {
+        -> UnifiedFdCloneResult {
     if (scheduled_process_slot_valid(child_slot)) {
         match unified_fd_clone(process_slot_address(parent_slot),
                                process_slot_address(child_slot)) {
-            UnifiedFdResult::Invalid => {
-                let mut failed: CloneFileState = { false };
-                let state_guard = process_run_lock();
-                scheduled_process_set_clone_file_state(state_guard,
-                                                       child_slot, failed);
-                process_run_unlock(state_guard);
-                return UnifiedFdResult::Invalid;
+            UnifiedFdCloneResult::Invalid => {
+                kernel_syscall_clone_file_state_set(child_slot, false);
+                return UnifiedFdCloneResult::Invalid;
             }
-            UnifiedFdResult::Ok => {}
+            UnifiedFdCloneResult::Failed(undo) => {
+                kernel_syscall_clone_file_state_set(child_slot, false);
+                return UnifiedFdCloneResult::Failed(undo);
+            }
+            UnifiedFdCloneResult::Ok => {}
         }
-        let mut cloned: CloneFileState = { true };
-        let state_guard = process_run_lock();
-        scheduled_process_set_clone_file_state(state_guard, child_slot, cloned);
-        process_run_unlock(state_guard);
-        return UnifiedFdResult::Ok;
+        kernel_syscall_clone_file_state_set(child_slot, true);
+        return UnifiedFdCloneResult::Ok;
     }
-    return UnifiedFdResult::Invalid;
+    return UnifiedFdCloneResult::Invalid;
 }
 
 fn kernel_connected_fd_is_open(fd: usize) -> bool {
@@ -9932,7 +9939,7 @@ private fn syscall_clone_current(
                 ProcessCloneVmResult::Copied => {
                     match kernel_syscall_clone_files_begin(
                         parent_slot, kernel_process_slot_of_current(child_authority)) {
-                        UnifiedFdResult::Invalid => {
+                        UnifiedFdCloneResult::Invalid => {
                             match process_image_clone_vm_reap(child_space) {
                                 ProcessCloneVmReapResult::Missing => {}
                                 ProcessCloneVmReapResult::Reaped => {}
@@ -9948,7 +9955,28 @@ private fn syscall_clone_current(
                                 }
                             }
                         }
-                        UnifiedFdResult::Ok => {}
+                        // #1350 slice 4: the installed descriptors are
+                        // released after the span, since the last release
+                        // of a pipe end takes the pipe's TaskMutex.
+                        UnifiedFdCloneResult::Failed(undo) => {
+                            match process_image_clone_vm_reap(child_space) {
+                                ProcessCloneVmReapResult::Missing => {}
+                                ProcessCloneVmReapResult::Reaped => {}
+                            }
+                            match kernel_process_clone_rollback(child_authority) {
+                                ProcessCloneRollbackResult::Invalid => {
+                                    preempt_span_end(span);
+                                    unified_fd_clone_undo_finish(undo);
+                                    return SyscallAction::Unreachable;
+                                }
+                                ProcessCloneRollbackResult::Restored(restored) => {
+                                    preempt_span_end(span);
+                                    unified_fd_clone_undo_finish(undo);
+                                    return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EAGAIN), restored);
+                                }
+                            }
+                        }
+                        UnifiedFdCloneResult::Ok => {}
                     }
                     // Assembly copies the complete saved parent frame
                     // to the dedicated child kernel stack and resumes
