@@ -22,6 +22,7 @@ import re
 import sys
 
 from pass_line import report_pass
+from source_scan import code_only
 
 DEFAULT = "kernel/arch/arm64/kernel/user_entry.S"
 TARGET = "el1_exception_evidence_from_frame"
@@ -29,13 +30,10 @@ REGS = ("esr_el1", "far_el1", "elr_el1", "spsr_el1")
 LABEL = re.compile(r"^\s*([.\w]+):")
 
 
-def strip(line):
-    return line.split("//")[0].strip()
-
-
 def blocks(text):
-    # Drop /* */ comments, then split at labels.
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    # user_entry.S uses the C comment forms code_only blanks; then split at
+    # labels.
+    text = code_only(text)
     cur, name = [], "<start>"
     for line in text.splitlines():
         m = LABEL.match(line)
@@ -43,7 +41,7 @@ def blocks(text):
             yield name, cur
             cur, name = [], m.group(1)
             line = line[m.end():]
-        s = strip(line)
+        s = line.strip()
         if s:
             cur.append(s)
     yield name, cur
