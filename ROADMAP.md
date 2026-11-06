@@ -265,7 +265,7 @@ next one taken. The done record of the previous queue is in HISTORY.md
    witnesses, deferred until a consumer needs them),
    #769 (every use of a global, done 2026-10-30 as --emit-globals' uses table), #747 (host GDB
    test). Audit follow-ups filed 2026-10-23 to 2026-10-25: #901, #902,
-   #898, #899, #904 (named failures at counted fixture poll bounds, controls patched inside their function; done 2026-11-06), #905 (done 2026-11-06), #903, #1024, #1025 (done 2026-10-26 by 9fd64f7f), #1029 (done 2026-11-06), #1030 (done 2026-11-06: #1016's payload, fixed in b30e30d6).
+   #898, #899, #904 (named failures at counted fixture poll bounds, controls patched inside their function; done 2026-11-06), #905 (done 2026-11-06), #903 (done 2026-11-06), #1024, #1025 (done 2026-10-26 by 9fd64f7f), #1029 (done 2026-11-06), #1030 (done 2026-11-06: #1016's payload, fixed in b30e30d6).
 7. **Time measurement, then the optimizations waiting on it** (maintainer,
    2026-10-08: space and time are both kept): #502; then #520 (TCP
    throughput, with #972: submit-only NIC TX), #741 (RPi5 HTTP SYN

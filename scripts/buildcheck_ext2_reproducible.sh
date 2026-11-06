@@ -65,4 +65,57 @@ for image in "${images[@]}"; do
   fi
 done
 
-echo "PASS ext2-reproducible: ${#images[@]} images rebuilt byte-identical; control epoch differs"
+# GitHub issue #903: the comparison above holds the ELFs inside the images
+# fixed. Recompile the guest ELFs the images take from kernel/build (Takibi
+# output; the downloaded BusyBox and load programs are not built here) and
+# their objects, and fail on any byte difference. Make's own database names
+# them, so a new fixture ELF joins without a list to keep. The control: at
+# least $min_elfs ELFs were found, and every one of them and its objects was
+# removed and written again by this rebuild, so a comparison of files make
+# never rebuilt cannot pass. The originals go back with their timestamps.
+min_elfs=30
+database=$("$make_cmd" --no-print-directory -pnq "$dir/ext2.img" "$dir/ext2-shell.img" 2>/dev/null || true)
+mapfile -t elfs < <(awk -v d="$dir" '
+  $1 == d "/ext2.img:" || $1 == d "/ext2-shell.img:" {
+    for (i = 2; i <= NF; i++) if ($i ~ /^kernel\/build\/.*\.elf$/) print $i }' \
+  <<<"$database" | sort -u)
+if (( ${#elfs[@]} < min_elfs )); then
+  echo "FAIL ext2-reproducible control: only ${#elfs[@]} compiled ELF inputs" \
+       "found in make's database (at least $min_elfs expected)" >&2
+  exit 1
+fi
+mapfile -t objects < <(for elf in "${elfs[@]}"; do
+  awk -v e="$elf:" '$1 == e {
+    for (i = 2; i <= NF; i++) if ($i ~ /^kernel\/build\/.*\.o$/) print $i }' \
+    <<<"$database"; done | sort -u)
+built=("${elfs[@]}" "${objects[@]}")
+mkdir -p "$saved/elf"
+for file in "${built[@]}"; do
+  [[ -f "$file" ]] || { echo "FAIL ext2-reproducible: $file is not built" >&2; exit 1; }
+  mkdir -p "$saved/elf/$(dirname "$file")"
+  cp -p "$file" "$saved/elf/$file"
+done
+restore_elfs() {
+  for file in "${built[@]}"; do
+    if [[ -f "$saved/elf/$file" ]]; then cp -p "$saved/elf/$file" "$file"; fi
+  done
+  restore
+}
+trap restore_elfs EXIT
+touch "$saved/marker"
+rm -f "${built[@]}"
+rebuild
+for file in "${built[@]}"; do
+  if [[ ! "$file" -nt "$saved/marker" ]]; then
+    echo "FAIL ext2-reproducible control: $file was not rebuilt" >&2
+    exit 1
+  fi
+  if ! cmp -s "$saved/elf/$file" "$file"; then
+    echo "FAIL ext2-reproducible: two compiles of $file differ:" >&2
+    cmp -l "$saved/elf/$file" "$file" | head -20 >&2 || true
+    exit 1
+  fi
+done
+
+echo "PASS ext2-reproducible: ${#images[@]} images rebuilt byte-identical; control epoch differs;" \
+     "${#elfs[@]} compiled ELF inputs and ${#objects[@]} objects recompiled byte-identical"
