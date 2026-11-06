@@ -19,6 +19,30 @@ const X86_64_NR_RT_SIGTIMEDWAIT: usize = 128;
 const X86_64_NR_GETUID: usize = 102;
 const SIGCHLD_SET: usize = 0x10000; // 1 << (SIGCHLD - 1)
 const SIGUSR1_SET: usize = 0x200; // 1 << (SIGUSR1 - 1)
+const X86_64_NR_RT_SIGACTION: usize = 13;
+const SIG_SETMASK: usize = 2;
+
+// GitHub issue #1388: the host oracle must not inherit the caller's
+// signal state. A land started under nohup ran this with SIGHUP ignored,
+// the SIGHUP child exited 0 instead of dying, and the row failed although
+// the kernel side was right. Every catchable signal goes back to SIG_DFL
+// and the mask is emptied before any probe forks. A zero-initialized
+// global is the kernel_sigaction {handler SIG_DFL, flags, restorer, mask}.
+let mut default_action: [usize; 4];
+let mut empty_mask: [usize; 1];
+
+fn reset_inherited_signal_state() {
+    let mut sig: usize = 1;
+    while (sig < 32) {
+        if (sig != 9 && sig != 19) {
+            linux_syscall(X86_64_NR_RT_SIGACTION, sig,
+                          (&default_action[0]) as usize, 0, 8);
+        }
+        sig = sig + 1;
+    }
+    linux_syscall(X86_64_NR_RT_SIGPROCMASK, SIG_SETMASK,
+                  (&empty_mask[0]) as usize, 0, 8);
+}
 
 // Forks a child that ends by `signal` when it is nonzero, else by exit
 // `code`, and returns the host's wait4 status word for it.
@@ -114,6 +138,7 @@ fn compare(label: *u8, host: u32, kernel: u32) {
 }
 
 fn app_main() {
+    reset_inherited_signal_state();
     // Signals whose default is to terminate without a core dump: the
     // kernel writes no cores, and a host core (SIGSEGV here) would set bit
     // 0x80 according to the host's core_pattern rather than to Linux's

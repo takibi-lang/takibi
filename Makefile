@@ -956,6 +956,13 @@ linuxcheck: linuxbuild compiler-fuzz
 		done; \
 		exit $$fail \
 	'
+	@# GitHub issue #1388: wait_status again with the signals it uses
+	@# ignored, as under nohup; the probe resets them, so the host oracle
+	@# answers the same whatever the caller inherited.
+	@got=$$(trap "" HUP USR1 TERM; $(LINUX_USER_DIR)/wait_status/wait_status.exe); \
+	 exp=$$(cat $(LINUX_USER_DIR)/wait_status/wait_status.expected); \
+	 if [ "$$got" = "$$exp" ]; then echo "PASS  wait_status with inherited SIG_IGN (linux amd64)"; \
+	 else echo "FAIL  wait_status with inherited SIG_IGN (linux amd64)"; echo "  got: $$got"; exit 1; fi
 	@# GitHub issue #1034: the ext2 equivalence rows' syscall half. Host
 	@# Linux runs the generated script (pinned BusyBox, qemu-aarch64 user
 	@# mode); the committed log the QEMU lane compares with must be exactly
