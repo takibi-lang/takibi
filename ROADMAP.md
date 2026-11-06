@@ -216,7 +216,7 @@ next one taken. The done record of the previous queue is in HISTORY.md
 1. **Verification (#954; B owns the refinement code).** #954 stage 2 done
    2026-10-31 (#1160; docs/VERIFICATION_DESIGN.md, "Stage 2 scope" and "Stage
    3 scope"); #955's evidence log continues from each audit; #986 slice 2 (region arithmetic and overlay length as
-   z3-checked obligations), #954 stage 3 (C), done 2026-10-30.
+   z3-checked obligations), #954 stage 3 (C), done 2026-10-30; its follow-up #1232 (global and enum atoms as z3 constants) done 2026-11-06.
 2. **Equivalence oracles.** ext2: tier B (#1034, landed 2026-10-25:
    `kernel/tests/ext2_eq/ops.eq` replayed on host Linux and libext2fs,
    compared logically in kernelcheck-qemu-main), #1033 (tier A, fsck after
