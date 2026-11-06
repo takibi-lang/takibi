@@ -83,7 +83,7 @@ case "$mode" in
   --command)
     cmd="${2:-}"
 
-    if printf '%s' "$cmd" | grep -Eq '(^|[;&|]|[[:space:]])gh[[:space:]]+issue[[:space:]]+create([[:space:]]|$)'; then
+    if grep -Eq '(^|[;&|]|[[:space:]])gh[[:space:]]+issue[[:space:]]+create([[:space:]]|$)' <<<"$cmd"; then
       if ! has_found_by "$cmd"; then
         {
           printf 'This `gh issue create` %s. Every issue records how it was discovered, including issues that are not defects.\n\n' "$(missing_or_unknown "$cmd")"
@@ -93,7 +93,7 @@ case "$mode" in
       fi
     fi
 
-    if printf '%s' "$cmd" | grep -Eq '(^|[;&|]|[[:space:]])git[[:space:]]+commit([[:space:]]|$)'; then
+    if grep -Eq '(^|[;&|]|[[:space:]])git[[:space:]]+commit([[:space:]]|$)' <<<"$cmd"; then
       if LC_ALL=C grep -qP "$CLOSES_RE" <<<"$cmd" && ! has_found_by "$cmd"; then
         {
           printf 'This commit closes a GitHub issue and %s. Add a `Found-by:` trailer line to the commit message body.\n\n' "$(missing_or_unknown "$cmd")"

@@ -321,7 +321,7 @@ fi
 claim
 PATH="$tmp_dir/bin:$PATH" vcpu lane-g 1 "resource_lease_vcpu_acquire 2 lane-g; \
     python3 -c 'import subprocess, sys; subprocess.run([sys.argv[1], \"-smp\", \"2\"], check=True)' '$shim'" \
-    | grep -qx fake-qemu-started \
+    | grep -x fake-qemu-started >/dev/null \
     && claim || fail "the QEMU shim refused a guest its Python runner had leased"
 
 # allcheck's recipe sources resource_lease.sh with /bin/sh, so one bash-only

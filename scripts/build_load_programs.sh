@@ -111,7 +111,7 @@ fi
 for program in stress-ng hackbench; do
     # `file` calls a static PIE "static-pie linked"; anything else is
     # either dynamic or an ET_EXEC the kernel would not map.
-    if ! file "$out/$program" | grep -q 'static-pie linked'; then
+    if ! file "$out/$program" | grep 'static-pie linked' >/dev/null; then
         echo "[load-programs] $program is not a static PIE" >&2
         exit 1
     fi

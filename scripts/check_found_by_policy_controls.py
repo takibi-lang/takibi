@@ -51,6 +51,12 @@ def main() -> int:
         ("command no", "git commit -m 'x\n\nCloses #1.\n\nFound-by: test\nProtocol: no'", 0),
         ("command missing", "git commit -m 'x\n\nCloses #1.\n\nFound-by: test'", 10),
         ("command bare yes", "git commit -m 'x\n\nCloses #1.\n\nFound-by: test\nProtocol: yes'", 10),
+        # #1385: a command far longer than a pipe buffer. With `printf |
+        # grep -Eq` under pipefail, grep matched the commit at the start and
+        # exited, printf died of SIGPIPE, and the closing commit read as
+        # non-closing (0). Here that happens every time, not only under load.
+        ("command missing, long",
+         "git commit -m 'x\n\nCloses #1.\n\nFound-by: test' # " + "x" * 120000, 10),
     ]
     for name, command, want in commands:
         got = command_status(command)
@@ -61,7 +67,7 @@ def main() -> int:
     # a miss, and cicheck once saw a closing commit pass as non-closing.
     for hook in sorted((ROOT / "scripts/hooks").glob("*.sh")):
         for number, line in enumerate(hook.read_text().splitlines(), 1):
-            assert not re.search(r"\|\s*(LC_ALL=C\s+)?grep\s+-q", line), (
+            assert not re.search(r"\|\s*(LC_ALL=C\s+)?grep\s+(-[A-Za-z]*q|--quiet)", line), (
                 f"{hook.name}:{number}: pipe into grep -q; use a here-string")
     controls.append("no pipe into grep -q")
     report_pass("found-by-policy",

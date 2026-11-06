@@ -79,7 +79,7 @@ for f in $(find -L "$TESTS_DIR" -maxdepth 1 -name '*.output' \
     | sort -k1,1 -k2 \
     | awk '{print $2}'); do
     stripped="$(sed 's/\x1b\[[0-9;]*m//g' "$f.output")"
-    if printf '%s\n' "$stripped" | grep -qE '^FAIL |\[exception\]'; then
+    if grep -qE '^FAIL |\[exception\]' <<<"$stripped"; then
         count=$((count + 1))
         name="$(basename "$f")"
         echo

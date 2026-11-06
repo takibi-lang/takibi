@@ -103,7 +103,7 @@ r="$(expected_archive reverted)"
 # The debug-return-abi counterfactuals and the uart-wake scalar control do not
 # archive at all (#877).
 PROBE="$REPO_ROOT/scripts/run_kernel_probe_refusals_qemutest.sh"
-grep -B1 -A3 'TAKIBI_ARCHIVE_EXPECTED=' "$PROBE" | grep -q 'old-baseline' && claim ||
+grep -B1 -A3 'TAKIBI_ARCHIVE_EXPECTED=' "$PROBE" | grep 'old-baseline' >/dev/null && claim ||
     fail "the probe-refusals old-baseline child is not marked expected"
 
 echo "PASS lane-new-archives control: $cases claims -- a passing lane that left an unexpected failure archive is refused; expected, neighbour and failing runs are not"

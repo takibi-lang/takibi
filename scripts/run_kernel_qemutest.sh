@@ -102,7 +102,7 @@ cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
 EXT2_EQ="${KERNEL_QEMU_EXT2_EQ:-on}"
 case "$EXT2_EQ" in
     on) debugfs -w -R 'write /dev/null /lib/ext2-eq.enable' "$QEMU_EXT2_IMAGE" >/dev/null 2>&1
-        if ! debugfs -R 'stat /lib/ext2-eq.enable' "$QEMU_EXT2_IMAGE" 2>/dev/null | grep -q '^Inode:'; then
+        if ! debugfs -R 'stat /lib/ext2-eq.enable' "$QEMU_EXT2_IMAGE" 2>/dev/null | grep '^Inode:' >/dev/null; then
             echo "FAIL $RUN_LABEL: could not plant /lib/ext2-eq.enable on the guest's disk" >&2
             exit 1
         fi
@@ -112,7 +112,7 @@ case "$EXT2_EQ" in
         python3 "$REPO_ROOT/scripts/ext2_eq.py" fixture "$ARTIFACT_DIR/ext2-eq-dind"
         E2FSPROGS_FAKE_TIME=1700000000 debugfs -w \
             -R "write $ARTIFACT_DIR/ext2-eq-dind /lib/ext2-eq-dind" "$QEMU_EXT2_IMAGE" >/dev/null 2>&1
-        if ! debugfs -R 'stat /lib/ext2-eq-dind' "$QEMU_EXT2_IMAGE" 2>/dev/null | grep -q '(DIND)'; then
+        if ! debugfs -R 'stat /lib/ext2-eq-dind' "$QEMU_EXT2_IMAGE" 2>/dev/null | grep '(DIND)' >/dev/null; then
             echo "FAIL $RUN_LABEL: could not plant the doubly-indirect /lib/ext2-eq-dind on the guest's disk" >&2
             exit 1
         fi ;;

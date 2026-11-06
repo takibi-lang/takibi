@@ -54,7 +54,7 @@ stage="$dest.partial.$$"
 rm -rf "$stage"
 opam exec --switch=herd7 -- make build PREFIX="$dest"
 opam exec --switch=herd7 -- make install PREFIX="$stage"
-"$stage/bin/herd7" -version | grep -q "^$HERDTOOLS7_VERSION\b"
+"$stage/bin/herd7" -version | grep "^$HERDTOOLS7_VERSION\b" >/dev/null
 mkdir -p "$(dirname "$dest")"
 rm -rf "$dest"
 mv "$stage" "$dest"

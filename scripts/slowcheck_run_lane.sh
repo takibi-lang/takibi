@@ -59,7 +59,7 @@ import json, sys
 record = json.loads(open(sys.argv[1]).read().strip())
 assert record["status"] != 0, record
 PY
-python3 "$SUMMARIZE" "$timing" | grep -q "FAILED" \
+python3 "$SUMMARIZE" "$timing" | grep "FAILED" >/dev/null \
     && claim || fail "the summary does not mark the failing lane"
 
 # --- a lane run by hand, with no timing configured, is unaffected ----------

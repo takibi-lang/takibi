@@ -611,7 +611,7 @@ if [ "$MODE" = el1_stack_guard ]; then
     target="$(sed -n 's/^takibi-guard-target=0x\([0-9a-f]*\)$/\1/p' "$ARTIFACT_DIR/arm-gdb.log" | head -1)"
     line="$(grep -aE "^oops: fail-stop seq=1 cpu=0 slot=[0-9]+ ec=0x0*$expected_ec " "$UART_LOG" | head -1 || true)"
     if [ -z "$target" ] || [ -z "$line" ] ||
-            ! printf '%s\n' "$line" | grep -q " far=0x$target " ||
+            ! grep -q " far=0x$target " <<<"$line" ||
             ! grep -Eq "$expected_detail" "$UART_LOG"; then
         echo "FAIL kernel/qemu oops: EL1 wrote the boot stack's guard page 0x${target:-unknown}, or did not report a translation data abort there" >&2
         sed 's/^/  /' "$UART_LOG" >&2 || true
@@ -630,7 +630,7 @@ if [ "$MODE" = el1_read_user ]; then
     target="$(sed -n 's/^takibi-read-target=0x\([0-9a-f]*\)$/\1/p' "$ARTIFACT_DIR/arm-gdb.log" | head -1)"
     line="$(grep -aE "^oops: fail-stop seq=1 cpu=0 slot=[0-9]+ ec=0x0*$expected_ec " "$UART_LOG" | head -1 || true)"
     if [ -z "$target" ] || [ -z "$line" ] ||
-            ! printf '%s\n' "$line" | grep -q " far=0x$target " ||
+            ! grep -q " far=0x$target " <<<"$line" ||
             ! grep -Eq "$expected_detail" "$UART_LOG"; then
         echo "FAIL kernel/qemu oops: EL1 read the user page 0x${target:-unknown} outside a user-access window, or did not report a permission data abort there" >&2
         sed 's/^/  /' "$UART_LOG" >&2 || true
@@ -651,7 +651,7 @@ if [ "$MODE" = el1_exec_writable ] || [ "$MODE" = el1_exec_user ]; then
     esr="$(printf '%s\n' "$line" | sed -n 's/.* esr=0x\([0-9a-f]*\) .*/\1/p')"
     if [ -z "$target" ] || [ -z "$line" ] || [ -z "$esr" ] ||
             [ $(( 0x$esr & 0x3c )) -ne $(( 0x0c )) ] ||
-            ! printf '%s\n' "$line" | grep -q " far=0x$target elr=0x$target\$" ||
+            ! grep -q " far=0x$target elr=0x$target\$" <<<"$line" ||
             ! grep -Eq "$expected_detail" "$UART_LOG" ||
             grep -Eq '^oops: fail-stop seq=[0-9]+ cpu=[0-9]+ slot=[0-9]+ ec=0x0*3c ' "$UART_LOG"; then
         echo "FAIL kernel/qemu oops: EL1 executed, or did not report a permission fault at, the $MODE target 0x${target:-unknown}" >&2
