@@ -166,14 +166,16 @@ const TCP_ACCEPT_ABANDONED: usize = TCP_RETRY_LIMIT + 1;
 fn tcp_ack_completes_handshake(state: ConnState, retries: usize,
                                snd_nxt: u32, rcv_nxt: u32,
                                header: TcpSegmentHeader) -> bool {
-    let pending: bool = state == ConnState::SynRcvd ||
-        (state == ConnState::Listen && retries == TCP_ACCEPT_ABANDONED);
-    return pending &&
-        (header.flags & TCP_FLAG_ACK) != 0 &&
-        (header.flags & TCP_FLAG_SYN) == 0 &&
-        (header.flags & TCP_FLAG_RST) == 0 &&
-        header.ack == snd_nxt &&
-        header.seq == rcv_nxt;
+    // Early returns, not one && chain: the chain lowered to a csel between one
+    // value, which kernel-same-operand-csel (#893) refuses.
+    if (state != ConnState::SynRcvd) {
+        if (state != ConnState::Listen) { return false; }
+        if (retries != TCP_ACCEPT_ABANDONED) { return false; }
+    }
+    if ((header.flags & TCP_FLAG_ACK) == 0) { return false; }
+    if ((header.flags & (TCP_FLAG_SYN | TCP_FLAG_RST)) != 0) { return false; }
+    if (header.ack != snd_nxt) { return false; }
+    return header.seq == rcv_nxt;
 }
 
 enum ConnState: u8 {
