@@ -142,6 +142,15 @@ check_model PipeWait NoLostWakeup 10 \
     unlocked:CInitUnlocked:NoLostWakeup:violated \
     norecheck:CInitNoRecheck:NoLostWakeup:violated
 
+# GitHub issue #1000: signal delivery decided in one place. Each unfixed
+# variant is the kernel before one of the fixes that place holds together.
+check_model SignalDelivery Safety 6 \
+    fixed:CInitFixed:pass:ok \
+    nowake:CInitNoWake:NoSleepWithSignal:violated \
+    noirqdeliver:CInitNoIrqDeliver:NoMissedReturn:violated \
+    noirqterm:CInitNoIrqTerm:NoMissedReturn:violated \
+    restarttwice:CInitRestartTwice:RestartOnce:violated
+
 # GitHub issue #993: scratch pools with more holders than cores. Each order
 # but the kernel's deadlocks; a masked retry keeps the core its holder needs.
 check_model SlotPool NoDeadlock 4 \

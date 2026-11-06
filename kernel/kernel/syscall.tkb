@@ -6607,30 +6607,8 @@ private fn syscall_block_interrupt(
                     process_current_end(current_authority); return SyscallAction::Block;
                 }
                 ProcessSignalInterrupt::Interrupt(interruption) => {
-                    let flags: usize = interruption.flags;
-                    let deadline: usize = interruption.deadline;
-                    let number: usize = frame_general(present, 8);
-                    if ((flags & LINUX_SA_RESTART) != 0 &&
-                        syscall_never_restarts(number) == false) {
-                        el0_context_retry_syscall(present);
-                        return syscall_signal_deliver_into(current_authority, present,
-                            frame_general(present, 0));
-                    }
-                    let mut result: usize = LINUX_EINTR;
-                    let mut remaining: usize = 0;
-                    if (number == AARCH64_NR_NANOSLEEP) {
-                        remaining = frame_general(present, 1);
-                    } else if (number == AARCH64_NR_CLOCK_NANOSLEEP &&
-                               frame_general(present, 1) == 0) {
-                        remaining = frame_general(present, 3);
-                    }
-                    if (remaining != 0 &&
-                        syscall_sleep_remaining_write(current_authority,
-                            remaining, deadline) == false) {
-                        result = LINUX_EFAULT;
-                    }
-                    return syscall_signal_deliver_into(current_authority, present,
-                                                       result);
+                    return syscall_signal_resume(current_authority, present,
+                        SignalEntry::Interrupted(interruption));
                 }
             }
         }
@@ -6670,20 +6648,129 @@ private fn syscall_sleep_remaining_write(
 private fn syscall_signal_deliver_into(current_authority: ProcessCurrent[current_process, ProcessState::Running], here: borrow FrameRef[process, ExceptionLevel::El0],
                                        value: usize)
         -> SyscallAction !{unsafe} {
-    match kernel_process_current_caught_signal_take() {
-        ProcessSignalPendingResult::Missing => {
-            kernel_process_current_suspend_mask_restore();
+    return syscall_signal_resume(current_authority, here,
+                                 SignalEntry::SyscallReturn(value));
+}
+
+// A syscall's return through signal_deliver: the value x0 gets, or the
+// process ends.
+private fn syscall_signal_resume(current_authority: ProcessCurrent[current_process, ProcessState::Running], here: borrow FrameRef[process, ExceptionLevel::El0],
+                                 entry: SignalEntry)
+        -> SyscallAction !{unsafe} {
+    match signal_deliver(current_authority, here, entry) {
+        SignalDelivery::Continue(value) => {
             process_current_end(current_authority); return SyscallAction::Resume(value);
         }
+        SignalDelivery::Handler(signum) => {
+            process_current_end(current_authority); return SyscallAction::Resume(signum);
+        }
+        SignalDelivery::LeftPending => {
+            process_current_end(current_authority);
+            return SyscallAction::Resume(frame_general(here, 0));
+        }
+        SignalDelivery::Terminate(end) => {
+            return kernel_syscall_exit_current_process(current_authority, end);
+        }
+    }
+}
+
+// GitHub issue #1000: where a return to EL0 meets signal delivery. A
+// syscall's own return carries its result; a Block a caught signal
+// interrupted carries the interruption; every other return to EL0 (the
+// stack-switch hook's, kernel_signal_return_deliver) carries nothing.
+must_use variant SignalEntry {
+    SyscallReturn(usize);
+    Interrupted(SignalInterruption);
+    ReturnToUser;
+}
+
+// What signal_deliver decided for the frame. Continue: no handler, x0 is
+// the value; Handler: the frame now enters the handler, x0 is the signal;
+// LeftPending: a caught signal stays pending for the syscall the frame
+// resumes at; Terminate: the process ends so, which the caller carries
+// out on its own exit path.
+must_use variant SignalDelivery {
+    Continue(usize);
+    Handler(usize);
+    LeftPending;
+    Terminate(ProcessEnd);
+}
+
+// GitHub issue #1000: the one place delivery is decided. Linux decides it
+// in exit_to_user_mode's do_signal: the pending check, the handler entry,
+// the ERESTART conversion and termination together. Its callers are the
+// syscall return (syscall_signal_resume, from syscall_signal_deliver_into
+// and syscall_block_interrupt) and the return-to-user hook
+// (kernel_signal_return_deliver). The restart rule is data:
+// syscall_never_restarts, SYSCALLS.md's "Interrupted system calls" table.
+fn signal_deliver(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+                  here: borrow FrameRef[process, ExceptionLevel::El0],
+                  entry: SignalEntry) -> SignalDelivery !{unsafe} {
+    let mut value: usize = 0;
+    let mut at_return: bool = false;
+    match entry {
+        SignalEntry::SyscallReturn(result) => { value = result; }
+        SignalEntry::Interrupted(interruption) => {
+            // GitHub issue #726: a caught, unmasked signal interrupted a
+            // Block. Under SA_RESTART, unless the call never restarts, the
+            // frame is rewound to its SVC with its first argument back in
+            // x0; otherwise the call answers EINTR, with nanosleep's
+            // remaining time written first.
+            let number: usize = frame_general(here, 8);
+            if ((interruption.flags & LINUX_SA_RESTART) != 0 &&
+                syscall_never_restarts(number) == false) {
+                el0_context_retry_syscall(here);
+                value = frame_general(here, 0);
+            } else {
+                value = LINUX_EINTR;
+                let mut remaining: usize = 0;
+                if (number == AARCH64_NR_NANOSLEEP) {
+                    remaining = frame_general(here, 1);
+                } else if (number == AARCH64_NR_CLOCK_NANOSLEEP &&
+                           frame_general(here, 1) == 0) {
+                    remaining = frame_general(here, 3);
+                }
+                if (remaining != 0 &&
+                    syscall_sleep_remaining_write(current_authority,
+                        remaining, interruption.deadline) == false) {
+                    value = LINUX_EFAULT;
+                }
+            }
+        }
+        SignalEntry::ReturnToUser => {
+            at_return = true;
+            value = frame_general(here, 0);
+            // GitHub issue #949: a pending, unmasked signal whose default
+            // action terminates is taken first, at an SVC or not.
+            match kernel_process_current_termination_signal_take() {
+                ProcessSignalPendingResult::Missing => {}
+                ProcessSignalPendingResult::Pending(ending) => {
+                    let signum: usize = taken_signal_delivered(ending);
+                    return SignalDelivery::Terminate(process_end_signaled(signum));
+                }
+            }
+        }
+    }
+    match kernel_process_current_caught_signal_take() {
+        ProcessSignalPendingResult::Missing => {
+            // A syscall's return ends an rt_sigsuspend mask swap here.
+            if (at_return == false) { kernel_process_current_suspend_mask_restore(); }
+            return SignalDelivery::Continue(value);
+        }
         ProcessSignalPendingResult::Pending(taken) => {
+            // At a return to user, a frame resuming at an SVC keeps the
+            // signal for that syscall's own return (see
+            // kernel_signal_return_deliver).
+            if (at_return && signal_resumes_at_svc(current_authority, here)) {
+                taken_signal_restore(taken);
+                return SignalDelivery::LeftPending;
+            }
             if (signal_handler_enter(current_authority, here, value, taken) == false) {
                 // Linux forces SIGSEGV when the frame cannot be written.
-                let delivered: usize = taken_signal_delivered(taken);
-                return kernel_syscall_exit_current_process(current_authority,
-                    process_end_signaled(LINUX_SIGSEGV));
+                let lost: usize = taken_signal_delivered(taken);
+                return SignalDelivery::Terminate(process_end_signaled(LINUX_SIGSEGV));
             }
-            let signum: usize = taken_signal_delivered(taken);
-            process_current_end(current_authority); return SyscallAction::Resume(signum);
+            return SignalDelivery::Handler(taken_signal_delivered(taken));
         }
     }
 }
@@ -6783,34 +6870,15 @@ fn kernel_signal_return_deliver(frame: borrow FrameRef[process, ExceptionLevel::
     let ProcessRunningHere::Running(current_authority) = process_running_here() else {
         ProcessRunningHere::Idle => { return; }
     };
-    match kernel_process_current_termination_signal_take() {
-        ProcessSignalPendingResult::Missing => {}
-        ProcessSignalPendingResult::Pending(ending) => {
-            let signum: usize = taken_signal_delivered(ending);
-            signal_return_exit(current_authority, frame,
-                process_end_signaled(signum));
-            return;
-        }
-    }
-    match kernel_process_current_caught_signal_take() {
-        ProcessSignalPendingResult::Missing => {
+    match signal_deliver(current_authority, frame, SignalEntry::ReturnToUser) {
+        SignalDelivery::Continue(value) => { process_current_end(current_authority); }
+        SignalDelivery::LeftPending => { process_current_end(current_authority); }
+        SignalDelivery::Handler(signum) => {
+            frame_general_set(frame, 0, signum);
             process_current_end(current_authority);
         }
-        ProcessSignalPendingResult::Pending(taken) => {
-            if (signal_resumes_at_svc(current_authority, frame)) {
-                taken_signal_restore(taken);
-                process_current_end(current_authority);
-                return;
-            }
-            if (signal_handler_enter(current_authority, frame,
-                    frame_general(frame, 0), taken) == false) {
-                let lost: usize = taken_signal_delivered(taken);
-                signal_return_exit(current_authority, frame,
-                    process_end_signaled(LINUX_SIGSEGV));
-                return;
-            }
-            frame_general_set(frame, 0, taken_signal_delivered(taken));
-            process_current_end(current_authority);
+        SignalDelivery::Terminate(end) => {
+            signal_return_exit(current_authority, frame, end);
         }
     }
 }

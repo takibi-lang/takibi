@@ -111,7 +111,10 @@ with such a signal already pending does not sleep. Either way the handler
 runs first, and then the call answers EINTR or, when the handler was
 installed with `SA_RESTART` and the call is one Linux restarts, is made again
 with its original arguments. A call whose wait is satisfied by the time it
-looks again completes normally instead.
+looks again completes normally instead. One kernel function,
+`signal_deliver` in `kernel/kernel/syscall.tkb`, makes this decision at
+every return to EL0, and the "never restarted" rows below are the data it
+reads (`syscall_never_restarts`).
 
 | Call (sleeping in) | After a handler | Notes |
 | --- | --- | --- |

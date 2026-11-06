@@ -89,7 +89,7 @@ Since #628 a handler also runs at the return to EL0 from a timer interrupt
 | `ChildExit` | `kernel_process_child_exit` | the child becomes a zombie and wakes the parent only if the parent is Blocked in ChildExit | a wait4(pid) for another child, which this exit leaves Blocked (#1352) -- irrelevant to `NoLostWakeup`: the model has one child, and the named child's own exit takes the wake; zombie draining -- irrelevant to `NoLostWakeup`: it reaps the exiting child's own children, never this parent or this child; SIGCHLD -- irrelevant to `NoLostWakeup`: it makes no process Blocked or Exited, and only such a step can break the property; CPU-time accounting (#1309) -- irrelevant to `NoLostWakeup`: it adds to counters under the run lock and changes no state; the direct parent start -- modelled elsewhere: `StackOwnership.ChildExitStart` | `a375eaa7958f` |
 | `Wait4Resume` | `kernel_syscall_wait4_deliver` | the woken parent reaps | the user-memory status write -- irrelevant to `NoLostWakeup`: it runs after the reap, when the child is no longer Exited | `c69dd34f5376` |
 | `SendSignal` | `kernel_process_signal_deliver_to` | a caught, unmasked signal becomes pending, and a parent Blocked in wait4 is woken in the same critical section to rerun the call | which signal, the sender, siginfo and SA_RESTART -- irrelevant to `NoSleepWithSignal`: only whether a caught signal is pending, and whether the parent is Blocked, decide it; terminating signals -- modelled elsewhere: `TickWake.SignalWake` | `966be5f882ef` |
-| `TickDeliver` | `kernel_signal_return_deliver`, `signal_resumes_at_svc` | a return to EL0 takes a pending caught signal and enters its handler, unless the parent resumes at its wait4 SVC | a frame that cannot be written and a pending terminating signal, which end the process there instead (#949) -- modelled elsewhere: `StackOwnership.ChildExit`; returns through `el0_context_resume` from a syscall -- irrelevant to `SignalWakeEndsWait`: they resume after the SVC, at "done", or at it, where the rule is the same | `d93f1dea53d1` |
+| `TickDeliver` | `kernel_signal_return_deliver`, `signal_deliver`, `signal_resumes_at_svc` | a return to EL0 (signal_deliver's ReturnToUser entry, #1000) takes a pending caught signal and enters its handler, unless the parent resumes at its wait4 SVC | a frame that cannot be written and a pending terminating signal, which end the process there instead (#949) -- modelled elsewhere: `StackOwnership.ChildExit`; returns through `el0_context_resume` from a syscall -- irrelevant to `SignalWakeEndsWait`: they resume after the SVC, at "done", or at it, where the rule is the same | `3f30f0dce8b6` |
 | `Preempt` | `kernel_process_timer_schedule` | the timer takes a process off its core, never inside the parent's wait4 syscall (`KERNEL_PREEMPTIBLE` is 0) | the test-only spread rendezvous -- irrelevant to `NoLostWakeup`: it changes affinity before scheduling and observes an existing leave, without changing a wait or wake | `9baee184ff77` |
 | `Dispatch` | `kernel_process_secondary_start`, `kernel_process_schedule` | an idle core takes a Ready process | affinity -- irrelevant to `NoLostWakeup`: it only forbids some dispatches, and the model already allows each one it forbids; the debugger-armed starvation injection of the busy-pair control -- irrelevant to `NoLostWakeup`: like affinity it only forbids some dispatches; the boot gate that lets only the boot core take the first process after main() hands off (#831) -- irrelevant to `NoLostWakeup`: like affinity it only forbids some dispatches; stack ownership -- modelled elsewhere: `StackOwnership.Reserve` | `f1e8ad115459` |
 
@@ -394,6 +394,46 @@ Properties:
   is on its way to the walk that wakes it.
 - `AllRead` (liveness, TLC only): every byte written is read, then end of
   file, under weak fairness of every step.
+
+## SignalDelivery.tla -- one place decides delivery (#1000)
+
+One process, one sender, one blocking call: a plain sleeping call, one under
+`SA_RESTART`, or rt_sigsuspend, which swaps the mask for the call. After it
+the process computes without syscalls. The sender raises one signal, caught
+or terminating, at any point. The kernel decides delivery in
+`signal_deliver`, entered at a syscall's return, at a Block that a caught
+signal interrupted, and at every other return to EL0. This model holds the
+rule; Wait4Block.tla holds the wait4 windows around it.
+
+The four unfixed variants are the kernel before the fixes that function now
+holds together. `nowake` is before #726: a signal does not wake a sleeper,
+so it sleeps with the signal pending (`NoSleepWithSignal`). `noirqdeliver` is
+before #628: a handler runs only at a syscall return, so a computing process
+never runs it (`NoMissedReturn`). `noirqterm` is before #949: a terminating
+signal ends the process only at a syscall (`NoMissedReturn`). `restarttwice`
+is a restart that leaves the signal pending, so the rerun restarts again
+(`RestartOnce`).
+
+| Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
+| --- | --- | --- | --- | --- |
+| `Send` | `kernel_process_signal_deliver_to` | a signal becomes pending, and a process asleep in the call is woken to rerun it | which signal, its sender and siginfo -- irrelevant to `NeverLost`: only whether a caught or a terminating signal is pending decides delivery; the run-lock re-check of a signal raised between the decision and the Blocked publication -- modelled elsewhere: `Wait4Block.Wait4Block` | `966be5f882ef` |
+| `Call` | `syscall_block_interrupt`, `syscall_signal_resume`, `signal_deliver`, `syscall_never_restarts` | the call's entry ends the process for a terminating signal; its Block return sleeps, or with a caught signal pending rewinds it under `SA_RESTART` or answers EINTR, the handler entered first | nanosleep's remaining-time write and its EFAULT -- irrelevant to `HandlerBeforeEintr`: it changes the value the call answers, not when the handler runs | `b853f37c3012` |
+| `Complete` | `syscall_signal_deliver_into`, `signal_deliver` | the wait ends of its own accord, and the syscall's return takes a caught signal pending by then or ends rt_sigsuspend's mask swap | what ended the wait -- irrelevant to `NeverLost`: any end returns through the same function | `e321185c9732` |
+| `HandlerReturn` | `syscall_signal_return_into` | rt_sigreturn puts the frame and the mask back; a call interrupted without a restart now shows its EINTR | the frame checks that end the process by SIGSEGV -- irrelevant to `NeverLost`: the signal was already taken by the handler entry | `ad8efd9f598e` |
+| `Tick` | `kernel_signal_return_deliver`, `signal_deliver`, `signal_resumes_at_svc` | a return to EL0 while the process computes ends it for a terminating signal and enters the handler for a caught one | a frame resuming at an SVC, which leaves a caught signal pending -- modelled elsewhere: `Wait4Block.TickDeliver` | `3f30f0dce8b6` |
+| `Done` | the end of the run: nothing more is raised | the signal is gone and the process computes or has ended | nothing | `e3b0c44298fc` |
+
+Properties:
+
+- `NeverLost`: a raised signal stays pending until a handler ran or the
+  process ended (TakenSignal's rule).
+- `NoSleepWithSignal`: no process sleeps in the call with a caught signal
+  pending.
+- `RestartOnce`: a call is rewound at most once for its signal.
+- `HandlerBeforeEintr`: the call's EINTR is seen only after the handler ran.
+- `SuspendEnds`: rt_sigsuspend's mask is not in force once the process
+  computes again.
+- `NoMissedReturn`: every return to EL0 takes what it can deliver.
 
 ## SlotPool.tla -- scratch pools with more holders than cores (#993)
 
