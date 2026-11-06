@@ -67,7 +67,7 @@ private fn ram_disk_span(sector: u32, length: usize) -> bool {
     return start <= KERNEL_EXT2_IMAGE_LEN && length <= KERNEL_EXT2_IMAGE_LEN - start;
 }
 
-fn disk_read_sectors(sector: u32, buf: []u8) -> DiskIoResult {
+fn disk_read_sectors(guard: borrow BlockDeviceGuard[&block_device_lock], sector: u32, buf: []u8) -> DiskIoResult {
     if (ram_disk_span(sector, buf.len) == false) { return DiskIoResult::Err(-5); }
     let start: usize = (sector as usize) * RAM_DISK_SECTOR;
     match host_span(ram_disk_image as []u8, start, buf.len) {
@@ -79,7 +79,7 @@ fn disk_read_sectors(sector: u32, buf: []u8) -> DiskIoResult {
     }
 }
 
-fn disk_write_sectors(sector: u32, buf: []u8) -> DiskIoResult {
+fn disk_write_sectors(guard: borrow BlockDeviceGuard[&block_device_lock], sector: u32, buf: []u8) -> DiskIoResult {
     if (ram_disk_span(sector, buf.len) == false) { return DiskIoResult::Err(-5); }
     let start: usize = (sector as usize) * RAM_DISK_SECTOR;
     ram_disk_writes = ram_disk_writes + 1;

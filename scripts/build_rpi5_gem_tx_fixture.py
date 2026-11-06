@@ -237,18 +237,18 @@ fn gem_fixture_xhci_bus(address: usize) -> usize {
     return address + boot_once_get(&rp1_dma_pci_offset);
 }
 
-fn gem_fixture_xhci_cbw_out() -> u32 !{unsafe} {
-    msc_cbw_header(512, true, 10);
+fn gem_fixture_xhci_cbw_out(guard: borrow BlockDeviceGuard[&block_device_lock]) -> u32 !{unsafe} {
+    msc_cbw_header(guard, 512, true, 10);
     msc_scsi_lba_cdb(0x28, 0, 1);
     let bus: usize = gem_fixture_xhci_cbw_bus();
-    return usb_bulk_xfer(false, bus, 31);
+    return usb_bulk_xfer(guard, false, bus, 31);
 }
 
-fn gem_fixture_xhci_stage(name: *u8, buffer: usize) !{unsafe} {
+fn gem_fixture_xhci_stage(guard: borrow BlockDeviceGuard[&block_device_lock], name: *u8, buffer: usize) !{unsafe} {
     gem_fixture_sentinel_arm(buffer);
-    let cbw: u32 = gem_fixture_xhci_cbw_out();
-    let data: u32 = usb_bulk_xfer(true, gem_fixture_xhci_bus(buffer), 512);
-    let csw: u32 = usb_bulk_xfer(true, gem_fixture_xhci_csw_bus(), 13);
+    let cbw: u32 = gem_fixture_xhci_cbw_out(guard);
+    let data: u32 = usb_bulk_xfer(guard, true, gem_fixture_xhci_bus(buffer), 512);
+    let csw: u32 = usb_bulk_xfer(guard, true, gem_fixture_xhci_csw_bus(), 13);
     let changed: usize = gem_fixture_sentinel_changed(buffer);
     kernel_boot_log("gem-tx fixture: xhci stage ");
     uart_puts(name);
@@ -264,7 +264,15 @@ fn gem_fixture_xhci_stage(name: *u8, buffer: usize) !{unsafe} {
 }
 
 fn gem_fixture_xhci_control() !{unsafe} {
-    match disk_initialize() {
+    let slot: BlockSlot[0] = block_slot_acquire();
+    let guard = block_device_take(slot);
+    gem_fixture_xhci_control_locked(guard);
+    block_device_give(guard);
+    block_slot_release(slot);
+}
+
+fn gem_fixture_xhci_control_locked(guard: borrow BlockDeviceGuard[&block_device_lock]) !{unsafe} {
+    match disk_initialize(guard) {
         DiskIoResult::Err(error) => {
             gem_fixture_require(false, "xHCI initialization");
             return;
@@ -278,10 +286,10 @@ fn gem_fixture_xhci_control() !{unsafe} {
                         "xHCI buffer inside the arena");
     gem_fixture_require(outside + 512 <= arena || outside >= arena + 0x40000,
                         "xHCI sentinel outside the arena");
-    gem_fixture_xhci_stage("inside", inside);
-    gem_fixture_xhci_stage("outside", outside);
+    gem_fixture_xhci_stage(guard, "inside", inside);
+    gem_fixture_xhci_stage(guard, "outside", outside);
     gem_fixture_close_window();
-    let cbw: u32 = gem_fixture_xhci_cbw_out();
+    let cbw: u32 = gem_fixture_xhci_cbw_out(guard);
     kernel_boot_log("gem-tx fixture: xhci stage moved cbw=");
     uart_put_udec(cbw as usize);
     kernel_boot_log("\\n");

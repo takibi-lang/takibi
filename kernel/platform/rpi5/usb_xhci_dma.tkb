@@ -172,7 +172,7 @@ fn msc_data_put(value: sink MscDataReceiveAuthority) {
 
 // A control DATA IN TD has one final Transfer Event. On a missing event,
 // halt and reset the controller before restoring CPU ownership.
-fn xhci_receive_configuration(length: {1..<257 as u32}) -> u32 !{unsafe} {
+fn xhci_receive_configuration(guard: borrow BlockDeviceGuard[&block_device_lock], length: {1..<257 as u32}) -> u32 !{unsafe} {
     static_assert(sizeof(XhciControlReceive) == 256,
                   "the protected control receive extent covers the descriptor");
     match xhci_control_take() {
@@ -181,7 +181,7 @@ fn xhci_receive_configuration(length: {1..<257 as u32}) -> u32 !{unsafe} {
             let span_length: {1..<257 as usize} = length as usize;
             let mut span = dma_device_span(device, XhciControlReceive,
                                            0, span_length);
-            let completion: u32 = usb_ctrl_in(0x80, 6, 0x0200, 0, span);
+            let completion: u32 = usb_ctrl_in(guard, 0x80, 6, 0x0200, 0, span);
             if (completion == 0) {
                 match msc_abort_unobserved_transfer() {
                     MscTimeoutResult::RestartRequired => {
@@ -206,7 +206,7 @@ fn xhci_receive_configuration(length: {1..<257 as u32}) -> u32 !{unsafe} {
     }
 }
 
-fn msc_data_receive_once(length: {1..<65537 as u32})
+fn msc_data_receive_once(guard: borrow BlockDeviceGuard[&block_device_lock], length: {1..<65537 as u32})
         -> MscDataReceiveResult !{unsafe} {
     static_assert(sizeof(MscDataReceive) ==
                   MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE,
@@ -217,7 +217,7 @@ fn msc_data_receive_once(length: {1..<65537 as u32})
             let span_length: {1..<65537 as usize} = length as usize;
             let mut span = dma_device_span(device, MscDataReceive,
                                            0, span_length);
-            let completion: u32 = usb_bulk_in(span);
+            let completion: u32 = usb_bulk_in(guard, span);
             if (completion == 0) {
                 match msc_abort_unobserved_transfer() {
                     MscTimeoutResult::RestartRequired => {
@@ -243,14 +243,14 @@ fn msc_data_receive_once(length: {1..<65537 as u32})
 }
 
 // The CSW is always 13 bytes (USB MSC BOT 1.0, 5.2).
-fn msc_csw_receive_once() -> MscDataReceiveResult !{unsafe} {
+fn msc_csw_receive_once(guard: borrow BlockDeviceGuard[&block_device_lock]) -> MscDataReceiveResult !{unsafe} {
     static_assert(sizeof(MscCswReceive) >= 13,
                   "the protected CSW extent covers its transfer");
     match msc_csw_take() {
         MscCswReceiveAuthority::Cpu(cpu) => {
             let device = dma_begin_rx(cpu, MscCswReceive);
             let mut span = dma_device_span(device, MscCswReceive, 0, 13);
-            let completion: u32 = usb_bulk_in(span);
+            let completion: u32 = usb_bulk_in(guard, span);
             if (completion == 0) {
                 match msc_abort_unobserved_transfer() {
                     MscTimeoutResult::RestartRequired => {
@@ -348,12 +348,12 @@ fn msc_data_out_put(value: sink MscDataTransmitAuthority) {
 }
 
 // The CBW is always 31 bytes (USB MSC BOT 1.0, 5.1).
-fn msc_cbw_send_once() -> MscDataReceiveResult !{unsafe} {
+fn msc_cbw_send_once(guard: borrow BlockDeviceGuard[&block_device_lock]) -> MscDataReceiveResult !{unsafe} {
     match msc_cbw_take() {
         MscCbwTransmitAuthority::Cpu(cpu) => {
             let device = dma_begin_tx(cpu, MscCbwTransmit);
             let mut span = dma_device_span(device, MscCbwTransmit, 0, 31);
-            let completion: u32 = usb_bulk_out(span);
+            let completion: u32 = usb_bulk_out(guard, span);
             if (completion == 0) {
                 match msc_abort_unobserved_transfer() {
                     MscTimeoutResult::RestartRequired => {
@@ -379,14 +379,14 @@ fn msc_cbw_send_once() -> MscDataReceiveResult !{unsafe} {
 }
 
 // One bulk-out data stage of `length` bytes from the start of the payload.
-fn msc_data_send_once(length: {1..<65537 as u32}) -> MscDataReceiveResult !{unsafe} {
+fn msc_data_send_once(guard: borrow BlockDeviceGuard[&block_device_lock], length: {1..<65537 as u32}) -> MscDataReceiveResult !{unsafe} {
     match msc_data_out_take() {
         MscDataTransmitAuthority::Cpu(cpu) => {
             let device = dma_begin_tx(cpu, MscDataTransmit);
             let span_length: {1..<65537 as usize} = length as usize;
             let mut span = dma_device_span(device, MscDataTransmit,
                                            0, span_length);
-            let completion: u32 = usb_bulk_out(span);
+            let completion: u32 = usb_bulk_out(guard, span);
             if (completion == 0) {
                 match msc_abort_unobserved_transfer() {
                     MscTimeoutResult::RestartRequired => {

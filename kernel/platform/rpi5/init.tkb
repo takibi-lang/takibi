@@ -199,7 +199,13 @@ fn kernel_boot_log_xhci_capability() {
 }
 
 fn kernel_test_platform_storage() {
-    let init_result: DiskIoResult = disk_initialize();
+    // The bring-up drives the transport rings, so it holds the block device
+    // guard as every later disk access does (GitHub issue #1012).
+    let slot: BlockSlot[0] = block_slot_acquire();
+    let guard = block_device_take(slot);
+    let init_result: DiskIoResult = disk_initialize(guard);
+    block_device_give(guard);
+    block_slot_release(slot);
     kernel_boot_log_xhci_capability();
     match init_result {
         DiskIoResult::Err(error) => {

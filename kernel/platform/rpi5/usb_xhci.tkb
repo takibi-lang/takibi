@@ -113,11 +113,9 @@ let mut xhci_dcbaa: [u32; 65 * 2] align(64);
 // XhciRing device protocol in usb_xhci_rings.tkb (GitHub issue #720).
 
 let mut xhci_slot_id: usize = 0;
-let mut xhci_ep0_enq: usize = 0;
-let mut xhci_ep0_cycle: u32 = 1;
+let mut xhci_last_evt_dw3: u32 = 0;
 let mut xhci_evt_idx: usize = 0;
 let mut xhci_evt_cycle: u32 = 1;
-let mut xhci_last_evt_dw3: u32 = 0;
 
 let mut xhci_msc_config_value: u32 = 0;
 let mut xhci_msc_interface_num: u32 = 0;
@@ -128,11 +126,7 @@ let mut xhci_msc_bulk_out_ep: u32 = 0;
 let mut xhci_msc_bulk_out_mps: u32 = 0;
 let mut xhci_msc_bulk_out_burst: u32 = 0;
 
-let mut xhci_bulk_in_enq: usize = 0;
-let mut xhci_bulk_in_cycle: u32 = 1;
 let mut xhci_bulk_in_dci: usize = 0;
-let mut xhci_bulk_out_enq: usize = 0;
-let mut xhci_bulk_out_cycle: u32 = 1;
 let mut xhci_bulk_out_dci: usize = 0;
 
 // Command Ring producer state. Bring-up (xhci_enable_slot/
@@ -141,8 +135,77 @@ let mut xhci_bulk_out_dci: usize = 0;
 // known order; this tracked index takes over from TRB[3] onward for
 // later, repeated commands (Reset Endpoint / Set TR Dequeue Pointer,
 // issued by xhci_reset_endpoint on every bulk-endpoint stall recovery).
-let mut xhci_cmd_enq: usize = 3;
-let mut xhci_cmd_cycle: u32 = 1;
+//
+// GitHub issue #1012: the producer cursors of the Command, EP0 and bulk
+// rings and the BOT tag are one linear record in a Place guarded by memory.tkb's
+// block_device_lock. Every transport entry takes the BlockDeviceGuard, so
+// "disk I/O after boot only under the lock, core 0 before" is in the
+// signatures: the boot bring-up and rootfs provisioning take the guard too.
+// The event ring's dequeue cursor, the last matched event's DWORD3 and the
+// foreign-event count stay globals: they are written under the XhciEvents and
+// XhciRing protocols' generated operations, whose signatures cannot carry the
+// guard.
+linear struct XhciTransportState[unit: usize] {
+    ep0_enq: usize;
+    ep0_cycle: u32;
+    bulk_in_enq: usize;
+    bulk_in_cycle: u32;
+    bulk_out_enq: usize;
+    bulk_out_cycle: u32;
+    cmd_enq: usize;
+    cmd_cycle: u32;
+    msc_tag: u32;
+}
+struct XhciTransport {
+    ep0_enq: usize;
+    ep0_cycle: u32;
+    bulk_in_enq: usize;
+    bulk_in_cycle: u32;
+    bulk_out_enq: usize;
+    bulk_out_cycle: u32;
+    cmd_enq: usize;
+    cmd_cycle: u32;
+    msc_tag: u32;
+}
+struct XhciTransportStore {
+    private state: Place(XhciTransportState[0]) guarded_by(block_device_lock);
+}
+private let mut xhci_transport_store_place: XhciTransportStore;
+
+private fn xhci_transport_retire(state: sink XhciTransportState[0]) {}
+
+// A copy of the record; Empty (never stored) reads as the reset state: every
+// cycle 1, the command cursor past bring-up's three fixed slots.
+fn xhci_transport(guard: borrow BlockDeviceGuard[&block_device_lock]) -> XhciTransport {
+    let mut v: XhciTransport = { 0, 1, 0, 1, 0, 1, 3, 1, 0 };
+    match place_take(guard, xhci_transport_store_place.state) {
+        Place::Empty => {}
+        Place::Full(s) => {
+            v.ep0_enq = s.ep0_enq;
+            v.ep0_cycle = s.ep0_cycle;
+            v.bulk_in_enq = s.bulk_in_enq;
+            v.bulk_in_cycle = s.bulk_in_cycle;
+            v.bulk_out_enq = s.bulk_out_enq;
+            v.bulk_out_cycle = s.bulk_out_cycle;
+            v.cmd_enq = s.cmd_enq;
+            v.cmd_cycle = s.cmd_cycle;
+            v.msc_tag = s.msc_tag;
+            let Place::Empty = place_put(guard, xhci_transport_store_place.state, s);
+        }
+    }
+    return v;
+}
+
+fn xhci_transport_store(guard: borrow BlockDeviceGuard[&block_device_lock], v: XhciTransport) {
+    let mut s: XhciTransportState[0] = {
+        v.ep0_enq, v.ep0_cycle, v.bulk_in_enq, v.bulk_in_cycle,
+        v.bulk_out_enq, v.bulk_out_cycle, v.cmd_enq, v.cmd_cycle,
+        v.msc_tag };
+    match place_put(guard, xhci_transport_store_place.state, s) {
+        Place::Empty => {}
+        Place::Full(previous) => { xhci_transport_retire(previous); }
+    }
+}
 
 // Close out a ring segment so the controller can actually WALK from
 // `from_idx` to the Link TRB and follow it back to index 0.
@@ -176,14 +239,16 @@ let mut xhci_cmd_cycle: u32 = 1;
 // examples/rp1_usb_smoke/rp1_usb_smoke.tkb never hit this only because
 // it happened to issue one fewer control transfer and stopped at 14.
 
-fn xhci_cmd_advance() !{unsafe} {
-    xhci_cmd_enq = xhci_cmd_enq + 1;
+fn xhci_cmd_advance(guard: borrow BlockDeviceGuard[&block_device_lock]) !{unsafe} {
+    let mut t: XhciTransport = xhci_transport(guard);
+    t.cmd_enq = t.cmd_enq + 1;
     let link_idx: usize = CMD_RING_TRBS - 1;
-    if (xhci_cmd_enq + 1 > link_idx) {
-        xhci_ring_close(XHCI_RING_CMD, xhci_cmd_enq, xhci_cmd_cycle, 23);
-        xhci_cmd_enq = 0;
-        xhci_cmd_cycle = 1 - xhci_cmd_cycle;
+    if (t.cmd_enq + 1 > link_idx) {
+        xhci_ring_close(XHCI_RING_CMD, t.cmd_enq, t.cmd_cycle, 23);
+        t.cmd_enq = 0;
+        t.cmd_cycle = 1 - t.cmd_cycle;
     }
+    xhci_transport_store(guard, t);
 }
 
 // TX uses the ordinary bounce buffer; RX uses a separate protected fixed
@@ -209,7 +274,6 @@ fn xhci_cmd_advance() !{unsafe} {
 // ordinary transport/device error.
 const MSC_MAX_TRANSFER_SECTORS: usize = 128;
 const MSC_SECTOR_SIZE: usize = 512;
-let mut msc_tag: u32 = 0;
 private let mut msc_write10_command_count: AtomicWord;
 
 let mut xhci_ready: AtomicWord;
@@ -362,7 +426,7 @@ fn usb_await_event(want: XhciEventWant, timeout_ms: usize) -> u32 !{unsafe} {
 // code (1 = Success, 0 = no event).
 // Private: a device-written buffer reaches it only through usb_ctrl_in,
 // whose address and length come from one device span (GitHub issue #623).
-private fn usb_ctrl_xfer(bm_request_type: u32, b_request: u32, w_value: u32,
+private fn usb_ctrl_xfer(guard: borrow BlockDeviceGuard[&block_device_lock], bm_request_type: u32, b_request: u32, w_value: u32,
                          w_index: u32, w_length: u32, buf_dma: usize,
                          dir_in: bool) -> u32 !{unsafe} {
     let has_data: bool = w_length > 0;
@@ -373,13 +437,14 @@ private fn usb_ctrl_xfer(bm_request_type: u32, b_request: u32, w_value: u32,
     // must be published rather than simply jumped over.
     let need: usize = 3;
     let ep0_link_idx: usize = EP0_RING_TRBS - 1;
-    if (xhci_ep0_enq + need > ep0_link_idx) {
-        xhci_ring_close(XHCI_RING_EP0, xhci_ep0_enq, xhci_ep0_cycle, 8);
-        xhci_ep0_enq = 0;
-        xhci_ep0_cycle = 1 - xhci_ep0_cycle;
+    let mut t: XhciTransport = xhci_transport(guard);
+    if (t.ep0_enq + need > ep0_link_idx) {
+        xhci_ring_close(XHCI_RING_EP0, t.ep0_enq, t.ep0_cycle, 8);
+        t.ep0_enq = 0;
+        t.ep0_cycle = 1 - t.ep0_cycle;
     }
-    let first_idx: usize = xhci_ep0_enq;
-    let cyc: u32 = xhci_ep0_cycle;
+    let first_idx: usize = t.ep0_enq;
+    let cyc: u32 = t.ep0_cycle;
 
     let mut trt: u32 = 0;
     if (has_data) {
@@ -408,7 +473,8 @@ private fn usb_ctrl_xfer(bm_request_type: u32, b_request: u32, w_value: u32,
         if (dir_in) { st_dir = 0; }
     }
     let mut status: Trb = { 0, 0, 0, cyc | (1 << 5) | (4 << 10) | (st_dir << 16) };
-    xhci_ep0_enq = idx + 1;
+    t.ep0_enq = idx + 1;
+    xhci_transport_store(guard, t);
     let mut td: [Trb; 3];
     td[0] = setup;
     let mut count: usize = 2;
@@ -432,15 +498,16 @@ private fn usb_ctrl_xfer(bm_request_type: u32, b_request: u32, w_value: u32,
 // 13 is Short Packet, both of which mean the data arrived.
 // Private for the same reason as usb_ctrl_xfer: an IN transfer is submitted
 // through usb_bulk_in, an OUT one through usb_bulk_out.
-private fn usb_bulk_xfer(dir_in: bool, buf_dma: usize, length: u32) -> u32 !{unsafe} {
+private fn usb_bulk_xfer(guard: borrow BlockDeviceGuard[&block_device_lock], dir_in: bool, buf_dma: usize, length: u32) -> u32 !{unsafe} {
     let mut ring: usize = XHCI_RING_BULK_OUT;
-    let mut enq: usize = xhci_bulk_out_enq;
-    let mut cyc: u32 = xhci_bulk_out_cycle;
+    let mut t: XhciTransport = xhci_transport(guard);
+    let mut enq: usize = t.bulk_out_enq;
+    let mut cyc: u32 = t.bulk_out_cycle;
     let mut dci: usize = xhci_bulk_out_dci;
     if (dir_in) {
         ring = XHCI_RING_BULK_IN;
-        enq = xhci_bulk_in_enq;
-        cyc = xhci_bulk_in_cycle;
+        enq = t.bulk_in_enq;
+        cyc = t.bulk_in_cycle;
         dci = xhci_bulk_in_dci;
     }
 
@@ -470,12 +537,13 @@ private fn usb_bulk_xfer(dir_in: bool, buf_dma: usize, length: u32) -> u32 !{uns
 
     enq = enq + 1;
     if (dir_in) {
-        xhci_bulk_in_enq = enq;
-        xhci_bulk_in_cycle = cyc;
+        t.bulk_in_enq = enq;
+        t.bulk_in_cycle = cyc;
     } else {
-        xhci_bulk_out_enq = enq;
-        xhci_bulk_out_cycle = cyc;
+        t.bulk_out_enq = enq;
+        t.bulk_out_cycle = cyc;
     }
+    xhci_transport_store(guard, t);
     let mut td: [Trb; 3];
     td[0] = normal;
     td[1] = normal;
@@ -508,16 +576,17 @@ private fn usb_bulk_xfer(dir_in: bool, buf_dma: usize, length: u32) -> u32 !{uns
 // on a Set TR Dequeue Pointer command (whose DWORD2 carries the Stream
 // ID) is exactly how that command came back with completion_code=0x05
 // (TRB Error) on real hardware here.
-fn xhci_run_command(dw0: u32, dw1: u32, dw2: u32, trb_type: u32,
+fn xhci_run_command(guard: borrow BlockDeviceGuard[&block_device_lock], dw0: u32, dw1: u32, dw2: u32, trb_type: u32,
                     dci: usize) -> u32 !{unsafe} {
     let dci_u32: u32 = dci as u32;
     let slot_u32: u32 = xhci_slot_id as u32;
+    let mut t: XhciTransport = xhci_transport(guard);
     let mut command: Trb = {
         dw0, dw1, dw2,
-        xhci_cmd_cycle | (trb_type << 10) | (dci_u32 << 16) | (slot_u32 << 24)
+        t.cmd_cycle | (trb_type << 10) | (dci_u32 << 16) | (slot_u32 << 24)
     };
-    let cmd_idx: usize = xhci_cmd_enq;
-    xhci_cmd_advance();
+    let cmd_idx: usize = t.cmd_enq;
+    xhci_cmd_advance(guard);
     let mut td: [Trb; 3];
     td[0] = command;
     td[1] = command;
@@ -533,11 +602,11 @@ fn xhci_run_command(dw0: u32, dw1: u32, dw2: u32, trb_type: u32,
 // must follow before the endpoint's doorbell is rung again, to tell the
 // controller where to resume -- the ring's next free producer slot,
 // since this driver has already advanced past the TRB that failed.
-fn xhci_reset_endpoint(dci: usize, ring_dma: usize, next_off: usize,
+fn xhci_reset_endpoint(guard: borrow BlockDeviceGuard[&block_device_lock], dci: usize, ring_dma: usize, next_off: usize,
                        next_cycle: u32) !{unsafe} {
-    xhci_run_command(0, 0, 0, 14, dci);
+    xhci_run_command(guard, 0, 0, 0, 14, dci);
     let deq: usize = (ring_dma + next_off) | (next_cycle as usize);
-    xhci_run_command((deq & 0xFFFFFFFF) as u32,
+    xhci_run_command(guard, (deq & 0xFFFFFFFF) as u32,
                      ((deq >> 32) & 0xFFFFFFFF) as u32,
                      0, 16, dci);
 }
@@ -548,32 +617,34 @@ fn xhci_reset_endpoint(dci: usize, ring_dma: usize, next_off: usize,
 // split recovery: its Transfer Event handler resets the host endpoint as
 // soon as the STALL arrives; the class driver clears the device-side halt
 // afterward before retrying the transfer.
-fn xhci_recover_bulk_stall(dir_in: bool, ep_addr: u32, dci: usize) !{unsafe} {
+fn xhci_recover_bulk_stall(guard: borrow BlockDeviceGuard[&block_device_lock], dir_in: bool, ep_addr: u32, dci: usize) !{unsafe} {
     if (dir_in) {
         match xhci_ring_dma(XHCI_RING_BULK_IN) {
             XhciRingAddress::Known(ring_dma) => {
-                xhci_reset_endpoint(dci, ring_dma, xhci_bulk_in_enq * 16,
-                                    xhci_bulk_in_cycle);
+                let mut t: XhciTransport = xhci_transport(guard);
+                xhci_reset_endpoint(guard, dci, ring_dma, t.bulk_in_enq * 16,
+                                    t.bulk_in_cycle);
             }
             XhciRingAddress::Busy => {}
         }
     } else {
         match xhci_ring_dma(XHCI_RING_BULK_OUT) {
             XhciRingAddress::Known(ring_dma) => {
-                xhci_reset_endpoint(dci, ring_dma, xhci_bulk_out_enq * 16,
-                                    xhci_bulk_out_cycle);
+                let mut t: XhciTransport = xhci_transport(guard);
+                xhci_reset_endpoint(guard, dci, ring_dma, t.bulk_out_enq * 16,
+                                    t.bulk_out_cycle);
             }
             XhciRingAddress::Busy => {}
         }
     }
-    usb_ctrl_no_data(0x02, 1, 0, ep_addr);
+    usb_ctrl_no_data(guard, 0x02, 1, 0, ep_addr);
 }
 
 // Bulk-Only Mass Storage Reset (class request, interface recipient, no
 // data stage) -- best-effort override of any inherited device state,
 // same reasoning as RPi3's own msc_bulk_only_reset.
-fn msc_bulk_only_reset() -> bool {
-    return usb_ctrl_no_data(0x21, 0xFF, 0, xhci_msc_interface_num) == 1;
+fn msc_bulk_only_reset(guard: borrow BlockDeviceGuard[&block_device_lock]) -> bool {
+    return usb_ctrl_no_data(guard, 0x21, 0xFF, 0, xhci_msc_interface_num) == 1;
 }
 
 // Full USB Mass Storage BOT reset recovery, in the order the BOT spec
@@ -601,10 +672,10 @@ fn msc_bulk_only_reset() -> bool {
 // Reset Endpoint Command here (see xhci_recover_bulk_stall's own
 // comment: it was tried and made an isolated stall into a total
 // transport breakdown).
-fn msc_recover_transport() -> bool {
-    msc_bulk_only_reset();
-    usb_ctrl_no_data(0x02, 1, 0, xhci_msc_bulk_in_ep);
-    usb_ctrl_no_data(0x02, 1, 0, xhci_msc_bulk_out_ep);
+fn msc_recover_transport(guard: borrow BlockDeviceGuard[&block_device_lock]) -> bool {
+    msc_bulk_only_reset(guard);
+    usb_ctrl_no_data(guard, 0x02, 1, 0, xhci_msc_bulk_in_ep);
+    usb_ctrl_no_data(guard, 0x02, 1, 0, xhci_msc_bulk_out_ep);
     return true;
 }
 
@@ -612,9 +683,11 @@ fn msc_recover_transport() -> bool {
 // callers fill in the CDB's own opcode/fields with msc_cbw_set(15.., ...)
 // afterward. bCBWLUN is always 0 -- single-drive scope, same as the RPi3
 // side.
-fn msc_cbw_header(data_len: u32, dir_in: bool, cb_len: u32) {
-    msc_tag = msc_tag + 1;
-    let tag: u32 = msc_tag;
+fn msc_cbw_header(guard: borrow BlockDeviceGuard[&block_device_lock], data_len: u32, dir_in: bool, cb_len: u32) {
+    let mut t: XhciTransport = xhci_transport(guard);
+    t.msc_tag = t.msc_tag + 1;
+    xhci_transport_store(guard, t);
+    let tag: u32 = t.msc_tag;
     match msc_cbw_take() {
         MscCbwTransmitAuthority::Cpu(cpu) => {
             let cbw = dma_cpu_slice(cpu, MscCbwTransmit);
@@ -692,10 +765,10 @@ must_use variant MscDataReceiveResult {
     ControllerUnusable;
 }
 
-private fn msc_csw_receive_attempt(remaining_stall_retries: usize)
+private fn msc_csw_receive_attempt(guard: borrow BlockDeviceGuard[&block_device_lock], remaining_stall_retries: usize)
         -> MscCommandResult !{unsafe} {
     let mut completion: u32 = 0;
-    match msc_csw_receive_once() {
+    match msc_csw_receive_once(guard) {
         MscDataReceiveResult::Completed(code) => { completion = code; }
         MscDataReceiveResult::RestartRequired => {
             return MscCommandResult::RestartRequired;
@@ -709,9 +782,9 @@ private fn msc_csw_receive_attempt(remaining_stall_retries: usize)
         // Retry this CSW, not a fresh CBW: the device still owes the CSW
         // for the command it accepted. Real hardware needs up to eight
         // bounded STALL recoveries after a WRITE(10).
-        xhci_recover_bulk_stall(true, xhci_msc_bulk_in_ep, xhci_bulk_in_dci);
+        xhci_recover_bulk_stall(guard, true, xhci_msc_bulk_in_ep, xhci_bulk_in_dci);
         delay_us(50000);
-        return msc_csw_receive_attempt(remaining_stall_retries - 1);
+        return msc_csw_receive_attempt(guard, remaining_stall_retries - 1);
     }
     if (completion != 1 && completion != 13) {
         return MscCommandResult::CompletedError(3);
@@ -727,7 +800,7 @@ private fn msc_csw_receive_attempt(remaining_stall_retries: usize)
                 csw_tag = csw_tag | ((bytes[4 + i] as u32) << sh);
             }
             let signature_ok: bool = csw_sig == 0x53425355;
-            let tag_ok: bool = csw_tag == msc_tag;
+            let tag_ok: bool = csw_tag == xhci_transport(guard).msc_tag;
             let status_ok: bool = bytes[12] == 0;
             msc_csw_put(MscCswReceiveAuthority::Cpu(restored));
             if (signature_ok == false) { return MscCommandResult::CompletedError(4); }
@@ -742,15 +815,15 @@ private fn msc_csw_receive_attempt(remaining_stall_retries: usize)
     }
 }
 
-private fn msc_read_csw() -> MscCommandResult !{unsafe} {
-    return msc_csw_receive_attempt(8);
+private fn msc_read_csw(guard: borrow BlockDeviceGuard[&block_device_lock]) -> MscCommandResult !{unsafe} {
+    return msc_csw_receive_attempt(guard, 8);
 }
 
-fn msc_run_command(data_len: {0..<65537 as u32}, dir_in: bool)
+fn msc_run_command(guard: borrow BlockDeviceGuard[&block_device_lock], data_len: {0..<65537 as u32}, dir_in: bool)
         -> MscCommandResult {
     // An outbound payload is already in the protected transmit allocation;
     // an inbound one lands in the protected receive allocation.
-    match msc_cbw_send_once() {
+    match msc_cbw_send_once(guard) {
         MscDataReceiveResult::Completed(code) => {
             if (code != 1) {
                 return MscCommandResult::CompletedError(1);
@@ -766,7 +839,7 @@ fn msc_run_command(data_len: {0..<65537 as u32}, dir_in: bool)
 
     if (data_len > 0) {
         if (dir_in) {
-            match msc_data_receive_once(data_len) {
+            match msc_data_receive_once(guard, data_len) {
                 MscDataReceiveResult::Completed(code) => {
                     if (code != 1 && code != 13) {
                         return MscCommandResult::CompletedError(2);
@@ -780,7 +853,7 @@ fn msc_run_command(data_len: {0..<65537 as u32}, dir_in: bool)
                 }
             }
         } else {
-            match msc_data_send_once(data_len) {
+            match msc_data_send_once(guard, data_len) {
                 MscDataReceiveResult::Completed(code) => {
                     if (code != 1 && code != 13) {
                         return MscCommandResult::CompletedError(2);
@@ -796,7 +869,7 @@ fn msc_run_command(data_len: {0..<65537 as u32}, dir_in: bool)
         }
     }
 
-    return msc_read_csw();
+    return msc_read_csw(guard);
 }
 
 // -- Bring-up sequence, split into stages matching rp1_usb_smoke.tkb's
@@ -843,7 +916,7 @@ fn xhci_halt_and_reset() -> bool !{unsafe} {
     return hcrst_confirmed;
 }
 
-fn xhci_setup_rings_and_start() -> bool !{unsafe} {
+fn xhci_setup_rings_and_start(guard: borrow BlockDeviceGuard[&block_device_lock]) -> bool !{unsafe} {
     // RP1 bus masters reach system RAM only at PCI 0x10_00000000 +
     // cpu_phys (BCM2712's own device tree), not raw cpu_phys.
     pcie2_dma_inbound_setup();
@@ -865,14 +938,16 @@ fn xhci_setup_rings_and_start() -> bool !{unsafe} {
     // 3, not 0: bring-up writes Enable Slot / Address Device / Configure
     // Endpoint into the fixed slots TRB[0..2] below, so the tracked
     // producer index for every LATER command starts after them.
-    xhci_cmd_enq = 3;
-    xhci_cmd_cycle = 1;
-    xhci_ep0_enq = 0;
-    xhci_ep0_cycle = 1;
-    xhci_bulk_in_enq = 0;
-    xhci_bulk_in_cycle = 1;
-    xhci_bulk_out_enq = 0;
-    xhci_bulk_out_cycle = 1;
+    let mut t: XhciTransport = xhci_transport(guard);
+    t.cmd_enq = 3;
+    t.cmd_cycle = 1;
+    t.ep0_enq = 0;
+    t.ep0_cycle = 1;
+    t.bulk_in_enq = 0;
+    t.bulk_in_cycle = 1;
+    t.bulk_out_enq = 0;
+    t.bulk_out_cycle = 1;
+    xhci_transport_store(guard, t);
 
     // The event ring: back from the controller only on a confirmed reset,
     // zeroed and published again.
@@ -954,7 +1029,7 @@ fn xhci_setup_rings_and_start() -> bool !{unsafe} {
     return run_confirmed;
 }
 
-fn xhci_enable_slot() -> bool !{unsafe} {
+fn xhci_enable_slot(guard: borrow BlockDeviceGuard[&block_device_lock]) -> bool !{unsafe} {
     // Enable Slot, Cycle=1, at the Command Ring's first TRB. Written here
     // with its doorbell (GitHub issue #783), not at controller start: the
     // controller reads a command TRB only after the doorbell.
@@ -978,7 +1053,7 @@ fn xhci_enable_slot() -> bool !{unsafe} {
 // controller, not the device, and firmware already enumerated this drive
 // before handoff, so Address Device's implicit SET_ADDRESS needs the
 // device back in the Default state a port reset produces.
-fn xhci_address_device() -> XhciAddressOutcome !{unsafe} {
+fn xhci_address_device(guard: borrow BlockDeviceGuard[&block_device_lock]) -> XhciAddressOutcome !{unsafe} {
     let dcbaa_base: usize = (xhci_dcbaa as *u8) as usize;
     if (xhci_slot_id >= 65) {
         return XhciAddressOutcome::SlotIdOutOfRange(xhci_slot_id as u32);
@@ -1000,8 +1075,10 @@ fn xhci_address_device() -> XhciAddressOutcome !{unsafe} {
         XhciRingAddress::Known(dma) => { ep0_ring_dma = dma; }
         XhciRingAddress::Busy => { return XhciAddressOutcome::Completion(0); }
     }
-    xhci_ep0_enq = 0;
-    xhci_ep0_cycle = 1;
+    let mut t: XhciTransport = xhci_transport(guard);
+    t.ep0_enq = 0;
+    t.ep0_cycle = 1;
+    xhci_transport_store(guard, t);
 
 
     // Slot Context: Route String=0 (root-port-attached), Speed = the
@@ -1104,8 +1181,8 @@ fn xhci_address_device() -> XhciAddressOutcome !{unsafe} {
 
 // Configuration Descriptor -> parse Mass Storage interface + bulk
 // endpoints -> Configure Endpoint -> SET_CONFIGURATION.
-fn xhci_configure() -> XhciConfigureOutcome {
-    let cfg9_cc: u32 = xhci_receive_configuration(9);
+fn xhci_configure(guard: borrow BlockDeviceGuard[&block_device_lock]) -> XhciConfigureOutcome {
+    let cfg9_cc: u32 = xhci_receive_configuration(guard, 9);
     if (cfg9_cc != 1) {
         return XhciConfigureOutcome::Transfer(cfg9_cc);
     }
@@ -1129,7 +1206,7 @@ fn xhci_configure() -> XhciConfigureOutcome {
         return XhciConfigureOutcome::Malformed;
     }
 
-    let cfg_cc: u32 = xhci_receive_configuration(total_len as u32);
+    let cfg_cc: u32 = xhci_receive_configuration(guard, total_len as u32);
     if (cfg_cc != 1) {
         return XhciConfigureOutcome::Transfer(cfg_cc);
     }
@@ -1168,7 +1245,7 @@ fn xhci_configure() -> XhciConfigureOutcome {
     let in_num: usize = (xhci_msc_bulk_in_ep & 0x0F) as usize;
     let out_num: usize = (xhci_msc_bulk_out_ep & 0x0F) as usize;
     if (in_num > 0 && out_num > 0) {
-        return xhci_configure_endpoint(in_num, out_num);
+        return xhci_configure_endpoint(guard, in_num, out_num);
     }
     return XhciConfigureOutcome::NoBulkEndpoints;
 }
@@ -1177,7 +1254,7 @@ fn xhci_configure() -> XhciConfigureOutcome {
 // narrowing guard on this function's own parameters (matching
 // rp1_usb_smoke.tkb's own proven pattern) -- the trap-site rejection otherwise
 // rejects out_num*2-1 as a possible underflow.
-fn xhci_configure_endpoint(in_num: {1..<16 as usize},
+fn xhci_configure_endpoint(guard: borrow BlockDeviceGuard[&block_device_lock], in_num: {1..<16 as usize},
                            out_num: {1..<16 as usize})
         -> XhciConfigureOutcome !{unsafe} {
     let in_idx: usize = in_num * 2;
@@ -1255,7 +1332,7 @@ fn xhci_configure_endpoint(in_num: {1..<16 as usize},
         return XhciConfigureOutcome::Transfer(ce_cc);
     }
 
-    let setcfg_cc: u32 = usb_ctrl_no_data(0x00, 9, xhci_msc_config_value, 0);
+    let setcfg_cc: u32 = usb_ctrl_no_data(guard, 0x00, 9, xhci_msc_config_value, 0);
     if (setcfg_cc != 1) {
         return XhciConfigureOutcome::Transfer(setcfg_cc);
     }
@@ -1274,7 +1351,7 @@ fn xhci_configure_endpoint(in_num: {1..<16 as usize},
 // DiskIoResult::Err(-1), so the six repairs they stand for arrived as one
 // sentence. Each now names itself, and the ones that received a controller
 // completion code, a transport status or a block size carry it.
-fn usb_disk_initialize_stages() -> UsbInitOutcome {
+fn usb_disk_initialize_stages(guard: borrow BlockDeviceGuard[&block_device_lock]) -> UsbInitOutcome {
     if (atomic_word_load(&xhci_controller_unusable) != 0) {
         return UsbInitOutcome::Reset;
     }
@@ -1285,13 +1362,13 @@ fn usb_disk_initialize_stages() -> UsbInitOutcome {
     if (xhci_halt_and_reset() == false) {
         return UsbInitOutcome::Reset;
     }
-    if (xhci_setup_rings_and_start() == false) {
+    if (xhci_setup_rings_and_start(guard) == false) {
         return UsbInitOutcome::RingSetup;
     }
-    if (xhci_enable_slot() == false) {
+    if (xhci_enable_slot(guard) == false) {
         return UsbInitOutcome::EnableSlot;
     }
-    match xhci_address_device() {
+    match xhci_address_device(guard) {
         XhciAddressOutcome::SlotIdOutOfRange(slot) => {
             return UsbInitOutcome::SlotIdOutOfRange(slot);
         }
@@ -1303,7 +1380,7 @@ fn usb_disk_initialize_stages() -> UsbInitOutcome {
         }
         XhciAddressOutcome::Ok => { }
     }
-    match xhci_configure() {
+    match xhci_configure(guard) {
         XhciConfigureOutcome::Transfer(completion) => {
             return UsbInitOutcome::Configure(completion);
         }
@@ -1341,9 +1418,9 @@ fn usb_disk_initialize_stages() -> UsbInitOutcome {
     // the regression #339 was filed from.
     let mut readiness: UsbRetryRecord = usb_retry_record_start();
     for i: usize in 0..<50 {
-        msc_cbw_header(0, false, 6);
+        msc_cbw_header(guard, 0, false, 6);
         msc_cbw_set(15, 0x00);
-        match msc_run_command(0, false) {
+        match msc_run_command(guard, 0, false) {
             MscCommandResult::Ok => {
                 readiness = usb_retry_record_attempt(readiness, 0);
             }
@@ -1370,9 +1447,9 @@ fn usb_disk_initialize_stages() -> UsbInitOutcome {
 
     // READ CAPACITY(10): confirm 512-byte blocks, this project's whole
     // storage stack's own fixed assumption.
-    msc_cbw_header(8, true, 10);
+    msc_cbw_header(guard, 8, true, 10);
     msc_cbw_set(15, 0x25);
-    match msc_run_command(8, true) {
+    match msc_run_command(guard, 8, true) {
         MscCommandResult::Ok => { }
         MscCommandResult::CompletedError(status) => {
             return UsbInitOutcome::ReadCapacity(status);
@@ -1432,9 +1509,9 @@ fn usb_disk_init_last_report() -> UsbInitReportResult {
 // The Media Access Interface entry point, unchanged for its callers: the
 // same name, the same DiskIoResult, and still no UART dependency. What
 // changed is that the stage it failed at survives the call.
-fn disk_initialize() -> DiskIoResult {
+fn disk_initialize(guard: borrow BlockDeviceGuard[&block_device_lock]) -> DiskIoResult {
     let mut description: UsbInitDescription =
-        usb_init_outcome_describe(usb_disk_initialize_stages());
+        usb_init_outcome_describe(usb_disk_initialize_stages(guard));
     xhci_init_description = description;
     atomic_word_store(&xhci_init_attempted, 1);
     if (description.failed) {
@@ -1477,7 +1554,7 @@ fn msc_scsi_lba_cdb(op: u8, sector: u32, sectors: usize) {
 // Reset + clear-halt on both bulk endpoints) followed by exactly one
 // retry of the same, side-effect-free-to-repeat command. An unobserved
 // transfer aborts instead; a BOT reset does not quiesce the host controller.
-fn disk_read_sectors(sector: u32, buf: []u8) -> DiskIoResult {
+fn disk_read_sectors(guard: borrow BlockDeviceGuard[&block_device_lock], sector: u32, buf: []u8) -> DiskIoResult {
     if (disk_io_ok(disk_status()) == false) {
         return DiskIoResult::Err(-1);
     }
@@ -1493,20 +1570,20 @@ fn disk_read_sectors(sector: u32, buf: []u8) -> DiskIoResult {
     let length_u32: u32 = length as u32;
     if (length_u32 >= 65537) { return DiskIoResult::Err(-1); }
     let transfer_len: {0..<65537 as u32} = length_u32;
-    msc_cbw_header(transfer_len, true, 10);
+    msc_cbw_header(guard, transfer_len, true, 10);
     msc_scsi_lba_cdb(0x28, sector, sectors);
     let mut retry: bool = false;
-    match msc_run_command(transfer_len, true) {
+    match msc_run_command(guard, transfer_len, true) {
         MscCommandResult::Ok => { }
         MscCommandResult::CompletedError(_) => { retry = true; }
         MscCommandResult::RestartRequired => { return DiskIoResult::Err(-1); }
         MscCommandResult::ControllerUnusable => { return DiskIoResult::Err(-1); }
     }
     if (retry) {
-        msc_recover_transport();
-        msc_cbw_header(transfer_len, true, 10);
+        msc_recover_transport(guard);
+        msc_cbw_header(guard, transfer_len, true, 10);
         msc_scsi_lba_cdb(0x28, sector, sectors);
-        match msc_run_command(transfer_len, true) {
+        match msc_run_command(guard, transfer_len, true) {
             MscCommandResult::Ok => { }
             MscCommandResult::CompletedError(_) => {
                 return DiskIoResult::Err(-1);
@@ -1536,12 +1613,12 @@ fn disk_read_sectors(sector: u32, buf: []u8) -> DiskIoResult {
     return DiskIoResult::Ok;
 }
 
-fn disk_read(sector: u32, buf: [u8; MSC_SECTOR_SIZE..]) -> DiskIoResult {
-    return disk_read_sectors(sector, buf[0..<MSC_SECTOR_SIZE]);
+fn disk_read(guard: borrow BlockDeviceGuard[&block_device_lock], sector: u32, buf: [u8; MSC_SECTOR_SIZE..]) -> DiskIoResult {
+    return disk_read_sectors(guard, sector, buf[0..<MSC_SECTOR_SIZE]);
 }
 
-fn disk_write(sector: u32, buf: [u8; MSC_SECTOR_SIZE..]) -> DiskIoResult {
-    return disk_write_sectors(sector, buf[0..<MSC_SECTOR_SIZE]);
+fn disk_write(guard: borrow BlockDeviceGuard[&block_device_lock], sector: u32, buf: [u8; MSC_SECTOR_SIZE..]) -> DiskIoResult {
+    return disk_write_sectors(guard, sector, buf[0..<MSC_SECTOR_SIZE]);
 }
 
 // Write a bounded contiguous run with one WRITE(10). The bounce buffer is
@@ -1549,7 +1626,7 @@ fn disk_write(sector: u32, buf: [u8; MSC_SECTOR_SIZE..]) -> DiskIoResult {
 // provide ordinary, unaligned byte storage. A failed write is replayed once
 // with the same bytes and LBA range after a completed error. A transfer
 // without a matching event aborts before any replay.
-fn disk_write_sectors(sector: u32, buf: []u8) -> DiskIoResult {
+fn disk_write_sectors(guard: borrow BlockDeviceGuard[&block_device_lock], sector: u32, buf: []u8) -> DiskIoResult {
     if (disk_io_ok(disk_status()) == false) {
         return DiskIoResult::Err(-1);
     }
@@ -1579,25 +1656,25 @@ fn disk_write_sectors(sector: u32, buf: []u8) -> DiskIoResult {
             msc_data_out_fail_device(stale);
         }
     }
-    msc_cbw_header(transfer_len, false, 10);
+    msc_cbw_header(guard, transfer_len, false, 10);
     msc_scsi_lba_cdb(0x2A, sector, sectors);
     atomic_word_fetch_add(&msc_write10_command_count, 1);
-    match msc_run_command(transfer_len, false) {
+    match msc_run_command(guard, transfer_len, false) {
         MscCommandResult::Ok => { return DiskIoResult::Ok; }
         MscCommandResult::CompletedError(_) => { }
         MscCommandResult::RestartRequired => { return DiskIoResult::Err(-1); }
         MscCommandResult::ControllerUnusable => { return DiskIoResult::Err(-1); }
     }
-    msc_recover_transport();
+    msc_recover_transport(guard);
     // This is deliberately limited to one replay of the exact same
     // WRITE(10) range. If the first command reached media before
     // its CSW was lost, repeating identical bytes to the identical LBA
     // is content-idempotent; no general write-command retry policy is
     // implied.
-    msc_cbw_header(transfer_len, false, 10);
+    msc_cbw_header(guard, transfer_len, false, 10);
     msc_scsi_lba_cdb(0x2A, sector, sectors);
     atomic_word_fetch_add(&msc_write10_command_count, 1);
-    match msc_run_command(transfer_len, false) {
+    match msc_run_command(guard, transfer_len, false) {
         MscCommandResult::Ok => { return DiskIoResult::Ok; }
         MscCommandResult::CompletedError(_) => {
             return DiskIoResult::Err(-1);
@@ -1614,25 +1691,25 @@ fn disk_write_sectors(sector: u32, buf: []u8) -> DiskIoResult {
 // GitHub issue #623: the submission entry points. A device-written buffer's
 // address and length both come from one span that dma_device_span proved
 // inside its allocation; RP1's bus translation is applied here, once.
-fn usb_ctrl_in(bm_request_type: u32, b_request: u32, w_value: u32,
+fn usb_ctrl_in(guard: borrow BlockDeviceGuard[&block_device_lock], bm_request_type: u32, b_request: u32, w_value: u32,
                w_index: u32, span: borrow DmaDeviceSpan) -> u32 !{unsafe} {
     let bus: usize = rp1_span_bus_address(span);
-    return usb_ctrl_xfer(bm_request_type, b_request, w_value, w_index,
+    return usb_ctrl_xfer(guard, bm_request_type, b_request, w_value, w_index,
                          dma_span_length(span) as u32, bus, true);
 }
 
-fn usb_ctrl_no_data(bm_request_type: u32, b_request: u32, w_value: u32,
+fn usb_ctrl_no_data(guard: borrow BlockDeviceGuard[&block_device_lock], bm_request_type: u32, b_request: u32, w_value: u32,
                     w_index: u32) -> u32 !{unsafe} {
-    return usb_ctrl_xfer(bm_request_type, b_request, w_value, w_index,
+    return usb_ctrl_xfer(guard, bm_request_type, b_request, w_value, w_index,
                          0, 0, false);
 }
 
-fn usb_bulk_in(span: borrow DmaDeviceSpan) -> u32 !{unsafe} {
+fn usb_bulk_in(guard: borrow BlockDeviceGuard[&block_device_lock], span: borrow DmaDeviceSpan) -> u32 !{unsafe} {
     let bus: usize = rp1_span_bus_address(span);
-    return usb_bulk_xfer(true, bus, dma_span_length(span) as u32);
+    return usb_bulk_xfer(guard, true, bus, dma_span_length(span) as u32);
 }
 
-fn usb_bulk_out(span: borrow DmaDeviceSpan) -> u32 !{unsafe} {
+fn usb_bulk_out(guard: borrow BlockDeviceGuard[&block_device_lock], span: borrow DmaDeviceSpan) -> u32 !{unsafe} {
     let bus: usize = rp1_span_bus_address(span);
-    return usb_bulk_xfer(false, bus, dma_span_length(span) as u32);
+    return usb_bulk_xfer(guard, false, bus, dma_span_length(span) as u32);
 }

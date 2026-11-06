@@ -225,9 +225,11 @@ fn block_device_wait_count(slot: usize) -> usize {
 // completes it. Nothing reaches the device from a handler, and the
 // acquire's `may_block` makes that a compile error rather than a rule.
 //
-// usb_provision.tkb writes around this lock, once, on core 0, before any
-// process exists -- so before any other core can reach a block device.
-// Public since GitHub issue #1012: virtio_blk.tkb's state is a Place
+// usb_provision.tkb writes around block_write (not around this lock: it
+// holds the guard for its whole run, as the xHCI bring-up does).
+// Public since GitHub issue #1012: virtio_blk.tkb's and usb_xhci.tkb's
+// transport state are Places guarded by it, so their entries name
+// BlockDeviceGuard[&block_device_lock]. virtio_blk.tkb's state is a Place
 // guarded_by it, so its entries name BlockDeviceGuard[&block_device_lock].
 let mut block_device_lock: TaskMutex;
 
@@ -529,7 +531,7 @@ private fn block_run_transfer_locked(
         // check above bound it inside block_run_data (#637 stage 3).
         let base: usize = here * BLOCK_RUN_BLOCKS * KERNEL_BLOCK_SIZE;
         let length: usize = count * KERNEL_BLOCK_SIZE;
-        match disk_read_sectors((first * 2) as u32,
+        match disk_read_sectors(guard, (first * 2) as u32,
                                 block_run_data[base..<base + length]) {
             DiskIoResult::Err(error) => { return false; }
             DiskIoResult::Ok => { return true; }
@@ -630,7 +632,7 @@ private fn block_read_device_locked(
     if (device.backend == 1) {
         // Both sectors of the block in one READ(10): a command costs the
         // same however few sectors it moves (GitHub issue #545).
-        match disk_read_sectors((block * 2) as u32,
+        match disk_read_sectors(guard, (block * 2) as u32,
                                 destination[0..<KERNEL_BLOCK_SIZE]) {
             DiskIoResult::Err(error) => { return BlockIoResult::Invalid; }
             DiskIoResult::Ok => { return BlockIoResult::Ok; }
@@ -662,7 +664,7 @@ private fn block_write_device_locked(
         // A boot's writes are single metadata blocks -- 188 of them over 18
         // distinct blocks on 2026-09-12 -- so there is no run across blocks
         // to coalesce; the command per sector was the whole of the waste.
-        match disk_write_sectors((block * 2) as u32,
+        match disk_write_sectors(guard, (block * 2) as u32,
                                  source[0..<KERNEL_BLOCK_SIZE]) {
             DiskIoResult::Err(error) => { return BlockIoResult::Invalid; }
             DiskIoResult::Ok => { return BlockIoResult::Ok; }

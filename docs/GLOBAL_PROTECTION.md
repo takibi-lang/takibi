@@ -326,3 +326,14 @@ file's comment lines are not rows.
   the lock is now public, and the boot capacity probe takes the guard too. The
   timeout snapshots stay listed (DDB reads them with the world stopped), as does
   the queue (its address is the device's). 245 -> 242 unprotected.
+- 2026-11-06: the xHCI transport cursors. The Command, EP0 and bulk IN/OUT
+  rings' producer index and cycle and the BOT tag, whose rows said "disk I/O after
+  boot only under block_device_lock, core 0 before; disk_* carries no guard", are
+  one linear `XhciTransportState` in a `Place` `guarded_by(block_device_lock)`.
+  Every `disk_*` entry, the bring-up (`disk_initialize`) and the rootfs
+  provisioning and verify take `BlockDeviceGuard[&block_device_lock]`; the
+  provisioning gives it back around its cache retirements, which take a
+  `BlockSlot`. The event ring's dequeue cursor, the last matched event and the
+  foreign-event count stay listed: they are written inside the `XhciEvents` and
+  `XhciRing` protocols' generated operations, whose signatures cannot carry the
+  guard. RPi5 only; compiled, not yet run on the board. 242 -> 233 unprotected.

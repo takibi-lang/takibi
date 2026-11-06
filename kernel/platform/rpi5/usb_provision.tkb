@@ -77,16 +77,31 @@ private fn usb_provision_container_holds_extent() -> bool {
 // replaying a range is content-idempotent, and the one-block case uses the
 // single-sector path.
 fn usb_provision_rootfs(destination: KernelBlockDevice) -> UsbProvisionResult {
+    // These writes go around block_write, so every cached copy is retired
+    // before and after them (GitHub issue #208). The writes themselves run
+    // under the block device guard (GitHub issue #1012), taken after the
+    // first retirement and given back before the second: the retirement
+    // takes a BlockSlot of its own, which is never taken under the lock.
+    block_forget_all();
+    let slot: BlockSlot[0] = block_slot_acquire();
+    let guard = block_device_take(slot);
+    let result: UsbProvisionResult = usb_provision_rootfs_locked(guard, destination);
+    block_device_give(guard);
+    block_slot_release(slot);
+    block_forget_all();
+    return result;
+}
+
+private fn usb_provision_rootfs_locked(guard: borrow BlockDeviceGuard[&block_device_lock],
+                                       destination: KernelBlockDevice)
+        -> UsbProvisionResult {
     if (block_device_is_usb(destination) == false ||
         USB_PROVISION_BLOCKS > block_count(destination)) {
         return UsbProvisionResult::Invalid;
     }
-    // These writes go around block_write, so every cached copy is retired
-    // before and after them (GitHub issue #208).
     if (usb_provision_container_holds_extent() == false) {
         return UsbProvisionResult::Invalid;
     }
-    block_forget_all();
     let mut cursor: usize = LZ4_IMAGE_HEADER_BYTES;
     let mut first_block: usize = 0;
     while (first_block < USB_PROVISION_BLOCKS) {
@@ -111,7 +126,7 @@ fn usb_provision_rootfs(destination: KernelBlockDevice) -> UsbProvisionResult {
         } else {
             return UsbProvisionResult::Invalid;
         }
-        match disk_write_sectors((first_block * 2) as u32, transfer) {
+        match disk_write_sectors(guard, (first_block * 2) as u32, transfer) {
             DiskIoResult::Err(error) => {
                 let mut fallback_offset: usize = 0;
                 let mut fallback_blocks: usize = batch / 2;
@@ -139,7 +154,7 @@ fn usb_provision_rootfs(destination: KernelBlockDevice) -> UsbProvisionResult {
                         if (block_bytes.len < KERNEL_BLOCK_SIZE) {
                             return UsbProvisionResult::Invalid;
                         }
-                        match disk_write(
+                        match disk_write(guard,
                                 ((first_block + fallback_offset) * 2) as u32,
                                 block_bytes[0..<512]) {
                             DiskIoResult::Err(single_error) => {
@@ -147,7 +162,7 @@ fn usb_provision_rootfs(destination: KernelBlockDevice) -> UsbProvisionResult {
                             }
                             DiskIoResult::Ok => { }
                         }
-                        match disk_write(
+                        match disk_write(guard,
                                 ((first_block + fallback_offset) * 2 + 1) as u32,
                                 block_bytes[512..<KERNEL_BLOCK_SIZE]) {
                             DiskIoResult::Err(single_error) => {
@@ -157,7 +172,7 @@ fn usb_provision_rootfs(destination: KernelBlockDevice) -> UsbProvisionResult {
                         }
                         fallback_offset = fallback_offset + 1;
                     } else {
-                        match disk_write_sectors(
+                        match disk_write_sectors(guard,
                                 ((first_block + fallback_offset) * 2) as u32,
                                 block_bytes) {
                             DiskIoResult::Err(smaller_error) => {
@@ -178,7 +193,6 @@ fn usb_provision_rootfs(destination: KernelBlockDevice) -> UsbProvisionResult {
         }
         first_block = first_block + batch;
     }
-    block_forget_all();
     return UsbProvisionResult::Copied;
 }
 
@@ -188,6 +202,18 @@ fn usb_provision_rootfs(destination: KernelBlockDevice) -> UsbProvisionResult {
 // not the codec; the build checks the container against ext2.img
 // (scripts/lz4_image.py pack) and linux_user/lz4 checks the decoder.
 fn usb_provision_rootfs_verify(destination: KernelBlockDevice)
+        -> UsbProvisionVerifyResult {
+    let slot: BlockSlot[0] = block_slot_acquire();
+    let guard = block_device_take(slot);
+    let result: UsbProvisionVerifyResult =
+        usb_provision_rootfs_verify_locked(guard, destination);
+    block_device_give(guard);
+    block_slot_release(slot);
+    return result;
+}
+
+private fn usb_provision_rootfs_verify_locked(guard: borrow BlockDeviceGuard[&block_device_lock],
+                                              destination: KernelBlockDevice)
         -> UsbProvisionVerifyResult {
     if (block_device_is_usb(destination) == false ||
         USB_PROVISION_BLOCKS > block_count(destination)) {
@@ -214,7 +240,7 @@ fn usb_provision_rootfs_verify(destination: KernelBlockDevice)
         } else {
             return UsbProvisionVerifyResult::Invalid;
         }
-        match disk_read_sectors((first_block * 2) as u32, transfer) {
+        match disk_read_sectors(guard, (first_block * 2) as u32, transfer) {
             DiskIoResult::Err(error) => {
                 return UsbProvisionVerifyResult::Invalid;
             }
