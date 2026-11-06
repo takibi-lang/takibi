@@ -2086,6 +2086,41 @@
         "extern_fns": "#999 xfail_probe_touch",
         "unsafe_blocks": "#999 the xfail rows' shared record page and their line writer"
       }
+    },
+    {
+      "date": "2026-11-06",
+      "head": "c6fefccc",
+      "counts": {
+        "raw_mint_files": 14,
+        "frame_lines": 12016,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 197,
+        "raw_deref_io": 7,
+        "raw_deref_builtin_region": 113,
+        "raw_deref_generated": 0,
+        "unsafe_blocks": 153,
+        "extern_fns": 70,
+        "invariant_stop_sites": 130,
+        "static_assert_premises": 23,
+        "assembly_lines": 2791,
+        "per_cpu_ordinary_arrays": 65,
+        "per_cpu_stores": 6,
+        "raw_cpu_id_calls": 147,
+        "trust_build_checks": 17,
+        "tla_review_stamps": 131,
+        "judge_defects_range": 1,
+        "judge_defects_init": 0,
+        "judge_defects_region_overlay": 0,
+        "unprotected_globals": 245,
+        "frame_api_ratchet": 7
+      },
+      "changes": {
+        "assembly_lines": "#638 stage 8: el1_preempt_spin, preempt_count_at, the EL1 entry after_switch",
+        "extern_fns": "#638 stage 8: preempt_count_at and the spin bounds",
+        "raw_cpu_id_calls": "#638 stage 8: the scenario compares the CPU it resumed on",
+        "static_assert_premises": "#638 stage 8: the window premise KERNEL_PREEMPTIBLE == 0",
+        "per_cpu_stores": "#638 stage 8: El1SwitchPending, a row in per_cpu_carried_fields.tsv"
+      }
     }
   ]
 }

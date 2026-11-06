@@ -86,6 +86,9 @@ FRAME_USIZE_SEAMS = {
     "kernel_irq_el1_return_complete",
     # Its address compared, never dereferenced: which return owes the hook.
     "el1_preempt_switch_note", "el1_preempt_switch_take",
+    # The IRQ-return consult reads the count word of the frame's stack run
+    # (#638 stage 8): an address masked to its run, never a frame.
+    "preempt_count_zero_at",
     "kernel_stack_guard_check", "kernel_stack_guard_check_interrupt",
     "kernel_stack_guard_inspect", "maybe_frame_from_entry",
     "frame_ref_from_entry", "frame_ref_from_saved",

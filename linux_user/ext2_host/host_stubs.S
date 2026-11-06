@@ -24,6 +24,12 @@ preempt_count_add:
     mov %rdi, .Lpreempt_count(%rip)
     ret
 
+// preempt_count_at(sp): the host has one stack, so its one word (#638 stage 8).
+    .global preempt_count_at
+preempt_count_at:
+    mov .Lpreempt_count(%rip), %rax
+    ret
+
     .global preempt_count_reset
 preempt_count_reset:
     movq $0, .Lpreempt_count(%rip)
