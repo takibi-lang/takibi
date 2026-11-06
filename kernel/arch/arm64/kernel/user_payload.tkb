@@ -25,6 +25,7 @@ extern fn sigchld_probe_handler_address() -> usize;
 extern fn sigchld_probe_restorer_address() -> usize;
 extern fn altstack_probe_handler_address() -> usize;
 extern fn shared_probe_mmap(length: usize, prot: usize, flags: usize) -> usize;
+extern fn xfail_probe_touch(address: usize);
 
 const EBADF_RC: usize = 0xFFFFFFFFFFFFFFF7;
 const EFAULT_RC: usize = 0xFFFFFFFFFFFFFFF2;
@@ -1033,6 +1034,9 @@ fn initial_user_payload() !{unsafe} {
         itimer_probe();
         credentials_probe();
         signal_conformance_probe();
+        // GitHub issue #1373: an EL0 fault the kernel does not resolve
+        // fail-stops it, so the #946 row's fault is not run here.
+        signal_xfail_probe(false);
         svc5(93, 0, 0, 0, 0, 0);
     }
 }
@@ -1081,6 +1085,17 @@ fn free_blocks_by_mkdir() -> usize !{unsafe} {
     return made;
 }
 
+// GitHub issue #999: the word at siginfo offset 24 is si_status only for a
+// SIGCHLD a child's end raised; for SI_USER it is no field Linux defines
+// (Linux zeroes it, qemu-aarch64's translation does not), so the kill rows
+// do not read it and the probe runs under qemu-aarch64 too.
+const SIGINFO_UNDEFINED: usize = 0xFFFFFFFFFFFFFFFF;
+
+fn sigchld_siginfo_probe_alone() !{unsafe} {
+    sigchld_siginfo_probe();
+    svc5(93, 0, 0, 0, 0, 0);
+}
+
 fn sigchld_siginfo_probe() !{unsafe} {
     let mut record: [u8; 40];
     let record_base: *u8 = record as *u8;
@@ -1127,10 +1142,10 @@ fn sigchld_siginfo_probe() !{unsafe} {
     let late: usize = sigchld_probe_child(7);
     sigchld_probe_reap(late);
     fail_if(svc5(135, 1, ptr_of(signal_base, 0), 0, 8, 0) != 0);
-    sigchld_probe_expect(record_base, 4, SI_USER, my_pid, 0);
+    sigchld_probe_expect(record_base, 4, SI_USER, my_pid, SIGINFO_UNDEFINED);
     // And unmasked, the kill's own return delivers it.
     fail_if(svc5(129, my_pid, SIGCHLD, 0, 0, 0) != 0);
-    sigchld_probe_expect(record_base, 5, SI_USER, my_pid, 0);
+    sigchld_probe_expect(record_base, 5, SI_USER, my_pid, SIGINFO_UNDEFINED);
     // GitHub issue #894: another process's kill names that process, and
     // a later kill while it is pending keeps the first sender.
     fail_if(svc5(135, 0, ptr_of(signal_base, 0), 0, 8, 0) != 0);
@@ -1143,7 +1158,7 @@ fn sigchld_siginfo_probe() !{unsafe} {
     sigchld_probe_reap(sender);
     fail_if(svc5(129, my_pid, SIGCHLD, 0, 0, 0) != 0);
     fail_if(svc5(135, 1, ptr_of(signal_base, 0), 0, 8, 0) != 0);
-    sigchld_probe_expect(record_base, 6, SI_USER, sender, 0);
+    sigchld_probe_expect(record_base, 6, SI_USER, sender, SIGINFO_UNDEFINED);
 
     payload_write_u64(action_base, 0, 0);
     payload_write_u64(action_base, 8, 0);
@@ -1895,7 +1910,9 @@ fn sigchld_probe_expect(record_base: *u8, runs: usize, code: usize,
     fail_if(payload_read_u64(record_base, 8) != SIGCHLD);
     fail_if(payload_read_u64(record_base, 16) != code);
     fail_if(payload_read_u64(record_base, 24) != pid);
-    fail_if(payload_read_u64(record_base, 32) != status);
+    if (status != SIGINFO_UNDEFINED) {
+        fail_if(payload_read_u64(record_base, 32) != status);
+    }
 }
 
 fn fail_halt() !{unsafe} {
@@ -2039,11 +2056,13 @@ fn credentials_probe() !{unsafe} {
  * terminating signal ends a child spinning without syscalls (#949);
  * ppoll(nfds 0, no timeout) sleeps until a handler runs, then EINTR (#870);
  * a pipe read interrupted by a handler is EINTR without SA_RESTART and
- * restarts with it (#726). The SIGCHLD siginfo rows (#885, #894) stay in
- * sigchld_siginfo_probe: under qemu-aarch64 its kill-sent case fails, a
- * word the Linux kernel zeroes (siginfo offset 24 for SI_USER, checked on
- * the x86-64 host) apparently not zeroed by qemu's siginfo translation, so
- * qemu user mode is not a faithful oracle for that row. */
+ * restarts with it (#726). The SIGCHLD siginfo rows (#885, #894) are
+ * sigchld_siginfo_probe's, run on the host the same way as
+ * `sigchld_siginfo_probe_alone`; signal_xfail_probe holds the rows the
+ * kernel is known to fail. The terminal-raised SIGINT row (#895: SI_KERNEL,
+ * si_pid 0) is host-unobservable here: qemu-aarch64 has no console the
+ * probe can type ^C into, so terminal_probe.tkb checks it on the kernel
+ * alone. */
 const SA_RESTART: usize = 0x10000000;
 const PPOLL_SYSCALL: usize = 73;
 
@@ -2156,6 +2175,109 @@ fn signal_conformance_probe() !{unsafe} {
         bs"userspace signal conformance: wait4 killed status, spinning child killed, ppoll pause EINTR, pipe read EINTR and SA_RESTART ok\n";
     fail_if(svc5(64, 1, (unsafe { message as *u8 }) as usize,
                  message.len, 0, 0) != message.len);
+}
+
+/* GitHub issue #999: expected-fail rows. Each prints what this system
+ * does, one line per row; Linux's answer is the first text. The linux_file
+ * view holds the kernel's present answer, and `make linuxcheck` runs
+ * `signal_xfail_probe_alone` under qemu-aarch64 and requires each of its
+ * lines to differ from the view's (scripts/check_signal_xfail_rows.py), so
+ * a row that starts passing on the kernel fails its view and is flipped to
+ * a conformance row when its issue closes. */
+const SIGSEGV: usize = 11;
+const SEGV_MAPERR: usize = 1;
+const SA_RESETHAND: usize = 0x80000000;
+const RT_SIGTIMEDWAIT_SYSCALL: usize = 137;
+const XFAIL_FAULT_ADDRESS: usize = 0x10;
+
+fn signal_xfail_probe_alone() !{unsafe} {
+    signal_xfail_probe(true);
+    svc5(93, 0, 0, 0, 0, 0);
+}
+
+fn signal_xfail_line(line: borrow []const u8) !{unsafe} {
+    fail_if(svc5(64, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0) != line.len);
+}
+
+// #946: a child faults on an unmapped address with an SA_SIGINFO SIGSEGV
+// handler installed (SA_RESETHAND, so the fault repeated after the handler
+// returns ends it). The handler's record is a shared page the parent reads.
+fn signal_xfail_fault_handled() -> bool !{unsafe} {
+    let shared: usize = shared_probe_mmap(4096, PROT_READ_WRITE, MAP_SHARED_ANONYMOUS);
+    fail_if(shared >= 0xFFFFFFFFFFFFF000 || shared % 4096 != 0);
+    let record_base: *u8 = unsafe { shared as *u8 };
+    let child: usize = svc5(220, SIGCHLD, 0, 0, 0, 0);
+    if (child == 0) {
+        sigchld_probe_arm(shared);
+        let mut action: [u8; 32];
+        let action_base: *u8 = action as *u8;
+        payload_write_u64(action_base, 0, sigchld_probe_handler_address());
+        payload_write_u64(action_base, 8, SA_SIGINFO | SA_RESTORER | SA_RESETHAND);
+        payload_write_u64(action_base, 16, sigchld_probe_restorer_address());
+        payload_write_u64(action_base, 24, 0);
+        if (svc5(134, SIGSEGV, ptr_of(action_base, 0), 0, 8, 0) == 0) {
+            xfail_probe_touch(XFAIL_FAULT_ADDRESS);
+        }
+        svc5(93, 97, 0, 0, 0, 0);
+    }
+    fail_if(child >= 0x8000000000000000);
+    // The low seven bits: whether a core bit (0x80) is set is the host's
+    // core limit, not a signal rule.
+    fail_if((signal_conformance_status(child) & 0x7F) != SIGSEGV);
+    // The handler's record: runs, si_signo, si_code, and the low half of
+    // si_addr (the handler copies the u32 at offset 16).
+    let handled: bool = payload_read_u64(record_base, 0) == 1 &&
+        payload_read_u64(record_base, 8) == SIGSEGV &&
+        payload_read_u64(record_base, 16) == SEGV_MAPERR &&
+        payload_read_u64(record_base, 24) == XFAIL_FAULT_ADDRESS;
+    fail_if(svc5(MUNMAP_SYSCALL, shared, 4096, 0, 0, 0) != 0);
+    return handled;
+}
+
+// #911: rt_sigtimedwait with a siginfo buffer, for a SIGUSR1 this process
+// sent itself while blocked. Linux fills si_signo, si_code SI_USER and
+// si_pid the sender. The signal is then drained with no buffer and a zero
+// timeout, whichever answer the first call gave.
+fn signal_xfail_timedwait_filled() -> bool !{unsafe} {
+    let mut set: [u8; 8];
+    let set_base: *u8 = set as *u8;
+    payload_write_u64(set_base, 0, 1 << (SIGUSR1 - 1));
+    fail_if(svc5(135, 0, ptr_of(set_base, 0), 0, 8, 0) != 0);
+    let me: usize = svc5(172, 0, 0, 0, 0, 0);
+    fail_if(svc5(129, me, SIGUSR1, 0, 0, 0) != 0);
+    let mut info: [u8; 128];
+    let info_base: *u8 = info as *u8;
+    for index: usize in 0..<128 { info[index] = 0; }
+    let mut zero: [u8; 16];
+    let zero_base: *u8 = zero as *u8;
+    payload_write_u64(zero_base, 0, 0);
+    payload_write_u64(zero_base, 8, 0);
+    let taken: usize = svc5(RT_SIGTIMEDWAIT_SYSCALL, ptr_of(set_base, 0),
+                            ptr_of(info_base, 0), ptr_of(zero_base, 0), 8, 0);
+    let filled: bool = taken == SIGUSR1 &&
+        (payload_read_u64(info_base, 0) & 0xFFFFFFFF) == SIGUSR1 &&
+        (payload_read_u64(info_base, 8) & 0xFFFFFFFF) == SI_USER &&
+        (payload_read_u64(info_base, 16) & 0xFFFFFFFF) == me;
+    let drained: usize = svc5(RT_SIGTIMEDWAIT_SYSCALL, ptr_of(set_base, 0), 0,
+                              ptr_of(zero_base, 0), 8, 0);
+    fail_if(drained != SIGUSR1 && drained != EAGAIN_RC);
+    fail_if(svc5(135, 1, ptr_of(set_base, 0), 0, 8, 0) != 0);
+    return filled;
+}
+
+fn signal_xfail_probe(run_fault: bool) !{unsafe} {
+    if (run_fault == false) {
+        signal_xfail_line(bs"userspace signal xfail #946: fault row not run: an EL0 fault fail-stops the kernel (#1373)\n");
+    } else if (signal_xfail_fault_handled()) {
+        signal_xfail_line(bs"userspace signal xfail #946: fault SIGSEGV ran the SA_SIGINFO handler with SEGV_MAPERR and si_addr\n");
+    } else {
+        signal_xfail_line(bs"userspace signal xfail #946: fault SIGSEGV killed without running the handler\n");
+    }
+    if (signal_xfail_timedwait_filled()) {
+        signal_xfail_line(bs"userspace signal xfail #911: rt_sigtimedwait filled siginfo with SI_USER and the sender\n");
+    } else {
+        signal_xfail_line(bs"userspace signal xfail #911: rt_sigtimedwait did not fill siginfo\n");
+    }
 }
 
 fn fail_if(bad: bool) {

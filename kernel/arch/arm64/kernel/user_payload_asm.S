@@ -168,6 +168,14 @@ altstack_probe_handler:
     str     x0, [x9, #24]
     ret
 
+/* GitHub issue #999: a load from x0, for the #946 expected-fail row's
+ * fault on an unmapped address. */
+    .global xfail_probe_touch
+    .type xfail_probe_touch, %function
+xfail_probe_touch:
+    ldr     x0, [x0]
+    ret
+
 /* GitHub issue #1147: mmap(NULL, length, prot, flags, -1, 0) for
  * user_payload's shared-mapping probe. svc5 sets x0-x4 only, and Linux
  * refuses an offset (x5) that is not page-aligned, so x5 is zeroed here. */

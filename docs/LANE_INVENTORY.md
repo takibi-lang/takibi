@@ -26,7 +26,7 @@ point, one more GDB stop in affinity-gdb), not to a lane of its own.
 
 | Lane | s | Class | What it proves |
 |---|---:|---|---|
-| kernelcheck-qemu-main | 335 | integration | boot, init, the ordinary QEMU suite end to end |
+| kernelcheck-qemu-main | 335 | integration | boot, init, the ordinary QEMU suite end to end; its linux_file view carries the host-Linux signal conformance and expected-fail rows (#999), which ride it rather than a lane of their own |
 | kernelcheck-qemu-fdt-multibank | 102 | integration | boot with a multi-bank FDT memory map |
 | kernelcheck-dma-qemu | 4 | integration | virtio-blk DMA fixture against the device model |
 | kernelcheck-invariant-qemu | 1 | integration | kernel stop call sites resolved against the exact ELF |

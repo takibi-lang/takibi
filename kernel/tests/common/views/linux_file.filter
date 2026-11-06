@@ -12,3 +12,4 @@
 ^userspace itimer:
 ^userspace credentials:
 ^userspace signal conformance:
+^userspace signal xfail #

@@ -1023,6 +1023,18 @@ linuxcheck: linuxbuild compiler-fuzz
 	 exp=$$(grep '^userspace signal conformance: ' kernel/tests/common/views/linux_file.expected); \
 	 if [ -n "$$exp" ] && [ "$$got" = "$$exp" ]; then echo "PASS  signal conformance probe (host Linux)"; \
 	 else echo "FAIL  signal conformance probe (host Linux)"; echo "  expected: $$exp"; echo "  got:      $$got"; exit 1; fi
+	@# The SIGCHLD siginfo rows (#885, #894), the same way.
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) --no-print-directory $(KERNEL_SIGCHLD_SIGINFO_LINUX_ELF)
+	@got=$$(qemu-aarch64 $(KERNEL_SIGCHLD_SIGINFO_LINUX_ELF)); \
+	 exp=$$(grep '^userspace SIGCHLD siginfo: ' kernel/tests/common/views/linux_file.expected); \
+	 if [ -n "$$exp" ] && [ "$$got" = "$$exp" ]; then echo "PASS  SIGCHLD siginfo probe (host Linux)"; \
+	 else echo "FAIL  SIGCHLD siginfo probe (host Linux)"; echo "  expected: $$exp"; echo "  got:      $$got"; exit 1; fi
+	@# The expected-fail rows (#946, #911): host Linux must answer otherwise
+	@# than the kernel's line in the view.
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) --no-print-directory $(KERNEL_SIGNAL_XFAIL_LINUX_ELF)
+	@qemu-aarch64 $(KERNEL_SIGNAL_XFAIL_LINUX_ELF) >$(KERNEL_SIGNAL_XFAIL_LINUX_ELF).host
+	@python3 scripts/check_signal_xfail_rows.py $(KERNEL_SIGNAL_XFAIL_LINUX_ELF).host \
+		kernel/tests/common/views/linux_file.expected
 	@bash scripts/lane_timing.sh end linuxcheck 0
 
 # GitHub issue #1035: the long ext2 tier C runs, outside every lane:
@@ -1171,6 +1183,9 @@ KERNEL_ITIMER_LINUX_ELF := $(KERNEL_BUILD_DIR)/itimer_probe.elf
 KERNEL_CREDENTIALS_LINUX_ELF := $(KERNEL_BUILD_DIR)/credentials_probe.elf
 # GitHub issue #999: its signal conformance probe alone, for host Linux.
 KERNEL_SIGNAL_CONFORMANCE_LINUX_ELF := $(KERNEL_BUILD_DIR)/signal_conformance_probe.elf
+# GitHub issue #999: its SIGCHLD siginfo probe and expected-fail rows alone.
+KERNEL_SIGCHLD_SIGINFO_LINUX_ELF := $(KERNEL_BUILD_DIR)/sigchld_siginfo_probe.elf
+KERNEL_SIGNAL_XFAIL_LINUX_ELF := $(KERNEL_BUILD_DIR)/signal_xfail_probe.elf
 KERNEL_BUSY_LOOP_TKB     := $(KERNEL_DIR)/arch/arm64/kernel/busy_loop.tkb
 KERNEL_BUSY_LOOP_O       := $(KERNEL_BUILD_DIR)/busy_loop.o
 KERNEL_BUSY_LOOP_A_ELF   := $(KERNEL_BUILD_DIR)/busy_a.elf
@@ -1600,7 +1615,7 @@ endef
 # so the resulting ET_DYN ELF has zero dynamic relocations -- verified
 # empirically before this rule existed (see HISTORY.md's #241 entry).
 $(KERNEL_RPI5_USER_PAYLOAD_TKB_O): $(KERNEL_RPI5_USER_PAYLOAD_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
-	$(call KERNEL_EL0_COMPILE,initial_user_payload sigaltstack_probe_alone shared_mapping_probe_alone mmap_region_probe_alone realtime_clock_probe_alone itimer_probe_alone credentials_probe_alone signal_conformance_probe_alone)
+	$(call KERNEL_EL0_COMPILE,initial_user_payload sigaltstack_probe_alone shared_mapping_probe_alone mmap_region_probe_alone realtime_clock_probe_alone itimer_probe_alone credentials_probe_alone signal_conformance_probe_alone sigchld_siginfo_probe_alone signal_xfail_probe_alone)
 
 $(KERNEL_RPI5_USER_PAYLOAD_ASM_O): $(KERNEL_RPI5_USER_PAYLOAD_ASM_S) | $(KERNEL_BUILD_DIR)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
@@ -1632,6 +1647,12 @@ $(KERNEL_CREDENTIALS_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 $(KERNEL_SIGNAL_CONFORMANCE_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O)
 	$(LLD) -pie --no-dynamic-linker -e signal_conformance_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) -o $@
+	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
+$(KERNEL_SIGCHLD_SIGINFO_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O)
+	$(LLD) -pie --no-dynamic-linker -e sigchld_siginfo_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) -o $@
+	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
+$(KERNEL_SIGNAL_XFAIL_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O)
+	$(LLD) -pie --no-dynamic-linker -e signal_xfail_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
 # GitHub issue #448: the CPU-bound pair /etc/inittab starts. One source and
