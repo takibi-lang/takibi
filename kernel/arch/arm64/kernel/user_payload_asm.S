@@ -191,3 +191,26 @@ shared_probe_mmap:
     mov     x8, #222
     svc     #0
     ret
+
+/* GitHub issue #1373: the three faults the signal conformance probe's
+ * children take -- a load from 0x10 (data abort, SIGSEGV), a branch to 0x10
+ * (instruction abort, SIGSEGV) and a permanently undefined instruction
+ * (SIGILL). None returns: the kernel ends the child. */
+    .global fault_probe_load_low
+    .type fault_probe_load_low, %function
+fault_probe_load_low:
+    mov     x0, #0x10
+    ldr     x0, [x0]
+    ret
+
+    .global fault_probe_jump_low
+    .type fault_probe_jump_low, %function
+fault_probe_jump_low:
+    mov     x0, #0x10
+    br      x0
+
+    .global fault_probe_undefined
+    .type fault_probe_undefined, %function
+fault_probe_undefined:
+    udf     #0
+    ret

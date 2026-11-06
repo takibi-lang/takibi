@@ -2630,6 +2630,21 @@ fn kernel_boot_log_syscall_unreachable(number: usize) {
     kernel_boot_log("\n" as *u8);
 }
 
+// GitHub issue #1373: a user process ended by a fault the kernel did not
+// resolve, as Linux's show_unhandled_signals line does.
+fn kernel_boot_log_el0_fault(pid: usize, signal: usize, esr: usize,
+                             fault_address: usize) {
+    kernel_boot_log("el0 fault: pid=" as *u8);
+    uart_put_udec(pid);
+    kernel_boot_log(" signal=" as *u8);
+    uart_put_udec(signal);
+    kernel_boot_log(" esr=" as *u8);
+    uart_put_hex(esr);
+    kernel_boot_log(" far=" as *u8);
+    uart_put_hex(fault_address);
+    kernel_boot_log("\n" as *u8);
+}
+
 fn kernel_boot_log_resource_exhausted(resource: *u8, capacity: usize) {
     kernel_boot_log("resource exhausted: " as *u8);
     uart_puts(resource);

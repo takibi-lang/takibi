@@ -133,6 +133,22 @@ it -- so that the rerun is the one interrupted. A frame that return cannot
 write ends the process by SIGSEGV there, as a terminating signal ends it
 there, without waiting for a syscall.
 
+## Faults
+
+An EL0 synchronous exception that is not a syscall, and that the kernel
+does not resolve (stack growth, copy-on-write and an mmap region's first
+touch are resolved and the instruction retried), ends the faulting process
+with the fault's signal, as Linux arm64 does (#1373): a data or instruction
+abort is SIGSEGV, an alignment fault, a synchronous external abort or a
+misaligned PC or SP is SIGBUS, a breakpoint instruction is SIGTRAP, and
+anything else, an undefined instruction first, is SIGILL. Its parent's
+wait4 sees that signal (never a core-dump bit), the kernel logs one
+`el0 fault: pid= signal= esr= far=` line, and every other process runs on.
+The signal is forced: a handler, mask or `SIG_IGN` does not defer it, and
+running the handler is #946's. A fault in PID 1 fail-stops the kernel with
+the oops record and crash console, where Linux panics with "Attempted to
+kill init".
+
 ## Syscalls confirmed correctly Unsupported-by-design
 
 These were named in the false-success audit's original problem list (written

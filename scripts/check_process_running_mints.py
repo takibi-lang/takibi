@@ -42,6 +42,9 @@ ALLOWED = {
         # the end of the stack-switch hook that has just made the process
         # current on this CPU.
         "kernel_signal_return_deliver": 1,
+        # GitHub issue #1373: a lower-EL fault the kernel did not resolve
+        # ends the process that took it, the one running on this CPU.
+        "kernel_el0_fault_dispatch": 1,
     }),
     "process_constructing_here": Counter({"kernel_syscall_clone_child_return": 1}),
     "process_running_new": Counter({"process_running_here": 1,

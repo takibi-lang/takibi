@@ -233,9 +233,12 @@ next one taken. The done record of the previous queue is in HISTORY.md
    sparse fixture the comparing runner plants (2026-10-25; #1022's truncate row and #1023's `peer` row, a held fd
    across O_TRUNC, match since 2026-10-25), and #1067
    (printf) and #1070 (sendfile to a file) are writers the rows avoid.
-   Signals: #999 (host-Linux conformance suite; done 2026-11-06, its #946 row runs on the kernel after #1373, an EL0 fault fail-stopping the kernel), #1000 (one delivery
+   Signals: #999 (host-Linux conformance suite; done 2026-11-06, its #946 row runs on the kernel since #1373), #1000 (one delivery
    chokepoint and `SignalDelivery.tla`, designed with #992); #948 (the
-   terminal-read EINTR fixture) and #432 (timed blocking) done 2026-10-30.
+   terminal-read EINTR fixture) and #432 (timed blocking) done 2026-10-30;
+   #1373 (an unresolved EL0 fault ends the process with SIGSEGV, SIGBUS,
+   SIGTRAP or SIGILL instead of fail-stopping the kernel) done 2026-11-06,
+   which #946 (running the handler) builds on.
 3. **Compiler consolidation.** #750 after #732; #1027 step 2 (`--facts
    DIR` for the `--emit-*` family) and step 3 (strict defaults with
    opt-outs) done 2026-10-30, steps 4-5 wait on #1006 and #1009;

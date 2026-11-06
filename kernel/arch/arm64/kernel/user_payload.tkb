@@ -26,6 +26,10 @@ extern fn sigchld_probe_restorer_address() -> usize;
 extern fn altstack_probe_handler_address() -> usize;
 extern fn shared_probe_mmap(length: usize, prot: usize, flags: usize) -> usize;
 extern fn xfail_probe_touch(address: usize);
+// GitHub issue #1373: each takes its fault and never returns.
+extern fn fault_probe_load_low();
+extern fn fault_probe_jump_low();
+extern fn fault_probe_undefined();
 
 const EBADF_RC: usize = 0xFFFFFFFFFFFFFFF7;
 const EFAULT_RC: usize = 0xFFFFFFFFFFFFFFF2;
@@ -66,6 +70,7 @@ const ENOTCONN_RC: usize = 0xFFFFFFFFFFFFFF95;
 const ECONNRESET_RC: usize = 0xFFFFFFFFFFFFFF98;
 const SIGCHLD: usize = 17;
 const SIGTERM: usize = 15;
+const SIGILL: usize = 4;
 const SA_SIGINFO: usize = 4;
 const SA_RESTORER: usize = 0x04000000;
 const CLD_EXITED: usize = 1;
@@ -1034,9 +1039,9 @@ fn initial_user_payload() !{unsafe} {
         itimer_probe();
         credentials_probe();
         signal_conformance_probe();
-        // GitHub issue #1373: an EL0 fault the kernel does not resolve
-        // fail-stops it, so the #946 row's fault is not run here.
-        signal_xfail_probe(false);
+        // GitHub issue #1373: an EL0 fault the kernel does not resolve ends
+        // only the faulting child, so the #946 row runs its fault here.
+        signal_xfail_probe(true);
         svc5(93, 0, 0, 0, 0, 0);
     }
 }
@@ -2104,6 +2109,20 @@ fn signal_conformance_status(pid: usize) -> usize !{unsafe} {
     return payload_read_u64(status_base, 0) & 0xFFFFFFFF;
 }
 
+// #1373: a child that takes fault `kind` (0 load from 0x10, 1 branch to
+// 0x10, 2 undefined instruction); the parent gets its pid.
+fn signal_conformance_fault_child(kind: usize) -> usize !{unsafe} {
+    let child: usize = svc5(220, SIGCHLD, 0, 0, 0, 0);
+    if (child == 0) {
+        if (kind == 0) { fault_probe_load_low(); }
+        if (kind == 1) { fault_probe_jump_low(); }
+        if (kind == 2) { fault_probe_undefined(); }
+        svc5(93, 97, 0, 0, 0, 0);
+    }
+    fail_if(child >= 0x8000000000000000);
+    return child;
+}
+
 fn signal_conformance_probe() !{unsafe} {
     let mut record: [u8; 40];
     let record_base: *u8 = record as *u8;
@@ -2171,8 +2190,16 @@ fn signal_conformance_probe() !{unsafe} {
     let action_base: *u8 = action as *u8;
     for index: usize in 0..<32 { action[index] = 0; }
     fail_if(svc5(134, SIGALRM, ptr_of(action_base, 0), 0, 8, 0) != 0);
+
+    // #1373: a fault the kernel does not resolve ends only the faulting
+    // child, with the fault's signal, and this parent goes on running. The
+    // core-dump bit (0x80) is masked: the host's core limit decides it on
+    // Linux, and this kernel writes no core.
+    fail_if((signal_conformance_status(signal_conformance_fault_child(0)) & 0x7F) != SIGSEGV);
+    fail_if((signal_conformance_status(signal_conformance_fault_child(1)) & 0x7F) != SIGSEGV);
+    fail_if((signal_conformance_status(signal_conformance_fault_child(2)) & 0x7F) != SIGILL);
     let message: []const u8 =
-        bs"userspace signal conformance: wait4 killed status, spinning child killed, ppoll pause EINTR, pipe read EINTR and SA_RESTART ok\n";
+        bs"userspace signal conformance: wait4 killed status, spinning child killed, ppoll pause EINTR, pipe read EINTR and SA_RESTART, fault kills SIGSEGV SIGSEGV SIGILL ok\n";
     fail_if(svc5(64, 1, (unsafe { message as *u8 }) as usize,
                  message.len, 0, 0) != message.len);
 }

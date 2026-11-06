@@ -7107,6 +7107,61 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     return (action_code, action_value);
 }
 
+// GitHub issue #1373: the signal a lower-EL synchronous exception that is
+// not a syscall, and that the kernel did not resolve, ends the process with
+// -- Linux arm64's choice (arch/arm64/mm/fault.c fault_info, traps.c).
+// Instruction and data aborts are SIGSEGV, except an alignment fault and a
+// synchronous external abort, which are SIGBUS; a misaligned PC or SP is
+// SIGBUS; a breakpoint instruction is SIGTRAP; everything else, the
+// undefined instruction (EC 0) first, is SIGILL.
+const LINUX_SIGILL: usize = 4;
+const LINUX_SIGTRAP: usize = 5;
+const LINUX_SIGBUS: usize = 7;
+
+fn el0_fault_signal(esr: usize) -> usize {
+    let exception_class: usize = (esr >> 26) & 0x3F;
+    if (exception_class == 0x20 || exception_class == 0x24) {
+        let status: usize = esr & 0x3F;
+        if (status == 0x21 || status == 0x10) { return LINUX_SIGBUS; }
+        return LINUX_SIGSEGV;
+    }
+    if (exception_class == 0x22 || exception_class == 0x26) { return LINUX_SIGBUS; }
+    if (exception_class == 0x3C) { return LINUX_SIGTRAP; }
+    return LINUX_SIGILL;
+}
+
+// GitHub issue #1373: user_entry.S's answer to a lower-EL synchronous
+// exception that is neither a syscall nor a data abort the kernel resolved
+// (stack growth, COW, an mmap region's first touch). The faulting process
+// ends as if killed by the fault's signal, which no mask or handler defers:
+// Linux forces it (force_sig_fault), and running a handler is #946's.
+// The pair is kernel_syscall_dispatch's, for the same action table; with no
+// process running here, or for PID 1 (below), it is (0, 0), the fail-stop.
+fn kernel_el0_fault_dispatch(esr: usize, fault_address: usize)
+        -> (usize, usize) !{unsafe} {
+    kernel_activity_set(KernelActivity::Syscall);
+    let ProcessRunningHere::Running(current_authority) = process_running_here() else {
+        ProcessRunningHere::Idle => { return (0, 0); }
+    };
+    let signal: usize = el0_fault_signal(esr);
+    kernel_boot_log_el0_fault(kernel_process_current_pid(), signal, esr, fault_address);
+    if (kernel_process_is_child(current_authority) == false) {
+        // PID 1: Linux panics ("Attempted to kill init!"), so this kernel
+        // fail-stops with the fault's full evidence -- the oops record and
+        // crash console -- rather than PID 1's ordinary exit, which shuts
+        // down cleanly and would lose the registers. kernelcheck-oops-qemu
+        // injects its EL0 faults into PID 1 for exactly this path.
+        process_current_end(current_authority);
+        return (0, 0);
+    }
+    let mut caller_slot: ProcessSlot = kernel_syscall_process_slot();
+    let (action_code, action_value) = syscall_action_encode(
+        kernel_syscall_exit_current_process(current_authority,
+                                            process_end_signaled(signal)));
+    kernel_process_clear_core0_for_call(caller_slot);
+    return (action_code, action_value);
+}
+
 // GitHub issue #1080: execve succeeded and is past its point of no return.
 // The call completed, so it gets kernel_syscall_dispatch's completion
 // bookkeeping here, and then the exec's tail runs on the Takibi side instead

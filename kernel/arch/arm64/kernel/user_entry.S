@@ -47,15 +47,16 @@ el0_sync_body:
      * bounded process-image stack reservation, a translation fault. Handle
      * the latter with IRQs still masked: page allocation and one PTE update
      * are non-blocking, and a scheduler switch cannot interpose between the
-     * fault and retry. All other non-SVC exceptions retain the fail-stop
-     * evidence path. */
+     * fault and retry. Every other non-SVC exception, and a data abort the
+     * kernel does not resolve, ends the process with the fault's signal
+     * (.Lel0_fault, GitHub issue #1373); it used to fail-stop the kernel. */
 .Lsyscall_dispatch:
     mrs     x0, esr_el1
     lsr     x1, x0, #26
     cmp     x1, #0x24          /* Data Abort taken without a change in EL */
     b.eq    .Ldata_abort
     cmp     x1, #0x15          /* SVC instruction execution in AArch64 */
-    b.ne    .Lsync_fail
+    b.ne    .Lel0_fault
 
     /* GitHub issue #187: exception entry unconditionally masks DAIF, so
      * without this, any syscall whose handling reaches a real
@@ -81,6 +82,7 @@ el0_sync_body:
     /* GitHub issue #627: the frame itself, for a signal frame. */
     mov     x7, sp
     bl      kernel_syscall_dispatch
+.Lsyscall_action:
     mov     x6, x0
     mov     x7, x1
     cmp     x6, #1
@@ -104,7 +106,7 @@ el0_sync_body:
 .Ldata_abort:
     mrs     x1, far_el1
     bl      kernel_process_handle_el0_data_abort
-    cbz     x0, .Lsync_fail
+    cbz     x0, .Lel0_fault
     /* GitHub issue #920: every eret to EL0 resets the GIC priority mask to
      * unmasked; DAIF.I has been set since the exception entry. */
     bl      irq_mask_reset_el0
@@ -112,7 +114,22 @@ el0_sync_body:
     add     sp, sp, #EXC_CONTEXT_SIZE
     eret
 
-.Lsync_fail:
+.Lel0_fault:
+    /* GitHub issue #1373: the process ends with the fault's signal through
+     * the exit syscall's own tail, so it gets the same action table and,
+     * like that syscall, runs with IRQs unmasked (see #187 above). ESR and
+     * FAR are read first: nothing between the exception and here wrote
+     * them. kernel_el0_fault_dispatch answers (0, 0) with no process
+     * running here or for PID 1, which the table's default fail-stops with
+     * this frame's evidence, as before #1373. */
+    mrs     x0, esr_el1
+    mrs     x1, far_el1
+    msr     DAIFClr, #0x2
+    bl      kernel_el0_fault_dispatch
+    cbnz    x0, .Lsyscall_action
+    /* The fail-stop answer enters the evidence path with IRQs masked, as
+     * every lower-EL fault did before #1373. */
+    msr     DAIFSet, #0x2
     mov     x0, #8
     mov     x1, sp
     b       el1_exception_evidence_from_frame
