@@ -2,8 +2,8 @@
   "date": "2026-11-06",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "a1c6cbdec668e14db94ba6eede7e11668987598fb61b9dd3ea7345c320271eba",
-  "workload": "#999: user_payload gains the SIGCHLD siginfo and expected-fail signal rows (two host-only entry points, one asm load helper). scripts/space_delta.py against origin/main, both production kernels.",
+  "source_sha256": "ba8247152353b404786f90c84422038f026b8b67eca5b5fdb8aae81840178012",
+  "workload": "#999: user_payload gains the SIGCHLD siginfo and expected-fail signal rows (two host-only entry points, one asm load helper). scripts/space_delta.py against origin/main, both production kernels. Re-recorded after a comment-only rename in user_payload.tkb (the row script's name).",
   "evidence": [
     "docs/AGGREGATE_MERGE_SPACE_2026-10-23.md",
     "docs/IRQ_PRIORITY_MASK_SPACE_2026-10-23.md",
