@@ -14875,7 +14875,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      preempt_off block rejects them: a span keeps this task on its CPU, and a
      wait there can be for a holder preempted on the same core. A binding
      consumed on only some paths ("maybe-held") is rejected too. *)
-  List.iter (fun (call_loc, _file, _line, caller, callee, binding, definite, name) ->
+  (* GitHub issue #1383: every rejected site is collected, and the error
+     names the first at its own location and lists the rest by file and
+     line, so a span is fixed in one pass rather than one call per build. *)
+  let span_rejections = ref [] in
+  List.iter (fun (call_loc, file, line, caller, callee, binding, definite, name) ->
     let path =
       (* GitHub issue #1387: the call's effects come from
          summarize_effect_body, the summary the preempt_off block and the
@@ -14909,12 +14913,21 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         | None, None -> None in
     match path with
     | Some path ->
-        raise (TypeError (call_loc, Printf.sprintf
+        span_rejections := (call_loc, file, line, Printf.sprintf
           "function '%s' calls '%s' while PreemptOff '%s' is %s; a \
            PreemptOff span keeps the task on its CPU, so nothing called in \
            it may block (%s)" caller (display_effect_key callee) binding
-          (if definite then "held" else "possibly held") path))
+          (if definite then "held" else "possibly held") path)
+          :: !span_rejections
     | _ -> ()) (List.rev !span_call_table);
+  (match List.rev !span_rejections with
+   | [] -> ()
+   | (first_loc, _, _, first) :: rest ->
+       let others = List.map (fun (_, file, line, text) ->
+         Printf.sprintf "\n  also %s:%d: %s" file line text) rest in
+       let summary = if rest = [] then "" else
+         Printf.sprintf "\n  (%d rejected span calls in all)" (List.length rest + 1) in
+       raise (TypeError (first_loc, first ^ String.concat "" others ^ summary)));
   (* GitHub issue #809: a bare mask. `msr_daifset_irq` reached with no
      IRQ-masking guard live (a plain disable_irq, or a mutex_irq_save whose
      flags are not yet restored) leaves IRQs masked for the rest of the

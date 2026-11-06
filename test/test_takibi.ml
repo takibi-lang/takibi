@@ -19696,7 +19696,18 @@ variant Carry1350 { Stay; Go(PreemptOff[0]); }
   let span = span_begin();
   interrupt_wait();
   span_end(span);
-}|}) ());
+}|}) ();
+      (* #1383: every rejected call is listed, not only the first. *)
+      let two = base ^ {|fn two1383() {
+  let span = span_begin();
+  wait_inside();
+  sleep1350();
+  span_end(span);
+}|} in
+      expect_type_error "calls 'wait_inside' while PreemptOff 'span' is held" two ();
+      expect_type_error "also " two ();
+      expect_type_error "calls 'sleep1350' while PreemptOff 'span' is held" two ();
+      expect_type_error "(2 rejected span calls in all)" two ());
 
   Alcotest.test_case "held guard report follows scope, moves and borrowed parameters" `Quick
     (fun () ->
