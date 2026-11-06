@@ -96,7 +96,8 @@ check_model Wait4Block Safety 4 \
     unfixed:CInitUnfixed:NoLostWakeup:violated \
     sigunfixed:CInitSigUnfixed:NoSleepWithSignal:violated \
     irqunfixed:CInitIrqUnfixed:temporal:ok \
-    svcunfixed:CInitSvcUnfixed:SignalWakeEndsWait:violated:8
+    svcunfixed:CInitSvcUnfixed:SignalWakeEndsWait:violated:8 \
+    pidunfixed:CInitPidUnfixed:WakeAnswersTarget:violated:8
 
 check_model StackOwnership CoreInvariants 6 \
     fixed:CInitFixed:pass:ok \

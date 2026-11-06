@@ -31,6 +31,13 @@
 (* takes it there, and TLC must find SignalWakeEndsWait violated: the      *)
 (* handler runs, and the rerun goes back to sleep.                         *)
 (*                                                                         *)
+(* GitHub issue #1370 (after #1352): the parent has two children and its *)
+(* wait4 names one of them or either (-1), chosen at Init. A child's exit *)
+(* wakes a Blocked parent only when the parent waits for it (PIDGUARD,   *)
+(* the wait4_pid comparison in kernel_process_child_exit). PIDGUARD =     *)
+(* FALSE is the kernel before #1352: a sibling's exit wakes the parent,   *)
+(* which reaps the sibling, and TLC must find WakeAnswersTarget violated. *)
+(*                                                                         *)
 (* Each action is ONE critical section under the process-run lock in the  *)
 (* kernel -- an action is atomic here exactly because it is atomic there.  *)
 (* kernel/models/README.md maps every action to the function it abstracts. *)
@@ -47,14 +54,18 @@ CONSTANT
     \* @type: Bool;
     IRQDELIVER,
     \* @type: Bool;
-    IRQSKIPSVC
+    IRQSKIPSVC,
+    \* @type: Bool;
+    PIDGUARD
 
-\* Two cores, and three processes: the waiting parent, its child, and one
-\* other runnable process. The other one matters: wait4 only takes the
+\* Two cores, and four processes: the waiting parent, its two children, and
+\* one other runnable process. The other one matters: wait4 only takes the
 \* Block path when there is a successor to switch to.
 Cores == {"c0", "c1"}
-Procs == {"parent", "child", "other"}
+Kids == {"k1", "k2"}
+Procs == {"parent", "other"} \union Kids
 None == "none"
+Any == "any"
 
 VARIABLES
     \* @type: Str -> Str;
@@ -66,9 +77,15 @@ VARIABLES
     \* @type: Bool;
     sig,        \* a signal the parent catches, and does not mask, is pending
     \* @type: Bool;
-    woke        \* a signal woke the parent's wait4 to rerun it (#726)
+    woke,       \* a signal woke the parent's wait4 to rerun it (#726)
+    \* @type: Str;
+    target,     \* the child wait4 names, or Any for -1 (#1370)
+    \* @type: Str;
+    waker,      \* the child whose exit woke the parent, or None
+    \* @type: Str;
+    answer      \* the child the finished wait4 reaped, or None
 
-vars == <<state, current, wait, sig, woke>>
+vars == <<state, current, wait, sig, woke, target, waker, answer>>
 
 ----------------------------------------------------------------------------
 (* Helpers *)
@@ -76,22 +93,28 @@ vars == <<state, current, wait, sig, woke>>
 \* @type: (Str, Str) => Bool;
 RunsOn(p, c) == current[c] = p
 
+\* The children the parent's wait4 waits for.
+Targets == IF target = Any THEN Kids ELSE {target}
+
 \* The parent is in the middle of its wait4 syscall once it has decided;
 \* the kernel is not preemptible there (KERNEL_PREEMPTIBLE = 0).
 \* @type: (Str) => Bool;
 Preemptible(p) == p # "parent" \/ wait \in {"call", "done"}
 
 ----------------------------------------------------------------------------
-(* Initial state: parent and child running, the other process Ready. *)
+(* Initial state: the parent and k1 running, k2 and the other Ready. *)
 
 Init ==
     /\ state = [p \in Procs |->
-                    IF p = "other" THEN "Ready" ELSE "Running"]
+                    IF p \in {"parent", "k1"} THEN "Running" ELSE "Ready"]
     /\ current = [c \in Cores |->
-                    IF c = "c0" THEN "parent" ELSE "child"]
+                    IF c = "c0" THEN "parent" ELSE "k1"]
     /\ wait = "call"
     /\ sig = FALSE
     /\ woke = FALSE
+    /\ target \in Kids \union {Any}
+    /\ waker = None
+    /\ answer = None
 
 ----------------------------------------------------------------------------
 (* Actions *)
@@ -105,17 +128,20 @@ Init ==
 Wait4Decide ==
     /\ \E c \in Cores : RunsOn("parent", c)
     /\ wait = "call"
-    /\ IF state["child"] = "Exited"
-         THEN /\ state' = [state EXCEPT !["child"] = "Reaped"]
-              /\ wait' = "done"
-              /\ sig' = FALSE
+    /\ IF \E k \in Targets : state[k] = "Exited"
+         THEN \E k \in Targets :
+                 /\ state[k] = "Exited"
+                 /\ state' = [state EXCEPT ![k] = "Reaped"]
+                 /\ wait' = "done"
+                 /\ sig' = FALSE
+                 /\ answer' = k
          ELSE IF sig
          THEN /\ wait' = "done"
               /\ sig' = FALSE
-              /\ UNCHANGED state
+              /\ UNCHANGED <<state, answer>>
          ELSE /\ wait' = "decided"
-              /\ UNCHANGED <<state, sig>>
-    /\ UNCHANGED <<current, woke>>
+              /\ UNCHANGED <<state, sig, answer>>
+    /\ UNCHANGED <<current, woke, target, waker>>
 
 \* Publishing Blocked, and switching this core to a Ready successor --
 \* any Ready process, as kernel_process_next_ready picks one -- or, with
@@ -126,7 +152,7 @@ Wait4Block ==
     \E c \in Cores :
         /\ RunsOn("parent", c)
         /\ wait = "decided"
-        /\ IF (RECHECK /\ state["child"] = "Exited") \/ (SIGRECHECK /\ sig)
+        /\ IF (RECHECK /\ \E k \in Targets : state[k] = "Exited") \/ (SIGRECHECK /\ sig)
              THEN /\ wait' = "call"
                   /\ UNCHANGED <<state, current>>
            ELSE IF \E q \in Procs : state[q] = "Ready"
@@ -139,20 +165,23 @@ Wait4Block ==
              ELSE /\ state' = [state EXCEPT !["parent"] = "Blocked"]
                   /\ current' = [current EXCEPT ![c] = None]
                   /\ wait' = "asleep"
-        /\ UNCHANGED <<sig, woke>>
+        /\ UNCHANGED <<sig, woke, target, waker, answer>>
 
-\* The child exits. It wakes the parent only if the parent is already
-\* Blocked in wait4; the core it ran on goes idle.
+\* A child exits. It wakes the parent only if the parent is already
+\* Blocked in wait4 and, with PIDGUARD, waits for this child (#1352); the
+\* core it ran on goes idle.
 ChildExit ==
-    \E c \in Cores :
-        /\ RunsOn("child", c)
-        /\ LET wakes == state["parent"] = "Blocked" /\ wait = "asleep"
+    \E c \in Cores, k \in Kids :
+        /\ RunsOn(k, c)
+        /\ LET wakes == /\ state["parent"] = "Blocked" /\ wait = "asleep"
+                        /\ (PIDGUARD => k \in Targets)
            IN  /\ state' = [state EXCEPT
-                              !["child"] = "Exited",
+                              ![k] = "Exited",
                               !["parent"] = IF wakes THEN "Ready" ELSE @]
                /\ wait' = IF wakes THEN "woken" ELSE wait
+               /\ waker' = IF wakes THEN k ELSE waker
         /\ current' = [current EXCEPT ![c] = None]
-        /\ UNCHANGED <<sig, woke>>
+        /\ UNCHANGED <<sig, woke, target, answer>>
 
 \* Another process sends the parent a signal it catches (#726). The raise
 \* and the wake are one critical section (kernel_process_signal_deliver_to):
@@ -168,7 +197,7 @@ SendSignal ==
               /\ wait' = "call"
               /\ woke' = TRUE
          ELSE UNCHANGED <<state, wait, woke>>
-    /\ UNCHANGED current
+    /\ UNCHANGED <<current, target, waker, answer>>
 
 \* #628: the return to EL0 from a timer interrupt runs the handler of a
 \* pending signal (kernel_signal_return_deliver, from the stack-switch
@@ -183,16 +212,18 @@ TickDeliver ==
     /\ \E c \in Cores : RunsOn("parent", c)
     /\ wait \in (IF IRQSKIPSVC THEN {"done"} ELSE {"call", "done"})
     /\ sig' = FALSE
-    /\ UNCHANGED <<state, current, wait, woke>>
+    /\ UNCHANGED <<state, current, wait, woke, target, waker, answer>>
 
-\* A woken parent runs again and finishes wait4 by reaping the zombie.
+\* A woken parent runs again and finishes wait4 by reaping the zombie whose
+\* exit woke it (kernel_syscall_wait4_deliver takes the exiting child's pid).
 Wait4Resume ==
     /\ \E c \in Cores : RunsOn("parent", c)
     /\ wait = "woken"
-    /\ state' = [state EXCEPT !["child"] = "Reaped"]
+    /\ state' = [state EXCEPT ![waker] = "Reaped"]
     /\ wait' = "done"
     /\ sig' = FALSE
-    /\ UNCHANGED <<current, woke>>
+    /\ answer' = waker
+    /\ UNCHANGED <<current, woke, target, waker>>
 
 \* The timer takes a Running process off its core.
 Preempt(c) ==
@@ -200,7 +231,7 @@ Preempt(c) ==
     /\ Preemptible(current[c])
     /\ state' = [state EXCEPT ![current[c]] = "Ready"]
     /\ current' = [current EXCEPT ![c] = None]
-    /\ UNCHANGED <<wait, sig, woke>>
+    /\ UNCHANGED <<wait, sig, woke, target, waker, answer>>
 
 \* An idle core takes a Ready process.
 \* @type: (Str, Str) => Bool;
@@ -209,7 +240,7 @@ Dispatch(c, p) ==
     /\ state[p] = "Ready"
     /\ state' = [state EXCEPT ![p] = "Running"]
     /\ current' = [current EXCEPT ![c] = p]
-    /\ UNCHANGED <<wait, sig, woke>>
+    /\ UNCHANGED <<wait, sig, woke, target, waker, answer>>
 
 Next ==
     \/ Wait4Decide
@@ -249,6 +280,9 @@ TypeOK ==
     /\ wait \in {"call", "decided", "asleep", "woken", "done"}
     /\ sig \in BOOLEAN
     /\ woke \in BOOLEAN
+    /\ target \in Kids \union {Any}
+    /\ waker \in Kids \union {None}
+    /\ answer \in Kids \union {None}
 
 \* A process is Running exactly when some core runs it, and no process
 \* runs on two cores.
@@ -259,9 +293,16 @@ RunningMatchesCores ==
            (c # d /\ current[c] # None) => current[c] # current[d]
 
 \* #550, as a safety property: the parent is never asleep in wait4 while
-\* its child is already a zombie. Nothing would wake it.
+\* a child it waits for is already a zombie. Nothing would wake it.
 NoLostWakeup ==
-    ~(state["parent"] = "Blocked" /\ state["child"] = "Exited")
+    ~(state["parent"] = "Blocked" /\
+      \E k \in Targets : state[k] = "Exited")
+
+\* #1352, #1370: a wait4 answers only a child it named (or either, for -1),
+\* and a wake names one: a sibling's exit never ends wait4(pid).
+WakeAnswersTarget ==
+    /\ (answer # None => answer \in Targets)
+    /\ (wait = "woken" => waker \in Targets)
 
 \* #726: the parent never sleeps in wait4 beside a pending signal it
 \* catches. Its handler would wait for the child, not run at once.
@@ -274,7 +315,8 @@ SignalWakeEndsWait ==
     ~(woke /\ wait = "asleep")
 
 \* The safety properties at once, for Apalache's shallow runs.
-Safety == NoLostWakeup /\ NoSleepWithSignal /\ SignalWakeEndsWait
+Safety == NoLostWakeup /\ NoSleepWithSignal /\ SignalWakeEndsWait /\
+    WakeAnswersTarget
 
 \* #550, as the liveness property #601 asks for: wait4 finishes.
 Wait4Finishes == <>(wait = "done")
@@ -287,14 +329,16 @@ SignalRuns == sig ~> ~sig
 (* Constant initializers for Apalache (TLC reads the .cfg files instead). *)
 
 CInitFixed == RECHECK = TRUE /\ SIGRECHECK = TRUE /\
-    IRQDELIVER = TRUE /\ IRQSKIPSVC = TRUE
+    IRQDELIVER = TRUE /\ IRQSKIPSVC = TRUE /\ PIDGUARD = TRUE
 CInitUnfixed == RECHECK = FALSE /\ SIGRECHECK = TRUE /\
-    IRQDELIVER = TRUE /\ IRQSKIPSVC = TRUE
+    IRQDELIVER = TRUE /\ IRQSKIPSVC = TRUE /\ PIDGUARD = TRUE
 CInitSigUnfixed == RECHECK = TRUE /\ SIGRECHECK = FALSE /\
-    IRQDELIVER = TRUE /\ IRQSKIPSVC = TRUE
+    IRQDELIVER = TRUE /\ IRQSKIPSVC = TRUE /\ PIDGUARD = TRUE
 CInitIrqUnfixed == RECHECK = TRUE /\ SIGRECHECK = TRUE /\
-    IRQDELIVER = FALSE /\ IRQSKIPSVC = TRUE
+    IRQDELIVER = FALSE /\ IRQSKIPSVC = TRUE /\ PIDGUARD = TRUE
 CInitSvcUnfixed == RECHECK = TRUE /\ SIGRECHECK = TRUE /\
-    IRQDELIVER = TRUE /\ IRQSKIPSVC = FALSE
+    IRQDELIVER = TRUE /\ IRQSKIPSVC = FALSE /\ PIDGUARD = TRUE
+CInitPidUnfixed == RECHECK = TRUE /\ SIGRECHECK = TRUE /\
+    IRQDELIVER = TRUE /\ IRQSKIPSVC = TRUE /\ PIDGUARD = FALSE
 
 =============================================================================

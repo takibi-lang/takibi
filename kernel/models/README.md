@@ -76,7 +76,10 @@ touches belongs to no existing one.
 
 ## Wait4Block.tla -- the wait4 ChildExit window (#550)
 
-Two cores; a parent, its child, and one other runnable process. Since #726
+Two cores; a parent, two children, and one other runnable process (two
+children since #1370: the parent's wait4 names one of them, or either for
+-1, chosen at Init, and `PIDGUARD` is the exit's wait4_pid comparison).
+Since #726
 the parent can also be sent a signal it catches; `SIGRECHECK` is the
 publication's re-check of a pending one, as `RECHECK` is of the zombie.
 Since #628 a handler also runs at the return to EL0 from a timer interrupt
@@ -86,8 +89,8 @@ Since #628 a handler also runs at the return to EL0 from a timer interrupt
 | --- | --- | --- | --- | --- |
 | `Wait4Decide` | the wait4 arm of `kernel_syscall_dispatch_action` | the zombie check and the decision to block, under one hold of the run lock (#571) | the pid, the status copy, the rusage zero-fill before the decision (#1314) and ECHILD -- irrelevant to `NoLostWakeup`: none of them changes which process is Blocked or Exited | `abe9dc3f33f0` |
 | `Wait4Block` | `kernel_process_block_current`, `kernel_process_block_reserved` | successor choice and the Blocked publication in one critical section; `RECHECK` is the zombie re-check there | ASID preparation and the lock drop around it -- irrelevant to `NoLostWakeup`: the drop comes after Blocked is published and re-checked, and the successor it crosses with is already reserved Running | `13f742ba7f06` |
-| `ChildExit` | `kernel_process_child_exit` | the child becomes a zombie and wakes the parent only if the parent is Blocked in ChildExit | a wait4(pid) for another child, which this exit leaves Blocked (#1352) -- irrelevant to `NoLostWakeup`: the model has one child, and the named child's own exit takes the wake; zombie draining -- irrelevant to `NoLostWakeup`: it reaps the exiting child's own children, never this parent or this child; SIGCHLD -- irrelevant to `NoLostWakeup`: it makes no process Blocked or Exited, and only such a step can break the property; CPU-time accounting (#1309) -- irrelevant to `NoLostWakeup`: it adds to counters under the run lock and changes no state; the direct parent start -- modelled elsewhere: `StackOwnership.ChildExitStart` | `a375eaa7958f` |
-| `Wait4Resume` | `kernel_syscall_wait4_deliver` | the woken parent reaps | the user-memory status write -- irrelevant to `NoLostWakeup`: it runs after the reap, when the child is no longer Exited | `c69dd34f5376` |
+| `ChildExit` | `kernel_process_child_exit` | a child becomes a zombie and wakes the parent only if the parent is Blocked in ChildExit and, with `PIDGUARD`, waits for that child or for any (#1352, #1370) | zombie draining -- irrelevant to `NoLostWakeup`: it reaps the exiting child's own children, never this parent or this child; SIGCHLD -- irrelevant to `NoLostWakeup`: it makes no process Blocked or Exited, and only such a step can break the property; CPU-time accounting (#1309) -- irrelevant to `NoLostWakeup`: it adds to counters under the run lock and changes no state; the direct parent start -- modelled elsewhere: `StackOwnership.ChildExitStart` | `a375eaa7958f` |
+| `Wait4Resume` | `kernel_syscall_wait4_deliver` | the woken parent reaps the child whose exit woke it | the user-memory status write -- irrelevant to `NoLostWakeup`: it runs after the reap, when the child is no longer Exited | `c69dd34f5376` |
 | `SendSignal` | `kernel_process_signal_deliver_to` | a caught, unmasked signal becomes pending, and a parent Blocked in wait4 is woken in the same critical section to rerun the call | which signal, the sender, siginfo and SA_RESTART -- irrelevant to `NoSleepWithSignal`: only whether a caught signal is pending, and whether the parent is Blocked, decide it; terminating signals -- modelled elsewhere: `TickWake.SignalWake` | `966be5f882ef` |
 | `TickDeliver` | `kernel_signal_return_deliver`, `signal_deliver`, `signal_resumes_at_svc` | a return to EL0 (signal_deliver's ReturnToUser entry, #1000) takes a pending caught signal and enters its handler, unless the parent resumes at its wait4 SVC | a frame that cannot be written and a pending terminating signal, which end the process there instead (#949) -- modelled elsewhere: `StackOwnership.ChildExit`; returns through `el0_context_resume` from a syscall -- irrelevant to `SignalWakeEndsWait`: they resume after the SVC, at "done", or at it, where the rule is the same | `3f30f0dce8b6` |
 | `Preempt` | `kernel_process_timer_schedule` | the timer takes a process off its core, never inside the parent's wait4 syscall (`KERNEL_PREEMPTIBLE` is 0) | the test-only spread rendezvous -- irrelevant to `NoLostWakeup`: it changes affinity before scheduling and observes an existing leave, without changing a wait or wake | `9baee184ff77` |
@@ -95,8 +98,8 @@ Since #628 a handler also runs at the return to EL0 from a timer interrupt
 
 Properties:
 
-- `NoLostWakeup` (safety): the parent is never Blocked while its child is a
-  zombie. The unfixed variant violates it in four steps: decide, child exits,
+- `NoLostWakeup` (safety): the parent is never Blocked while a child it
+  waits for is a zombie. The unfixed variant violates it in four steps: decide, child exits,
   block.
 - `NoSleepWithSignal` (safety, #726): the parent is never asleep in wait4
   while a signal it catches is pending. The `sigunfixed` variant violates it
@@ -111,6 +114,10 @@ Properties:
 - `SignalRuns` (liveness, TLC only, #628): a pending caught signal is
   eventually handled, by a parent that makes no syscall too. The
   `irqunfixed` variant, with no delivery at the interrupt return, loses it.
+- `WakeAnswersTarget` (safety, #1370): a wait4 that names a child answers
+  only that child, and only that child's exit wakes it. The `pidunfixed`
+  variant, whose exit wakes a parent waiting for the sibling (the kernel
+  before #1352), violates it: wait4(k1) answers k2.
 - `TypeOK`, `RunningMatchesCores`: bookkeeping sanity.
 
 ## StackOwnership.tla -- kernel stacks across switch, exit and idle
