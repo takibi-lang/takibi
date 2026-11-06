@@ -293,6 +293,7 @@ fn kernel_idle_loop() !{unsafe} {
 // GitHub issue #831: core 0's boot work is done and its boot context given
 // back; nothing is left to release.
 fn kernel_idle_boot_reenter() {
+    preempt_count_after_switch();
     kernel_idle_loop();
 }
 
@@ -335,6 +336,11 @@ fn kernel_timer_tick_leave(switch: TimerSwitch) -> AnyFrame !{interrupt} {
 // stack was released at IRQ entry and its state published Ready before the
 // interrupt was acknowledged, so there is nothing left to hand over.
 fn kernel_idle_tick_reenter() {
+    // GitHub issue #638: the idle stack still holds the span the idle loop's
+    // own start raised before it resumed the process (kernel_process_
+    // secondary_start); like every idle entry, reset it, or the next wfi's
+    // blockable check finds it (found in the stage 8 land, alloc-rollback).
+    preempt_count_after_switch();
     workload_profile_idle_enter();
     kernel_idle_loop();
 }
