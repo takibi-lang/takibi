@@ -3643,8 +3643,16 @@ fn tcp_route_received_segment(current_address: usize,
                                 target.local_port == header.dst_port &&
                                 slice_eq(ip[IP_SRC..<IP_DST],
                                          remote_ip[0..<4]);
+                            // GitHub issue #1371: and a handshake the accept
+                            // step abandoned but remembers (#876), whose late
+                            // final ACK the peer never sends again: dropping it
+                            // here left the peer connected and the accept
+                            // waiting (TcpAccept.tla, routesynrcvd).
                             if (tuple_matches &&
-                                target.state == ConnState::SynRcvd &&
+                                (target.state == ConnState::SynRcvd ||
+                                 (target.state == ConnState::Listen &&
+                                  target.accept_syn_ack_retries ==
+                                      TCP_ACCEPT_ABANDONED)) &&
                                 (header.flags & TCP_FLAG_SYN) == 0 &&
                                 (header.flags & TCP_FLAG_RST) == 0 &&
                                 header.ack == target.snd_nxt &&
