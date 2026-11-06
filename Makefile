@@ -2982,6 +2982,7 @@ allcheck:
 	rm -rf "$(LANE_TIMING_DIR)"; mkdir -p "$(LANE_TIMING_DIR)"; \
 	export TAKIBI_LANE_TIMING_DIR="$(LANE_TIMING_DIR)"; bash scripts/lane_timing.sh origin; \
 	python3 scripts/untracked_leaks.py snapshot "$(LANE_TIMING_DIR)" || true; \
+	python3 scripts/signal_env.py $@ || true; \
 	rm -rf "$(AWAIT_TIMING_DIR)"; mkdir -p "$(AWAIT_TIMING_DIR)"; \
 	export TAKIBI_AWAIT_TIMING_DIR="$(AWAIT_TIMING_DIR)"; \
 	resource_lease_run_suite allcheck bash -c \
@@ -3052,6 +3053,7 @@ cicheck cicheck-lang cicheck-models cicheck-qemu cicheck-race:
 	rm -rf "$(LANE_TIMING_DIR)"; mkdir -p "$(LANE_TIMING_DIR)"; \
 	export TAKIBI_LANE_TIMING_DIR="$(LANE_TIMING_DIR)"; bash scripts/lane_timing.sh origin; \
 	python3 scripts/untracked_leaks.py snapshot "$(LANE_TIMING_DIR)" || true; \
+	python3 scripts/signal_env.py $@ || true; \
 	rm -rf "$(AWAIT_TIMING_DIR)"; mkdir -p "$(AWAIT_TIMING_DIR)"; \
 	export TAKIBI_AWAIT_TIMING_DIR="$(AWAIT_TIMING_DIR)"; \
 	resource_lease_run_suite $@ \

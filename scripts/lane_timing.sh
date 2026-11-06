@@ -83,6 +83,8 @@ case "${1:-}" in
         ;;
     begin)
         [ "$#" -eq 2 ] || { echo "usage: lane_timing.sh begin LANE" >&2; exit 2; }
+        # #1392: name inherited ignored/blocked signals (silent when none).
+        python3 "$(dirname "$0")/signal_env.py" "$2" || true
         enabled || exit 0
         mkdir -p "$TIMING_DIR" || exit 0
         now >"$TIMING_DIR/$(sanitize "$2").start"
