@@ -156,6 +156,26 @@ const TCP_RETRY_LIMIT: usize = 3;
 // waited for a SYN that never came.
 const TCP_ACCEPT_ABANDONED: usize = TCP_RETRY_LIMIT + 1;
 
+// GitHub issue #1400: whether `header`, from the connection's own peer, is the
+// final ACK that completes its pending accept handshake -- one in SynRcvd, or
+// one the accept step abandoned but remembers (#876). The accept step and
+// tcp_route_received_segment both ask this one function: #876 changed one of
+// two copies of the condition and left the other dropping the late ACK
+// (#1371, kernel/models/TcpAccept.tla). `retries` is the accept step's live
+// count (its local copy while a step runs). A reset is never a completion.
+fn tcp_ack_completes_handshake(state: ConnState, retries: usize,
+                               snd_nxt: u32, rcv_nxt: u32,
+                               header: TcpSegmentHeader) -> bool {
+    let pending: bool = state == ConnState::SynRcvd ||
+        (state == ConnState::Listen && retries == TCP_ACCEPT_ABANDONED);
+    return pending &&
+        (header.flags & TCP_FLAG_ACK) != 0 &&
+        (header.flags & TCP_FLAG_SYN) == 0 &&
+        (header.flags & TCP_FLAG_RST) == 0 &&
+        header.ack == snd_nxt &&
+        header.seq == rcv_nxt;
+}
+
 enum ConnState: u8 {
     Listen;
     SynRcvd;
@@ -3397,16 +3417,12 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection_pool, conn
                                     syn_ack_retries = 0;
                                     atomic_word_store(&tcp_injected_syn_pending, 0);
                                 } else if (
-                                    (conn.state == ConnState::SynRcvd ||
-                                     (conn.state == ConnState::Listen &&
-                                      syn_ack_retries == TCP_ACCEPT_ABANDONED)) &&
                                     header.src_port == conn.remote_port &&
                                     slice_eq(ip[IP_SRC..<IP_DST],
                                         remote_ip_bytes[0..<4]) &&
-                                    (header.flags & TCP_FLAG_ACK) != 0 &&
-                                    (header.flags & TCP_FLAG_SYN) == 0 &&
-                                    header.ack == conn.snd_nxt &&
-                                    header.seq == conn.rcv_nxt) {
+                                    tcp_ack_completes_handshake(
+                                        conn.state, syn_ack_retries,
+                                        conn.snd_nxt, conn.rcv_nxt, header)) {
                                     handled_current = true;
                                     conn.state =
                                         ConnState::Established;
@@ -3649,14 +3665,9 @@ fn tcp_route_received_segment(current_address: usize,
                             // here left the peer connected and the accept
                             // waiting (TcpAccept.tla, routesynrcvd).
                             if (tuple_matches &&
-                                (target.state == ConnState::SynRcvd ||
-                                 (target.state == ConnState::Listen &&
-                                  target.accept_syn_ack_retries ==
-                                      TCP_ACCEPT_ABANDONED)) &&
-                                (header.flags & TCP_FLAG_SYN) == 0 &&
-                                (header.flags & TCP_FLAG_RST) == 0 &&
-                                header.ack == target.snd_nxt &&
-                                header.seq == target.rcv_nxt) {
+                                tcp_ack_completes_handshake(
+                                    target.state, target.accept_syn_ack_retries,
+                                    target.snd_nxt, target.rcv_nxt, header)) {
                                 // The accept waiter may not be the first
                                 // process to acquire RX. Complete its
                                 // pending handshake under the slot owner so
