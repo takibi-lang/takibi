@@ -112,6 +112,7 @@ fn signal_boundary_probe() !{unsafe} {
     boundary_interrupts();
     boundary_spin();
     boundary_spin_end();
+    boundary_wait_named();
     svc5(93, 0, 0, 0, 0, 0);
 }
 
@@ -490,6 +491,80 @@ private fn boundary_spin_end() !{unsafe} {
         return;
     }
     boundary_line(bs"boundary: unwritable handler frame ended spinning CPU 1 by SIGSEGV\n");
+}
+
+// A child that sleeps `delay_ms` and exits `code`. Returns its pid.
+private fn wait_named_child(delay_ms: usize, code: usize) -> usize !{unsafe} {
+    let child: usize = svc5(220, 17, 0, 0, 0, 0);
+    if (child != 0) { return child; }
+    let mut pause: [usize; 2];
+    pause[0] = 0;
+    pause[1] = delay_ms * 1000000;
+    svc5(101, pause as *usize as usize, 0, 0, 0, 0);
+    svc5(93, code, 0, 0, 0, 0);
+    return 0;
+}
+
+// GitHub issue #1352: wait4(pid) blocked on one child is not answered by a
+// sibling's exit. The later child exits first, while the parent sleeps in
+// wait4 for the earlier one; that exit used to hand the parent its own pid.
+//
+// SIGCHLD goes back to its default first. boundary_spin left a caught,
+// SA_RESTART handler on it, and that signal's wake reran the wait4 before
+// the exit's own wake was reached, so the shape passed without the fix.
+private fn boundary_wait_named() !{unsafe} {
+    let mut default_action: [usize; 4];
+    for index: usize in 0..<4 { default_action[index] = 0; }
+    if (svc5(134, 17, default_action as *usize as usize, 0, 8, 0) != 0) {
+        boundary_fail(bs"boundary: FAIL wait-named sigaction\n");
+        return;
+    }
+    let slow: usize = wait_named_child(400, 7);
+    let fast: usize = wait_named_child(100, 0);
+    if (slow >= 0xFFFFFFFFFFFFF000 || fast >= 0xFFFFFFFFFFFFF000) {
+        boundary_fail(bs"boundary: FAIL wait-named fork\n");
+        return;
+    }
+    let mut status: [u8; 4];
+    for index: usize in 0..<4 { status[index] = 0xFF; }
+    if (svc5(260, slow, status as *u8 as usize, 0, 0, 0) != slow ||
+        status[0] != 0 || status[1] != 7) {
+        boundary_fail(bs"boundary: FAIL wait4(pid) answered by a sibling\n");
+        return;
+    }
+    if (interrupt_reap(fast) == false) {
+        boundary_fail(bs"boundary: FAIL wait-named second child\n");
+        return;
+    }
+    // The issue's own shape: two children spinning at EL0, both killed,
+    // then each waited for by pid in fork order.
+    for round: usize in 0..<8 {
+        let mut spinners: [usize; 2];
+        for index: usize in 0..<2 {
+            let child: usize = svc5(220, 17, 0, 0, 0, 0);
+            if (child == 0) {
+                signal_spin_forever(0, 0);
+                svc5(93, 1, 0, 0, 0, 0);
+                return;
+            }
+            if (child >= 0xFFFFFFFFFFFFF000) {
+                boundary_fail(bs"boundary: FAIL wait-named spin fork\n");
+                return;
+            }
+            spinners[index] = child;
+        }
+        svc5(129, spinners[0], 9, 0, 0, 0);
+        svc5(129, spinners[1], 9, 0, 0, 0);
+        for index: usize in 0..<2 {
+            for byte: usize in 0..<4 { status[byte] = 0xFF; }
+            if (svc5(260, spinners[index], status as *u8 as usize, 0, 0, 0) !=
+                    spinners[index] || status[0] != 9 || status[1] != 0) {
+                boundary_fail(bs"boundary: FAIL wait4(pid) of a killed spinner answered by a sibling\n");
+                return;
+            }
+        }
+    }
+    boundary_line(bs"boundary: wait4(pid) blocked past a sibling's exit, reaped the named child\n");
 }
 
 // GitHub issue #948: a read sleeping on the terminal is ended by a caught

@@ -12681,6 +12681,16 @@ fn kernel_process_current_root(current_authority: borrow ProcessCurrent[current_
 // Rewind the saved frame so a CPU that admits the parent runs ordinary
 // synchronous wait4 after activating the parent's root; that path can
 // validate user memory without making timer IRQ scheduling allocate.
+// GitHub issue #1352: a parent Blocked in wait4(pid) waits for that child
+// only. A sibling's exit leaves it Blocked; waking it handed it the
+// sibling's pid and reaped the sibling, which Linux never does.
+private fn kernel_process_wait4_names(
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+        parent: ProcessHandle, child_pid: usize) -> bool {
+    let wanted: usize = scheduled_process_record_live_locked(guard, parent).wait4_pid;
+    return wanted == 0xFFFFFFFFFFFFFFFF || wanted == child_pid;
+}
+
 private fn kernel_process_leave_parent_ready(
         parent: ProcessHandle,
         parent_owner: sink ScheduledProcessOwner[process],
@@ -12959,7 +12969,9 @@ fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, Pro
                 scheduled_process_state_of_locked(exit_guard, parent) ==
                     ProcessSlotState::Blocked &&
                 scheduled_process_wait_reason_of_locked(exit_guard, parent) ==
-                    ProcessWaitReason::ChildExit) {
+                    ProcessWaitReason::ChildExit &&
+                kernel_process_wait4_names(exit_guard, parent,
+                    scheduled_process_pid_of_handle(child))) {
                 match scheduled_process_blocked_take(exit_guard, parent) {
                     ScheduledProcessBlockedTakeResult::Missing => {}
                     ScheduledProcessBlockedTakeResult::Blocked(parent_resources) => {

@@ -18,3 +18,4 @@ boundary: spinning process ran its SIGCHLD handler, registers intact
 boundary: kill from CPU 0 ran a handler on spinning CPU 1, registers intact
 boundary: SIGTERM from CPU 0 ended spinning CPU 1
 boundary: unwritable handler frame ended spinning CPU 1 by SIGSEGV
+boundary: wait4(pid) blocked past a sibling's exit, reaped the named child
