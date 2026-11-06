@@ -2368,6 +2368,7 @@ _kernelbuild-check: _kernelbuild-images
 		buildcheck-process-current-phase 'python3 scripts/buildcheck_process_current_phase.py $(KERNELBUILD_CHECK_ARGS)' \
 		buildcheck-user-write-result 'python3 scripts/buildcheck_user_write_result.py $(KERNELBUILD_CHECK_ARGS)'
 	MAKE='$(MAKE)' bash scripts/buildcheck_ext2_reproducible.sh $(KERNEL_USER_BUILD_DIR) $(KERNEL_EXT2_FAKE_TIME)
+	MAKE='$(MAKE)' bash scripts/buildcheck_kernel_reproducible.sh $(KERNEL_QEMU_MAIN_TKB)=$(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_TKB)=$(KERNEL_RPI5_MAIN_O)
 
 kernelbuild-check: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-check
