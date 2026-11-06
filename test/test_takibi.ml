@@ -7314,7 +7314,7 @@ fn stored_release(holder: sink StoredHolder[k]) { stored_drop(holder.token); }
           Alcotest.(check bool) "two globals differ" true
             (has "(assert (not (= x_g_a1232 x_g_b1232)))");
           Alcotest.(check bool) "two enum cases differ" true
-            (has "(declare-const x_e_E1232__Y Int)")));
+            (has "(declare-const x_e_E1232_SY Int)")));
 
   Alcotest.test_case
     "issue #983: a literal index past 2^63 is out of bounds, not -1" `Quick
@@ -27016,6 +27016,22 @@ scratch let mut sb: S975;
            (contains_substring text "(assert (>= (+ x_x (- 16)) 0))");
          Alcotest.(check bool) "min defined" true
            (contains_substring text "(assert (= x_s (ite (<= x_x 28) x_x 28)))"));
+    t "issue #1372: atoms that differ only in punctuation stay distinct z3 constants"
+      (fun () ->
+         let names = ["v3@1"; "v3_1"; "ret:call"; "ret_call"; "arm:b"; "arm_b"] in
+         let smt = List.map Init_pred.smt_atom names in
+         Alcotest.(check int) "injective" (List.length names)
+           (List.length (List.sort_uniq compare smt));
+         let a = Init_pred.atom "v3@1" and b = Init_pred.atom "v3_1" in
+         let text = Init_pred.obligation ~claim:"c" [] [(a, b)]
+             (Init_pred.const 0, Init_pred.const 1) in
+         Alcotest.(check bool) "first declared" true
+           (contains_substring text "(declare-const x_v3_401 Int)");
+         Alcotest.(check bool) "second declared" true
+           (contains_substring text "(declare-const x_v3__1 Int)");
+         Alcotest.(check bool) "enum cases split at different underscores" true
+           (Types.static_opaque_atom (Types.SEnum ("A_", "B"))
+            <> Types.static_opaque_atom (Types.SEnum ("A", "_B"))));
     t "issue #976: --internal-trace-init-flow shows where coverage was lost"
       (fun () ->
          let buf = Buffer.create 256 in

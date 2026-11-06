@@ -185,11 +185,22 @@ let uncovered ?(eqs = []) ?(facts = no_facts) (ivs : interval list) ((a, b) : in
 
 let header = "; takibi-init-obligation v1"
 
+(* GitHub issue #1372: the SMT name of an atom is injective. It used to map
+   every character outside [A-Za-z0-9_] to '_', so the versioned binding
+   "v3@1" and an atom "v3_1", or "ret:call" and "ret_call", became one z3
+   constant, and an obligation over two different values could be proved
+   from an equality they never had. '_' is now doubled and any other
+   character becomes '_' and two hex digits, so distinct atoms stay
+   distinct constants. *)
 let smt_atom a =
-  "x_" ^ String.map (fun ch ->
+  let buf = Buffer.create (String.length a + 2) in
+  Buffer.add_string buf "x_";
+  String.iter (fun ch ->
     match ch with
-    | 'a'..'z' | 'A'..'Z' | '0'..'9' | '_' -> ch
-    | _ -> '_') a
+    | 'a'..'z' | 'A'..'Z' | '0'..'9' -> Buffer.add_char buf ch
+    | '_' -> Buffer.add_string buf "__"
+    | _ -> Buffer.add_string buf (Printf.sprintf "_%02X" (Char.code ch))) a;
+  Buffer.contents buf
 
 let smt_int k = if k < 0 then Printf.sprintf "(- %d)" (-k) else string_of_int k
 

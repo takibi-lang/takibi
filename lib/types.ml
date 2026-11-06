@@ -812,7 +812,12 @@ and static_smt t =
 and static_opaque_atom t =
   match static_repr t with
   | SGlobal name -> Printf.sprintf "x_g_%s" name
-  | SEnum (name, case) -> Printf.sprintf "x_e_%s__%s" name case
+  (* GitHub issue #1372: '_' doubled inside each name, and
+     the separator "_S", so enum "A_" case "B" and enum "A" case "_B" are not
+     one constant. *)
+  | SEnum (name, case) ->
+      let esc s = String.concat "__" (String.split_on_char '_' s) in
+      Printf.sprintf "x_e_%s_S%s" (esc name) (esc case)
   | _ -> assert false
 
 and static_atoms t acc =
