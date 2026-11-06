@@ -63,6 +63,7 @@ fn console_contention_secondary_run(cpu: usize) {
 }
 
 private fn console_probe_wait(cell: *AtomicWord) -> bool {
+    // peer-window-ok: core 0 alone stores console_probe_go.
     let mut window = peer_tick_window_policy(
         peer_tick_window_peer(), PeerTickPolicy::Arrival);
     while (peer_tick_window_open(window)) {

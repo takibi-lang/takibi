@@ -37,6 +37,12 @@ def problems(sources):
             continue
         for match in DEFINITION.finditer(masked_sources(source)):
             definitions.setdefault(match[1], []).append((path, source))
+    # GitHub issue #899: every defined probe entry must be among the calls
+    # matched, so a call shape CALL does not recognise cannot hide an entry
+    # from the round check below.
+    for name in sorted(set(definitions) - set(calls)):
+        errors.append(f'{name}: defined but no call in {DRIVER} matched; '
+                      'widen CALL or remove the dead entry')
     for name in calls:
         candidates = definitions.get(name, [])
         if len(candidates) != 1:

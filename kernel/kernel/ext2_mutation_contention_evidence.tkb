@@ -119,6 +119,7 @@ private fn ext2_mutation_probe_reader(cpu: usize) !{unsafe} {
         peer_tally_set(&ext2_mutation_probe_inside, cpu, 1);
         // Stay inside until core 0 has started taking the lock, then a
         // little longer, so a take that did not wait has time to return.
+        // peer-window-ok: core 0 alone stores `trying` in phases 3 and 4.
         let mut window = peer_tick_window_policy(
             peer_tick_window_peer(), PeerTickPolicy::Entry);
         while (atomic_word_load(&ext2_mutation_probe_trying) == 0 &&
@@ -129,6 +130,7 @@ private fn ext2_mutation_probe_reader(cpu: usize) !{unsafe} {
         // take and taking, and a fixed wall-clock linger then missed a
         // control take that did not wait (seen under a full allcheck). A
         // take that waits for this reader does not come; the window ends.
+        // peer-window-ok: core 0 alone stores `taken` in phases 3 and 4.
         let mut taking = peer_tick_window_policy(
             peer_tick_window_peer(), PeerTickPolicy::Entry);
         while (atomic_word_load(&ext2_mutation_probe_taken) == 0 &&
@@ -158,6 +160,7 @@ private fn ext2_mutation_probe_mutator(phase: usize) !{unsafe} {
         atomic_word_store(&ext2_mutation_probe_taken, 1);
         // Keep the lock until core 0's reader has left, as a real mutation
         // would still be running.
+        // peer-window-ok: core 0 alone stores `left`, as phase 5's reader.
         let mut hold = peer_tick_window_policy(
             peer_tick_window_peer(), PeerTickPolicy::Arrival);
         while (atomic_word_load(&ext2_mutation_probe_left) == 0 &&
@@ -229,6 +232,8 @@ private fn ext2_mutation_probe_core0_reader(phase: usize) -> usize
     atomic_word_store(&ext2_mutation_probe_left, 0);
     if (ext2_read_enter() == false) { return 2; }
     let sequence: usize = ext2_mutation_probe_arm(phase);
+    // peer-window-ok: any one peer's store ends the wait, and the window's
+    // peer is itself one of the peers that store it (any-of, not all-of).
     let mut window = peer_tick_window_policy(
         peer_tick_window_peer(), PeerTickPolicy::Arrival);
     while (atomic_word_load(&ext2_mutation_probe_trying) == 0 &&
@@ -237,6 +242,7 @@ private fn ext2_mutation_probe_core0_reader(phase: usize) -> usize
     let started: usize = atomic_word_load(&ext2_mutation_probe_trying);
     // As in the peer reader: wait for the take, by peer ticks, before the
     // linger, so a descheduled peer cannot hide a control take.
+    // peer-window-ok: any one peer's take ends the wait (any-of, not all-of).
     let mut taking = peer_tick_window_policy(
         peer_tick_window_peer(), PeerTickPolicy::Arrival);
     while (atomic_word_load(&ext2_mutation_probe_taken) == 0 &&

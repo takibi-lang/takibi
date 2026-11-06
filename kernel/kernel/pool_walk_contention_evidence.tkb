@@ -213,6 +213,7 @@ private fn pool_walk_once(cpu: usize) !{unsafe} {
             if (region_held_address(held) != 0) {
                 crossed = true;
                 peer_tally_set(&pool_walk_held_seq, cpu, round);
+                // peer-window-ok: core 0 alone stores released_seq.
                 let mut window = peer_tick_window_policy(
                     peer_tick_window_peer(), PeerTickPolicy::Entry);
                 let mut released: bool = false;

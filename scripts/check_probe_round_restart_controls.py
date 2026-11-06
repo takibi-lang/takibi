@@ -51,6 +51,13 @@ def main():
              'fn fresh_secondary_run() { for work: usize in 0..<FRESH_ROUNDS {} }\n'}
     check(extra, 1, 'fresh_secondary_run: invocation-local round batch restarts')
     cases.note()
+    # #899: an entry called in a shape CALL does not match is refused, not
+    # silently left out of the round check.
+    unmatched = {**sources, checker.DRIVER: sources[checker.DRIVER] +
+                 '\nfn extra_dispatch() { fresh_secondary_run(core_id + 0); }\n',
+                 'kernel/kernel/fresh.tkb': 'fn fresh_secondary_run(c: usize) { }\n'}
+    check(unmatched, 1, 'fresh_secondary_run: defined but no call')
+    cases.note()
     del extra['kernel/kernel/fresh.tkb']
     check(extra, 1, 'fresh_secondary_run: expected one maintained body, found 0')
     cases.note()

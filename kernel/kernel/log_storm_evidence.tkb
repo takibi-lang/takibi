@@ -55,6 +55,7 @@ private fn log_storm_write_share(round: usize) -> bool !{unsafe} {
 
 // A secondary: wait for core 0 to publish `value`, on core 0's ticks.
 private fn log_storm_wait_word(cell: *AtomicWord, value: usize) -> bool {
+    // peer-window-ok: core 0 alone stores log_storm_go, the one cell passed.
     let mut window = peer_tick_window_policy(
         peer_tick_window_peer(), PeerTickPolicy::Arrival);
     while (peer_tick_window_open(window)) {
