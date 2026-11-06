@@ -473,6 +473,9 @@ def main() -> int:
     parser.add_argument("--console-swd", action="store_true")
     parser.add_argument("--console-elf")
     parser.add_argument("--console-log")
+    # GitHub issue #1366: a lane that already opened QEMU's GDB stub
+    # (-gdb tcp::PORT) names it here; QEMU refuses a second stub.
+    parser.add_argument("--console-gdb-endpoint")
     parser.add_argument("--interactive-httpd-listener-file")
     parser.add_argument("--foreground-httpd-listener-file")
     parser.add_argument("--init-listener-file")
@@ -515,7 +518,8 @@ def main() -> int:
                 capture_swd(args.console_elf, args.console_log, phase)
             else:
                 from capture_kernel_console import capture
-                capture(args.qmp_port, args.console_elf, args.console_log, phase)
+                capture(args.qmp_port, args.console_elf, args.console_log, phase,
+                        gdb_endpoint=args.console_gdb_endpoint)
         except Exception as error:
             # Even an unwritable artifact directory must not hide the stall
             # or prevent the existing bounded serial BREAK/DDB walk.

@@ -231,6 +231,7 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --interactive-httpd-done-file "$INTERACTIVE_HTTPD_DONE" \
     --qmp-port "$QMP_PORT" \
     --console-elf "$ELF" --console-log "$ARTIFACT_POINT_DIR/console-state.log" \
+    --console-gdb-endpoint "localhost:$GDB_PORT" \
     --httpd-peer-guard-file "$HTTPD_GUARD_FILE" \
     --postmortem-request-file "$POSTMORTEM_REQUEST" \
     >"$UART_DRIVER_LOG" 2>&1 &
