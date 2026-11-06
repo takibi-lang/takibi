@@ -141,7 +141,9 @@ check_model TickWake ListsMatchBlocked 6 \
 check_model TcpAccept Safety 10 \
     fixed:CInitFixed:pass:ok \
     forget:CInitForget:NoForgottenPeer:violated \
-    routesynrcvd:CInitRouteSynRcvd:DeliveredAckCompletes:violated
+    routesynrcvd:CInitRouteSynRcvd:DeliveredAckCompletes:violated \
+    busy:CInitBusy:pass:ok \
+    busynoretx:CInitBusyNoRetx:temporal:ok
 
 # GitHub issue #1042: a pipe's wait and wake across two CPUs. Each unfixed
 # variant sleeps beside what it waits for.

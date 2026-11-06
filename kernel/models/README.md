@@ -632,15 +632,23 @@ forgets the handshake (`forget` breaks `NoForgottenPeer`). `ROUTEABANDONED =
 FALSE` is the route path before #1371, which completes only `SynRcvd`: a late
 ACK another waiter takes while the handshake is abandoned is dropped, and the
 peer never sends it again (`routesynrcvd` breaks `DeliveredAckCompletes`).
+Since #1399 a receive waiter that finds the connection Busy drops the frame
+(`BusyDrop`, at most once), and `ABANDONRETX` keeps retransmitting the
+abandoned SYN-ACK with backoff (`AbandonedRetry`). The `busy` and
+`busynoretx` variants run without network loss and check
+`AckReachesListener`; `busynoretx`, the kernel before #1399, loses it: a
+Busy drop after the give-up leaves the peer connected for good.
 
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |
-| `StepRecv` | `kernel_tcp_accept_step`, `tcp_ack_completes_handshake` | one acquired frame for the listener's port: a SYN in Listen (or abandoned) starts a handshake and answers SYN-ACK, a matching final ACK in SynRcvd or abandoned completes it | sequence and tuple matching -- irrelevant to `DeliveredAckCompletes`: the model's one peer sends only matching segments, and the ISN is a function of the tuple, so a repeated SYN rebuilds the same numbers; data on the final ACK -- irrelevant to `NoForgottenPeer`: it is kept with the completion and changes no state; RST -- irrelevant to `NoForgottenPeer`: the model's peer never resets, and a reset peer is not connected; the injected SYN-ACK drop fixture -- irrelevant to `NoForgottenPeer`: it is one `LoseToP` | `c4accf12debd` |
-| `OtherRecv` | `tcp_route_received_segment`, `tcp_ack_completes_handshake` | another waiter's frame: a matching final ACK completes a half-open (and, with `ROUTEABANDONED`, an abandoned) handshake for the parked accept; anything else for the listener is dropped | a target that is Busy, which leaves the frame unacknowledged -- modelled elsewhere: `LoseToL`; FIN, RST and data for Established connections (#1121) -- irrelevant to `DeliveredAckCompletes`: the model's listener has no established reader before it completes | `81a86d758db8` |
-| `Retry` | `kernel_tcp_accept_step` | the retransmission timer: another SYN-ACK below the limit, past it the give-up to Listen that remembers the handshake (`TCP_ACCEPT_ABANDONED`) | the timer's period and the accept's 30 s deadline -- irrelevant to `NoForgottenPeer`: a period only reorders steps the model already interleaves, and the deadline ends the accept call, which this bounded model leaves out as Linux's request socket expiry | `48e6dfed1d3d` |
+| `StepRecv` | `kernel_tcp_accept_step`, `tcp_ack_completes_handshake` | one acquired frame for the listener's port: a SYN in Listen (or abandoned) starts a handshake and answers SYN-ACK, a matching final ACK in SynRcvd or abandoned completes it | sequence and tuple matching -- irrelevant to `DeliveredAckCompletes`: the model's one peer sends only matching segments, and the ISN is a function of the tuple, so a repeated SYN rebuilds the same numbers; data on the final ACK -- irrelevant to `NoForgottenPeer`: it is kept with the completion and changes no state; RST -- irrelevant to `NoForgottenPeer`: the model's peer never resets, and a reset peer is not connected; the injected SYN-ACK drop fixture -- irrelevant to `NoForgottenPeer`: it is one `LoseToP` | `f80740f8eed3` |
+| `OtherRecv` | `tcp_route_received_segment`, `tcp_ack_completes_handshake` | another waiter's frame: a matching final ACK completes a half-open (and, with `ROUTEABANDONED`, an abandoned) handshake for the parked accept; anything else for the listener is dropped | a target that is Busy, which leaves the frame unacknowledged -- modelled elsewhere: `BusyDrop`; FIN, RST and data for Established connections (#1121) -- irrelevant to `DeliveredAckCompletes`: the model's listener has no established reader before it completes | `cfd5be123e65` |
+| `Retry` | `kernel_tcp_accept_step` | the retransmission timer: another SYN-ACK below the limit, past it the give-up to Listen that remembers the handshake (`TCP_ACCEPT_ABANDONED`) | the timer's period and the accept's 30 s deadline -- irrelevant to `NoForgottenPeer`: a period only reorders steps the model already interleaves, and the deadline ends the accept call, which this bounded model leaves out as Linux's request socket expiry | `93155ae22158` |
 | `PeerSyn` | the peer's TCP stack, outside the kernel | connect()'s SYN and its retransmission while no SYN-ACK came | nothing | `e3b0c44298fc` |
 | `PeerSynAck` | the peer's TCP stack, outside the kernel | a SYN-ACK makes the peer connected and sends the final ACK; a duplicate is answered with the ACK again | nothing | `e3b0c44298fc` |
-| `LoseToL` | the network, and a receive waiter that finds the target Busy | a segment for the listener never reaches a receiver that acts on it | nothing | `e3b0c44298fc` |
+| `AbandonedRetry` | `kernel_tcp_accept_step` | after the give-up, `TCP_ACCEPT_ABANDONED_RETX` more SYN-ACKs at a doubling period, each once the last exchange has settled | the exact periods -- irrelevant to `AckReachesListener`: the model assumes only that a backed-off period outlasts a round trip | `93155ae22158` |
+| `BusyDrop` | `tcp_route_received_segment`, `tcp_connection_try_take` | a receive waiter finds the listener's connection locked and drops the frame | more than one Busy drop -- irrelevant to `AckReachesListener`: each further drop is recovered the same way while retransmissions remain, and a Busy that outlasts them all is a loss, as the network's is | `91f227c38130` |
+| `LoseToL` | the network | a segment for the listener never reaches a receiver that acts on it | nothing | `e3b0c44298fc` |
 | `LoseToP` | the network, and the injected SYN-ACK drop | a SYN-ACK never reaches the peer | nothing | `e3b0c44298fc` |
 
 Properties:
@@ -651,6 +659,9 @@ Properties:
   while the handshake can complete completes it. Only a loss, or a Busy
   target, may lose it, and after the give-up nothing recovers that loss
   until the peer sends data or a new SYN (as Linux's expired request socket).
+- `AckReachesListener` (liveness, TLC only, #1399): without network loss, a
+  connected peer is eventually the listener's established connection, even
+  after a Busy drop.
 - `TypeOK`: bookkeeping sanity.
 
 ## The dropped column

@@ -146,7 +146,7 @@ const TCP_ECHO_PORT: u16 = 7;
 // see that function's comment.
 const TCP_MAX_PAYLOAD: u16 = 1460;
 const TCP_RETRY_LIMIT: usize = 3;
-// GitHub issue #876: accept_syn_ack_retries holds this, one past the limit,
+// GitHub issue #876: accept_syn_ack_retries holds at least this, past the limit,
 // while a listener is back in Listen after giving up on a half-open
 // handshake whose SYN-ACK the peer may still answer. The tuple and sequence
 // numbers of that handshake stay in the connection, so a late final ACK that
@@ -155,6 +155,16 @@ const TCP_RETRY_LIMIT: usize = 3;
 // dropped in silence: the peer believed it was connected and the accept
 // waited for a SYN that never came.
 const TCP_ACCEPT_ABANDONED: usize = TCP_RETRY_LIMIT + 1;
+// GitHub issue #1399: an abandoned handshake keeps retransmitting its SYN-ACK
+// this many more times, each period twice the last (two then four retry
+// periods), as Linux's request socket does with its backed-off retries. A
+// final ACK lost after the give-up -- to the network, or to a receive waiter
+// that found this connection Busy (tcp_route_received_segment) -- is drawn
+// again by the next one; before, nothing did. accept_syn_ack_retries runs
+// from TCP_ACCEPT_ABANDONED to TCP_ACCEPT_ABANDONED_LAST while abandoned.
+const TCP_ACCEPT_ABANDONED_RETX: usize = 2;
+const TCP_ACCEPT_ABANDONED_LAST: usize =
+    TCP_ACCEPT_ABANDONED + TCP_ACCEPT_ABANDONED_RETX;
 
 // GitHub issue #1400: whether `header`, from the connection's own peer, is the
 // final ACK that completes its pending accept handshake -- one in SynRcvd, or
@@ -170,7 +180,7 @@ fn tcp_ack_completes_handshake(state: ConnState, retries: usize,
     // value, which kernel-same-operand-csel (#893) refuses.
     if (state != ConnState::SynRcvd) {
         if (state != ConnState::Listen) { return false; }
-        if (retries != TCP_ACCEPT_ABANDONED) { return false; }
+        if (retries < TCP_ACCEPT_ABANDONED) { return false; }
     }
     if ((header.flags & TCP_FLAG_ACK) == 0) { return false; }
     if ((header.flags & (TCP_FLAG_SYN | TCP_FLAG_RST)) != 0) { return false; }
@@ -3528,6 +3538,21 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection_pool, conn
             }
             conn.state = ConnState::Listen;
             syn_ack_retries = TCP_ACCEPT_ABANDONED;
+        } else if (conn.state == ConnState::Listen &&
+                   syn_ack_retries >= TCP_ACCEPT_ABANDONED &&
+                   syn_ack_retries < TCP_ACCEPT_ABANDONED_LAST) {
+            // GitHub issue #1399: the abandoned handshake's backed-off
+            // retransmissions (TcpAccept.tla, AbandonedRetry).
+            let mut backoff: i64 = retry_ticks * 2;
+            if (syn_ack_retries > TCP_ACCEPT_ABANDONED) {
+                backoff = retry_ticks * 4;
+            }
+            if (retry_now - syn_ack_sent_at >= backoff) {
+                ready = net_transmit_ready(
+                    ready, stream_frames[0..<1514], 54);
+                syn_ack_sent_at = retry_now;
+                syn_ack_retries = syn_ack_retries + 1;
+            }
         }
     tcp_connection_frame_unhold(owner, TcpFrameRole::Tx, tx);
     conn.accept_syn_ack_sent_at = syn_ack_sent_at;

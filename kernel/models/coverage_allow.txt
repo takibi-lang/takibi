@@ -37,3 +37,7 @@ WorldStopRetry debugstop Timeout: the debug stop reaches every target, so no tar
 PipeWait fixed Name: only the unlocked naming of variant unlocked has a section of its own
 OrphanReap fixed ParentDrainEnd: the unfixed drain's own hold, which DRAIN_IN_HOLD removes
 OrphanReap fixed ParentExit: the unfixed exit's later hold, which DRAIN_IN_HOLD removes
+
+# GitHub issue #1399: the busy variant checks liveness without network loss.
+TcpAccept busy LoseToL: NETLOSS = FALSE by design; fixed takes it
+TcpAccept busy LoseToP: NETLOSS = FALSE by design; fixed takes it
