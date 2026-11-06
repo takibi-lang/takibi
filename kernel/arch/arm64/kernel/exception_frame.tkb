@@ -75,6 +75,8 @@ exception_entry el1_current_irq_entry {
     frame: ExceptionFrame;
     before: fpsimd_irq_clobber;
     dispatch: platform_irq_dispatch;
+    // GitHub issue #638 stage 8: its body runs only when the tick switched.
+    after_switch: kernel_irq_el1_return_complete;
     stack_guard_shift: KERNEL_STACK_SHIFT;
     stack_guard_stack: overflow_stack_top;
     stack_guard_handler: kernel_stack_overflow_fail_stop;

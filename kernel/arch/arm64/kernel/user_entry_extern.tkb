@@ -14,6 +14,11 @@ extern fn el0_context_resume(frame: sink FrameRef[process, level]) !{noreturn};
 // landing saw in `results`.
 extern fn el1_resume_probe_run(frame_address: usize, results: *usize);
 extern fn el1_resume_probe_landing_address() -> usize;
+// GitHub issue #638 stage 8: the spin a real EL1 preemption interrupts; 1 when
+// its registers survived.
+extern fn el1_preempt_spin(rounds: usize) -> usize;
+extern fn el1_preempt_spin_begin_address() -> usize;
+extern fn el1_preempt_spin_end_address() -> usize;
 
 // Resume a frame whose process the caller does not name.
 fn frame_any_resume(any: sink AnyFrame) {

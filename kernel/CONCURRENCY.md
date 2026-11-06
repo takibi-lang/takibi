@@ -40,7 +40,11 @@ state in this kernel is safe *because of* them:
   two readers could before.
 - `KERNEL_PREEMPTIBLE` -- 0. A timer interrupt taken at EL1 sets a flag and the
   switch happens at syscall return. That is `CONFIG_PREEMPT_NONE`, and it is
-  why many field accesses need no lock.
+  why many field accesses need no lock. The exception is one window
+  (`kernel/kernel/el1_preempt_scenario.tkb`): /bin/protocol-trace spins in a
+  syscall, and a tick with the interrupted PC in that spin and the preempt count
+  at zero switches. With the window shut no EL1 frame is produced, the quiesce
+  state #1048 relies on, which the flip must keep reachable.
 
 ### Target model: full kernel preemption (#638)
 

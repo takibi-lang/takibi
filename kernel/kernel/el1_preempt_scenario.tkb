@@ -1,0 +1,110 @@
+// GitHub issue #638 stage 8: the one place the EL1 switch at IRQ return is
+// allowed while KERNEL_PREEMPTIBLE is 0. A tick taken at EL1 may switch only
+// when the interrupted PC is inside el1_preempt_spin (user_entry.S), on behalf
+// of the process that opened the window, and with the preempt count of the
+// interrupted frame's stack at zero (#638 slices 1-3: the count is per stack). /bin/protocol-trace is the only program that opens it, inside its
+// window, so scripts/validate_protocol_trace.py replays the real switches
+// against StackOwnership.tla.
+//
+// The window is what makes this safe before the flip: every other kernel path
+// still runs to completion, as the static_asserts of KERNEL_PREEMPTIBLE claim.
+// It is also the quiesce point #1048 needs (#638): with the window shut no EL1
+// frame is produced, so "no live kernel frame while blocked" holds once the
+// frames already saved have run. Stage 9 replaces the PC test and the window
+// with the count alone and must keep such a closed state.
+//
+// Current limitations (2026-11-06):
+// - One window at a time, over the whole machine; a second opener overwrites
+//   the first. /bin/protocol-trace is the only caller, once per boot.
+// - The switch is taken only at the spin's PC, so this says nothing about
+//   preempting any real handler. A scratch window over real syscalls held on
+//   QEMU and RPi5 (#638 comments of 2026-11-04/05, not a soak); the lasting
+//   evidence is stage 9's to produce.
+// - Nothing resets the priority mask on an El1 resume (maintainer,
+//   2026-11-05): the scenario checks the shadow after its cross-CPU take,
+//   the flip asserts it on every El1 resume, and the typed form is #850.
+
+use "kernel/arch/arm64/kernel/user_entry_extern.tkb";
+use "kernel/lib/execution_model.tkb";
+
+fn el1_preempt_window_premise() {
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+                  "the flip replaces this window with the count alone (#638 stage 9)");
+}
+
+// The pid whose window is open, or 0. Written by that process and by the tick
+// that switched it away; read by every core's EL1 tick.
+private let mut el1_preempt_window_pid: AtomicWord;
+// EL1 ticks that switched.
+private let mut el1_preempt_switches: AtomicWord;
+// EL1 ticks inside the window that the count refused.
+private let mut el1_preempt_count_refusals: AtomicWord;
+// Resumes of an El1 frame through el0_irq_entry's return.
+private let mut el1_preempt_irq_return_resumes: AtomicWord;
+
+// What a tick that switched tells its own entry's after_switch hook: the frame
+// it chose, 0 when none. A debug stop nesting into the tick returns through the
+// same entry with a frame on the IRQ stack, so the address is what is compared.
+struct per_cpu El1SwitchPending {
+    private frame_sp: usize;
+}
+private let mut el1_switch_pending: [El1SwitchPending; KERNEL_MAX_CORES];
+
+fn el1_preempt_window_open(pid: usize) {
+    atomic_word_store(&el1_preempt_window_pid, pid);
+}
+
+fn el1_preempt_window_close() {
+    atomic_word_store(&el1_preempt_window_pid, 0);
+}
+
+// The window of `pid`, with this PC inside the spin. Nothing else about the
+// tick is decided here; the count is the caller's consult.
+fn el1_preempt_window_admits(pid: usize, pc: usize) -> bool {
+    if (atomic_word_load(&el1_preempt_window_pid) != pid || pid == 0) {
+        return false;
+    }
+    return pc >= el1_preempt_spin_begin_address() &&
+           pc < el1_preempt_spin_end_address();
+}
+
+fn el1_preempt_count_refused() {
+    atomic_word_fetch_add(&el1_preempt_count_refusals, 1);
+}
+
+fn el1_preempt_count_refusals_read() -> usize {
+    return atomic_word_load(&el1_preempt_count_refusals);
+}
+
+fn el1_preempt_switches_read() -> usize {
+    return atomic_word_load(&el1_preempt_switches);
+}
+
+fn el1_preempt_irq_return_resume_note() {
+    atomic_word_fetch_add(&el1_preempt_irq_return_resumes, 1);
+}
+
+fn el1_preempt_irq_return_resumes_read() -> usize {
+    return atomic_word_load(&el1_preempt_irq_return_resumes);
+}
+
+// The tick switched: the window is spent, and this CPU's entry owes the hook.
+fn el1_preempt_switch_note(frame_sp: usize) {
+    el1_preempt_window_close();
+    atomic_word_fetch_add(&el1_preempt_switches, 1);
+    preempt_off (cpu) {
+        el1_switch_pending[cpu].frame_sp = frame_sp;
+    } else { }
+}
+
+// True once, on the return that installs the frame the tick chose.
+fn el1_preempt_switch_take(frame_sp: usize) -> bool {
+    let mut taken: bool = false;
+    preempt_off (cpu) {
+        if (el1_switch_pending[cpu].frame_sp == frame_sp) {
+            el1_switch_pending[cpu].frame_sp = 0;
+            taken = true;
+        }
+    } else { }
+    return taken;
+}

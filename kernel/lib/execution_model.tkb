@@ -16,6 +16,7 @@
 //      out, in kernel_process_syscall_return_schedule. The line that does
 //      it is kernel_tick's El1 branch (the frame's level, #992). So a syscall
 //      handler runs to completion. This is Linux's CONFIG_PREEMPT_NONE.
+//      (One test spin is the exception: kernel/kernel/el1_preempt_scenario.tkb.)
 //
 //   3. INTERRUPT HANDLERS ENTER NO LOCKED SUBSYSTEM. Device handlers
 //      publish and return: virtio_net_irq_handler sets two flags and calls

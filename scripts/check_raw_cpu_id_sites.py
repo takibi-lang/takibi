@@ -51,7 +51,7 @@ LISTED = {
     "kernel/kernel/log_storm_evidence.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/nic_irq_affinity.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/pool_lock_wait.tkb": (1, FLIP, "not yet reviewed for migration"),
-    "kernel/kernel/process.tkb": (40, FLIP, "not yet reviewed for migration"),
+    "kernel/kernel/process.tkb": (43, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/profile_samples.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/profile_session.tkb": (4, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/profile_timeline.tkb": (1, FLIP, "not yet reviewed for migration"),

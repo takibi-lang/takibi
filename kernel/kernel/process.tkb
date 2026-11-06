@@ -10,6 +10,7 @@ use "kernel/lib/pool_lock.tkb";
 use "kernel/kernel/process_test_evidence.tkb";
 use "kernel/kernel/process_wait.tkb";
 use "kernel/kernel/protocol_trace.tkb";
+use "kernel/kernel/el1_preempt_scenario.tkb";
 // A process slot remains the temporary address-space key, but process.tkb
 // owns no table details. scheduled_process_alloc/reap are the lifecycle
 // choke points for kernel/mm/address_space.tkb's backing-page and ASID
@@ -2004,6 +2005,13 @@ fn kernel_process_protocol_trace_close() -> usize {
     protocol_trace_close();
     process_run_unlock(guard);
     protocol_trace_report();
+    // #638 stage 8: the switches themselves, which the trace's labels cannot
+    // tell from a syscall return's (the replay accepts either as PreemptEL1).
+    if (el1_preempt_switches_read() == 2 && el1_preempt_irq_return_resumes_read() >= 1) {
+        kernel_boot_log("scheduler: el1 preempt: 2 real switches, resumed through the el0 irq return and taken on another cpu\n");
+    } else {
+        kernel_boot_log("scheduler: el1 preempt: failed\n");
+    }
     return 1;
 }
 
@@ -5435,6 +5443,12 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
         }
         LeveledFrame::El1(frame) => {
             kernel_process_stack_switch_take(frame);
+            // No priority-mask reset here (maintainer, 2026-11-05, #638): the
+            // switch at IRQ return comes after irq_nest_close, so the frame
+            // was frozen unmasked, and a path that chose it under a mask of
+            // its own is a defect to report, not to paper over. The stage 8
+            // scenario checks the shadow after its take; the flip asserts it
+            // on every El1 resume; the typed form is #850.
         }
     }
 }
@@ -8712,6 +8726,107 @@ private fn kernel_process_tick_leave_excluded(
     kernel_process_spread_timer_left(guard, outgoing);
     process_run_unlock(guard);
     return true;
+}
+
+// GitHub issue #638 stage 8: whether this tick, taken at EL1, may switch away
+// from the frame. Only inside the scenario's window, and then only with the
+// count at zero: the consult is what the flip keeps.
+fn kernel_process_el1_preempt_consult(
+        frame: borrow FrameRef[process, ExceptionLevel::El1]) -> bool !{interrupt, unsafe} {
+    if (execution_state[execution_cpu_index()].scheduler_enabled == false) {
+        return false;
+    }
+    let ProcessCurrentRead::Running(current_task) = kernel_process_current_read() else {
+        ProcessCurrentRead::Idle => { return false; }
+    };
+    let pid: usize = scheduled_process_pid_of_handle(current_task);
+    if (el1_preempt_window_admits(pid, frame_elr_el1(frame)) == false) {
+        return false;
+    }
+    if (preempt_count_zero_at(frame_ref_address(frame)) == false) {
+        el1_preempt_count_refused();
+        return false;
+    }
+    execution_state[execution_cpu_index()].reschedule_pending = false;
+    return true;
+}
+
+const EL1_PREEMPT_SPIN_ROUNDS: usize = 100000;
+
+// Spin in the window until a switch has come and gone, or four seconds pass.
+// False when a register did not survive, or nothing happened in time.
+private fn el1_preempt_spin_until_switch(from: usize) -> bool !{unsafe} {
+    let start: i64 = read_cntpct();
+    let deadline: i64 = read_cntfrq() * 4;
+    while (el1_preempt_switches_read() == from) {
+        if (el1_preempt_spin(EL1_PREEMPT_SPIN_ROUNDS) != 1) { return false; }
+        if (read_cntpct() - start >= deadline) { return false; }
+    }
+    return true;
+}
+
+private fn el1_preempt_spin_until_refused(from: usize) -> bool !{unsafe} {
+    let start: i64 = read_cntpct();
+    let deadline: i64 = read_cntfrq() * 4;
+    while (el1_preempt_count_refusals_read() == from) {
+        if (el1_preempt_spin(EL1_PREEMPT_SPIN_ROUNDS) != 1) { return false; }
+        if (read_cntpct() - start >= deadline) { return false; }
+    }
+    return true;
+}
+
+// The syscall /bin/protocol-trace makes with a child pinned to this CPU and
+// spinning at EL0, so the tick has a successor, and that successor's own tick
+// is an EL0 one. Returns 1, or the number of the step that failed:
+// 2. with a span open the consult refuses and no switch happens;
+// 3. a real switch saves an El1 frame, and el0_irq_entry's return resumes it
+//    here on this CPU with its registers;
+// 4. a second one, with the mask now naming only `target`, is taken there,
+//    with this CPU's ordinary IRQs open.
+fn kernel_process_el1_preempt_scenario(target: usize) -> usize !{unsafe} {
+    if (protocol_trace_is_active() == false || target >= KERNEL_MAX_CORES) {
+        return 0xFFFFFFFFFFFFFFFF;
+    }
+    let ProcessCurrentRead::Running(current_task) = kernel_process_current_read() else {
+        ProcessCurrentRead::Idle => { return 0xFFFFFFFFFFFFFFFF; }
+    };
+    let pid: usize = scheduled_process_pid_of_handle(current_task);
+    let home: usize = cpu_id();
+    if (target == home) { return 0xFFFFFFFFFFFFFFFE; }
+
+    let switches_before: usize = el1_preempt_switches_read();
+    let refusals: usize = el1_preempt_count_refusals_read();
+    el1_preempt_window_open(pid);
+    let span = preempt_span_begin();
+    let refused: bool = el1_preempt_spin_until_refused(refusals);
+    el1_preempt_window_close();
+    preempt_span_end(span);
+    if (refused == false || el1_preempt_switches_read() != switches_before) {
+        return 2;
+    }
+
+    let resumes: usize = el1_preempt_irq_return_resumes_read();
+    el1_preempt_window_open(pid);
+    let first: bool = el1_preempt_spin_until_switch(switches_before);
+    el1_preempt_window_close();
+    if (first == false || cpu_id() != home ||
+        el1_preempt_irq_return_resumes_read() == resumes) {
+        return 3;
+    }
+
+    match kernel_process_affinity_set(pid, 1 << target) {
+        ProcessAffinityResult::Mask(mask) => {}
+        ProcessAffinityResult::Invalid => { return 4; }
+        ProcessAffinityResult::Missing => { return 4; }
+    }
+    let switches_taken: usize = el1_preempt_switches_read();
+    el1_preempt_window_open(pid);
+    let second: bool = el1_preempt_spin_until_switch(switches_taken);
+    el1_preempt_window_close();
+    if (second == false || cpu_id() != target || irq_pmr_masked_here()) {
+        return 4;
+    }
+    return 1;
 }
 
 fn kernel_process_syscall_return_schedule(current: borrow FrameRef[process, level])

@@ -398,6 +398,15 @@ WINDOWS["1194-no-pan"] = {
               "const KERNEL_PROCESS_PROBE_SPSR_EL1H: usize = 0x3C5;"),
 }
 
+# #638 stage 8's negative control: the IRQ return ignores the preempt count, so
+# a tick switches away from a span. The count must stop that being silent.
+WINDOWS["638-no-consult"] = {
+    "spin": None,
+    "check": ("kernel/process.tkb",
+              "    if (preempt_count_zero_at(frame_ref_address(frame)) == false) {\n        el1_preempt_count_refused();",
+              "    if (preempt_count_zero_at(frame_ref_address(frame)) == false && false) {\n        el1_preempt_count_refused();"),
+}
+
 WINDOWS["1211"] = {
     "spin": None,
     "prepare": [

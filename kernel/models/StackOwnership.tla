@@ -408,8 +408,8 @@ InterruptDepart(c) ==
 \* this core keeps owning it and still stands on it, and SwitchComplete
 \* releases it at the exception return into the successor. Unlike
 \* InterruptDepart the EL1 entry does not release the stack. No EL1 frame
-\* is produced until the route's stage 8 (KERNEL_PREEMPTIBLE stays 0);
-\* the action is the design the kernel's El1 frame type is built for.
+\* is produced outside the stage 8 window (KERNEL_PREEMPTIBLE stays 0);
+\* /bin/protocol-trace produces it, and the trace replay accepts those steps.
 \* #1323: Settled is what the kernel's PreemptOff spans give the tick: every
 \* window where current and the stack disagree holds the count. Here the guard
 \* cannot be dropped to a violation, since a reservation only exists settled;

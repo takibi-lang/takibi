@@ -758,7 +758,10 @@ def check_exception_stacks_are_per_core(insns):
 # so compiler tests can prove its lowering while still letting a kernel caller
 # accidentally omit the key. Check the linked image, which is the contract the
 # CPU actually executes.
-STACK_SWITCH_FUNCTIONS = ("el0_irq_entry", "el0_context_resume")
+# GitHub issue #638 stage 8: a tick at EL1 may switch too, so its entry has the
+# same boundary, through a hook whose body runs only when the tick switched.
+STACK_SWITCH_FUNCTIONS = ("el0_irq_entry", "el0_context_resume",
+                          "el1_current_irq_entry")
 STACK_SWITCH_HOOK = "kernel_process_stack_switch_complete"
 # GitHub issue #846: the interrupt return calls a wrapper that runs the
 # hook first and then the TCP retransmit pass; the syscall return calls
@@ -769,6 +772,7 @@ RETRANSMIT_PASS = "kernel_net_retransmit_pass"
 STACK_SWITCH_CALLS = {
     "el0_irq_entry": IRQ_RETURN_HOOK,
     "el0_context_resume": STACK_SWITCH_HOOK,
+    "el1_current_irq_entry": "kernel_irq_el1_return_complete",
 }
 
 

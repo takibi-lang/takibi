@@ -159,6 +159,16 @@ fn irq_nest_close(interrupted: usize) !{restores_saved_irq} {
     } else { }
 }
 
+// Whether this core's priority mask holds ordinary IRQs. Not DAIF: a read of it
+// is a save to the compiler's mask rule (#809).
+fn irq_pmr_masked_here() -> bool {
+    let mut masked: bool = false;
+    preempt_off (cpu) {
+        masked = irq_pmr[cpu].masked != 0;
+    } else { }
+    return masked;
+}
+
 // Every return to EL0, with DAIF.I set: EL0 runs unmasked, whatever the
 // kernel path before it left in the priority mask.
 fn irq_mask_reset_el0() {

@@ -26,3 +26,5 @@ kernel/tests/rpi5/gem_tx/fixture.tkb	gem_fixture_reply	1	protocol	physical-only 
 kernel/tests/rpi5/gem_tx/irq_fixture.tkb	gem_probe_peer	1	protocol	physical-only IRQ fixture waits for a real host RX handshake (10 s); not run under QEMU
 kernel/drivers/net/virtio_net_tx_wait.tkb	virtio_net_tx_wait	1	backstop	elapsed completion backstop follows current virtio-blk policy; expiry disables queues without reusing TX or in-place RX bytes; native tests use a deterministic clock
 kernel/kernel/uart_irq_affinity.tkb	uart_irq_hang_poll	1	pending	DDB lane hung-core spin (8 s, #830): the second BREAK must arrive while the armed core is still masked, which a starved host can miss
+kernel/kernel/process.tkb	el1_preempt_spin_until_switch	1	backstop	the EL1 preemption scenario (#638 stage 8): 4 s for a tick that comes every millisecond, it only tells a dead consult from a slow one
+kernel/kernel/process.tkb	el1_preempt_spin_until_refused	1	backstop	the same scenario waiting for a refused tick

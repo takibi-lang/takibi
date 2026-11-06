@@ -107,6 +107,9 @@ REQUIRED = (("CloneBegin",), ("CloneFinish",), ("SwitchComplete",),
             ("Reserve",), ("Commit",), ("ChildExit", "ChildExitStart"),
             ("IdleEnter",), ("Wait4Reap",), ("LeaveBegin",),
             ("LeaveComplete",))
+# PreemptEL1 is not required: a syscall return's switch is the same step to the
+# model, so TLC's label cannot witness a real EL1 switch. The kernel's own count
+# does (process_lifecycle's "scheduler: el1 preempt" line, #638 stage 8).
 
 NONE = "none"
 IDLE = "idle"

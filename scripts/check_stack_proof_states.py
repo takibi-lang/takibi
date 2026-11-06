@@ -83,6 +83,9 @@ FRAME_USIZE_SEAMS = {
     # el0_irq_entry's after_switch, which hands frame_sp straight to
     # kernel_process_stack_switch_complete (GitHub issue #846).
     "kernel_irq_return_complete",
+    "kernel_irq_el1_return_complete",
+    # Its address compared, never dereferenced: which return owes the hook.
+    "el1_preempt_switch_note", "el1_preempt_switch_take",
     "kernel_stack_guard_check", "kernel_stack_guard_check_interrupt",
     "kernel_stack_guard_inspect", "maybe_frame_from_entry",
     "frame_ref_from_entry", "frame_ref_from_saved",

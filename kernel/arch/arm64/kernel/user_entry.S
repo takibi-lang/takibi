@@ -324,6 +324,109 @@ el1_resume_probe_landing:
     ret
     .size el1_resume_probe_landing, . - el1_resume_probe_landing
 
+// GitHub issue #638 stage 8: the code a real EL1 preemption interrupts.
+// el1_preempt_spin(rounds) -> 1 when every register it filled still holds its
+// pattern after `rounds` turns of the loop, 0 otherwise. A tick may switch only
+// with its PC between the begin and end labels
+// (kernel/kernel/el1_preempt_scenario.tkb), so the frame it saves is this
+// function's, on the syscall's stack, and the check is what the eret that
+// resumes it restored, on whichever CPU took it. Caller-saved registers are
+// used on purpose: only a frame brings those back. Assembly stays a leaf.
+    .global el1_preempt_spin
+    .type el1_preempt_spin, %function
+el1_preempt_spin:
+    sub     sp, sp, #48
+    stp     x19, x20, [sp, #0]
+    stp     d8, d9, [sp, #16]
+    mov     x19, sp
+    movz    x9, #0x638
+    add     x10, x9, #1
+    add     x11, x9, #2
+    add     x12, x9, #3
+    add     x13, x9, #4
+    add     x14, x9, #5
+    add     x15, x9, #6
+    add     x16, x9, #7
+    add     x17, x9, #8
+    add     x20, x9, #9
+    fmov    d8, x9
+    fmov    d9, x10
+    fmov    d0, x11
+    fmov    d31, x12
+el1_preempt_spin_begin:
+    subs    x0, x0, #1
+    b.ne    el1_preempt_spin_begin
+el1_preempt_spin_end:
+    mov     x0, #0
+    mov     x2, sp
+    cmp     x19, x2
+    b.ne    .Lel1_preempt_spin_done
+    movz    x1, #0x638
+    cmp     x9, x1
+    b.ne    .Lel1_preempt_spin_done
+    add     x1, x1, #1
+    cmp     x10, x1
+    b.ne    .Lel1_preempt_spin_done
+    add     x1, x1, #1
+    cmp     x11, x1
+    b.ne    .Lel1_preempt_spin_done
+    add     x1, x1, #1
+    cmp     x12, x1
+    b.ne    .Lel1_preempt_spin_done
+    add     x1, x1, #1
+    cmp     x13, x1
+    b.ne    .Lel1_preempt_spin_done
+    add     x1, x1, #1
+    cmp     x14, x1
+    b.ne    .Lel1_preempt_spin_done
+    add     x1, x1, #1
+    cmp     x15, x1
+    b.ne    .Lel1_preempt_spin_done
+    add     x1, x1, #1
+    cmp     x16, x1
+    b.ne    .Lel1_preempt_spin_done
+    add     x1, x1, #1
+    cmp     x17, x1
+    b.ne    .Lel1_preempt_spin_done
+    add     x1, x1, #1
+    cmp     x20, x1
+    b.ne    .Lel1_preempt_spin_done
+    fmov    x1, d8
+    cmp     x1, x9
+    b.ne    .Lel1_preempt_spin_done
+    fmov    x1, d9
+    cmp     x1, x10
+    b.ne    .Lel1_preempt_spin_done
+    fmov    x1, d0
+    cmp     x1, x11
+    b.ne    .Lel1_preempt_spin_done
+    fmov    x1, d31
+    cmp     x1, x12
+    b.ne    .Lel1_preempt_spin_done
+    mov     x0, #1
+.Lel1_preempt_spin_done:
+    ldp     x19, x20, [sp, #0]
+    ldp     d8, d9, [sp, #16]
+    add     sp, sp, #48
+    ret
+    .size el1_preempt_spin, . - el1_preempt_spin
+
+    .global el1_preempt_spin_begin_address
+    .type el1_preempt_spin_begin_address, %function
+el1_preempt_spin_begin_address:
+    adrp    x0, el1_preempt_spin_begin
+    add     x0, x0, :lo12:el1_preempt_spin_begin
+    ret
+    .size el1_preempt_spin_begin_address, . - el1_preempt_spin_begin_address
+
+    .global el1_preempt_spin_end_address
+    .type el1_preempt_spin_end_address, %function
+el1_preempt_spin_end_address:
+    adrp    x0, el1_preempt_spin_end
+    add     x0, x0, :lo12:el1_preempt_spin_end
+    ret
+    .size el1_preempt_spin_end_address, . - el1_preempt_spin_end_address
+
     .global el1_resume_probe_landing_address
     .type el1_resume_probe_landing_address, %function
 el1_resume_probe_landing_address:
@@ -368,6 +471,17 @@ preempt_count_add:
     mov     x0, x2
     ret
     .size preempt_count_add, . - preempt_count_add
+
+/* GitHub issue #638 stage 8: preempt_count_at(sp) -> the count of the stack
+ * `sp` names, the same word preempt_count_add reaches from SP. The IRQ-return
+ * consult reads the interrupted frame's stack through it. */
+    .global preempt_count_at
+    .type preempt_count_at, %function
+preempt_count_at:
+    orr     x0, x0, #0x7fff
+    ldur    x0, [x0, #-15]
+    ret
+    .size preempt_count_at, . - preempt_count_at
 
     .global preempt_count_reset
     .type preempt_count_reset, %function

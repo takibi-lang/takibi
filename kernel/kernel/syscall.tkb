@@ -6861,9 +6861,12 @@ fn kernel_irq_return_complete(frame_sp: usize) !{unsafe} {
     kernel_process_stack_switch_complete(frame_sp);
     // GitHub issue #992: only a return to EL0 runs the pass; an El1 frame
     // resumes a kernel path that was preempted, which may hold what the pass
-    // would take, and keeps the priority mask it had.
+    // would take.
     match frame_ref_from_entry(frame_sp, kernel_process_entry_generation()) {
-        LeveledFrame::El1(kernel_frame) => { return; }
+        LeveledFrame::El1(kernel_frame) => {
+            el1_preempt_irq_return_resume_note();
+            return;
+        }
         LeveledFrame::El0(user_frame) => {}
     }
     if (tcp_retx_pass_due() == false) { return; }
@@ -6874,6 +6877,16 @@ fn kernel_irq_return_complete(frame_sp: usize) !{unsafe} {
     // whatever the pass left in it (its locks save and restore it, so this
     // is the hook's own reset again, not a repair).
     irq_mask_reset_el0();
+}
+
+// GitHub issue #638 stage 8: el1_current_irq_entry's after_switch. It runs on
+// every EL1 interrupt return, where the interrupted path goes on holding what it
+// held (a count, the stack), so it does nothing unless this entry's tick
+// switched. Then it is a switch like any other: the outgoing stack is released
+// here, and the incoming frame gets what el0_irq_entry's return gives it.
+fn kernel_irq_el1_return_complete(frame_sp: usize) !{unsafe} {
+    if (el1_preempt_switch_take(frame_sp) == false) { return; }
+    kernel_irq_return_complete(frame_sp);
 }
 
 // GitHub issue #949: end the current process from the return hook. Once
@@ -8107,6 +8120,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         }
         if (x0 == 17) {
             return syscall_finish_current(frame, SyscallAction::Resume(kernel_process_protocol_trace_close()), current_authority);
+        }
+        // /bin/protocol-trace's real EL1 preemption (#638 stage 8): x1 is the
+        // CPU the last phase must be taken on.
+        if (x0 == 25) {
+            return syscall_finish_current(frame, SyscallAction::Resume(
+                kernel_process_el1_preempt_scenario(x1)), current_authority);
         }
         // /bin/protocol-trace's log-ring window (GitHub issue #656).
         if (x0 == 22) {
@@ -9741,7 +9760,8 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
 // gate: kernel_syscall_dispatch_action answers syscall_peer_safe for the CPU
 // it asked on, and a core-only handler relies on staying there until it
 // returns, because the switch is deferred to
-// kernel_process_syscall_return_schedule.
+// kernel_process_syscall_return_schedule. The stage 8 window does not disturb
+// that: its one syscall is peer-safe.
 fn syscall_execution_model_assumption() {
     static_assert(KERNEL_PREEMPTIBLE == 0,
                   "the syscall placement gate answers for the CPU it asked on; a core-0-only handler preempted and moved would run on a peer");

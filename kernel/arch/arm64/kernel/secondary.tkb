@@ -350,7 +350,8 @@ fn kernel_idle_tick_reenter() {
 // the way out of the syscall and a handler always runs to completion. That
 // is KERNEL_PREEMPTIBLE == 0 in kernel/lib/execution_model.tkb, and the
 // files that depend on it assert it. Changing this line means changing that
-// constant, whose assertions then name every site.
+// constant, whose assertions then name every site. The one exception is the
+// window of kernel/kernel/el1_preempt_scenario.tkb (#638 stage 8).
 fn kernel_tick(frame: sink FrameRef[process, level])
         -> TimerSwitch !{interrupt, unsafe} {
     // GitHub issue #774: the timer was rearmed by the platform's
@@ -365,6 +366,19 @@ fn kernel_tick(frame: sink FrameRef[process, level])
         }
         LeveledFrame::El1(kernel_frame) => {
             kernel_process_tick_charge(false);
+            // GitHub issue #638 stage 8: the IRQ-return consult.
+            if (kernel_process_el1_preempt_consult(kernel_frame)) {
+                match kernel_process_schedule(kernel_frame) {
+                    FrameSwitch::Stay => {}
+                    FrameSwitch::Switch(switched) => {
+                        let (next, span) = switched;
+                        el1_preempt_switch_note(frame_ref_address(next));
+                        // Its span ends at this entry's after_switch.
+                        preempt_span_resume(span);
+                        return TimerSwitch::Resume(next);
+                    }
+                }
+            }
             kernel_process_request_reschedule();
             return TimerSwitch::Resume(kernel_frame);
         }

@@ -31,6 +31,9 @@ const CLONE_FORK_SIGCHLD: usize = 0x11;
 const PROTOCOL_TRACE_OPEN_TAG: usize = 16;
 const PROTOCOL_TRACE_CLOSE_TAG: usize = 17;
 const LOG_RING_TRACE_TAG: usize = 22;
+const PROTOCOL_TRACE_EL1_PREEMPT_TAG: usize = 25;
+const KILL_SYSCALL: usize = 129;
+const SIGKILL_NUMBER: usize = 9;
 const PROTOCOL_TRACE_ERROR_FLOOR: usize = 0xFFFFFFFFFFFFF000;
 // Every CPU the kernel can have, as an affinity mask.
 const PROTOCOL_TRACE_ANY_CPU: u8 = 0x0F;
@@ -111,6 +114,43 @@ private fn protocol_trace_leave_core0() {
     }
 }
 
+/* GitHub issue #638 stage 8: real EL1 preemptions. This process and a child
+ * that only computes stand on CPU 1; the kernel spins in this process's syscall
+ * until a tick switches to the child, the child's own tick switches back through
+ * the EL0 interrupt return, and then a second switch leaves this process for
+ * CPU 2 to take. The child makes no syscall, so its ticks are EL0 ones whatever
+ * the timing. */
+private fn protocol_trace_el1_preempt() {
+    if (protocol_trace_pin(2) != 0) {
+        protocol_trace_fail(bs"protocol-trace: cpu 1 alone was refused\n");
+    }
+    if (protocol_trace_reach(1) == false) {
+        protocol_trace_fail(bs"protocol-trace: never reached cpu 1\n");
+    }
+    let child: usize = svc5(CLONE_SYSCALL, CLONE_FORK_SIGCHLD, 0, 0, 0, 0);
+    if (child == 0) {
+        while (true) { }
+    }
+    if (child >= PROTOCOL_TRACE_ERROR_FLOOR) {
+        protocol_trace_fail(bs"protocol-trace: fork failed\n");
+    }
+    let result: usize = svc5(WORKLOAD_PROGRESS_SYSCALL, PROTOCOL_TRACE_EL1_PREEMPT_TAG,
+                             2, 0, 0, 0);
+    if (result == 2) {
+        protocol_trace_fail(bs"protocol-trace: el1 preempt: a raised count did not refuse the switch\n");
+    } else if (result == 3) {
+        protocol_trace_fail(bs"protocol-trace: el1 preempt: no resume through the EL0 interrupt return\n");
+    } else if (result == 4) {
+        protocol_trace_fail(bs"protocol-trace: el1 preempt: no take on another CPU\n");
+    } else if (result != 1) {
+        protocol_trace_fail(bs"protocol-trace: el1 preempt: refused\n");
+    }
+    svc5(KILL_SYSCALL, child, SIGKILL_NUMBER, 0, 0, 0);
+    if (svc5(WAIT4_SYSCALL, child, 0, 0, 0, 0) != child) {
+        protocol_trace_fail(bs"protocol-trace: el1 preempt: wait4 did not reap the child\n");
+    }
+}
+
 fn protocol_trace_probe() {
     let mut opened: bool = false;
     // GitHub issue #665: yield once whether or not the window is deferred.
@@ -135,6 +175,7 @@ fn protocol_trace_probe() {
     protocol_trace_lifecycle(PROTOCOL_TRACE_ANY_CPU);
     protocol_trace_leave_core0();
     protocol_trace_lifecycle(1);
+    protocol_trace_el1_preempt();
     // Close from CPU 0: the report is thousands of lines, and a peer's log
     // lines go through a bounded ring that would overwrite them.
     if (protocol_trace_pin(1) != 0) {

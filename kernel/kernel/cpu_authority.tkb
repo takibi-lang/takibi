@@ -48,15 +48,16 @@
 //   No public function mints one (scripts/check_cpu_authority_mints.py);
 //   the boot probe's any-CPU mint went with the exec argv slot (#1080).
 //
-// Current limitations (2026-11-05):
-// - The count is not yet consulted by any switch: KERNEL_PREEMPTIBLE is 0,
-//   and the EL1 IRQ return never switches (#638 stage 8).
+// Current limitations (2026-11-06):
+// - KERNEL_PREEMPTIBLE is 0. The EL1 IRQ return consults the count
+//   (preempt_count_zero_at, on the interrupted frame's stack) only inside the
+//   window of kernel/kernel/el1_preempt_scenario.tkb (#638 stage 8); outside
+//   it no EL1 frame is switched away.
 // - preempt_count_after_switch resets the stack it lands on and asserts
 //   nothing: a stack keeps the count it had when it was left, so the check
 //   that at most one span reached a resume no longer reads the right word.
 //   An El1 resume checks its own stack's count is zero first
-//   (preempt_count_el1_resume_check). The IRQ-return consult, which reads the
-//   interrupted stack's count, comes with the stage 8 window that calls it.
+//   (preempt_count_el1_resume_check).
 
 use "kernel/lib/execution_model.tkb";
 use "kernel/arch/arm64/kernel/cpu_stop_extern.tkb";
@@ -198,6 +199,14 @@ fn preempt_count_el1_resume_check() {
 // This stack's preempt count.
 private fn preempt_count_here() -> usize {
     return preempt_count_add(0);
+}
+
+// GitHub issue #638 stage 8: the IRQ-return consult. A tick may switch away
+// from the frame it interrupted only when the stack that frame stands on has
+// no region and no span open. Masked, in the handler, so the answer cannot
+// move under it.
+fn preempt_count_zero_at(frame_sp: usize) -> bool !{interrupt} {
+    return preempt_count_at(frame_sp) == 0;
 }
 
 // A blocking point's runtime check: nothing may block inside a region.
