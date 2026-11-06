@@ -254,7 +254,7 @@ def drive(driver, uart, workdir, *, timeout, qmp_port=None,
     saved_capture = capture_kernel_console.capture
     if console_snapshots is not None:
         argv += ["--console-elf", "fixture.elf", "--console-log", str(workdir / "console-state.log")]
-        def capture(port, elf, log, phase):
+        def capture(port, elf, log, phase, gdb_endpoint=None):
             console_snapshots.append(phase)
             if console_failure:
                 raise OSError("fixture: artifact directory is unwritable")
