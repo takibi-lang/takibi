@@ -6,6 +6,13 @@ rollback or commit. It cannot prove the arithmetic inside the small trusted
 implementation boundary: success must advance through the installed fd,
 failure must preserve the previous prefix, and rollback must use that prefix.
 This check pins those concrete relationships from issue #297.
+
+GitHub issue #1350 slice 4: the rollback no longer closes below the prefix
+inside the clone window. unified_fd_clone_detach takes the child's whole
+descriptor-block chain into the undo and clears it from the child, and the
+caller releases the chain after its PreemptOff span. The whole chain is the
+installed prefix only because the clone refuses a child that already has an
+open descriptor before it begins, so that refusal is pinned too.
 """
 
 from pathlib import Path
@@ -52,8 +59,9 @@ def check(text: str) -> tuple[list[str], int]:
     text = code_only(text)
     begin = compact(function(text, "unified_fd_clone_begin"))
     install = compact(function(text, "unified_fd_clone_install"))
-    rollback = compact(function(text, "unified_fd_clone_rollback"))
-    scanned = sum(len(part.split()) for part in (begin, install, rollback))
+    rollback = compact(function(text, "unified_fd_clone_detach"))
+    run = compact(function(text, "unified_fd_clone_run"))
+    scanned = sum(len(part.split()) for part in (begin, install, rollback, run))
 
     if not begin:
         failures.append("unified_fd_clone_begin is missing or unreadable")
@@ -86,10 +94,29 @@ def check(text: str) -> tuple[list[str], int]:
                     f"{result} install failure does not preserve the prefix")
 
     if not rollback:
-        failures.append("unified_fd_clone_rollback is missing or unreadable")
-    elif ("unified_fd_clone_rollback_prefix(transaction.child_value, "
-          "transaction.limit);" not in rollback):
-        failures.append("rollback does not use the transaction child and prefix")
+        failures.append("unified_fd_clone_detach is missing or unreadable")
+    else:
+        for fragment in (
+                "UnifiedFdCloneUndo[child] = { child_ctx.block_head, "
+                "child_ctx.block_head_generation, installs };",
+                "child_ctx.block_head = 0;",
+                "child_ctx.block_head_generation = 0;"):
+            if fragment not in rollback:
+                failures.append(
+                    "rollback does not take and clear the child's whole chain")
+                break
+
+    if not run:
+        failures.append("unified_fd_clone_run is missing or unreadable")
+    else:
+        empty = ("match unified_fd_next_open(child, 0) { "
+                 "UnifiedFdScanResult::Found(taken) => {")
+        at = run.find(empty)
+        begin_at = run.find("unified_fd_clone_begin(child)")
+        if (at < 0 or begin_at < at or
+                "UnifiedFdCloneRunResult::Invalid" not in run[at:at + 250]):
+            failures.append(
+                "clone does not refuse a child with an open descriptor first")
 
     return failures, scanned
 
@@ -108,7 +135,7 @@ def main() -> int:
     report_pass(
         "fd-clone-transaction",
         "begin is empty, success advances through fd, failures preserve the "
-        "prefix, and rollback consumes that prefix",
+        "prefix, the child starts empty, and rollback takes its whole chain",
         tokens_scanned=scanned,
     )
     return 0

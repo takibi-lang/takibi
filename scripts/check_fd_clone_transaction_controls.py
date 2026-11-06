@@ -64,11 +64,18 @@ def main() -> int:
         "Invalid install failure",
     )
     failures += case(
-        "rollback uses wrong bound",
+        "rollback leaves the chain on the child",
+        replace_once(source, "    child_ctx.block_head = 0;\n", ""),
+        "whole chain",
+    )
+    failures += case(
+        "clone accepts a child with descriptors",
         replace_once(source,
-                     "transaction.child_value,\n                                     transaction.limit",
-                     "transaction.child_value,\n                                     transaction.child_value"),
-        "transaction child and prefix",
+                     "        UnifiedFdScanResult::Found(taken) => {\n"
+                     "            { let __child_ctx_result: UnifiedFdCloneRunResult = UnifiedFdCloneRunResult::Invalid;",
+                     "        UnifiedFdScanResult::Found(taken) => {\n"
+                     "            { let __child_ctx_result: UnifiedFdCloneRunResult = UnifiedFdCloneRunResult::Ok;"),
+        "open descriptor first",
     )
     failures += case(
         "install function renamed",
@@ -84,7 +91,8 @@ def main() -> int:
     report_pass(
         "fd-clone-transaction controls",
         f"{CASES.ran} cases -- the current boundary passes; nonempty begin, "
-        "off-by-one success, advancing failure, wrong rollback bound, and "
+        "off-by-one success, advancing failure, a rollback leaving the chain, "
+        "a nonempty child accepted, and "
         "renamed install are refused",
         cases=CASES.ran,
     )
