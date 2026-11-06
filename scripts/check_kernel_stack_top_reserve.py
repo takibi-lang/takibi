@@ -152,8 +152,7 @@ def self_test(files):
          ":lo12:irq_stack_top\n    nop"),
         (ENTRIES[1], "    str     xzr, [x0]\n", ""),
         (SECONDARY, "preempt_count_after_switch();", ""),
-        (EXCEPTION_FRAME, "    dispatch_stack: irq_stack_top;\n}\n\n// Current-EL",
-         "}\n\n// Current-EL"),
+        (EXCEPTION_FRAME, "dispatch_stack: irq_stack_top;", ""),
         (CODEGEN, IRQ_RESET, IRQ_RESET.replace("\\tstr\\txzr, [x1]\\n", "")),
     ]
     refused = 0
