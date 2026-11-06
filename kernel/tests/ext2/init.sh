@@ -115,15 +115,23 @@ if [ -e /lib/ext2-eq.enable ]; then
     # lands.
     g=nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
     /bin/mkdir /grow 2>/dev/null
+    # GitHub issue #1405: each of these 98 execs maps busybox from ext2
+    # block by block (no page cache), about 0.35 s apiece on a quiet host and
+    # over 1 s on a loaded one; the loops once ran 71 s silent and the UART
+    # driver's no-progress watchdog broke into DDB with pid 321 still in
+    # execve's image load. A line every 16 operations keeps each silent
+    # stretch near 20 s even then.
     i=10
     while [ "$i" -lt 59 ]; do
         /bin/mkdir "/grow/$g$i" 2>/dev/null
         i=$((i + 1))
+        [ $((i % 16)) -eq 0 ] && echo "ext2-eq: /grow mkdir $i"
     done
     i=10
     while [ "$i" -lt 59 ]; do
         /bin/rmdir "/grow/$g$i" 2>/dev/null
         i=$((i + 1))
+        [ $((i % 16)) -eq 0 ] && echo "ext2-eq: /grow rmdir $i"
     done
     echo "ext2-eq: /grow ran"
 fi
