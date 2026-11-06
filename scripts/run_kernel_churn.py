@@ -62,6 +62,10 @@ VERDICT = re.compile(rb"\n" + re.escape(VERDICT_PREFIX) +
 HOST_NOTICE = re.compile(rb"\[kernel/[a-z0-9]+\][^\n]*\n")
 FAILURE_MARKERS = (b"oops: ", b"sched: STARVED", b"ddb> ")
 BOOT_TIMEOUT_SECONDS = {"qemu": 90, "rpi5": 120}
+# scripts/run_kernel_shell_qemu.sh prints this once the build is done and
+# before it starts QEMU; readiness is timed from it (#1401).
+LAUNCH_NOTICE = b"[kernel/qemu] interactive UART session"
+PRELAUNCH_TIMEOUT_SECONDS = 1200
 # Measured on QEMU: 100 rounds of a similar loop took 40 s. The deadline is
 # per round so a longer run is not a different verdict.
 SECONDS_PER_ROUND = 2.0
@@ -525,10 +529,25 @@ def main():
     failure = None
     readings = []
     try:
-        ready = session.wait_for(
+        # The make child first holds the kernel build lock, which another
+        # lane's make may own for minutes under allcheck; that wait is not
+        # boot time (#1401: race-window 633's reverted run failed "the
+        # shell never became ready" with the make still at "WAIT kernel
+        # build"). Readiness is timed from the runner's launch notice, which
+        # it prints after the build and before QEMU (#719 took the lease
+        # out of the same deadline). The prelaunch bound only catches a
+        # make that never gets there.
+        if args.platform == "qemu":
+            launched = session.wait_for(
+                lambda n: LAUNCH_NOTICE in bytes(session.transcript) or None,
+                PRELAUNCH_TIMEOUT_SECONDS, await_name="build and launch")
+            if launched is None:
+                failure = (timed_out_waiting(session.transcript) or
+                           "the shell runner never launched QEMU")
+        ready = None if failure is not None else session.wait_for(
             lambda n: any(marker in n for marker in READY_MARKERS),
             BOOT_TIMEOUT_SECONDS[args.platform], await_name="shell readiness")
-        if ready is None:
+        if ready is None and failure is None:
             failure = (timed_out_waiting(session.transcript) or
                        "the shell never became ready")
         if failure is None and session.gdb is not None:
