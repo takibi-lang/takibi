@@ -1872,24 +1872,53 @@ let check_expected_type_value loc (e : Ast.expr) (target : ty) =
    when its division is inferred (a literal inside an argument that is later
    unified with a refined parameter) has no Value_facts base yet.  Such
    divisors are retried once at the end of the enclosing function, after
-   unification has resolved the type, like the overflow audit sites. *)
-let pending_divisor_proofs : (ty * Ast.expr) list ref = ref []
+   unification has resolved the type, like the overflow audit sites.
+   GitHub issue #793: array-index and refined-cast proofs depend on the
+   type in the same way (a `let k = 3` whose type only a later use fixes), so
+   every unproven site of the three kinds is retried.  A retry runs under
+   the flow facts its site saw -- the binding exclusions and the
+   runtime-bounds key captured when it was recorded -- never the facts in
+   force at the end of the function, which an early return later in the
+   body may have extended; only the type resolution is new. *)
+type pending_value_proof = {
+  pending_exclusions : Value_facts.integer list IntMap.t;
+  pending_bounds_key : string;
+  pending_attempt : unit -> bool;
+}
 
-let record_divisor_nonzero_proof ty (expr : Ast.expr) =
+let pending_value_proofs : pending_value_proof list ref = ref []
+
+let defer_value_proof attempt =
+  pending_value_proofs := {
+    pending_exclusions = !active_binding_exclusions;
+    pending_bounds_key = !active_runtime_bounds_key;
+    pending_attempt = attempt;
+  } :: !pending_value_proofs
+
+(* Returns the number of sites the retry proved. *)
+let retry_pending_value_proofs () =
+  let pending = List.rev !pending_value_proofs in
+  pending_value_proofs := [];
+  let saved_exclusions = !active_binding_exclusions in
+  let saved_key = !active_runtime_bounds_key in
+  Fun.protect ~finally:(fun () ->
+    active_binding_exclusions := saved_exclusions;
+    active_runtime_bounds_key := saved_key)
+    (fun () ->
+      List.fold_left (fun proved site ->
+        active_binding_exclusions := site.pending_exclusions;
+        active_runtime_bounds_key := site.pending_bounds_key;
+        if site.pending_attempt () then proved + 1 else proved) 0 pending)
+
+let try_divisor_nonzero_proof ty (expr : Ast.expr) =
   match value_facts_of_expr ty expr with
   | Some facts when Value_facts.excludes facts Value_facts.zero ->
-      Hashtbl.replace divisor_proven_nonzero_at expr.loc ()
-  | Some _ -> ()
-  | None -> pending_divisor_proofs := (ty, expr) :: !pending_divisor_proofs
+      Hashtbl.replace divisor_proven_nonzero_at expr.loc (); true
+  | _ -> false
 
-let retry_pending_divisor_proofs () =
-  let pending = !pending_divisor_proofs in
-  pending_divisor_proofs := [];
-  List.iter (fun (ty, (expr : Ast.expr)) ->
-    match value_facts_of_expr ty expr with
-    | Some facts when Value_facts.excludes facts Value_facts.zero ->
-        Hashtbl.replace divisor_proven_nonzero_at expr.loc ()
-    | _ -> ()) pending
+let record_divisor_nonzero_proof ty (expr : Ast.expr) =
+  if not (try_divisor_nonzero_proof ty expr) then
+    defer_value_proof (fun () -> try_divisor_nonzero_proof ty expr)
 
 let record_signed_division_overflow_proof loc lhs_facts rhs_facts =
   match lhs_facts with
@@ -1903,19 +1932,30 @@ let record_signed_division_overflow_proof loc lhs_facts rhs_facts =
         Hashtbl.replace signed_division_overflow_proven_safe_at loc ()
   | _ -> ()
 
-let record_array_index_proof size ty (expr : Ast.expr) =
+let try_array_index_proof size ty (expr : Ast.expr) =
   match value_facts_of_expr ty expr with
   | Some facts ->
       let open Value_facts in
       let lower_ok = compare_integer facts.interval.lo zero >= 0 in
       let upper = of_signed_int64 (Int64.of_int size) in
       let upper_ok = compare_integer facts.interval.hi upper < 0 in
-      if lower_ok && upper_ok then
-        Hashtbl.replace array_index_proven_in_bounds_at expr.loc ()
-      else note_range_fact_unavailable expr (while_drop_reason [var_name expr])
-  | None -> ()
+      if lower_ok && upper_ok then begin
+        Hashtbl.replace array_index_proven_in_bounds_at expr.loc ();
+        note_range_fact_unavailable expr None;
+        true
+      end else false
+  | None -> false
 
-let record_refined_cast_proof lo hi source_ty target_base
+let record_array_index_proof size ty (expr : Ast.expr) =
+  if not (try_array_index_proof size ty expr) then begin
+    (match value_facts_of_expr ty expr with
+     | Some _ ->
+         note_range_fact_unavailable expr (while_drop_reason [var_name expr])
+     | None -> ());
+    defer_value_proof (fun () -> try_array_index_proof size ty expr)
+  end
+
+let try_refined_cast_proof lo hi source_ty target_base
     (expr : Ast.expr) cast_loc =
   let facts = match value_facts_of_expr source_ty expr with
     | Some facts -> Some facts
@@ -1929,9 +1969,17 @@ let record_refined_cast_proof lo hi source_ty target_base
       let lower = of_signed_int64 (Int64.of_int lo) in
       let upper = of_signed_int64 (Int64.of_int hi) in
       if compare_integer facts.interval.lo lower >= 0
-         && compare_integer facts.interval.hi upper < 0 then
-        Hashtbl.replace refined_cast_proven_in_bounds_at cast_loc ()
-  | None -> ()
+         && compare_integer facts.interval.hi upper < 0 then begin
+        Hashtbl.replace refined_cast_proven_in_bounds_at cast_loc ();
+        true
+      end else false
+  | None -> false
+
+let record_refined_cast_proof lo hi source_ty target_base
+    (expr : Ast.expr) cast_loc =
+  if not (try_refined_cast_proof lo hi source_ty target_base expr cast_loc)
+  then defer_value_proof (fun () ->
+    try_refined_cast_proof lo hi source_ty target_base expr cast_loc)
 
 let collect_excluded_cond tyenv (cond : Ast.expr) =
   (* #956: the constant folds at the compared variable's base. *)
@@ -8657,7 +8705,7 @@ let infer_func ~key senv eenv fenv genv (fdef : Ast.func) : func_info =
     Hashtbl.reset binding_fact_sources;
     Hashtbl.reset intrinsic_nonzero_at;
     active_overflow_audit_sites := [];
-    pending_divisor_proofs := [];
+    pending_value_proofs := [];
     active_audit_function := fdef.name;
     List.iter2 (fun id ty -> Hashtbl.replace active_binding_types id ty)
       bindings.param_ids param_tys;
@@ -8672,7 +8720,7 @@ let infer_func ~key senv eenv fenv genv (fdef : Ast.func) : func_info =
     in
     check_default_initialization senv fdef;
     check_undetermined_lets fdef raw_locals;
-    retry_pending_divisor_proofs ();
+    ignore (retry_pending_value_proofs ());
     List.iter (fun site ->
       if site.overflow_lhs_facts = None then
         site.overflow_lhs_facts <-
@@ -8862,7 +8910,7 @@ let reset_compilation_state () =
   span_blocking_table := [];
   active_audit_function := "<global>";
   Hashtbl.reset divisor_proven_nonzero_at;
-  pending_divisor_proofs := [];
+  pending_value_proofs := [];
   Hashtbl.reset signed_division_overflow_proven_safe_at;
   Hashtbl.reset array_index_proven_in_bounds_at;
   Hashtbl.reset runtime_slice_index_proven_at;

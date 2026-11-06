@@ -3541,6 +3541,29 @@ let infer_tests = [
       Alcotest.(check bool) "divisor {0..<5} keeps its zero check" true
         (contains_substring ir "divzero_cmp"));
 
+  (* GitHub issue #793: the array-index and refined-cast proofs had #791's
+     dependence on the type at inference time.  `let k = 3` takes u32 only
+     from the later call h(k), so at the index and the cast k's fact had no
+     base and both sites kept a spurious runtime check.  The proof is
+     consumed through an index, as lib/AGENTS.md asks.  The negative
+     controls keep an out-of-range value checked after the retry. *)
+  Alcotest.test_case "index whose binding's type a later use fixes is proved in bounds" `Quick
+    (expect_trap_sites 0
+       "fn h(v: u32) -> u32 { return v; }
+        fn g(a: [u32; 4]) -> u32 { let k = 3; let x = a[k as usize]; return x + h(k); }");
+  Alcotest.test_case "out-of-range index whose binding's type a later use fixes keeps its check" `Quick
+    (expect_trap_sites 1
+       "fn h(v: u32) -> u32 { return v; }
+        fn g(a: [u32; 4]) -> u32 { let k = 4; let x = a[k as usize]; return x + h(k); }");
+  Alcotest.test_case "refined cast whose binding's type a later use fixes is proved" `Quick
+    (expect_trap_sites 0
+       "fn h(v: u32) -> u32 { return v; }
+        fn g() -> u32 { let k = 3; let y = k as {0..<5 as u32}; return h(k) + (y as u32); }");
+  Alcotest.test_case "out-of-range refined cast whose binding's type a later use fixes keeps its check" `Quick
+    (expect_trap_sites 1
+       "fn h(v: u32) -> u32 { return v; }
+        fn g() -> u32 { let k = 7; let y = k as {0..<5 as u32}; return h(k) + (y as u32); }");
+
   Alcotest.test_case "early-return continuation carries nonzero facts to siblings" `Quick
     (fun () ->
       ignore (infer
