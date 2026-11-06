@@ -2934,6 +2934,18 @@ kernelcheck: $(KERNELCHECK_LANES)
 # previous run's would average two runs into a critical path that neither
 # had. Copy the directory to compare two runs (GitHub issue #471).
 LANE_TIMING_DIR := $(CURDIR)/_build/lane-timing
+# GitHub issue #1198: the lanes timed by `lane_timing.sh begin`/`end` run each
+# recipe line through scripts/lane_cpu_shell.sh, which adds the CPU the line
+# used to the lane's receipt; run_lane.sh lanes take their own. The budget
+# sums CPU, not wall time. scripts/check_lane_budget.py refuses a begin/end
+# lane missing from this list, since its receipt would have no CPU.
+LANE_CPU_SHELL_LANES := langcheck slowcheck test linuxcheck modelcheck
+$(LANE_CPU_SHELL_LANES): SHELL := $(CURDIR)/scripts/lane_cpu_shell.sh
+langcheck: export TAKIBI_CPU_LANE := langcheck
+slowcheck: export TAKIBI_CPU_LANE := slowcheck
+test: export TAKIBI_CPU_LANE := test
+linuxcheck: export TAKIBI_CPU_LANE := linuxcheck
+modelcheck: export TAKIBI_CPU_LANE := modelcheck
 AWAIT_TIMING_DIR := $(CURDIR)/_build/await-timing
 
 # GitHub issue #1193: build what the lanes read before the first lane

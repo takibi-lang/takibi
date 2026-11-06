@@ -277,6 +277,35 @@ for lane in $(env -u TAKIBI_VCPU_LANE_ORDER bash -c ". '$repo_root/scripts/vcpu_
 done
 claim
 
+# GitHub issue #1145: while a land's allcheck holds land.lock, another
+# session's QEMU runner waits before asking for vCPUs and says why; the
+# land's own runners (TAKIBI_LAND_ALLCHECK) do not wait; and the waiter
+# goes on once the land ends.
+vcpu land 5 "resource_lease_land_hold abc123 && : > '$tmp_dir/land.held'; exec sleep 30" 2>/dev/null &
+land_pid=$!
+for _ in $(seq 1 300); do
+    [ -e "$tmp_dir/land.held" ] && break
+    sleep 0.1
+done
+[ -e "$tmp_dir/land.held" ] || fail "the land did not take land.lock within 30 s"
+if vcpu worker 1 'resource_lease_vcpu_acquire 1 lane-w' >"$tmp_dir/land-wait.log" 2>&1; then
+    pkill -KILL -P "$land_pid" 2>/dev/null || true
+    fail "a worker's QEMU runner took vCPUs while a land's allcheck ran"
+fi
+grep -F "waiting for a land's allcheck to finish before starting QEMU: land running land allcheck abc123" \
+    "$tmp_dir/land-wait.log" >/dev/null \
+    && claim || fail "the land wait did not say who holds it: $(cat "$tmp_dir/land-wait.log")"
+TAKIBI_LAND_ALLCHECK=1 vcpu land 1 'resource_lease_vcpu_acquire 1 lane-l' \
+    && claim || fail "the land's own runner waited for its own land"
+vcpu worker 10 "resource_lease_vcpu_acquire 1 lane-w && : > '$tmp_dir/worker.ran'" 2>/dev/null &
+worker_pid=$!
+sleep 0.5
+[ ! -e "$tmp_dir/worker.ran" ] || fail "the worker did not wait for the land"
+pkill -KILL -P "$land_pid" 2>/dev/null || true
+wait "$land_pid" 2>/dev/null || true
+wait "$worker_pid" && [ -e "$tmp_dir/worker.ran" ] \
+    && claim || fail "the worker did not start once the land ended"
+
 # The QEMU shim refuses a guest larger than its runner's lease, including a
 # runner whose Python subprocess closed the inherited descriptors.
 mkdir -p "$tmp_dir/bin"
@@ -311,4 +340,4 @@ esac
 echo "PASS resource-lease: $cases claims -- boards are exclusive across clones, released by a" \
      "dying holder, kept by one that outlives its runner, reused when nested;" \
      "suite children do not inherit; board failures remain reported;" \
-     "QEMU guests wait for vCPUs within the host budget"
+     "QEMU guests wait for vCPUs within the host budget and for a land's allcheck"

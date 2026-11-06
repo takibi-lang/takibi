@@ -29,7 +29,11 @@ lane="$1"
 shift
 
 timing="$(dirname "$0")/lane_timing.sh"
+# GitHub issue #1198: the receipt carries the CPU the lane's processes used,
+# the figure the lane budget sums (scripts/lane_cpu.sh).
+. "$(dirname "$0")/lane_cpu.sh"
 started="$(bash "$timing" now)"
+lane_cpu_ms cpu_before
 
 export TAKIBI_AWAIT_TIMING_LANE="$lane"
 # GitHub issue #883: names this run in every failure archive made under it
@@ -53,7 +57,9 @@ fi
 # Recorded before the verdict is printed, and for a failure as well as a
 # pass: a lane that fails slowly is the one most worth measuring, and a
 # record that existed only for green runs would be missing exactly then.
-bash "$timing" record "$lane" "$started" "$status"
+lane_cpu_ms cpu_after
+bash "$timing" record "$lane" "$started" "$status" \
+    "$(lane_cpu_seconds "$cpu_before" "$cpu_after")"
 
 if [ "$status" -eq 0 ]; then
     echo "PASS $lane: every step passed"

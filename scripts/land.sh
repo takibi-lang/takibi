@@ -202,6 +202,13 @@ else
         echo "land: FAIL clean on $tested; log: $log" >&2
         exit 1
     fi
+    # GitHub issue #1145: QEMU lanes other sessions start wait until this
+    # allcheck has finished (scripts/vcpu_lease.sh, resource_lease_land_wait).
+    . scripts/vcpu_lease.sh
+    if ! resource_lease_land_hold "$tested"; then
+        echo "land: FAIL taking the land lock on $tested" >&2
+        exit 1
+    fi
     make allcheck 2>&1 | tee -a "$log"
     status=${PIPESTATUS[0]}
     if [ "$status" -ne 0 ]; then

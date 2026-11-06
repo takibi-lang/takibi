@@ -168,7 +168,27 @@ def summarize(records, incomplete, origin=None, waits=()) -> int:
         print(f"incomplete: {len(incomplete)} lane(s) started and left no "
               "record: " + ", ".join(incomplete))
     summarize_lease_waits(list(waits))
+    summarize_cpu(records)
     return 0
+
+
+def summarize_cpu(records) -> None:
+    """GitHub issue #1198: the CPU each lane used, the figure the lane
+    budget (scripts/check_lane_budget.py) sums; lanes without one listed."""
+    measured = sorted((r for r in records if "cpu" in r),
+                      key=lambda r: r["cpu"], reverse=True)
+    missing = sorted(r["lane"] for r in records if "cpu" not in r)
+    if not measured and not missing:
+        return
+    width = max(len(r["lane"]) for r in records)
+    print("lane CPU (user+sys), most first:")
+    for record in measured:
+        print(f"  {record['lane']:<{width}}  {float(record['cpu']):7.1f}s")
+    for lane in missing:
+        print(f"  {lane:<{width}}  {'--':>7}   no CPU recorded")
+    total = sum(float(r["cpu"]) for r in measured)
+    print(f"cpu:     {total:7.1f}s  summed over {len(measured)} lane(s)"
+          + (f", {len(missing)} without" if missing else ""))
 
 
 def main() -> int:

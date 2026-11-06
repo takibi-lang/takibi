@@ -81,6 +81,39 @@ summary="$(python3 "$SUMMARIZE" "$timing")" && claim || fail "the stamp summary 
 grep -q "abandoned.*did not finish" <<<"$summary" \
     && claim || fail "a lane that never finished was dropped instead of reported: $summary"
 
+# --- CPU, not wall time (GitHub issue #1198) --------------------------------
+# A lane that sleeps costs no CPU and a lane that spins costs its spin, in a
+# run_lane.sh lane and in a begin/end lane whose recipe lines run through
+# scripts/lane_cpu_shell.sh. A line whose CPU cannot be read leaves the
+# receipt without CPU, which the budget refuses, never a zero.
+timing="$work/cpu"
+spin='end=$((SECONDS + 2)); while [ "$SECONDS" -lt "$end" ]; do :; done'
+TAKIBI_LANE_TIMING_DIR="$timing" bash "$RUN_LANE" spinner bash -c "$spin" >/dev/null \
+    && claim || fail "the spinning lane failed"
+TAKIBI_LANE_TIMING_DIR="$timing" bash "$RUN_LANE" sleeper sleep 2 >/dev/null \
+    && claim || fail "the sleeping lane failed"
+export TAKIBI_LANE_TIMING_DIR="$timing"
+bash "$REPO_ROOT/scripts/lane_timing.sh" begin shelled
+TAKIBI_CPU_LANE=shelled "$REPO_ROOT/scripts/lane_cpu_shell.sh" -c "$spin"
+TAKIBI_CPU_LANE=shelled "$REPO_ROOT/scripts/lane_cpu_shell.sh" -c 'sleep 1; exit 3'
+[ $? -eq 3 ] && claim || fail "the lane CPU shell lost a recipe line's status"
+bash "$REPO_ROOT/scripts/lane_timing.sh" end shelled 0
+bash "$REPO_ROOT/scripts/lane_timing.sh" begin unread
+echo unknown >"$timing/unread.cpu"
+bash "$REPO_ROOT/scripts/lane_timing.sh" end unread 0
+unset TAKIBI_LANE_TIMING_DIR
+python3 - "$timing" <<'PY' && claim || fail "the receipts do not carry the lanes' CPU"
+import json, pathlib, sys
+d = pathlib.Path(sys.argv[1])
+cpu = {r["lane"]: r.get("cpu") for r in
+       (json.loads(p.read_text().strip()) for p in d.glob("*.jsonl"))}
+assert 1.5 <= cpu["spinner"] <= 3.0, cpu
+assert cpu["sleeper"] < 0.5, cpu
+assert 1.5 <= cpu["shelled"] <= 3.0, cpu
+assert cpu["unread"] is None, cpu
+PY
+[ ! -e "$timing/shelled.cpu" ] && claim || fail "end left the lane's CPU lines behind"
+
 # --- a run that recorded NOTHING is not a run where everything was instant --
 # Required to REFUSE, and to say why: a crash would also exit nonzero, and a
 # traceback is not a diagnostic a reader of a red allcheck can act on.

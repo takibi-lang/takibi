@@ -25,6 +25,8 @@ if [ "$#" -lt 2 ] || [ $(($# % 2)) -ne 0 ]; then
 fi
 
 timing="$(dirname "$0")/lane_timing.sh"
+# GitHub issue #1198: each record carries its check's CPU seconds.
+. "$(dirname "$0")/lane_cpu.sh"
 work="$(mktemp -d "${TMPDIR:-/tmp}/takibi-concurrent-XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
@@ -36,9 +38,12 @@ while [ "$#" -gt 0 ]; do
     names+=("$name")
     (
         started="$(bash "$timing" now)"
+        lane_cpu_ms cpu_before
         status=0
         bash -c "$command" >"$work/$index.out" 2>&1 || status=$?
-        bash "$timing" record "$name" "$started" "$status"
+        lane_cpu_ms cpu_after
+        bash "$timing" record "$name" "$started" "$status" \
+            "$(lane_cpu_seconds "$cpu_before" "$cpu_after")"
         exit "$status"
     ) &
     pids+=("$!")

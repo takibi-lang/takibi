@@ -224,6 +224,66 @@ resource_lease_vcpu_queue_wait() {
     done
 }
 
+# -- A land's allcheck goes first (GitHub issue #1145) -------------------------
+# Worker sessions run QEMU lanes in their worktrees, and those guests share
+# the host with the land's allcheck: land allchecks rose from 3841 to 4477
+# busy lane-seconds with no lane change, and two lands went red on an 80 s
+# silence watchdog at host load 40-80 (#1021, #1080). The vCPU budget does
+# not cover this: it counts guests, not the load their timing suffers. So
+# scripts/land.sh holds land.lock exclusively while its allcheck runs and
+# exports TAKIBI_LAND_ALLCHECK to it; every other QEMU runner waits for the
+# lock (shared, released at once) before it asks for vCPUs, and says so. A
+# lane already running when the land starts runs on.
+resource_lease_land_lock() {
+    printf '%s/land.lock\n' "$(resource_lease_dir)"
+}
+
+# resource_lease_land_hold TESTED -- hold land.lock in this shell for the
+# rest of its life (land.sh, around its allcheck).
+RESOURCE_LEASE_LAND_FD=""
+resource_lease_land_hold() {
+    local dir
+    dir="$(resource_lease_dir)"
+    mkdir -p "$dir"
+    exec {RESOURCE_LEASE_LAND_FD}>"$(resource_lease_land_lock)"
+    if ! flock -n "$RESOURCE_LEASE_LAND_FD"; then
+        echo "[lease] waiting for another land: $(resource_lease_holder_line "$dir/land.holder")" >&2
+        flock -w "$RESOURCE_LEASE_TIMEOUT_SECONDS" "$RESOURCE_LEASE_LAND_FD" || {
+            echo "FAIL resource-lease: another land still held land.lock after" \
+                 "${RESOURCE_LEASE_TIMEOUT_SECONDS}s" >&2
+            return 1
+        }
+    fi
+    resource_lease_write "$dir/land.holder" \
+        "resource=land" \
+        "session=${TAKIBI_SESSION:-unknown}" \
+        "target=land allcheck ${1:-}" \
+        "pid=$$" \
+        "started=$(date +%H:%M:%S)"
+    export TAKIBI_LAND_ALLCHECK=1
+}
+
+# Return once no land's allcheck runs; nonzero after the lease timeout.
+resource_lease_land_wait() {
+    local fd lock
+    [ -n "${TAKIBI_LAND_ALLCHECK:-}" ] && return 0
+    lock="$(resource_lease_land_lock)"
+    mkdir -p "$(dirname "$lock")"
+    exec {fd}>"$lock"
+    if ! flock -n -s "$fd"; then
+        echo "[lease] waiting for a land's allcheck to finish before starting QEMU:" \
+             "$(resource_lease_holder_line "$(resource_lease_dir)/land.holder")" >&2
+        if ! flock -s -w "$RESOURCE_LEASE_TIMEOUT_SECONDS" "$fd"; then
+            echo "FAIL resource-lease: a land's allcheck still ran after" \
+                 "${RESOURCE_LEASE_TIMEOUT_SECONDS}s" >&2
+            exec {fd}>&-
+            return 1
+        fi
+        echo "[lease] the land's allcheck finished" >&2
+    fi
+    exec {fd}>&-
+}
+
 # resource_lease_vcpu_acquire N [TARGET] -- hold N slots in this shell.
 resource_lease_vcpu_acquire() {
     local want="$1" target="${2:-$0}"
@@ -233,6 +293,7 @@ resource_lease_vcpu_acquire() {
     case "$want" in ''|*[!0-9]*|0) echo "error: vCPU lease needs a positive count, got '$want'" >&2; return 1;; esac
     have="$(resource_lease_vcpu_held)"
     [ "$have" -ge "$want" ] && return 0
+    resource_lease_land_wait || return 1
     budget="$(resource_lease_vcpu_budget)"
     if [ "$want" -gt "$budget" ]; then
         echo "error: a guest of $want vCPUs can never fit the budget of $budget" >&2

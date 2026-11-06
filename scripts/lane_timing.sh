@@ -16,10 +16,16 @@
 #
 # Usage:
 #   lane_timing.sh now                      print an epoch timestamp
-#   lane_timing.sh record LANE START STATUS append a finished lane's record
+#   lane_timing.sh record LANE START STATUS [CPU]
+#                                           append a finished lane's record;
+#                                           CPU is the lane's user+sys CPU
+#                                           seconds (scripts/lane_cpu.sh)
 #   lane_timing.sh begin LANE               write a start stamp for a lane
 #                                           whose recipe cannot be wrapped
-#   lane_timing.sh end LANE STATUS          close the stamp begin wrote
+#   lane_timing.sh end LANE STATUS          close the stamp begin wrote; the
+#                                           CPU is the sum of LANE.cpu, which
+#                                           scripts/lane_cpu_shell.sh appends
+#                                           one line to per recipe line
 #   lane_timing.sh origin [EPOCH]           stamp when the run began (now by
 #                                           default), so the summary can say
 #                                           how long passed before the first
@@ -56,14 +62,23 @@ case "${1:-}" in
         now
         ;;
     record)
-        [ "$#" -eq 4 ] || { echo "usage: lane_timing.sh record LANE START STATUS" >&2; exit 2; }
+        [ "$#" -eq 4 ] || [ "$#" -eq 5 ] ||
+            { echo "usage: lane_timing.sh record LANE START STATUS [CPU]" >&2; exit 2; }
         enabled || exit 0
         mkdir -p "$TIMING_DIR" || exit 0
-        lane="$2"; start="$3"; status="$4"
+        lane="$2"; start="$3"; status="$4"; cpu=""
+        # GitHub issue #1198: a receipt with no CPU is refused by the lane
+        # budget, so only a well-formed figure is written.
+        if [ "$#" -eq 5 ]; then
+            case "$5" in
+                ''|*[!0-9.]*) echo "lane_timing: CPU '$5' is not a number" >&2 ;;
+                *) cpu=",\"cpu\":$5" ;;
+            esac
+        fi
         finish="$(now)"
         elapsed="$(awk -v a="$finish" -v b="$start" 'BEGIN { printf "%.3f", a - b }')"
-        printf '{"lane":"%s","start":%s,"finish":%s,"elapsed":%s,"status":%s}\n' \
-            "$lane" "$start" "$finish" "$elapsed" "$status" \
+        printf '{"lane":"%s","start":%s,"finish":%s,"elapsed":%s,"status":%s%s}\n' \
+            "$lane" "$start" "$finish" "$elapsed" "$status" "$cpu" \
             >>"$TIMING_DIR/$(sanitize "$lane").jsonl"
         ;;
     begin)
@@ -77,8 +92,14 @@ case "${1:-}" in
         enabled || exit 0
         stamp="$TIMING_DIR/$(sanitize "$2").start"
         [ -f "$stamp" ] || exit 0
-        "$0" record "$2" "$(cat "$stamp")" "$3"
-        rm -f "$stamp"
+        cpu_file="$TIMING_DIR/$(sanitize "$2").cpu"
+        if [ -f "$cpu_file" ] && ! grep -qv '^[0-9.]*$' "$cpu_file"; then
+            "$0" record "$2" "$(cat "$stamp")" "$3" \
+                "$(awk '{ s += $1 } END { printf "%.3f", s }' "$cpu_file")"
+        else
+            "$0" record "$2" "$(cat "$stamp")" "$3"
+        fi
+        rm -f "$stamp" "$cpu_file"
         ;;
     origin)
         # Not a `.start` stamp: the summary would report it as an unfinished
