@@ -797,8 +797,8 @@ and static_of_poly (p, atoms) =
 and static_smt t =
   match static_repr t with
   | SConst n -> if n < 0 then Printf.sprintf "(- %d)" (-n) else string_of_int n
-  | SParam (id, _) -> Printf.sprintf "x_p%d" id
-  | SVar { contents = SUnbound id } -> Printf.sprintf "x_v%d" id
+  | SParam (id, _) -> Smt_name.to_string (Smt_name.param id)
+  | SVar { contents = SUnbound id } -> Smt_name.to_string (Smt_name.var id)
   | SAdd (a, b) -> Printf.sprintf "(+ %s %s)" (static_smt a) (static_smt b)
   | SSub (a, b) -> Printf.sprintf "(- %s %s)" (static_smt a) (static_smt b)
   | SMul (a, b) -> Printf.sprintf "(* %s %s)" (static_smt a) (static_smt b)
@@ -811,19 +811,17 @@ and static_smt t =
 
 and static_opaque_atom t =
   match static_repr t with
-  | SGlobal name -> Printf.sprintf "x_g_%s" name
-  (* GitHub issue #1372: '_' doubled inside each name, and
-     the separator "_S", so enum "A_" case "B" and enum "A" case "_B" are not
-     one constant. *)
-  | SEnum (name, case) ->
-      let esc s = String.concat "__" (String.split_on_char '_' s) in
-      Printf.sprintf "x_e_%s_S%s" (esc name) (esc case)
+  (* GitHub issues #1372 and #1394: Smt_name's encoding, so enum "A_" case
+     "B" and enum "A" case "_B" are not one constant, nor a global and an
+     init atom of the same spelling. *)
+  | SGlobal name -> Smt_name.to_string (Smt_name.global name)
+  | SEnum (name, case) -> Smt_name.to_string (Smt_name.enum name case)
   | _ -> assert false
 
 and static_atoms t acc =
   match static_repr t with
-  | SParam (id, _) -> Printf.sprintf "x_p%d" id :: acc
-  | SVar { contents = SUnbound id } -> Printf.sprintf "x_v%d" id :: acc
+  | SParam (id, _) -> Smt_name.to_string (Smt_name.param id) :: acc
+  | SVar { contents = SUnbound id } -> Smt_name.to_string (Smt_name.var id) :: acc
   | (SGlobal _ | SEnum _) as a -> static_opaque_atom a :: acc
   | SAdd (a, b) | SSub (a, b) | SMul (a, b) -> static_atoms a (static_atoms b acc)
   | _ -> acc

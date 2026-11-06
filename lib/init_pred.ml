@@ -192,15 +192,9 @@ let header = "; takibi-init-obligation v1"
    from an equality they never had. '_' is now doubled and any other
    character becomes '_' and two hex digits, so distinct atoms stay
    distinct constants. *)
-let smt_atom a =
-  let buf = Buffer.create (String.length a + 2) in
-  Buffer.add_string buf "x_";
-  String.iter (fun ch ->
-    match ch with
-    | 'a'..'z' | 'A'..'Z' | '0'..'9' -> Buffer.add_char buf ch
-    | '_' -> Buffer.add_string buf "__"
-    | _ -> Buffer.add_string buf (Printf.sprintf "_%02X" (Char.code ch))) a;
-  Buffer.contents buf
+(* GitHub issue #1394: the encoding lives in Smt_name, the one place a
+   z3 constant name can be made. *)
+let smt_atom a = Smt_name.to_string (Smt_name.atom a)
 
 let smt_int k = if k < 0 then Printf.sprintf "(- %d)" (-k) else string_of_int k
 

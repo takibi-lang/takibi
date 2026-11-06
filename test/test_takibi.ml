@@ -7309,12 +7309,12 @@ fn stored_release(holder: sink StoredHolder[k]) { stored_drop(holder.token); }
           let has needle = List.exists (fun t -> contains_substring t needle) texts in
           Alcotest.(check int) "three obligations" 3 (List.length texts);
           Alcotest.(check bool) "global declared" true
-            (has "(declare-const x_g_a1232 Int)");
+            (has "(declare-const x__ga1232 Int)");
           (* Before #1232 both spelled 0, so z3 proved &a = &b. *)
           Alcotest.(check bool) "two globals differ" true
-            (has "(assert (not (= x_g_a1232 x_g_b1232)))");
+            (has "(assert (not (= x__ga1232 x__gb1232)))");
           Alcotest.(check bool) "two enum cases differ" true
-            (has "(declare-const x_e_E1232_SY Int)")));
+            (has "(declare-const x__eE1232_SY Int)")));
 
   Alcotest.test_case
     "issue #983: a literal index past 2^63 is out of bounds, not -1" `Quick
@@ -27060,6 +27060,28 @@ scratch let mut sb: S975;
          Alcotest.(check bool) "enum cases split at different underscores" true
            (Types.static_opaque_atom (Types.SEnum ("A_", "B"))
             <> Types.static_opaque_atom (Types.SEnum ("A", "_B"))));
+    t "issue #1394: every kind of z3 name comes from one injective encoder"
+      (fun () ->
+         (* Spellings that collided before, or would collide under a
+            per-kind encoder: an atom against a param, a var, a global and
+            an enum of the same text, and enum splits. *)
+         let names = [
+           Smt_name.atom "p3"; Smt_name.param 3; Smt_name.atom "_p3";
+           Smt_name.atom "v3"; Smt_name.var 3;
+           Smt_name.atom "g_a"; Smt_name.atom "_ga"; Smt_name.global "a";
+           Smt_name.global "_a"; Smt_name.atom "e_A_SB";
+           Smt_name.enum "A_" "B"; Smt_name.enum "A" "_B";
+           Smt_name.enum "A_S" "B"; Smt_name.enum "A" "SB";
+           Smt_name.atom "v3@1"; Smt_name.atom "v3_1"; Smt_name.atom "v3_401";
+         ] in
+         let spelled = List.map Smt_name.to_string names in
+         Alcotest.(check int) "injective across kinds" (List.length names)
+           (List.length (List.sort_uniq compare spelled));
+         Alcotest.(check bool) "every name is an SMT-LIB simple symbol" true
+           (List.for_all (fun n ->
+              String.for_all (fun c ->
+                (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9') || c = '_') n) spelled));
     t "issue #976: --internal-trace-init-flow shows where coverage was lost"
       (fun () ->
          let buf = Buffer.create 256 in
