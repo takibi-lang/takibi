@@ -47,6 +47,7 @@ Usage:
 
 import os
 import re
+import resource
 import shutil
 import stat
 import subprocess
@@ -237,6 +238,12 @@ def qemu_user():
     raise EqError("qemu-aarch64 (qemu-user) is required for the host oracle")
 
 
+def host_child_setup():
+    """The guest's umask, and no core file in the cwd (#1386)."""
+    os.umask(0o022)
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+
+
 def run_host(rows, busybox, workdir):
     """Run the script on host Linux in WORKDIR; return the log."""
     script = os.path.join(workdir, "ext2-eq.sh")
@@ -249,7 +256,7 @@ def run_host(rows, busybox, workdir):
         write_fixture(os.path.join(tree, DIND_FIXTURE))
     done = subprocess.run([qemu_user(), busybox, "ash", script, tree, "",
                            os.path.abspath(busybox)],
-                          preexec_fn=lambda: os.umask(0o022),
+                          preexec_fn=host_child_setup,
                           capture_output=True, text=True, timeout=120)
     if done.returncode != 0 or not done.stdout.endswith("eq done\n"):
         raise EqError(f"host run failed (status {done.returncode}): {done.stderr}")

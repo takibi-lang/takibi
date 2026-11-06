@@ -65,3 +65,7 @@ linux_user/build/*.dtb
 # linux_user/lz4 inputs (GitHub issue #1218), written by
 # scripts/lz4_image.py fixture.
 linux_user/build/lz4/
+
+# qemu-user core dumps (GitHub issue #1386): scripts/qemu_user.sh turns them
+# off; this keeps a stray one out of a commit.
+*.core

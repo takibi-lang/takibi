@@ -983,57 +983,57 @@ linuxcheck: linuxbuild compiler-fuzz
 	@# (qemu-aarch64 user mode) prints the line the QEMU lane's linux_file
 	@# view expects from the kernel, so each answer it checks is Linux's.
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) --no-print-directory $(KERNEL_SIGALTSTACK_LINUX_ELF)
-	@got=$$(qemu-aarch64 $(KERNEL_SIGALTSTACK_LINUX_ELF)); \
+	@got=$$(bash scripts/qemu_user.sh $(KERNEL_SIGALTSTACK_LINUX_ELF)); \
 	 exp=$$(grep '^userspace sigaltstack: ' kernel/tests/common/views/linux_file.expected); \
 	 if [ -n "$$exp" ] && [ "$$got" = "$$exp" ]; then echo "PASS  sigaltstack probe (host Linux)"; \
 	 else echo "FAIL  sigaltstack probe (host Linux)"; echo "  expected: $$exp"; echo "  got:      $$got"; exit 1; fi
 	@# GitHub issue #1147: the shared-mapping, umask, getrusage and statfs
 	@# probe, the same way.
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) --no-print-directory $(KERNEL_SHARED_MAPPING_LINUX_ELF)
-	@got=$$(qemu-aarch64 $(KERNEL_SHARED_MAPPING_LINUX_ELF)); \
+	@got=$$(bash scripts/qemu_user.sh $(KERNEL_SHARED_MAPPING_LINUX_ELF)); \
 	 exp=$$(grep '^userspace shared mmap: ' kernel/tests/common/views/linux_file.expected); \
 	 if [ -n "$$exp" ] && [ "$$got" = "$$exp" ]; then echo "PASS  shared mapping probe (host Linux)"; \
 	 else echo "FAIL  shared mapping probe (host Linux)"; echo "  expected: $$exp"; echo "  got:      $$got"; exit 1; fi
 	@# GitHub issue #1151: the mmap region probe, the same way.
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) --no-print-directory $(KERNEL_MMAP_REGION_LINUX_ELF)
-	@got=$$(qemu-aarch64 $(KERNEL_MMAP_REGION_LINUX_ELF)); \
+	@got=$$(bash scripts/qemu_user.sh $(KERNEL_MMAP_REGION_LINUX_ELF)); \
 	 exp=$$(grep '^userspace mmap region: ' kernel/tests/common/views/linux_file.expected); \
 	 if [ -n "$$exp" ] && [ "$$got" = "$$exp" ]; then echo "PASS  mmap region probe (host Linux)"; \
 	 else echo "FAIL  mmap region probe (host Linux)"; echo "  expected: $$exp"; echo "  got:      $$got"; exit 1; fi
 	@# GitHub issue #1166: the realtime/monotonic clock probe, the same way.
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) --no-print-directory $(KERNEL_CLOCK_LINUX_ELF)
-	@got=$$(qemu-aarch64 $(KERNEL_CLOCK_LINUX_ELF)); \
+	@got=$$(bash scripts/qemu_user.sh $(KERNEL_CLOCK_LINUX_ELF)); \
 	 exp=$$(grep '^userspace clocks: ' kernel/tests/common/views/linux_file.expected); \
 	 if [ -n "$$exp" ] && [ "$$got" = "$$exp" ]; then echo "PASS  clock probe (host Linux)"; \
 	 else echo "FAIL  clock probe (host Linux)"; echo "  expected: $$exp"; echo "  got:      $$got"; exit 1; fi
 	@# GitHub issue #1172: the ITIMER_REAL probe, the same way.
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) --no-print-directory $(KERNEL_ITIMER_LINUX_ELF)
-	@got=$$(qemu-aarch64 $(KERNEL_ITIMER_LINUX_ELF)); \
+	@got=$$(bash scripts/qemu_user.sh $(KERNEL_ITIMER_LINUX_ELF)); \
 	 exp=$$(grep '^userspace itimer: ' kernel/tests/common/views/linux_file.expected); \
 	 if [ -n "$$exp" ] && [ "$$got" = "$$exp" ]; then echo "PASS  itimer probe (host Linux)"; \
 	 else echo "FAIL  itimer probe (host Linux)"; echo "  expected: $$exp"; echo "  got:      $$got"; exit 1; fi
 	@# GitHub issue #1176: the credentials probe, the same way.
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) --no-print-directory $(KERNEL_CREDENTIALS_LINUX_ELF)
-	@got=$$(qemu-aarch64 $(KERNEL_CREDENTIALS_LINUX_ELF)); \
+	@got=$$(bash scripts/qemu_user.sh $(KERNEL_CREDENTIALS_LINUX_ELF)); \
 	 exp=$$(grep '^userspace credentials: ' kernel/tests/common/views/linux_file.expected); \
 	 if [ -n "$$exp" ] && [ "$$got" = "$$exp" ]; then echo "PASS  credentials probe (host Linux)"; \
 	 else echo "FAIL  credentials probe (host Linux)"; echo "  expected: $$exp"; echo "  got:      $$got"; exit 1; fi
 	@# GitHub issue #999: the signal conformance rows, the same way.
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) --no-print-directory $(KERNEL_SIGNAL_CONFORMANCE_LINUX_ELF)
-	@got=$$(qemu-aarch64 $(KERNEL_SIGNAL_CONFORMANCE_LINUX_ELF)); \
+	@got=$$(bash scripts/qemu_user.sh $(KERNEL_SIGNAL_CONFORMANCE_LINUX_ELF)); \
 	 exp=$$(grep '^userspace signal conformance: ' kernel/tests/common/views/linux_file.expected); \
 	 if [ -n "$$exp" ] && [ "$$got" = "$$exp" ]; then echo "PASS  signal conformance probe (host Linux)"; \
 	 else echo "FAIL  signal conformance probe (host Linux)"; echo "  expected: $$exp"; echo "  got:      $$got"; exit 1; fi
 	@# The SIGCHLD siginfo rows (#885, #894), the same way.
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) --no-print-directory $(KERNEL_SIGCHLD_SIGINFO_LINUX_ELF)
-	@got=$$(qemu-aarch64 $(KERNEL_SIGCHLD_SIGINFO_LINUX_ELF)); \
+	@got=$$(bash scripts/qemu_user.sh $(KERNEL_SIGCHLD_SIGINFO_LINUX_ELF)); \
 	 exp=$$(grep '^userspace SIGCHLD siginfo: ' kernel/tests/common/views/linux_file.expected); \
 	 if [ -n "$$exp" ] && [ "$$got" = "$$exp" ]; then echo "PASS  SIGCHLD siginfo probe (host Linux)"; \
 	 else echo "FAIL  SIGCHLD siginfo probe (host Linux)"; echo "  expected: $$exp"; echo "  got:      $$got"; exit 1; fi
 	@# The expected-fail rows (#946, #911): host Linux must answer otherwise
 	@# than the kernel's line in the view.
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) --no-print-directory $(KERNEL_SIGNAL_XFAIL_LINUX_ELF)
-	@qemu-aarch64 $(KERNEL_SIGNAL_XFAIL_LINUX_ELF) >$(KERNEL_SIGNAL_XFAIL_LINUX_ELF).host
+	@bash scripts/qemu_user.sh $(KERNEL_SIGNAL_XFAIL_LINUX_ELF) >$(KERNEL_SIGNAL_XFAIL_LINUX_ELF).host
 	@python3 scripts/signal_xfail_rows.py $(KERNEL_SIGNAL_XFAIL_LINUX_ELF).host \
 		kernel/tests/common/views/linux_file.expected
 	@bash scripts/lane_timing.sh end linuxcheck 0

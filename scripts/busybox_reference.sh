@@ -31,6 +31,8 @@ if [[ ! -x "$reference_busybox" ]]; then
 fi
 
 reference_status=0
+# No core file in the caller's directory (#1386).
+ulimit -c 0
 "$reference_qemu" "$reference_busybox" ash "$reference_script" || reference_status=$?
 printf 'busybox reference: exit status %s\n' "$reference_status" >&2
 exit "$reference_status"
