@@ -199,7 +199,9 @@ let record_held_guard_site site =
    value carrying one) is live in the caller and not handed to that call,
    whose callee may block. Rejected at the end of infer_program. *)
 
-let span_call_table : (Ast.loc * string * int * string * string * string * bool) list ref = ref []
+(* GitHub issue #1387: the call's source name rides along, so the check
+   rebuilds the call and asks summarize_effect_body what it contributes. *)
+let span_call_table : (Ast.loc * string * int * string * string * string * bool * string) list ref = ref []
 
 let merge_overflow_audit_facts left right =
   match left, right with
@@ -13364,7 +13366,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                  && not (ResourceFlow.is_consumed_on_all_paths path moved) then
                 span_call_table := (e.loc, Ast.source_file_of_loc e.loc, e.loc.Lexing.pos_lnum,
                                     fdef.name, target, visible_name,
-                                    not (ResourceFlow.may_be_consumed path moved))
+                                    not (ResourceFlow.may_be_consumed path moved), name)
                                    :: !span_call_table) guard_bindings
           end;
           (match StringMap.find_opt target !lock_acquire_summaries with
@@ -14873,26 +14875,38 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      preempt_off block rejects them: a span keeps this task on its CPU, and a
      wait there can be for a holder preempted on the same core. A binding
      consumed on only some paths ("maybe-held") is rejected too. *)
-  List.iter (fun (call_loc, _file, _line, caller, callee, binding, definite) ->
+  List.iter (fun (call_loc, _file, _line, caller, callee, binding, definite, name) ->
     let path =
-      (* An indirect call made in the span holder itself has no resolved
-         target to close over: its own row decides (maintainer, 2026-11-06,
-         #1350 (a)+(d)). *)
-      match StringMap.find_opt (loc_key call_loc) !resolved_indirect_call_effects with
-      | Some (Some effects) when List.mem "may_block" effects ->
-          Some "<indirect call !{may_block}>"
-      | Some None -> Some "unknown effects: <indirect call>"
-      | Some (Some _) -> None
-      | None ->
-      if StringSet.mem callee (closed_effect "may_block") then
-        Some (String.concat " -> " (Option.value
-          (find_effect_path "may_block" StringSet.empty callee)
-          ~default:[display_effect_key callee]))
-      else if StringSet.mem callee may_reach_unknown then
-        Some ("unknown effects: " ^ String.concat " -> " (Option.value
-          (find_unknown_path StringSet.empty callee)
-          ~default:[display_effect_key callee; "<indirect call>"]))
-      else None in
+      (* GitHub issue #1387: the call's effects come from
+         summarize_effect_body, the summary the preempt_off block and the
+         effect closure read, not from a classifier of the span's own. The
+         call is rebuilt without its arguments (each argument's own calls
+         are recorded at their own sites) at its own location, so its
+         resolved target and indirect-call row are the ones the summary
+         keys by. An indirect call in the span holder decides by its own
+         row (maintainer, 2026-11-06, #1350 (a)+(d)); interrupt_wait, which
+         the old classifier did not see, now counts as a direct wait. *)
+      let call = { Ast.desc = Ast.Call (name, []); loc = call_loc } in
+      let (callees, direct, _, indirect, _, unknown) =
+        summarize_effect_body [{ Ast.desc = Ast.Expr call; loc = call_loc }] in
+      if StringSet.mem "may_block" direct then
+        Some ("<" ^ name ^ " !{may_block}>")
+      else if StringSet.mem "may_block" indirect then
+        Some "<indirect call !{may_block}>"
+      else if unknown then Some "unknown effects: <indirect call>"
+      else
+        let blocking = closed_effect "may_block" in
+        match StringSet.min_elt_opt (StringSet.inter blocking callees),
+              StringSet.min_elt_opt (StringSet.inter may_reach_unknown callees) with
+        | Some c, _ ->
+            Some (String.concat " -> " (Option.value
+              (find_effect_path "may_block" StringSet.empty c)
+              ~default:[display_effect_key c]))
+        | None, Some c ->
+            Some ("unknown effects: " ^ String.concat " -> " (Option.value
+              (find_unknown_path StringSet.empty c)
+              ~default:[display_effect_key c; "<indirect call>"]))
+        | None, None -> None in
     match path with
     | Some path ->
         raise (TypeError (call_loc, Printf.sprintf

@@ -19688,6 +19688,14 @@ variant Carry1350 { Stay; Go(PreemptOff[0]); }
   span_end(span);
   let late: fn(u8) -> void = h;
   late(3);
+}|}) ();
+      (* #1387: the span reads summarize_effect_body, so a direct wait it
+         did not see under its own classifier is refused too. *)
+      expect_type_error "calls 'interrupt_wait' while PreemptOff 'span' is held"
+        (base ^ {|fn direct_wait1387() {
+  let span = span_begin();
+  interrupt_wait();
+  span_end(span);
 }|}) ());
 
   Alcotest.test_case "held guard report follows scope, moves and borrowed parameters" `Quick
