@@ -1973,6 +1973,95 @@ let record_array_index_proof size ty (expr : Ast.expr) =
     defer_value_proof (fun () -> try_array_index_proof size ty expr)
   end
 
+(* GitHub issue #1159: an accepted index of an owned_by(T.f, S) global,
+   recorded by validate_owned_by (syntax) and checked by infer_expr when it
+   reaches that very index expression (types): the selector variable is a
+   T, and k is proven below S. *)
+type owned_site = {
+  owned_global : string;
+  owned_decl : Owned_by_registry.decl;
+  owned_stride : int;
+  owned_index : Ast.expr;        (* the whole index; matched physically *)
+  owned_selector : string;       (* t in t.f *)
+  owned_offset : Ast.expr option;  (* k *)
+  owned_function : string;
+  mutable owned_checked : bool;
+}
+
+let owned_sites : (string * int, owned_site list) Hashtbl.t = Hashtbl.create 32
+
+let owned_function_key (fdef : Ast.func) =
+  fdef.name ^ "@" ^ Ast.source_file_of_loc fdef.def_loc
+
+(* The k obligations of the function being checked whose facts arrive only
+   after the body (a loop variable's range); retried after the body, and
+   each must hold. *)
+let owned_pending : (Ast.loc * owned_site * (unit -> bool)) list ref = ref []
+
+let owned_offset_below stride ty (k : Ast.expr) =
+  match value_facts_of_expr ty k with
+  | Some facts ->
+      let open Value_facts in
+      compare_integer facts.interval.lo zero >= 0
+      && compare_integer facts.interval.hi
+           (of_signed_int64 (Int64.of_int stride)) < 0
+  | None -> false
+
+let owned_site_error (site : owned_site) loc what =
+  raise (TypeError (loc, Printf.sprintf
+    "'%s' is owned_by(%s.%s, %d): %s"
+    site.owned_global site.owned_decl.token site.owned_decl.field
+    site.owned_stride what))
+
+let check_owned_site tyenv (site : owned_site) =
+  site.owned_checked <- true;
+  let idx = site.owned_index in
+  let token = site.owned_decl.Owned_by_registry.token in
+  (match StringMap.find_opt site.owned_selector tyenv with
+   | Some (t, _) ->
+       (match repr t with
+        | TStruct n | TIndexedStruct (n, _) when n = token -> ()
+        | t -> owned_site_error site idx.loc (Printf.sprintf
+            "the index selects with '%s', which is %s, not a %s"
+            site.owned_selector (to_string t) token))
+   | None -> owned_site_error site idx.loc (Printf.sprintf
+       "'%s' is not a variable in scope" site.owned_selector));
+  match site.owned_offset with
+  | None -> ()
+  | Some k ->
+      let fail () = owned_site_error site k.loc (Printf.sprintf
+        "the offset k in %s.%s * %d + k is not proven below %d, so it could \
+         reach another holder's elements"
+        site.owned_selector site.owned_decl.field site.owned_stride
+        site.owned_stride) in
+      (match k.desc with
+       | IntLit n ->
+           if Int64.compare n 0L < 0
+              || Int64.compare n (Int64.of_int site.owned_stride) >= 0
+           then fail ()
+       | Var c when Const_env.find c <> None
+                    && not (StringMap.mem c tyenv) ->
+           let n = Option.get (Const_env.find c) in
+           if n < 0 || n >= site.owned_stride then fail ()
+       | Var v ->
+           let ty = match StringMap.find_opt v tyenv with
+             | Some (t, _) -> t
+             | None -> fail () in
+           if not (owned_offset_below site.owned_stride ty k) then
+             owned_pending := (k.loc, site,
+               fun () -> owned_offset_below site.owned_stride ty k)
+               :: !owned_pending
+       | _ -> fail ())
+
+let check_owned_index_at tyenv (e : Ast.expr) =
+  if Hashtbl.length owned_sites > 0 then
+    match Hashtbl.find_opt owned_sites
+            (Owned_by_registry.loc_key e.loc) with
+    | Some sites ->
+        List.iter (fun site ->
+          if site.owned_index == e then check_owned_site tyenv site) sites
+    | None -> ()
+
 let try_refined_cast_proof lo hi source_ty target_base
     (expr : Ast.expr) cast_loc =
   let facts = match value_facts_of_expr source_ty expr with
@@ -2834,6 +2923,10 @@ let check_private_field_access (loc : Ast.loc) (sname : string) (fname : string)
   match Hashtbl.find_opt private_struct_fields (sname, fname) with
   | Some _ when Per_cpu_registry.rewritten_global loc <> None
                 && Per_cpu_registry.authority_name () = Some sname -> ()
+  | Some _ when Owned_by_registry.is_select loc
+                && Hashtbl.fold (fun _ (d : Owned_by_registry.decl) acc ->
+                     acc || (d.token = sname && d.field = fname))
+                     Owned_by_registry.decls false -> ()
   | Some file when file <> Ast.source_file_of_loc loc ->
       raise (TypeError (loc, Printf.sprintf
         "field '%s.%s' is private to '%s'; go through that file's accessor \
@@ -3621,6 +3714,7 @@ let is_compare_swap name =
   | _ -> false
 
 let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
+  check_owned_index_at tyenv e;
   match e.desc with
   | IntLit _    -> fresh ()  (* polymorphic: unifies with any integer type via context *)
   | BoolLit _   -> TBool
@@ -8755,6 +8849,7 @@ let infer_func ~key senv eenv fenv genv (fdef : Ast.func) : func_info =
     Hashtbl.reset intrinsic_nonzero_at;
     active_overflow_audit_sites := [];
     pending_value_proofs := [];
+    owned_pending := [];
     active_audit_function := fdef.name;
     List.iter2 (fun id ty -> Hashtbl.replace active_binding_types id ty)
       bindings.param_ids param_tys;
@@ -8770,6 +8865,22 @@ let infer_func ~key senv eenv fenv genv (fdef : Ast.func) : func_info =
     check_default_initialization senv fdef;
     check_undetermined_lets fdef raw_locals;
     ignore (retry_pending_value_proofs ());
+    (* GitHub issue #1159: each owned_by offset holds by the end of the
+       body, and every owned_by index of this function was checked (fail
+       closed if an inference path skipped one). *)
+    List.iter (fun (loc, site, attempt) ->
+      if not (attempt ()) then
+        owned_site_error site loc (Printf.sprintf
+          "the offset k in %s.%s * %d + k is not proven below %d, so it \
+           could reach another holder's elements"
+          site.owned_selector site.owned_decl.field site.owned_stride
+          site.owned_stride)) (List.rev !owned_pending);
+    owned_pending := [];
+    Hashtbl.iter (fun _ sites -> List.iter (fun site ->
+      if site.owned_function = owned_function_key fdef && not site.owned_checked then
+        owned_site_error site site.owned_index.loc
+          "internal: this index was not reached by the checker") sites)
+      owned_sites;
     List.iter (fun site ->
       if site.overflow_lhs_facts = None then
         site.overflow_lhs_facts <-
@@ -8820,6 +8931,104 @@ let infer_func ~key senv eenv fenv genv (fdef : Ast.func) : func_info =
    for it and no pointer or parameter can carry an element elsewhere; the
    authority is never stored, so it cannot outlive the action that minted
    it on its CPU. *)
+(* GitHub issue #1159: the declarations and every use of owned_by globals
+   (Owned_by_registry). A declaration names a linear struct T with a
+   private field f (so only T's file mints a T, and the slot pool there is
+   the one place that keeps two live T apart) and a stride S >= 1. A use is
+   only an element access whose index has the shape `t.f * S + k` (or
+   `t.f * S`, or `t.f` when S is 1); its types are checked when infer_expr
+   reaches it (check_owned_site). Any other mention of the global -- bare,
+   sliced, passed, its address -- is refused here. *)
+let validate_owned_by (prog : Ast.toplevel list) =
+  Hashtbl.reset owned_sites;
+  if Hashtbl.length Owned_by_registry.decls > 0 then begin
+    let fail loc msg = raise (TypeError (loc, msg)) in
+    let strides = Hashtbl.create 8 in
+    Hashtbl.iter (fun name (d : Owned_by_registry.decl) ->
+      let token_ok = List.exists (function
+        | Ast.OwnedStructDef (n, Ast.KindLinear, _, fields, _, _, privs, _, _)
+          when n = d.token ->
+            List.mem_assoc d.field fields && List.mem d.field privs
+        | _ -> false) prog in
+      if not token_ok then
+        fail d.decl_loc (Printf.sprintf
+          "owned_by(%s.%s, ..) on '%s' needs '%s' to be a linear struct with \
+           a private field '%s', so only its declaring file mints one"
+          d.token d.field name d.token d.field);
+      (match Owned_by_registry.stride d with
+       | Some n when n >= 1 -> Hashtbl.replace strides name n
+       | _ -> fail d.decl_loc (Printf.sprintf
+           "owned_by on '%s': the stride must be an integer literal or a \
+            const name, at least 1" name));
+      let is_array = List.exists (function
+        | Ast.LetDef (n, Some (Ast.TypeArray _ | Ast.TypeArraySym _), _, _,
+                      true, _, _) -> n = name
+        | _ -> false) prog in
+      if not is_array then
+        fail d.decl_loc (Printf.sprintf
+          "owned_by on '%s': only a `let mut` array global can be owned by \
+           slot" name)) Owned_by_registry.decls;
+    let allowed : Ast.expr list ref = ref [] in
+    let bad (g : string) loc =
+      let d = Option.get (Owned_by_registry.find g) in
+      let s = Hashtbl.find strides g in
+      fail loc (Printf.sprintf
+        "'%s' is owned_by(%s.%s, %d): reach it only as an element `%s[%s]` \
+         with t a %s and k proven below %d"
+        g d.token d.field s g
+        (if s = 1 then "t." ^ d.field
+         else Printf.sprintf "t.%s * %d + k" d.field s)
+        d.token s) in
+    let visit fkey (e : Ast.expr) =
+      match e.desc with
+      | Index (({ desc = Var g; _ } as base), idx)
+        when Owned_by_registry.mem g ->
+          let d = Option.get (Owned_by_registry.find g) in
+          let stride = Hashtbl.find strides g in
+          let select (x : Ast.expr) = match x.desc with
+            | FieldGet ({ desc = Var t; _ }, f) when f = d.field ->
+                Owned_by_registry.mark_select x.loc; Some t
+            | _ -> None in
+          let is_stride (x : Ast.expr) = match x.desc with
+            | IntLit n -> Int64.to_int n = stride
+            | Var c -> Const_env.find c = Some stride
+            | _ -> false in
+          let shape = match idx.desc with
+            | _ when stride = 1 ->
+                Option.map (fun t -> (t, None)) (select idx)
+            | BinOp (Add, { desc = BinOp (Mul, sel, sx); _ }, k)
+              when is_stride sx ->
+                Option.map (fun t -> (t, Some k)) (select sel)
+            | BinOp (Mul, sel, sx) when is_stride sx ->
+                Option.map (fun t -> (t, None)) (select sel)
+            | _ -> None in
+          (match shape with
+           | None -> bad g idx.loc
+           | Some (t, k) ->
+               allowed := base :: !allowed;
+               let site = {
+                 owned_global = g; owned_decl = d; owned_stride = stride;
+                 owned_index = idx; owned_selector = t; owned_offset = k;
+                 owned_function = fkey; owned_checked = false } in
+               let key = Owned_by_registry.loc_key idx.loc in
+               Hashtbl.replace owned_sites key
+                 (site :: Option.value (Hashtbl.find_opt owned_sites key)
+                            ~default:[]))
+      | Var g when Owned_by_registry.mem g
+                   && not (List.memq e !allowed) -> bad g e.loc
+      | SliceOf ({ desc = Var g; loc }, _, _) when Owned_by_registry.mem g ->
+          bad g loc
+      | _ -> ()
+    in
+    List.iter (function
+      | Ast.FuncDef fdef ->
+          List.iter (Cas_load_rule.iter_stmt (visit (owned_function_key fdef)))
+            fdef.body
+      | Ast.LetDef (_, _, Some init, _, _, _, _) ->
+          Cas_load_rule.iter_expr (visit "-") init
+      | _ -> ()) prog
+  end
+
 let validate_per_cpu (prog : Ast.toplevel list) =
   let stores = Hashtbl.fold (fun name () acc -> name :: acc)
       Per_cpu_registry.stores [] in
@@ -8961,6 +9170,8 @@ let reset_compilation_state () =
   pending_value_proofs := [];
   Hashtbl.reset signed_division_overflow_proven_safe_at;
   Hashtbl.reset array_index_proven_in_bounds_at;
+  Hashtbl.reset owned_sites;
+  owned_pending := [];
   Hashtbl.reset runtime_slice_index_proven_at;
   Hashtbl.reset range_fact_unavailable_at;
   while_fact_drops := [];
@@ -9040,6 +9251,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      unresolved AST here would hide a caller that bypassed it. *)
   Declared_type_resolver.validate prog;
   validate_per_cpu prog;
+  validate_owned_by prog;
   (* GitHub issue #79 follow-up: ONE flat namespace for every top-level
      name, not just functions and globals (the two kinds fixed earlier in
      this same follow-up) -- struct, opaque struct, and enum names now

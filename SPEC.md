@@ -2245,6 +2245,40 @@ file may also publish mints that bypass a block; their callers are fixed by
 diagnostics) is not expressible; such diagnostic arrays stay ordinary
 arrays.
 
+## Slot-Owned Globals (GitHub issue #1159)
+
+A global whose elements are split among the holders of a linear slot token
+declares the token and the stride:
+
+```takibi
+linear struct BlockSlot[unit: usize] { private index: {0..<KERNEL_MAX_CORES as usize}; }
+private let mut block_cache_valid: [bool; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS]
+    owned_by(BlockSlot.index, BLOCK_CACHE_SLOTS);
+private let mut block_cache_tick: [usize; KERNEL_MAX_CORES] owned_by(BlockSlot.index, 1);
+```
+
+- `owned_by(T.f, S)` is accepted on a `let mut` array global with no
+  initializer. `T` must be a `linear struct` and `f` a private field of it,
+  so only `T`'s declaring file can mint a `T`. `S` is an integer literal or
+  a `const` name, at least 1.
+- Every use of the global is an element access `g[i]` -- read, assignment
+  target, `&g[i]`, or the base of a slice of that element -- whose index
+  is written `t.f * S + k`, `t.f * S` (k = 0), or `t.f` when S is 1. `S` is
+  the declared stride, spelled as a literal or a const of that value.
+- `t` is a variable of type `T` (owned, `borrow` or `borrow mut`), and `t.f`
+  may be read in this position even outside `T`'s file: the declaration
+  names the field, and only to select.
+- `k` is an integer literal, a const, or a variable proven in `0..<S` by
+  its type or the value facts at that point (a `for` variable over
+  `0..<S`, a `{0..<S as usize}` parameter).
+- Any other use is an error: a bare `g`, `&g`, a slice `g[a..<b]` of the
+  global, a cast of it, or an index of another shape.
+
+So a holder of `t` reaches only elements `t.f * S` through `t.f * S + S - 1`.
+What stays trusted is the token's mint: that two live `T` never carry the
+same `f` (the slot pool's compare-exchange). `--facts globals.tsv` reports
+such a global with protection `slot_owned`.
+
 ## Scoped Mutable Owner Borrows (Takibi Core Slice 4)
 
 `borrow mut` exposes the caller's indexed runtime-owner place for one direct

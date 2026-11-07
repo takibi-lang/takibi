@@ -4,7 +4,7 @@
 
 The complete inventory of source words the compiler gives a meaning, generated from `lib/language_words.ml`. SPEC.md "Compiler-Owned Words and Names" defines the classes.
 
-## Hard keywords (75)
+## Hard keywords (76)
 
 | Keyword | Class |
 | --- | --- |
@@ -53,6 +53,7 @@ The complete inventory of source words the compiler gives a meaning, generated f
 | `cpu_authority` | kernel-driven qualifier |
 | `preempt_off` | kernel-driven qualifier |
 | `guarded_by` | kernel-driven qualifier |
+| `owned_by` | kernel-driven qualifier |
 | `io` | kernel-driven qualifier |
 | `enum` | core |
 | `match` | core |
@@ -216,7 +217,7 @@ No user source may call or define these.
 | `region_table_lock` | `lib/region_builtin.ml` |
 | `region_bytes_assume` | `lib/region_builtin.ml` |
 
-## Declaration qualifiers (11)
+## Declaration qualifiers (12)
 
 | Form | Recorded by |
 | --- | --- |
@@ -228,6 +229,7 @@ No user source may call or define these.
 | `struct packed, struct packed be` | type_layout.ml |
 | `io struct` | io_struct_registry.ml |
 | `private f: T guarded_by(lock)` | guarded_registry.ml |
+| `let mut g: T owned_by(Token.f, S)` | owned_by_registry.ml |
 | `scratch let mut` | init_state.ml |
 | `region let mut` | region_backing.ml |
 | `protocol` | protocol_decl.ml, device_protocol_registry.ml |

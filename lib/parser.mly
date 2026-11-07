@@ -257,6 +257,7 @@ let promote_be_field_type = function
 %token <string> STRING
 %token <string> BS_STRING
 %token GUARDED_BY
+%token OWNED_BY
 %token BORROW_INIT BORROW_UNINIT
 %token FN INLINE NOINLINE WHERE REQUIRES ENSURES RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE PUBLISH NO_COPY DMA_FIXED PER_CPU CPU_AUTHORITY PREEMPT_OFF IO ENUM MATCH ALIGN MULTIPLE SIZEOF ALIGNOF CONTAINS_STABLE_OWNER OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY EXCEPTION_RESTORE EMBED_FILE
 %token TYPE GENERIC
@@ -421,6 +422,16 @@ item:
       LetDef (name, Some ty, None, Some a, true, p, $symbolstartpos) }
   | p = private_flag LET m = mut_flag IDENT let_rhs SEMI
     { LetDef ($4, fst $5, snd $5, None, m, p, $symbolstartpos) }
+  | p = private_flag LET m = mut_flag name = IDENT COLON ty = type_expr
+    OWNED_BY LPAREN token = IDENT DOT field = IDENT COMMA stride = owned_stride
+    RPAREN SEMI
+    (* GitHub issue #1159: `let mut g: [E; N] owned_by(T.f, S);` -- a
+       slot-indexed global, reached only as `g[t.f * S + k]` (Owned_by_registry). *)
+    { if not m then
+        raise (Types.TypeError ($startpos(name),
+          "owned_by qualifies a `let mut` global only"));
+      Owned_by_registry.note name token field stride $startpos(name);
+      LetDef (name, Some ty, None, None, true, p, $symbolstartpos) }
   | p = private_flag LET m = mut_flag IDENT COLON type_expr ALIGN LPAREN alignment_value RPAREN SEMI
     { LetDef ($4, Some $6, None, Some $9, m, p, $symbolstartpos) }
   | p = private_flag LET m = mut_flag IDENT COLON type_expr ALIGN LPAREN alignment_value RPAREN ASSIGN expr SEMI
@@ -1333,6 +1344,10 @@ rest_args:
 ident_rest:
   | /* empty */ { [] }
   | COMMA id = IDENT ids = ident_rest { id :: ids }
+
+owned_stride:
+  | n = INT { { desc = IntLit n; loc = $startpos } }
+  | c = IDENT { { desc = Var c; loc = $startpos } }
 
 let_rhs:
   | /* empty */ { (None, None) }

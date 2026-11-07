@@ -67,6 +67,7 @@ let classified_hard_keywords = [
   "cpu_authority", Kernel_qualifier;
   "preempt_off", Kernel_qualifier;
   "guarded_by", Kernel_qualifier;
+  "owned_by", Kernel_qualifier;
   "io", Kernel_qualifier;
   "enum", Core;
   "match", Core;
@@ -198,6 +199,7 @@ let declaration_qualifiers = [
   "struct packed, struct packed be", "type_layout.ml";
   "io struct", "io_struct_registry.ml";
   "private f: T guarded_by(lock)", "guarded_registry.ml";
+  "let mut g: T owned_by(Token.f, S)", "owned_by_registry.ml";
   "scratch let mut", "init_state.ml";
   "region let mut", "region_backing.ml";
   "protocol", "protocol_decl.ml, device_protocol_registry.ml";

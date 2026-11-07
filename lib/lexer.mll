@@ -45,6 +45,7 @@ let hard_keyword_token = function
   | "dma_fixed" -> DMA_FIXED
   | "per_cpu" -> PER_CPU
   | "guarded_by" -> GUARDED_BY
+  | "owned_by" -> OWNED_BY
   | "cpu_authority" -> CPU_AUTHORITY
   | "preempt_off" -> PREEMPT_OFF
   | "io" -> IO | "enum" -> ENUM | "match" -> MATCH | "align" -> ALIGN

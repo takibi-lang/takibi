@@ -57,6 +57,7 @@ Tried in this order; an array `[T; N]` takes the class of `T`.
 | class | the type |
 | --- | --- |
 | `region` | a `region let mut` backing, reached only through its claim |
+| `slot_owned` | an `owned_by(T.f, S)` global: each element reached as `g[t.f * S + k]` with a linear slot token `t` (SPEC.md, Slot-Owned Globals) |
 | `atomic` | `AtomicWord` |
 | `lock` | `LockedCell(T)`, `RegionPool(T)`, `InitOnce` as kernel/lib/init_once.tkb defines it (#1418: its private `complete` is written only under its own `TaskMutex`, by that file) |
 | `place` | `Place(T)` |

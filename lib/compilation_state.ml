@@ -17,6 +17,7 @@ let reset () =
   Init_state.reset ();
   Region_backing.reset ();
   Guarded_registry.reset ();
+  Owned_by_registry.reset ();
   Io_struct_registry.reset ();
   Hashtbl.reset Generic_variant.proven_empty_puts;
   Dma_fixed_registry.reset ();

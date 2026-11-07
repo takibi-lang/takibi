@@ -26,7 +26,8 @@
      and the lock words are this: one AtomicWord);
    - anything else -> none.
 
-   A `region let mut` backing is `region` whatever its element type. *)
+   A `region let mut` backing is `region` whatever its element type, and an
+   `owned_by(T.f, S)` global is `slot_owned` (GitHub issue #1159). *)
 
 open Ast
 
@@ -111,7 +112,10 @@ let write_table (out : out_channel) (prog : toplevel list) =
         let qualifier =
           if Region_backing.is_marked name then "region"
           else if Init_state.is_scratch name then "scratch" else "-" in
-        let prot = if qualifier = "region" then "region" else protection [] ty in
+        let prot =
+          if qualifier = "region" then "region"
+          else if Owned_by_registry.mem name then "slot_owned"
+          else protection [] ty in
         Printf.fprintf out "%s\t%d\t%s\t%s\t%s\t%s\t%s\n"
           (Call_graph.relative (source_file_of_loc loc)) loc.Lexing.pos_lnum name
           (if priv then "private" else "public") qualifier (spell ty) prot

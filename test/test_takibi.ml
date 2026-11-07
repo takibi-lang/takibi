@@ -2769,6 +2769,26 @@ let owner_derived_fixture =
    }
    "
 
+(* GitHub issue #1159: an owned_by fixture, four slots of four elements. *)
+let owned_by_fixture =
+  "const SETS: usize = 4;
+   linear struct Slot[unit: usize] { private index: {0..<4 as usize}; }
+   private let mut valid: [bool; 4 * SETS] owned_by(Slot.index, SETS);
+   private let mut tick: [usize; 4] owned_by(Slot.index, 1);
+   "
+
+let owned_by_ok =
+  "fn touch(slot: borrow Slot[0], k: {0..<SETS as usize}) -> usize {
+     tick[slot.index] = tick[slot.index] + 1;
+     for j: usize in 0..<SETS { valid[slot.index * SETS + j] = true; }
+     valid[slot.index * SETS] = false;
+     valid[slot.index * SETS + 3] = false;
+     valid[slot.index * SETS + k] = false;
+     let p: *usize = &tick[slot.index];
+     return tick[slot.index];
+   }
+   fn main() {}"
+
 let atomic_word_fixture =
   "struct no_copy AtomicWord { private value: usize; }
    "
@@ -3234,6 +3254,8 @@ let infer_tests = [
          let mut mixed: Mixed;
          let mut empty: Empty;
          let fixed: usize = 3;
+         linear struct Slot[unit: usize] { private index: {0..<4 as usize}; }
+         let mut owned: [usize; 4] owned_by(Slot.index, 1);
          fn main() -> usize { return plain; }" in
       let buf = Buffer.create 256 in
       let table = Filename.temp_file "globals" ".tsv" in
@@ -3253,7 +3275,72 @@ let infer_tests = [
         Alcotest.(check string) name want (protection name))
         [ "plain", "none"; "flag", "none"; "word", "atomic"; "words", "atomic";
           "lock", "composite"; "mixed", "none"; "empty", "none";
-          "fixed", "absent" ]);
+          "fixed", "absent"; "owned", "slot_owned" ]);
+
+  (* GitHub issue #1159 (option B1): an owned_by(T.f, S) global is reached
+     only as g[t.f * S + k], t a T and k proven below S. *)
+  Alcotest.test_case "owned_by: the slot's own elements compile" `Quick
+    (expect_ok (owned_by_fixture ^ owned_by_ok));
+  Alcotest.test_case "owned_by: an index of another shape is refused" `Quick
+    (expect_type_error "reach it only as an element `valid[t.index * 4 + k]`"
+       (owned_by_fixture ^
+        "fn find(core: usize) -> bool { return valid[core * SETS]; }
+         fn main() {}"));
+  Alcotest.test_case "owned_by: an unproven offset is refused" `Quick
+    (expect_type_error "is not proven below 4"
+       (owned_by_fixture ^
+        "fn f(slot: borrow Slot[0], k: usize) { valid[slot.index * SETS + k] = true; }
+         fn main() {}"));
+  Alcotest.test_case "owned_by: a literal offset past the stride is refused" `Quick
+    (expect_type_error "is not proven below 4"
+       (owned_by_fixture ^
+        "fn f(slot: borrow Slot[0]) { valid[slot.index * SETS + 4] = true; }
+         fn main() {}"));
+  Alcotest.test_case "owned_by: a selector of another type is refused" `Quick
+    (expect_type_error "not a Slot"
+       (owned_by_fixture ^
+        "struct Other { index: {0..<4 as usize}; }
+         fn f(o: Other) { tick[o.index] = 0; }
+         fn main() {}"));
+  Alcotest.test_case "owned_by: a stride that is not the declared one is refused" `Quick
+    (expect_type_error "reach it only as"
+       (owned_by_fixture ^
+        "fn f(slot: borrow Slot[0]) { valid[slot.index * 2 + 1] = true; }
+         fn main() {}"));
+  Alcotest.test_case "owned_by: a bare use, a slice or an address is refused" `Quick
+    (fun () ->
+      List.iter (fun body ->
+        expect_type_error "reach it only as"
+          (owned_by_fixture ^ body ^ " fn main() {}") ())
+        [ "fn f() -> *bool { return &valid as *bool; }";
+          "fn f() -> bool { return slice_eq(valid[0..<4], valid[4..<8]); }";
+          "fn f() { let t: [usize; 4] = tick; }" ]);
+  Alcotest.test_case "owned_by: the token must be linear with a private field" `Quick
+    (fun () ->
+      expect_type_error "needs 'Pub' to be a linear struct with a private field"
+        "linear struct Pub[unit: usize] { index: {0..<4 as usize}; }
+         let mut g: [usize; 4] owned_by(Pub.index, 1);
+         fn main() {}" ();
+      expect_type_error "needs 'Plain' to be a linear struct"
+        "struct Plain { private index: {0..<4 as usize}; }
+         let mut g: [usize; 4] owned_by(Plain.index, 1);
+         fn main() {}" ());
+  Alcotest.test_case "owned_by: another file selects with the token's private field" `Quick
+    (fun () ->
+      ignore (infer_files [
+        "slot.tkb",
+        "linear struct Slot[unit: usize] { private index: {0..<4 as usize}; }
+         fn main() {}";
+        "user.tkb",
+        "private let mut tick: [usize; 4] owned_by(Slot.index, 1);
+         fn bump(slot: borrow Slot[0]) { tick[slot.index] = tick[slot.index] + 1; }";
+      ]);
+      expect_type_error_files "is private to"
+        [ "slot.tkb",
+          "linear struct Slot[unit: usize] { private index: {0..<4 as usize}; }
+           fn main() {}";
+          "user.tkb",
+          "fn peek(slot: borrow Slot[0]) -> usize { return slot.index; }" ] ());
 
   Alcotest.test_case "global protection: InitOnce from init_once.tkb is a lock (#1418)" `Quick
     (fun () ->
