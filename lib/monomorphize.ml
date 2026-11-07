@@ -457,9 +457,9 @@ let walk_toplevel ~subst ~vsubst ~resolve_inst (t : toplevel) : toplevel =
   | ConstDef (n, t, e, l) -> ConstDef (n, ty t, e, l)
   | LetDef (n, t_opt, e_opt, a, m, p, l) ->
       LetDef (n, Option.map ty t_opt, e_opt, a, m, p, l)
-  | ExternFuncDef (n, params, r, eff) ->
+  | ExternFuncDef (n, params, r, eff, el) ->
       ExternFuncDef (n, List.map (fun (pn, pt) -> (pn, Option.map ty pt)) params,
-                     Option.map ty r, eff)
+                     Option.map ty r, eff, el)
   | StructDef (n, fields, packed, align, priv, l) ->
       StructDef (n, List.map (fun (fn, ft) -> (fn, ty ft)) fields, packed, align, priv, l)
   | OwnedStructDef (n, k, sps, fields, packed, align, priv, is_priv, l) ->
@@ -1268,9 +1268,9 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
       | ConstDef (n, t, e, l) -> ConstDef (n, ty t, e, l)
       | LetDef (n, t_opt, e_opt, a, m, p, l) ->
           LetDef (n, Option.map ty t_opt, e_opt, a, m, p, l)
-      | ExternFuncDef (n, params, r, eff) ->
+      | ExternFuncDef (n, params, r, eff, el) ->
           ExternFuncDef (n, List.map (fun (pn, pt) -> (pn, Option.map ty pt)) params,
-                         Option.map ty r, eff)
+                         Option.map ty r, eff, el)
       | StructDef (n, fields, packed, align, priv, l) ->
           StructDef (n, List.map (fun (fn, ft) -> (fn, ty ft)) fields, packed, align, priv, l)
       | OwnedStructDef (n, k, sps, fields, packed, align, priv, is_priv, l) ->

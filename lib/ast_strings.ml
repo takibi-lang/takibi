@@ -134,7 +134,7 @@ let item (top : Ast.toplevel) : item =
        list where_clause f.where_clauses
    | Ast.ConstDef (id, t, e, _) -> comma id; ty t; expr e
    | Ast.LetDef (id, t, eo, _, _, _, _) -> comma id; opt ty t; opt expr eo
-   | Ast.ExternFuncDef (id, ps, r, effs) ->
+   | Ast.ExternFuncDef (id, ps, r, effs, _) ->
        comma id; list param ps; opt ty r; opt (list plain) effs
    | Ast.ExternSymbolDef (id, _) -> comma id
    | Ast.VectorTableDef (entries, _) -> list (fun (_, id) -> plain id) entries

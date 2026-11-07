@@ -426,7 +426,7 @@ item:
   | p = private_flag LET m = mut_flag IDENT COLON type_expr ALIGN LPAREN alignment_value RPAREN ASSIGN expr SEMI
     { LetDef ($4, Some $6, Some $12, Some $9, m, p, $symbolstartpos) }
   | EXTERN FN IDENT LPAREN params RPAREN ret_type_opt effects_opt SEMI
-    { ExternFuncDef ($3, $5, $7, $8) }
+    { ExternFuncDef ($3, $5, $7, $8, $symbolstartpos) }
   | kw = IDENT name = IDENT ps = loption(static_params) rw = IDENT
     region = IDENT LPAREN elem = type_expr RPAREN
     LBRACKET idx = separated_nonempty_list(COMMA, IDENT) RBRACKET

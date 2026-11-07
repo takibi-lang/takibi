@@ -729,7 +729,7 @@ let parser_tests = [
          fn parsed_irq() !{interrupt} {}
          fn parsed_sync() !{exception} {}
          fn parsed_nonblocking() !{} {}" with
-      | [Ast.ExternFuncDef ("parsed_wait", [], None, Some ["may_block"]);
+      | [Ast.ExternFuncDef ("parsed_wait", [], None, Some ["may_block"], _);
          Ast.FuncDef { name = "parsed_irq"; effects = Some ["interrupt"]; _ };
          Ast.FuncDef { name = "parsed_sync"; effects = Some ["exception"]; _ };
          Ast.FuncDef { name = "parsed_nonblocking"; effects = Some []; _ }] -> ()
@@ -2222,13 +2222,13 @@ let parser_tests = [
 
   Alcotest.test_case "extern fn without return type parses" `Quick (fun () ->
     match parse "extern fn uart_putc(c: u8);" with
-    | [Ast.ExternFuncDef ("uart_putc", [("c", Some Ast.TypeU8)], None, None)] -> ()
+    | [Ast.ExternFuncDef ("uart_putc", [("c", Some Ast.TypeU8)], None, None, _)] -> ()
     | _ -> Alcotest.fail "expected ExternFuncDef(uart_putc, [c:u8], None)"
   );
 
   Alcotest.test_case "extern fn with return type parses" `Quick (fun () ->
     match parse "extern fn uart_getc() -> u8;" with
-    | [Ast.ExternFuncDef ("uart_getc", [], Some Ast.TypeU8, None)] -> ()
+    | [Ast.ExternFuncDef ("uart_getc", [], Some Ast.TypeU8, None, _)] -> ()
     | _ -> Alcotest.fail "expected ExternFuncDef(uart_getc, [], Some u8)"
   );
 
@@ -16816,6 +16816,14 @@ let codegen_tests = [
         "linear opaque struct M1421;\nvariant V1421 { Some(*align(8) M1421); None; }" ();
       expect_type_error "is an opaque struct, which has no layout"
         "opaque struct O1421;\nfn c1421(p: *align(16) O1421) { }" ());
+
+  (* GitHub issue #1422: an extern fn's type errors name its declaration. *)
+  Alcotest.test_case "extern fn type errors carry the declaration's location" `Quick
+    (fun () ->
+      expect_type_error_at 3 1 "has no type annotation"
+        "fn a1422() {}\n\nextern fn h1422(p);" ();
+      expect_type_error_at 2 1 "is an opaque struct"
+        "linear opaque struct L1422;\nextern fn g1422(p: *align(8) L1422);" ());
 
   Alcotest.test_case "explicit wrapping multiply lowers to fixed-width arithmetic" `Quick
     (fun () ->

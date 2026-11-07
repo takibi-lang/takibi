@@ -214,12 +214,12 @@ let resolve_toplevel names = function
       LetDef
         (name, Option.map (resolve_type names) declared,
          Option.map (resolve_expr names) init, align, mut, private_, loc)
-  | ExternFuncDef (name, params, ret, effects) ->
+  | ExternFuncDef (name, params, ret, effects, el) ->
       ExternFuncDef
         (name,
          List.map (fun (param, declared) ->
            (param, Option.map (resolve_type names) declared)) params,
-         Option.map (resolve_type names) ret, effects)
+         Option.map (resolve_type names) ret, effects, el)
   | StructDef (name, fields, packed, align, private_fields, loc) ->
       StructDef
         (name,
@@ -360,7 +360,7 @@ let validate prog =
     | ConstDef (_, ty, init, _) -> check_type ty; check_expr init
     | LetDef (_, ty, init, _, _, _, _) ->
         Option.iter check_type ty; Option.iter check_expr init
-    | ExternFuncDef (_, params, ret, _) ->
+    | ExternFuncDef (_, params, ret, _, _) ->
         List.iter (fun (_, ty) -> Option.iter check_type ty) params;
         Option.iter check_type ret
     | StructDef (_, fields, _, _, _, _) ->

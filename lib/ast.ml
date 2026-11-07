@@ -669,8 +669,9 @@ type toplevel =
      (loc.pos_fname) matches this declaration's own loc -- enforced in type_inf.ml. loc is this
      declaration's own position, needed to know which file "declared" it. *)
   | ExternFuncDef of ident * (ident * type_expr option) list * type_expr option
-      * ident list option
-  (* extern fn name(params) -> ret !{effects}; -- body is external. *)
+      * ident list option * loc
+  (* extern fn name(params) -> ret !{effects}; -- body is external. loc is
+     the declaration's start (GitHub issue #1422: its type errors name it). *)
   | ExternSymbolDef of ident * loc
   (* extern symbol name; -- GitHub issue #225. Declares a symbol defined
      elsewhere (hand-written assembly or the linker script) with no Takibi

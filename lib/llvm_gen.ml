@@ -8455,7 +8455,7 @@ let gen_program ?prog_types prog =
   List.iter (function
     | ViewDef (name, _, _, _, _) -> Hashtbl.replace erased_view_names name ()
     | VariantDef (name, _, cases, _, _) -> Hashtbl.replace variant_defs name cases
-    | ExternFuncDef (name, _, _, Some effects)
+    | ExternFuncDef (name, _, _, Some effects, _)
       when List.mem "noreturn" effects ->
         Hashtbl.replace noreturn_functions name ()
     | _ -> ()) prog;
@@ -8695,7 +8695,7 @@ let gen_program ?prog_types prog =
         gen_global ?prog_types name (Some ty) (Some expr) None false loc
     | LetDef (name, ty_opt, expr_opt, align_opt, is_mutable, _, loc) ->
         gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable loc
-    | ExternFuncDef (name, params, ret_ty, effects) ->
+    | ExternFuncDef (name, params, ret_ty, effects, _) ->
         if not (Hashtbl.mem functions name) then begin
           let param_ast = List.map (fun (_, t) ->
             resolve_special_type

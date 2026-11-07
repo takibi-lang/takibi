@@ -9120,7 +9120,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   in
   List.iter (function
     | Ast.FuncDef fdef          -> claim_toplevel_name fdef.name "function"
-    | Ast.ExternFuncDef (n, _, _, _) -> claim_toplevel_name n "function"
+    | Ast.ExternFuncDef (n, _, _, _, _) -> claim_toplevel_name n "function"
     | Ast.ExternSymbolDef (n, _) -> claim_toplevel_name n "symbol"
     | Ast.ConstDef (n, _, _, _) -> claim_toplevel_name n "constant"
     | Ast.LetDef (n, _, _, _, _, _, _)  -> claim_toplevel_name n "global"
@@ -10394,38 +10394,38 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          | None -> Option.iter (validate_nonparam_type f.def_loc) f.ret_type);
         allow_implicit_static := false;
         List.iter validate_stmt_types f.body
-    | Ast.ExternFuncDef (name, params, ret, effects) ->
+    | Ast.ExternFuncDef (name, params, ret, effects, eloc) ->
         if List.exists (fun (_, ty) ->
              Option.fold ~none:false
                ~some:type_contains_fixed_dma_authority ty) params
            || Option.fold ~none:false
                 ~some:type_contains_fixed_dma_authority ret then
-          raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+          raise (TypeError (eloc, Printf.sprintf
             "extern function '%s' cannot carry fixed DMA authority"
             name));
         Option.iter (fun effects ->
-          validate_effects ~allow_declaration_only:true ~allow_noreturn:true Lexing.dummy_pos
+          validate_effects ~allow_declaration_only:true ~allow_noreturn:true eloc
             "extern function" name effects;
           if List.exists (fun effect_name -> match Effect_rules.find effect_name with
             | Some rule -> rule.declaration_role | None -> false) effects then
-            raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+            raise (TypeError (eloc, Printf.sprintf
               "extern function '%s' cannot be an interrupt or exception root, or an mmu_off root, because it has no body to check"
               name))
         ) effects;
         validation_static_scope := Some (Hashtbl.create 8);
         allow_implicit_static := true;
         List.iter (fun (pname, ty) -> match ty with
-          | Some t -> validate_param_type Lexing.dummy_pos t
-          | None -> raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+          | Some t -> validate_param_type eloc t
+          | None -> raise (TypeError (eloc, Printf.sprintf
               "extern fn '%s' parameter '%s' has no type annotation; extern fn \
                parameters must be explicitly typed (there is no function body \
                to infer them from)" name pname))
         ) params;
         Option.iter (fun t ->
           if ast_contains_stable_owner_value t then
-            raise (TypeError (Lexing.dummy_pos,
+            raise (TypeError (eloc,
               "stable owner containers cannot be returned by value"));
-          validate_nonparam_type Lexing.dummy_pos t
+          validate_nonparam_type eloc t
         ) ret
     | Ast.ConstDef (_gname, ty, init, gloc) ->
         validation_static_scope := None;
@@ -11100,14 +11100,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   in
   let signatures = List.fold_left (fun m -> function
     | Ast.FuncDef f -> add_signature m f.name f.params
-    | Ast.ExternFuncDef (name, params, _, _) -> add_signature m name params
+    | Ast.ExternFuncDef (name, params, _, _, _) -> add_signature m name params
     | _ -> m
   ) StringMap.empty prog in
   let fn_counts = StringMap.map StringSet.cardinal signatures in
   let fn_occurrences = List.fold_left (fun m -> function
     | Ast.FuncDef f ->
         StringMap.add f.name (1 + Option.value (StringMap.find_opt f.name m) ~default:0) m
-    | Ast.ExternFuncDef (name, _, _, _) ->
+    | Ast.ExternFuncDef (name, _, _, _, _) ->
         StringMap.add name (1 + Option.value (StringMap.find_opt name m) ~default:0) m
     | _ -> m
   ) StringMap.empty prog in
@@ -11187,10 +11187,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             | Some rule -> rule.function_pointer | None -> false) effects)
           fdef.effects in
         StringMap.add fdef.name ((key, TFun (pts, rt, call_effects)) :: old) m
-    | Ast.ExternFuncDef (name, params, ret_ty, effects_for_extern) ->
-        check_reserved_fn Lexing.dummy_pos name;
+    | Ast.ExternFuncDef (name, params, ret_ty, effects_for_extern, eloc) ->
+        check_reserved_fn eloc name;
         if Option.value (StringMap.find_opt name fn_occurrences) ~default:0 > 1 then
-          raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+          raise (TypeError (eloc, Printf.sprintf
             "extern function '%s' cannot be overloaded" name));
         let scope = create_static_scope () in
         let pts = List.map (fun (_, t) -> of_ast_opt_in_decl_scope scope t) params in
@@ -11468,7 +11468,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   function_param_modes := List.fold_left (fun modes -> function
     | Ast.FuncDef f ->
         StringMap.add (overload_key f.name f.params) (List.map snd f.params) modes
-    | Ast.ExternFuncDef (name, params, _, _) ->
+    | Ast.ExternFuncDef (name, params, _, _, _) ->
         StringMap.add (overload_key name params) (List.map snd params) modes
     | _ -> modes
   ) StringMap.empty prog;
@@ -11664,7 +11664,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let call_params = List.fold_left (fun m -> function
     | Ast.FuncDef f ->
         StringMap.add (overload_key f.name f.params) (List.map snd f.params) m
-    | Ast.ExternFuncDef (name, params, _, _) -> StringMap.add name (List.map snd params) m
+    | Ast.ExternFuncDef (name, params, _, _, _) -> StringMap.add name (List.map snd params) m
     | _ -> m
   ) StringMap.empty prog in
   let call_returns = List.fold_left (fun m -> function
@@ -11672,7 +11672,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         let key = overload_key f.name f.params in
         let ret = (StringMap.find key functions).ret_type in
         StringMap.add key ret m
-    | Ast.ExternFuncDef (name, _, ret, _) ->
+    | Ast.ExternFuncDef (name, _, ret, _, _) ->
         StringMap.add name (Option.value ret ~default:Ast.TypeVoid) m
     | _ -> m
   ) StringMap.empty prog in
@@ -11709,8 +11709,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   "loan_transfer requires two borrowed indexed authorities sharing the return lifetime index")))
          | _ -> raise (TypeError (f.def_loc,
              "loan_transfer requires exactly two borrowed authorities and an indexed pointer return")))
-    | Ast.ExternFuncDef (_, _, _, words) when annotated words ->
-        raise (TypeError (Lexing.dummy_pos,
+    | Ast.ExternFuncDef (_, _, _, words, eloc) when annotated words ->
+        raise (TypeError (eloc,
           "loan_transfer requires a private Takibi function body"))
     | _ -> map) StringMap.empty prog in
   (* Authority-derived region returns (issues #106/#128): function key ->
@@ -11760,7 +11760,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             "authority-derived return functions cannot be used as runtime function pointers"))
     | _ -> ()) prog;
   let noreturn_functions = List.fold_left (fun names -> function
-    | Ast.ExternFuncDef (name, _, _, Some effects)
+    | Ast.ExternFuncDef (name, _, _, Some effects, _)
       when List.mem "noreturn" effects -> StringSet.add name names
     | _ -> names
   ) StringSet.empty prog in
@@ -11816,7 +11816,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             | None, _ -> guards
           in
           (acquires, guards)
-      | Ast.ExternFuncDef (name, params, ret, effects) ->
+      | Ast.ExternFuncDef (name, params, ret, effects, eloc) ->
           let key = overload_key name params in
           let acquires = match lock_annotation effects
               Effect_rules.lock_acquire_annotation with
@@ -11826,10 +11826,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               Effect_rules.lock_guard_annotation, ret with
             | Some annotation, Some guard_type ->
                 if not (is_linear_type guard_type) then
-                  raise (TypeError (Lexing.dummy_pos,
+                  raise (TypeError (eloc,
                     "lock_guard annotation requires a linear returned guard type"));
-                add_lock_guard_types Lexing.dummy_pos guard_type annotation guards
-            | Some _, _ -> raise (TypeError (Lexing.dummy_pos,
+                add_lock_guard_types eloc guard_type annotation guards
+            | Some _, _ -> raise (TypeError (eloc,
                 "lock_guard annotation requires a named returned guard type"))
             | None, _ -> guards in
           (acquires, guards)
@@ -12062,7 +12062,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     List.fold_left (fun acc -> function
       | Ast.FuncDef f when has_annotation f.effects word ->
           StringSet.add (overload_key f.name f.params) acc
-      | Ast.ExternFuncDef (name, params, _, effects)
+      | Ast.ExternFuncDef (name, params, _, effects, _)
         when has_annotation effects word ->
           StringSet.add (overload_key name params) acc
       | _ -> acc) StringSet.empty prog
@@ -12179,10 +12179,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              StringMap.add (overload_key f.name f.params) kind map
          | _ -> raise (TypeError (f.def_loc,
              "a function may declare only one record mutation authority")))
-    | Ast.ExternFuncDef (_, _, _, Some words)
+    | Ast.ExternFuncDef (_, _, _, Some words, eloc)
       when List.exists (fun word ->
         Effect_rules.record_mutation_annotation word <> None) words ->
-        raise (TypeError (Lexing.dummy_pos,
+        raise (TypeError (eloc,
           "record mutation annotations require a Takibi function body"))
     | _ -> map) StringMap.empty prog in
   let record_mutation_reach = StringMap.map (fun seed_kind ->
@@ -12240,7 +12240,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     match item with
     | Ast.FuncDef f -> add (overload_key f.name f.params) f.def_loc
         (Option.value f.effects ~default:[])
-    | Ast.ExternFuncDef (name, _, _, words) -> add name Lexing.dummy_pos
+    | Ast.ExternFuncDef (name, _, _, words, _) -> add name Lexing.dummy_pos
         (Option.value words ~default:[])
     | _ -> seeds) StringMap.empty prog in
   let witness_changes = StringMap.map (fun seeds ->
@@ -14613,7 +14613,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           (StringMap.add key f.effects effects,
            StringMap.add key f.name names,
            StringMap.add key f.def_loc locs)
-      | Ast.ExternFuncDef (name, params, _, effects_for_extern) ->
+      | Ast.ExternFuncDef (name, params, _, effects_for_extern, _) ->
           let key = overload_key name params in
           (StringMap.add key effects_for_extern effects,
            StringMap.add key name names,
@@ -15019,7 +15019,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               body does to DAIF; it is read as msr_daifset_irq is. *)
            (if has_annotation f.effects Effect_rules.masks_irq_annotation
             then StringSet.add key primitives else primitives))
-      | Ast.ExternFuncDef (name, params, _, effects)
+      | Ast.ExternFuncDef (name, params, _, effects, _)
         when has_annotation effects "noreturn" ->
           (guards, restorers, StringSet.add (overload_key name params) noreturn,
            primitives)
