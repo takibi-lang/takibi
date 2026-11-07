@@ -204,6 +204,88 @@ private fn ext2_write_exhaustion_check(mount: Ext2Mount) -> bool {
            ext2_counters_match_bitmaps(mount);
 }
 
+// GitHub issue #1434: a failed exhaustion check must not leave its fillers
+// behind. On 2026-11-07 a virtio-blk timeout failed the check partway; EL0
+// then found free space where it expected ENOSPC, grew /mutable.txt to
+// 12288 bytes, and peer-mutate later failed naming the wrong cause. Undo
+// what the check made: recover a fence, unlink both fillers (absent is
+// fine), and require /mutable.txt and the free counts as they were.
+private fn ext2_exhaustion_filler_remove(mount: Ext2Mount,
+                                         name: []const u8) -> bool !{unsafe} {
+    match ext2_unlink_name(mount, EXT2_ROOT_INODE, name) {
+        Ext2UnlinkNameResult::Unlinked => { return true; }
+        Ext2UnlinkNameResult::NotFound => { return true; }
+        Ext2UnlinkNameResult::Invalid => { return false; }
+        Ext2UnlinkNameResult::IsDirectory => { return false; }
+        Ext2UnlinkNameResult::Unsupported => { return false; }
+    }
+}
+
+private fn ext2_exhaustion_restore(mount: Ext2Mount, blocks: usize,
+                                   inodes: usize) -> bool !{unsafe} {
+    if (ext2_is_fenced()) {
+        match ext2_recover(mount) {
+            Ext2RecoverResult::Failed => { return false; }
+            Ext2RecoverResult::Recovered => { }
+        }
+    }
+    let a: bool = ext2_exhaustion_filler_remove(mount, bs"enospc-a");
+    let b: bool = ext2_exhaustion_filler_remove(mount, bs"enospc-b");
+    if (a == false || b == false) { return false; }
+    match ext2_lookup_root(mount, bs"mutable.txt") {
+        Ext2LookupResult::Invalid => { return false; }
+        Ext2LookupResult::NotFound => { return false; }
+        Ext2LookupResult::Found(inode) => {
+            return ext2_io_file_is(mount, inode, false, false) &&
+                   ext2_write_fixture_counts_match(mount, blocks, inodes) &&
+                   ext2_counters_match_bitmaps(mount);
+        }
+    }
+}
+
+// The regression for #1434: one write fault partway into the filler writes
+// fails the check, and the restore must still put everything back. Skip 50
+// lands inside enospc-a's one-byte range writes.
+const EXT2_EXHAUSTION_FAULT_SKIP: usize = 50;
+
+private fn ext2_exhaustion_fault_case(mount: Ext2Mount) -> bool !{unsafe} {
+    match ext2_free_counts(mount) {
+        Ext2FreeCountsResult::Invalid => { return false; }
+        Ext2FreeCountsResult::Counts(counts) => {
+            let (blocks, inodes) = counts;
+            block_fault_arm(true, EXT2_EXHAUSTION_FAULT_SKIP, false);
+            let passed: bool = ext2_write_exhaustion_check(mount);
+            let injected: usize = block_fault_disarm();
+            let restored: bool = ext2_exhaustion_restore(mount, blocks, inodes);
+            return passed == false && injected != 0 && restored;
+        }
+    }
+}
+
+// The real check. On failure it restores and answers false, so the caller
+// halts before EL0 runs its ENOSPC fixture against a volume with room.
+private fn ext2_exhaustion_run(mount: Ext2Mount) -> bool !{logs, unsafe} {
+    match ext2_free_counts(mount) {
+        Ext2FreeCountsResult::Invalid => {
+            kernel_boot_log("ext2 exhaustion: failed, free counts unreadable\n");
+            return false;
+        }
+        Ext2FreeCountsResult::Counts(counts) => {
+            let (blocks, inodes) = counts;
+            if (ext2_write_exhaustion_check(mount)) {
+                kernel_boot_log("ext2 exhaustion: indirect NoSpace rollback, EL0 fillers ready\n");
+                return true;
+            }
+            if (ext2_exhaustion_restore(mount, blocks, inodes)) {
+                kernel_boot_log("ext2 exhaustion: failed, fillers removed, mutable.txt intact\n");
+            } else {
+                kernel_boot_log("ext2 exhaustion: failed, fillers or mutable.txt not restored\n");
+            }
+            return false;
+        }
+    }
+}
+
 // GitHub issue #698: with one bitmap full, mkdir and create answer NoSpace
 // and leave everything as it was -- in particular the block the inode-full
 // case claimed before its inode claim failed. After the bitmap is put back,
@@ -1498,14 +1580,15 @@ fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
         Ext2ExhaustionMode::Interactive => { return; }
         Ext2ExhaustionMode::Integration => { }
     }
+    if (ext2_exhaustion_fault_case(mount)) {
+        kernel_boot_log("ext2 exhaustion: write fault mid-check failed it, fillers removed, mutable.txt intact\n");
+    } else {
+        kernel_boot_log("ext2 exhaustion: write fault mid-check left state behind\n");
+    }
     let exhaustion_start: usize = read_cntpct() as usize;
     let exhaustion_reads: usize = block_read_call_total();
     let exhaustion_writes: usize = block_write_call_total();
-    if (ext2_write_exhaustion_check(mount)) {
-        kernel_boot_log("ext2 exhaustion: indirect NoSpace rollback, EL0 fillers ready\n");
-    } else {
-        kernel_boot_log("ext2 exhaustion: failed\n");
-    }
+    let exhausted: bool = ext2_exhaustion_run(mount);
     let exhaustion_ticks: usize = (read_cntpct() as usize) - exhaustion_start;
     kernel_boot_log("ext2 exhaustion cost: ticks=");
     uart_put_udec(exhaustion_ticks);
@@ -1516,6 +1599,13 @@ fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
     kernel_boot_log(" writes=");
     uart_put_udec(block_write_call_total() - exhaustion_writes);
     kernel_boot_log("\n");
+    // GitHub issue #1434: EL0 writes /mutable.txt until ENOSPC, so without
+    // the fillers it would grow the file and fail later checks under other
+    // names. Stop here, with the cause as the last line.
+    if (exhausted == false) {
+        kernel_boot_log("ext2 exhaustion: EL0 ENOSPC fixture cannot run; halting\n");
+        while (true) { }
+    }
 
 }
 
