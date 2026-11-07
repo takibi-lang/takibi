@@ -68,7 +68,6 @@ LISTED = {
     ("kernel/kernel/pid_contention_evidence.tkb", "pid_probe_active"): (CROSS, "the PID contention probe's driver"),
     ("kernel/kernel/pool_lock_wait.tkb", "pool_lock_wait_cores"): (CROSS, "the pool-lock wait total"),
     ("kernel/kernel/process.tkb", "execution_state"): (CROSS, "the scheduler's cross-CPU wakes and DDB"),
-    ("kernel/kernel/process.tkb", "kernel_activity"): (CROSS, "DDB's per-CPU activity view"),
     ("kernel/kernel/process.tkb", "kernel_crash_trace_next"): (CROSS, "the crash trace report"),
     ("kernel/kernel/process.tkb", "kernel_process_tick_wake_due"): (CROSS, "tick wakes posted by another CPU"),
     ("kernel/kernel/process.tkb", "kernel_process_tick_wake_tick_now"): (CROSS, "the tick-wake report"),
