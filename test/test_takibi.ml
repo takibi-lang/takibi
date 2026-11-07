@@ -170,6 +170,25 @@ let expect_trap_sites expected src () =
   Alcotest.(check int) "recorded trap sites"
     expected (List.length !Llvm_gen.trap_sites)
 
+(* GitHub issue #1431: codegen over several named files, for a rule that
+   depends on which file declares what (the Atomic(E) read-back exemption). *)
+let expect_trap_sites_files expected files () =
+  if Option.is_none !Llvm_gen.target_data then
+    ignore (Llvm_gen.setup_target ~triple:"aarch64-none-elf" ());
+  Compilation_state.reset ();
+  let prog = List.concat_map (fun (filename, src) ->
+    let lexbuf = Lexing.from_string src in
+    Lexing.set_filename lexbuf filename;
+    Parser.program Lexer.read lexbuf) files in
+  let prog =
+    Declared_type_resolver.run
+      (Monomorphize.run (Dma_fixed_record.run (Publish_record.run prog))) in
+  (match Llvm_gen.gen_program ~prog_types:(Type_inf.infer_program prog) prog with
+   | _ -> ()
+   | exception Llvm_gen.Error msg -> Alcotest.failf "unexpected codegen Error: %s" msg);
+  Alcotest.(check int) "recorded trap sites"
+    expected (List.length !Llvm_gen.trap_sites)
+
 (* Run one complete compilation with an explicit pointer-width target.  The
    cleanup is part of this helper rather than each table row: target selection
    is process-global, and a failing row must not poison a later (or shuffled)
@@ -12372,6 +12391,32 @@ linear struct Owner746b[page: usize] {
        (atomic_enum_base ^ "
       enum Wide1159: u32 { A; B; }
       private let mut wide1159: Atomic(Wide1159);"));
+  (* GitHub issue #1431: the read-back exemption covers exactly
+     `(atomic_word_load(..) as u8) as E` in the file declaring Atomic. *)
+  Alcotest.test_case "Atomic(E) read-back needs no runtime variant check" `Quick
+    (expect_trap_sites 0 (atomic_enum_base ^ "
+      private let mut site1159: Atomic(Site1159);
+      fn note1159() -> bool {
+        atomic_enum_store(&site1159, Site1159::Syscall);
+        return atomic_enum_load(&site1159) == Site1159::Syscall;
+      }"));
+  Alcotest.test_case "another u8-to-enum cast in Atomic's file keeps its check" `Quick
+    (expect_trap_sites 1 (atomic_enum_base ^ "
+      fn decode1431(code: u8) -> Site1159 { return code as Site1159; }"));
+  Alcotest.test_case "a wider read-back in Atomic's file keeps its check" `Quick
+    (expect_trap_sites 1 (atomic_enum_base ^ "
+      private let mut word1431: AtomicWord;
+      fn decode1431() -> Site1159 {
+        return ((atomic_word_load(&word1431) as u16) as u8) as Site1159;
+      }"));
+  Alcotest.test_case "the read-back shape outside Atomic's file keeps its check" `Quick
+    (expect_trap_sites_files 1
+       [ ("atomic_enum.tkb", atomic_enum_base);
+         ("user1431.tkb", "
+      private let mut word1431: AtomicWord;
+      fn decode1431() -> Site1159 {
+        return (atomic_word_load(&word1431) as u8) as Site1159;
+      }") ]);
   Alcotest.test_case "SetOnce publishes once through its claim" `Quick
     (expect_ok (set_once_base ^ "
       fn set1159(v: usize) {
