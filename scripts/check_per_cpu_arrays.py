@@ -38,6 +38,7 @@ LISTED = {
     ("kernel/fs/ext2/ext2.tkb", "ext2_scratch"): (POOL, "Ext2Slot"),
     ("kernel/fs/ext2/ext2.tkb", "ext2_slot_words"): (POOL, "Ext2Slot's acquire words"),
     ("kernel/drivers/block/block_slot.tkb", "block_slot_words"): (POOL, "BlockSlot's acquire words"),
+    ("kernel/drivers/block/memory.tkb", "block_run_data"): (POOL, "BlockSlot"),
     ("kernel/drivers/block/memory.tkb", "block_run_backend"): (POOL, "BlockSlot"),
     ("kernel/drivers/block/memory.tkb", "block_run_first"): (POOL, "BlockSlot"),
     ("kernel/drivers/block/memory.tkb", "block_run_count"): (POOL, "BlockSlot"),
