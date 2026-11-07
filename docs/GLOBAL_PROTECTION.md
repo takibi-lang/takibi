@@ -61,6 +61,7 @@ Tried in this order; an array `[T; N]` takes the class of `T`.
 | `atomic` | `AtomicWord` |
 | `lock` | `LockedCell(T)`, `RegionPool(T)`, `InitOnce` as kernel/lib/init_once.tkb defines it (#1418: its private `complete` is written only under its own `TaskMutex`, by that file), `GuardedField(T)` (#1159: its guard proves the guarded-field lock is held, not which cell's; one adopter, fd_table.tkb's `fd_slot_total`) |
 | `place` | `Place(T)` |
+| `atomic` (enum) | `Atomic(E)`: one AtomicWord holding a u8 enum's code, through `atomic_enum_store` / `atomic_enum_load` (#1159) |
 | `boot_once` | `BootOnce(T)`: written under one `BootPhase`, read after by `boot_once_get` |
 | `per_cpu` | a `struct per_cpu` store |
 | `dma_fixed` | a `struct dma_fixed` record |
@@ -453,3 +454,9 @@ entries below that date are history, left as written.
   `execution_state` has readers outside a stop (the protocol observation
   under the run lock, the logger's stack owner), so a stop authority alone
   does not cover them.
+- 2026-11-07: enum-valued atomics (GitHub issue #1159, rule 2 of the
+  2026-11-07 decision; SPEC.md, Enum-valued cells). `Atomic(E)` is an
+  AtomicWord holding a u8 enum's code. `scheduled_process_freed_site`,
+  `scheduled_process_missing_site` (`Atomic(KernelActivity)`) and
+  `kernel_process_exec_failure_reason` (`Atomic(KernelExecFailureReason)`)
+  move to it; no debugger script reads the three symbols.

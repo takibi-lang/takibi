@@ -3901,6 +3901,25 @@ in its comment. The ordering argument between accesses is still the
 user's; what the type removes is the raw address. The spinlock word inside
 `Mutex` and `TaskMutex` is such a cell.
 
+**Enum-valued cells (GitHub issue #1159).** `Atomic(E)`
+(kernel/lib/atomic_enum.tkb: `generic struct Atomic(T: type) { private
+code: AtomicWord; }`) is an `AtomicWord` holding an enum's code:
+
+```
+atomic_enum_store(cell: &mut Atomic(E), value: E)   // release store of value as usize
+atomic_enum_load(cell: &mut Atomic(E)) -> E         // acquire load, read back as E
+```
+
+- `E` must be an enum whose underlying type is `u8`; `Atomic(usize)` or an
+  `Atomic` of a wider enum is a compile error. An integer word stays an
+  `AtomicWord`.
+- The word is private to atomic_enum.tkb and only `atomic_enum_store`
+  writes it, from an `E`, so the load's `(code as u8) as E` read-back in
+  that file carries no runtime variant check. That one shape in that file
+  is the only int-to-enum cast exempt from the check.
+- Load and store only. The layout is `AtomicWord`'s, so a debugger reads
+  the symbol as one word holding the code.
+
 **Which instruction each one becomes is a backend decision, not a spelling
 here.** The read-modify-write operations lower through LLVM, so the
 selected `--cpu` picks the encoding. Measured on real objdump output:

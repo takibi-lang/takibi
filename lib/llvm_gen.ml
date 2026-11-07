@@ -4223,8 +4223,20 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                  all_in a
              | _ -> false
            in
+           (* GitHub issue #1159 rule 2: atomic_enum_load's read-back of
+              an Atomic(E) code. The word is private to the file that
+              declares Atomic and only atomic_enum_store writes it, from an
+              E, so the code is one of E's; monomorphize.ml has checked E
+              is a u8 enum. Only this exact shape in that file is exempt. *)
+           let atomic_enum_readback = match src_e.desc with
+             | Cast (TypeU8, { desc = Call ("atomic_word_load", [_]); _ }) ->
+                 !Atomic_enum_registry.file
+                 = Some (Ast.source_file_of_loc e.loc)
+             | _ -> false in
            if is_ne then
              (* non-exhaustive enum: any integer is valid; round-trip is guaranteed *)
+             (TypeNamed ename, v_coerced)
+           else if atomic_enum_readback then
              (TypeNamed ename, v_coerced)
            else if variants_proven () then
              (TypeNamed ename, v_coerced)

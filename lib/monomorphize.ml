@@ -908,6 +908,8 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
         if Hashtbl.mem struct_templates name then
           raise (Types.TypeError (Lexing.dummy_pos, Printf.sprintf
             "'%s' is already defined as a generic struct" name));
+        if name = "Atomic" then
+          Atomic_enum_registry.file := Some (Ast.source_file_of_loc loc);
         Hashtbl.replace struct_templates name
           { st_params = tps; st_fields = fields; st_is_packed = packed;
             st_align_opt = align; st_private_fields = priv; st_loc = loc }
@@ -1456,6 +1458,16 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
                 raise (Types.TypeError (Lexing.dummy_pos, Printf.sprintf
                   "generic struct '%s' expects %d argument(s), got %d"
                   name (List.length tpl.st_params) (List.length gargs)));
+              (* GitHub issue #1159 rule 2: Atomic(E) keeps E's code in
+                 one AtomicWord and loads it back as E unchecked, which is
+                 exact only for a u8-backed enum. *)
+              if name = "Atomic" then
+                (match gargs with
+                 | [GType (TypeNamed e)]
+                   when Hashtbl.find_opt Type_layout.enums e = Some TypeU8 -> ()
+                 | _ -> raise (Types.TypeError (tpl.st_loc,
+                     "Atomic(T) holds a u8-backed enum: declare `enum E: u8` \
+                      and use Atomic(E); for an integer use AtomicWord")));
               let mapping = List.combine tpl.st_params gargs in
               List.iter (fun ((pname, kind), arg) -> match kind, arg with
                 | GPType, GValue _ -> raise (Types.TypeError (Lexing.dummy_pos, Printf.sprintf

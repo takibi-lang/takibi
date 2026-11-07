@@ -509,6 +509,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/lib/byte_slice.tkb \
 	kernel/lib/diagnostic_ring.tkb \
 	kernel/lib/boot_once.tkb \
+	kernel/lib/atomic_enum.tkb \
 	kernel/lib/init_once.tkb \
 	kernel/lib/locked_cell.tkb \
 	kernel/lib/mutex.tkb \

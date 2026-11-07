@@ -1,0 +1,25 @@
+// GitHub issue #1159 rule 2: one enum-valued word shared between cores, as
+// a type. Atomic(E) is one AtomicWord holding E's code, so its layout is
+// AtomicWord's. The compiler accepts Atomic(E) only for an enum E whose
+// underlying type is u8 (monomorphize.ml), and the word is private to this
+// file, so every code in it was stored from an E by atomic_enum_store: the
+// load reads it back as E with no decode and no `unknown` arm.
+//
+// Current limitations (2026-11-07):
+// - Load and store only; no compare-exchange (no user needs one yet).
+// - u8-backed enums only; a wider enum needs its own cast here.
+// - As for AtomicWord, an unsafe raw pointer to the cell can still read or
+//   write the word unsynchronised.
+use "kernel/lib/atomic_word.tkb";
+
+generic struct Atomic(T: type) {
+    private code: AtomicWord;
+}
+
+fn atomic_enum_store(T: type, cell: &mut Atomic(T), value: T) {
+    atomic_word_store(&(*cell).code, value as usize);
+}
+
+fn atomic_enum_load(T: type, cell: &mut Atomic(T)) -> T {
+    return (atomic_word_load(&(*cell).code) as u8) as T;
+}

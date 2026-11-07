@@ -14,6 +14,7 @@ let reset () =
   Publish_registry.reset ();
   No_copy_registry.reset ();
   Per_cpu_registry.reset ();
+  Atomic_enum_registry.reset ();
   Init_state.reset ();
   Region_backing.reset ();
   Guarded_registry.reset ();

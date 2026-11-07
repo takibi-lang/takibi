@@ -10,7 +10,7 @@
    A type's protection, in the order tried:
 
    - `[T; N]`: the protection of T (an array of protected cells);
-   - `AtomicWord` -> atomic;
+   - `AtomicWord`, `Atomic(E)` -> atomic;
    - `LockedCell(T)`, `RegionPool(T)` (generated as `RegionPool__T`) -> lock;
    - `InitOnce`, the struct kernel/lib/init_once.tkb defines, -> lock
      (GitHub issue #1418): its fields are private, so only that file's
@@ -89,6 +89,8 @@ let write_table (out : out_channel) (prog : toplevel list) =
     | TypeGenericInst (("LockedCell" | "RegionPool" | "GuardedField"), _) -> "lock"
     | TypeGenericInst ("Place", _) | TypeVariant ("Place", _, _) -> "place"
     | TypeGenericInst ("BootOnce", _) -> "boot_once"
+    (* #1159 rule 2: one AtomicWord holding an enum code. *)
+    | TypeGenericInst ("Atomic", _) -> "atomic"
     | TypeNamed n | TypeIndexed (n, _) -> named seen n
     | _ -> "none"
   and named seen n =

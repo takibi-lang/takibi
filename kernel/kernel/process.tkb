@@ -1,4 +1,5 @@
 use "kernel/lib/atomic_word.tkb";
+use "kernel/lib/atomic_enum.tkb";
 use "kernel/kernel/pool_lock_wait.tkb";
 use "kernel/kernel/stall_probe.tkb";
 use "kernel/kernel/stack_poison.tkb";
@@ -1135,8 +1136,7 @@ fn scheduled_process_record_locked(guard: borrow ProcessRunGuard[lock],
                 atomic_word_fetch_add(&scheduled_process_freed_slot_count, 1);
                 if (atomic_word_compare_exchange(&scheduled_process_freed_first_slot, 0, slot.word)) {
                     atomic_word_store(&scheduled_process_freed_cpu, cpu_id());
-                    scheduled_process_freed_site =
-                        kernel_activity_here();
+                    atomic_enum_store(&scheduled_process_freed_site, kernel_activity_here());
                 }
                 return ProcessRecordLookup::Absent;
             }
@@ -1144,8 +1144,7 @@ fn scheduled_process_record_locked(guard: borrow ProcessRunGuard[lock],
             if (atomic_word_compare_exchange(&scheduled_process_missing_first_slot, 0, slot.word)) {
                 atomic_word_store(&scheduled_process_missing_reason, 2);
                 atomic_word_store(&scheduled_process_missing_cpu, cpu_id());
-                scheduled_process_missing_site =
-                    kernel_activity_here();
+                atomic_enum_store(&scheduled_process_missing_site, kernel_activity_here());
                 // +1, so 0 means "no current process here" rather than
                 // "current is slot 0". The first version could not tell
                 // those apart and the difference is the idle path.
@@ -1504,7 +1503,7 @@ struct per_cpu KernelActivityCell {
     private activity: KernelActivity;
 }
 private let mut kernel_activity: [KernelActivityCell; KERNEL_MAX_CORES];
-private let mut scheduled_process_missing_site: KernelActivity;
+private let mut scheduled_process_missing_site: Atomic(KernelActivity);
 
 
 fn kernel_activity_enter(activity: KernelActivity) -> KernelActivity {
@@ -1599,7 +1598,7 @@ fn kernel_activity_name_for_code(code: usize) -> *u8 {
 }
 
 fn scheduled_process_missing_site_value() -> KernelActivity {
-    return scheduled_process_missing_site;
+    return atomic_enum_load(&scheduled_process_missing_site);
 }
 
 // A slot a walk named and found free by the time it looked. Reported, not
@@ -1608,7 +1607,7 @@ fn scheduled_process_missing_site_value() -> KernelActivity {
 private let mut scheduled_process_freed_slot_count: AtomicWord;
 private let mut scheduled_process_freed_first_slot: AtomicWord;
 private let mut scheduled_process_freed_cpu: AtomicWord;
-private let mut scheduled_process_freed_site: KernelActivity;
+private let mut scheduled_process_freed_site: Atomic(KernelActivity);
 
 fn scheduled_process_freed_slot_count_value() -> usize {
     return atomic_word_load(&scheduled_process_freed_slot_count);
@@ -1623,7 +1622,7 @@ fn scheduled_process_freed_cpu_value() -> usize {
 }
 
 fn scheduled_process_freed_site_value() -> KernelActivity {
-    return scheduled_process_freed_site;
+    return atomic_enum_load(&scheduled_process_freed_site);
 }
 
 fn scheduled_process_missing_first_slot_value() -> usize {
@@ -5976,7 +5975,7 @@ enum KernelExecFailureReason: u8 {
     DebuggerAfterCommit;
     ImageRecordOutOfMemory;
 }
-private let mut kernel_process_exec_failure_reason: KernelExecFailureReason;
+private let mut kernel_process_exec_failure_reason: Atomic(KernelExecFailureReason);
 
 // Where a prepared exec enters EL0: the new image's entry point and initial
 // stack pointer, carried to the child-exec return in the result itself.
@@ -6231,35 +6230,35 @@ fn kernel_process_trace_fail_after_exec_requested() -> bool {
 }
 
 fn kernel_process_exec_failure_clear() {
-    kernel_process_exec_failure_reason = KernelExecFailureReason::None;
+    atomic_enum_store(&kernel_process_exec_failure_reason, KernelExecFailureReason::None);
 }
 
 fn kernel_process_exec_failure_set(result: KernelChildExecPrepareResult) {
     match result {
-        KernelChildExecPrepareResult::Prepared(_) => { kernel_process_exec_failure_reason = KernelExecFailureReason::None; }
-        KernelChildExecPrepareResult::CloneVmMissing => { kernel_process_exec_failure_reason = KernelExecFailureReason::CloneVmMissing; }
-        KernelChildExecPrepareResult::DynamicResolveInvalid => { kernel_process_exec_failure_reason = KernelExecFailureReason::DynamicResolveInvalid; }
-        KernelChildExecPrepareResult::DynamicPairInvalid => { kernel_process_exec_failure_reason = KernelExecFailureReason::DynamicPairInvalid; }
-        KernelChildExecPrepareResult::ImageAlreadyInstalled => { kernel_process_exec_failure_reason = KernelExecFailureReason::ImageAlreadyInstalled; }
-        KernelChildExecPrepareResult::ImageNoTargetRoot => { kernel_process_exec_failure_reason = KernelExecFailureReason::ImageNoTargetRoot; }
-        KernelChildExecPrepareResult::NoImageResolved => { kernel_process_exec_failure_reason = KernelExecFailureReason::NoImageResolved; }
-        KernelChildExecPrepareResult::StaticImageInvalid => { kernel_process_exec_failure_reason = KernelExecFailureReason::StaticImageInvalid; }
-        KernelChildExecPrepareResult::StaticMapOutOfMemory => { kernel_process_exec_failure_reason = KernelExecFailureReason::StaticMapOutOfMemory; }
-        KernelChildExecPrepareResult::ImageRecordOutOfMemory => { kernel_process_exec_failure_reason = KernelExecFailureReason::ImageRecordOutOfMemory; }
-        KernelChildExecPrepareResult::ReserveOutOfMemory => { kernel_process_exec_failure_reason = KernelExecFailureReason::None; }
+        KernelChildExecPrepareResult::Prepared(_) => { atomic_enum_store(&kernel_process_exec_failure_reason, KernelExecFailureReason::None); }
+        KernelChildExecPrepareResult::CloneVmMissing => { atomic_enum_store(&kernel_process_exec_failure_reason, KernelExecFailureReason::CloneVmMissing); }
+        KernelChildExecPrepareResult::DynamicResolveInvalid => { atomic_enum_store(&kernel_process_exec_failure_reason, KernelExecFailureReason::DynamicResolveInvalid); }
+        KernelChildExecPrepareResult::DynamicPairInvalid => { atomic_enum_store(&kernel_process_exec_failure_reason, KernelExecFailureReason::DynamicPairInvalid); }
+        KernelChildExecPrepareResult::ImageAlreadyInstalled => { atomic_enum_store(&kernel_process_exec_failure_reason, KernelExecFailureReason::ImageAlreadyInstalled); }
+        KernelChildExecPrepareResult::ImageNoTargetRoot => { atomic_enum_store(&kernel_process_exec_failure_reason, KernelExecFailureReason::ImageNoTargetRoot); }
+        KernelChildExecPrepareResult::NoImageResolved => { atomic_enum_store(&kernel_process_exec_failure_reason, KernelExecFailureReason::NoImageResolved); }
+        KernelChildExecPrepareResult::StaticImageInvalid => { atomic_enum_store(&kernel_process_exec_failure_reason, KernelExecFailureReason::StaticImageInvalid); }
+        KernelChildExecPrepareResult::StaticMapOutOfMemory => { atomic_enum_store(&kernel_process_exec_failure_reason, KernelExecFailureReason::StaticMapOutOfMemory); }
+        KernelChildExecPrepareResult::ImageRecordOutOfMemory => { atomic_enum_store(&kernel_process_exec_failure_reason, KernelExecFailureReason::ImageRecordOutOfMemory); }
+        KernelChildExecPrepareResult::ReserveOutOfMemory => { atomic_enum_store(&kernel_process_exec_failure_reason, KernelExecFailureReason::None); }
     }
 }
 
 fn kernel_process_exec_failure_debugger_after_commit() {
-    kernel_process_exec_failure_reason = KernelExecFailureReason::DebuggerAfterCommit;
+    atomic_enum_store(&kernel_process_exec_failure_reason, KernelExecFailureReason::DebuggerAfterCommit);
 }
 
 fn kernel_process_exec_failure_render() {
-    if (kernel_process_exec_failure_reason == KernelExecFailureReason::None) {
+    if (atomic_enum_load(&kernel_process_exec_failure_reason) == KernelExecFailureReason::None) {
         return;
     }
     ddb_puts("oops: exec prepare=");
-    match kernel_process_exec_failure_reason {
+    match atomic_enum_load(&kernel_process_exec_failure_reason) {
         KernelExecFailureReason::None => { ddb_puts("none\n"); }
         KernelExecFailureReason::CloneVmMissing => { ddb_puts("clone-vm-missing\n"); }
         KernelExecFailureReason::DynamicResolveInvalid => { ddb_puts("dynamic-resolve-invalid\n"); }

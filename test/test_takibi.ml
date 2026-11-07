@@ -2948,6 +2948,19 @@ let stopped_read_base = "
   private let mut stop1159: usize;
 "
 
+(* GitHub issue #1159 rule 2: Atomic(E) for a u8-backed enum. *)
+let atomic_enum_base = "
+  struct no_copy AtomicWord { private value: usize; }
+  generic struct Atomic(T: type) { private code: AtomicWord; }
+  fn atomic_enum_store(T: type, cell: &mut Atomic(T), value: T) {
+    atomic_word_store(&(*cell).code, value as usize);
+  }
+  fn atomic_enum_load(T: type, cell: &mut Atomic(T)) -> T {
+    return (atomic_word_load(&(*cell).code) as u8) as T;
+  }
+  enum Site1159: u8 { None; Syscall; Idle; }
+"
+
 let issue370_cell_fixture = {|
   linear struct CellOwner[p: addr] { private value: usize; }
   struct BrandCell[p: addr] {
@@ -12290,6 +12303,22 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "MachineStopped must keep its fields private" `Quick
     (expect_type_error "every field private"
        "linear struct MachineStopped[stop: addr] { mask: usize; }");
+  Alcotest.test_case "Atomic(E) stores and loads a u8 enum" `Quick
+    (expect_ok (atomic_enum_base ^ "
+      private let mut site1159: Atomic(Site1159);
+      fn note1159() -> bool {
+        atomic_enum_store(&site1159, Site1159::Syscall);
+        return atomic_enum_load(&site1159) == Site1159::Syscall;
+      }"));
+  Alcotest.test_case "Atomic(T) needs a u8-backed enum" `Quick
+    (expect_type_error "Atomic(T) holds a u8-backed enum"
+       (atomic_enum_base ^ "
+      private let mut word1159: Atomic(usize);"));
+  Alcotest.test_case "Atomic(T) rejects a wider enum" `Quick
+    (expect_type_error "Atomic(T) holds a u8-backed enum"
+       (atomic_enum_base ^ "
+      enum Wide1159: u32 { A; B; }
+      private let mut wide1159: Atomic(Wide1159);"));
   Alcotest.test_case "CPU authority needs one private bounded index field" `Quick
     (expect_type_error "must have exactly one private field"
        "struct cpu_authority Loose704 { id: usize; }");
