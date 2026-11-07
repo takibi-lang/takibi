@@ -56,6 +56,13 @@ existing one:
   constant back to its literal inline, so a bug here can stay invisible until
   the first assignment of such a constant into a field.
 
+For any new type an integer literal must not inhabit (an opaque scalar such
+as `SrcLoc`, an aggregate): `infer_expr` types `IntLit` as a fresh variable,
+which unifies with anything, so `return 5;` from a `-> T` function type-checks
+unless `type_inf.ml`'s `check_integer_literal_target_shape` names `T`. Add its
+arm, and an Alcotest case per literal position (return, `let`, argument,
+struct literal field, assignment); #1024 found `SrcLoc` accepting `5` this way.
+
 For a new wrapper or pointer-shaped `Ast.type_expr` constructor, check
 `type_inf.ml`'s core type matches, which the compiler checks for
 exhaustiveness; `llvm_gen.ml`'s `Ast.type_expr` matches, which it does not;
