@@ -47,11 +47,9 @@ LISTED = {
     ("kernel/drivers/block/memory.tkb", "block_device_waits"): (POOL, "BlockSlot; totalled by the block report"),
     ("kernel/drivers/block/memory.tkb", "block_single_reads"): (POOL, "BlockSlot; totalled by the block report"),
     ("kernel/drivers/block/block_cache.tkb", "block_cache_hits"): (POOL, "BlockSlot's index; totalled by the block report"),
-    ("kernel/mm/process_image.tkb", "process_image_staging"): (POOL, "ProcessImageSlot"),
     ("kernel/mm/process_image.tkb", "process_image_slot_words"): (POOL, "ProcessImageSlot's acquire words"),
     ("kernel/kernel/syscall.tkb", "syscall_scratch"): (POOL, "SyscallSlot"),
     ("kernel/kernel/syscall.tkb", "syscall_slot_words"): (POOL, "SyscallSlot's acquire words"),
-    ("kernel/init/test_driver.tkb", "exec_windows"): (POOL, "ExecWindowSlot"),
     ("kernel/init/test_driver.tkb", "exec_window_words"): (POOL, "ExecWindowSlot's acquire words"),
     # Read by another CPU.
     ("kernel/arch/arm64/kernel/exception_evidence.tkb", "crash_snapshot_per_core"): (CROSS, "DDB and the crash report on a stopped machine"),
