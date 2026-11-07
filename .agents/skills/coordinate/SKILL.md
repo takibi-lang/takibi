@@ -105,6 +105,8 @@ refuses any branch but `main`).
    missing, continue the worker with SendMessage to add it.
 4. In the main checkout, clean and on `main`:
    `(cd <worktree> && python3 scripts/checkpoint_rebase.py --onto main)`,
+   or, for stacked branches, `python3 scripts/checkpoint_rebase.py --onto main --stack B1 B2 ...`
+   (#1443: bottom-up, each onto its rebased predecessor),
    then `git merge --ff-only <branch>`. The helper resolves a conflict
    confined to `docs/SPACE_CHECKPOINT.json` by itself (#832: main's side,
    then the branch's own review re-recorded for the rebased head in a new

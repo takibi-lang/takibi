@@ -39,6 +39,23 @@ reasons are re-appended in one entry measured on the rebased tree
 (`--append --reason CAT=TEXT ...`), in one new commit. If that append is
 refused too, the helper stops: exit 4.
 
+Known append-only files (GitHub issue #1443) are merged, not stopped on:
+both sides of a conflict are kept. Two kinds:
+
+- UNION_TEXT: tables and logs whose entries are only appended
+  (docs/GLOBAL_PROTECTION.md's migration log, check_trust_ledger.py's RULES
+  table): `git merge-file --union` keeps every hunk of both sides.
+- UNION_ROWS: row-set TSVs (global_protection_allowlist.tsv,
+  invariant_stop_sites.tsv): the merged file is upstream's rows, less any
+  base row the branch deleted, plus the rows the branch added. A row deleted
+  on either side stays deleted; a row changed on both sides is kept in both
+  forms, which the file's own check then refuses with the row named.
+
+`--stack B1 B2 ...` rebases a stack bottom-up: B1 onto --onto, then each
+next branch onto its rebased predecessor, cutting at the predecessor's old
+head, each with the same resolutions. It stops at the first branch that
+does not finish, with that branch checked out.
+
 Exit status: 0 rebased (and re-recorded if needed); 2 the checkpoint needs a
 review; 4 the rebase stopped on a conflict other than the checkpoint and a
 stamp-only model map, or the restamped model map does not check.
@@ -72,6 +89,54 @@ def unmerged():
 MODEL_MAP = 'kernel/models/README.md'
 LEDGER = 'docs/TRUST_LEDGER.json'
 LEDGER_CHECK = 'scripts/check_trust_ledger.py'
+UNION_TEXT = ('docs/GLOBAL_PROTECTION.md', 'scripts/check_trust_ledger.py')
+UNION_ROWS = ('scripts/global_protection_allowlist.tsv', 'scripts/invariant_stop_sites.tsv')
+
+
+def stage_text(path, stage):
+    shown = git('show', f':{stage}:{path}', check=False)
+    return shown.stdout if shown.returncode == 0 else None
+
+
+def union_rows(base, ours, theirs):
+    """Upstream's rows, less base rows the branch deleted, plus the branch's new rows."""
+    base_rows = base.splitlines(keepends=True)
+    theirs_rows = theirs.splitlines(keepends=True)
+    deleted = set(base_rows) - set(theirs_rows)
+    kept = [row for row in ours.splitlines(keepends=True) if row not in deleted]
+    present = set(kept)
+    added = [row for row in theirs_rows if row not in set(base_rows) and row not in present]
+    if kept and not kept[-1].endswith('\n'):
+        kept[-1] += '\n'
+    return ''.join(kept + added)
+
+
+def resolve_union(path):
+    """Keep both sides of PATH's conflict (#1443); False when it cannot."""
+    base, ours, theirs = (stage_text(path, n) for n in (1, 2, 3))
+    if ours is None or theirs is None:
+        return False
+    base = base or ''
+    if path in UNION_ROWS:
+        merged = union_rows(base, ours, theirs)
+    else:
+        git_dir = out('rev-parse', '--git-dir')
+        names = []
+        for stage, text in ((2, ours), (1, base), (3, theirs)):
+            name = os.path.join(git_dir, f'checkpoint-rebase-union{stage}')
+            with open(name, 'w', encoding='utf-8') as handle:
+                handle.write(text)
+            names.append(name)
+        result = git('merge-file', '-p', '--union', *names, check=False)
+        for name in names:
+            os.remove(name)
+        if result.returncode < 0:
+            return False
+        merged = result.stdout
+    with open(path, 'w', encoding='utf-8') as handle:
+        handle.write(merged)
+    git('add', '--', path)
+    return True
 STAMP_RE = re.compile(r'^(\| `.*\|) `[0-9a-f]+` \|$')
 BLANK = ' `-` |'
 
@@ -135,20 +200,25 @@ def review_valid(head, base):
     return True
 
 
-def rebase(onto, env):
+def rebase(onto, env, cut=None):
     """Run the rebase; return (checkpoint stops resolved, model map stops resolved)."""
     resolved = stamped = 0
-    step = git('rebase', '--rebase-merges', onto, check=False, env=env)
+    args = ['rebase', '--rebase-merges'] + (['--onto', onto, cut] if cut else [onto])
+    step = git(*args, check=False, env=env)
     while step.returncode != 0:
         paths = unmerged()
-        others = [p for p in paths if p not in (REVIEW, MODEL_MAP, LEDGER)]
-        if not paths or others or (MODEL_MAP in paths and not resolve_stamp_only(MODEL_MAP)):
+        unions = [p for p in paths if p in UNION_TEXT + UNION_ROWS]
+        others = [p for p in paths if p not in (REVIEW, MODEL_MAP, LEDGER) and p not in unions]
+        if (not paths or others or (MODEL_MAP in paths and not resolve_stamp_only(MODEL_MAP))
+                or not all(resolve_union(p) for p in unions)):
             sys.stderr.write(step.stdout + step.stderr)
             print('checkpoint_rebase: conflict outside ' + REVIEW + ' and a stamp-only ' +
                   MODEL_MAP + ': ' + (', '.join(p for p in paths if p != REVIEW)
                                       or 'no unmerged path'), file=sys.stderr)
             return None
         at = out('rev-parse', '--short', 'REBASE_HEAD')
+        for path in unions:
+            print(f'checkpoint_rebase: kept both sides of append-only {path} at {at}')
         if MODEL_MAP in paths:
             stamped += 1
             print(f'checkpoint_rebase: merged stamp-only {MODEL_MAP} conflict at {at}')
@@ -239,18 +309,38 @@ def relog(orig, old_base, upstream, env):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--onto', default='origin/main')
+    parser.add_argument('--stack', nargs='+', metavar='BRANCH',
+                        help='rebase these branches bottom-up, each onto the one before')
     args = parser.parse_args()
     os.chdir(out("rev-parse", "--show-toplevel"))
+    if not args.stack:
+        return rebase_one(args.onto, None)
+    onto = args.onto
+    cut = None
+    for branch in args.stack:
+        old_head = out('rev-parse', branch)
+        git('checkout', '--quiet', branch)
+        status = rebase_one(onto, cut)
+        if status != 0:
+            print(f'checkpoint_rebase: stack stopped at {branch} (exit {status})', file=sys.stderr)
+            return status
+        print(f'checkpoint_rebase: {branch} rebased to {out("rev-parse", "--short", "HEAD")}')
+        onto, cut = out('rev-parse', 'HEAD'), old_head
+    return 0
+
+
+def rebase_one(onto_ref, cut):
+    """Rebase the checked-out branch onto ONTO_REF (from CUT when given)."""
     orig = out('rev-parse', 'HEAD')
-    upstream = out('rev-parse', args.onto)
-    old_base = out('merge-base', orig, upstream)
+    upstream = out('rev-parse', onto_ref)
+    old_base = cut or out('merge-base', orig, upstream)
     author = {'GIT_AUTHOR_NAME': out('log', '-1', '--format=%an', orig),
               'GIT_AUTHOR_EMAIL': out('log', '-1', '--format=%ae', orig)}
     env = dict(os.environ)
     for key, value in author.items():
         env.setdefault(key, value)
         env.setdefault(key.replace('AUTHOR', 'COMMITTER'), value)
-    outcome = rebase(args.onto, env)
+    outcome = rebase(upstream, env, cut)
     if outcome is None:
         return 4
     resolved, stamped = outcome

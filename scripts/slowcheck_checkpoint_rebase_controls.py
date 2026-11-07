@@ -175,11 +175,37 @@ def main():
         assert repo.git('log', '-1', '--format=%s').stdout.startswith('Trust ledger: re-appended')
         assert repo.git('status', '--porcelain').stdout == ''
         cases += 1
+    with tempfile.TemporaryDirectory(prefix='takibi-ckpt-rebase-') as tmp:
+        # #1443: an append-only log and a row-set TSV conflict; both kept.
+        repo = union_scenario(tmp)
+        result = repo.run(HELPER, '--onto', 'main')
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert result.stdout.count('kept both sides') == 2, result.stdout
+        log = (repo.root / GP).read_text()
+        assert '- main entry' in log and '- topic entry' in log, log
+        rows = (repo.root / ROWS).read_text().splitlines()
+        assert rows == ['# header', 'keep\tx', 'main-new\tx', 'topic-new\tx'], rows
+        assert repo.git('status', '--porcelain').stdout == ''
+        cases += 1
+    with tempfile.TemporaryDirectory(prefix='takibi-ckpt-rebase-') as tmp:
+        # #1443: a two-branch stack, each appending to the log, rebased bottom-up.
+        repo = union_scenario(tmp, stack=True)
+        result = repo.run(HELPER, '--onto', 'main', '--stack', 'topic', 'topic2')
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert repo.git('rev-parse', '--abbrev-ref', 'HEAD').stdout.strip() == 'topic2'
+        for ancestor in ('main', 'topic'):
+            assert repo.git('merge-base', '--is-ancestor', ancestor, 'topic2',
+                            check=False).returncode == 0, ancestor
+        log = (repo.root / GP).read_text()
+        assert all(e in log for e in ('- main entry', '- topic entry', '- topic2 entry')), log
+        assert len(repo.git('log', '--format=%s', 'main..topic2').stdout.split('\n')) == 3
+        cases += 1
     report_pass('checkpoint-rebase-controls',
                 f'{cases} scripted rebases; checkpoint-only conflict re-records, mixed conflict stops, '
                 'stale branch review refused, clean rebase untouched, stamp-only model map '
                 'conflict restamps, non-stamp model map conflict stops, a branch ledger entry '
-                'is re-appended after upstream\'s', cases=cases)
+                'is re-appended after upstream\'s, append-only conflicts keep both sides, '
+                'a stack rebases bottom-up', cases=cases)
 
 
 MAP = 'kernel/models/README.md'
@@ -226,6 +252,33 @@ def map_scenario(tmp, kept=None):
     repo.write('kernel/a.tkb', 'a1\n')
     repo.write(MAP, map_text('2222', kept='main kept' if kept else 'kept'))
     repo.commit('main work', review='main review')
+    repo.git('switch', '-q', 'topic')
+    return repo
+
+
+GP = 'docs/GLOBAL_PROTECTION.md'
+ROWS = 'scripts/global_protection_allowlist.tsv'
+
+
+def union_scenario(tmp, stack=False):
+    """Both sides append to the log and change the row set next to each other."""
+    repo = Repo(Path(tmp))
+    repo.write('docs/evidence.tsv', 'measured\n')
+    repo.write(GP, '# Log\n\n- base entry\n')
+    repo.write(ROWS, '# header\ngone-main\tx\nkeep\tx\ngone-topic\tx\n')
+    repo.commit('base')
+    repo.git('switch', '-q', '-c', 'topic')
+    repo.write(GP, '# Log\n\n- base entry\n- topic entry\n')
+    repo.write(ROWS, '# header\ngone-main\tx\nkeep\tx\ntopic-new\tx\n')
+    repo.commit('topic')
+    if stack:
+        repo.git('switch', '-q', '-c', 'topic2')
+        repo.write(GP, '# Log\n\n- base entry\n- topic entry\n- topic2 entry\n')
+        repo.commit('topic2')
+    repo.git('switch', '-q', 'main')
+    repo.write(GP, '# Log\n\n- base entry\n- main entry\n')
+    repo.write(ROWS, '# header\nkeep\tx\ngone-topic\tx\nmain-new\tx\n')
+    repo.commit('main')
     repo.git('switch', '-q', 'topic')
     return repo
 
