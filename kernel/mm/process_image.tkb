@@ -53,7 +53,10 @@ struct ProcessImageStaging {
     private pair_source: ProcessImageSourceState;
     block: [u8; KERNEL_BLOCK_SIZE];
 }
-private let mut process_image_staging: [ProcessImageStaging; KERNEL_MAX_CORES];
+// Owned by the ProcessImageSlot that indexes it (GitHub issue #1159): an
+// element is reached only as `process_image_staging[slot.index]`.
+private let mut process_image_staging: [ProcessImageStaging; KERNEL_MAX_CORES]
+    owned_by(ProcessImageSlot.index, 1);
 private let mut process_image_slot_words: [AtomicWord; KERNEL_MAX_CORES];
 
 // `[unit]` is always 0: an owner needs a static parameter, and the slot's
@@ -87,9 +90,9 @@ private fn process_image_slot_acquire() -> ProcessImageSlot[0] !{may_block} {
             waited = true;
         }
     }
-    process_image_staging[index].source = ProcessImageSourceState::Absent;
-    process_image_staging[index].pair_source = ProcessImageSourceState::Absent;
     let mut slot: ProcessImageSlot[0] = { index };
+    process_image_staging[slot.index].source = ProcessImageSourceState::Absent;
+    process_image_staging[slot.index].pair_source = ProcessImageSourceState::Absent;
     return slot;
 }
 

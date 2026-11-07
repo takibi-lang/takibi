@@ -434,3 +434,8 @@ entries below that date are history, left as written.
   trace's writers keep their run-lock discipline; the type now says each
   word is one atomic cell.
 
+- 2026-11-07: the exec staging slots (#1436). `exec_windows` is
+  `owned_by(ExecWindowSlot.index, 1)` and `process_image_staging`
+  `owned_by(ProcessImageSlot.index, 1)`; every use already indexed by
+  `slot.index`, and the acquire resets the staging sources through the slot
+  it has just minted rather than the bare index.

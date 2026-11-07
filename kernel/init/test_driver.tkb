@@ -79,7 +79,10 @@ const EXEC_WINDOW_INTERPRETER: usize = EXEC_METADATA_SIZE;
 struct ExecWindows {
     bytes: [u8; EXEC_WINDOWS_SIZE];
 }
-private let mut exec_windows: [ExecWindows; KERNEL_MAX_CORES];
+// Owned by the ExecWindowSlot that indexes it (GitHub issue #1159): an
+// element is reached only as `exec_windows[slot.index]`.
+private let mut exec_windows: [ExecWindows; KERNEL_MAX_CORES]
+    owned_by(ExecWindowSlot.index, 1);
 private let mut exec_window_words: [AtomicWord; KERNEL_MAX_CORES];
 
 // `[unit]` is always 0, as ProcessImageSlot's.
