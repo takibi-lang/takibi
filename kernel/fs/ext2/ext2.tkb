@@ -65,9 +65,13 @@ struct Ext2Scratch {
     file: [u8; KERNEL_BLOCK_SIZE];
 }
 
-private let mut ext2_scratch: [Ext2Scratch; KERNEL_MAX_CORES];
+// Owned by the Ext2Slot that indexes them (GitHub issue #1159): an element is
+// reached only as `g[slot.index]` or `g[slot.index * STRIDE + k]`.
+private let mut ext2_scratch: [Ext2Scratch; KERNEL_MAX_CORES]
+    owned_by(Ext2Slot.index, 1);
 private let mut ext2_write_blocks:
-    [usize; KERNEL_MAX_CORES * EXT2_MAX_WRITE_ALLOCATIONS];
+    [usize; KERNEL_MAX_CORES * EXT2_MAX_WRITE_ALLOCATIONS]
+    owned_by(Ext2Slot.index, EXT2_MAX_WRITE_ALLOCATIONS);
 // 0 free, 1 held: one word per slot.
 private let mut ext2_slot_words: [AtomicWord; KERNEL_MAX_CORES];
 
@@ -2550,15 +2554,9 @@ private fn ext2_write_allocations_record(slot: borrow Ext2Slot[0],
         }
         return Ext2WriteRecordResult::Full(allocations);
     }
-    let row: usize = slot.index * EXT2_MAX_WRITE_ALLOCATIONS + index;
-    if (row >= KERNEL_MAX_CORES * EXT2_MAX_WRITE_ALLOCATIONS) {
-        match ext2_release_block(slot, mount, owner) {
-            Ext2OwnerReleaseResult::Invalid => { }
-            Ext2OwnerReleaseResult::Released => { }
-        }
-        return Ext2WriteRecordResult::Full(allocations);
-    }
-    ext2_write_blocks[row] = owner.block_number;
+    let k: {0..<EXT2_MAX_WRITE_ALLOCATIONS as usize} = index;
+    ext2_write_blocks[slot.index * EXT2_MAX_WRITE_ALLOCATIONS + k] =
+        owner.block_number;
     allocations.count = index + 1;
     ext2_block_owner_staged(owner);
     return Ext2WriteRecordResult::Recorded(allocations);
@@ -2569,9 +2567,8 @@ private fn ext2_write_allocations_block(slot: borrow Ext2Slot[0],
     if (index >= allocations.count || index >= EXT2_MAX_WRITE_ALLOCATIONS) {
         return 0;
     }
-    let row: usize = slot.index * EXT2_MAX_WRITE_ALLOCATIONS + index;
-    if (row >= KERNEL_MAX_CORES * EXT2_MAX_WRITE_ALLOCATIONS) { return 0; }
-    return ext2_write_blocks[row];
+    let k: {0..<EXT2_MAX_WRITE_ALLOCATIONS as usize} = index;
+    return ext2_write_blocks[slot.index * EXT2_MAX_WRITE_ALLOCATIONS + k];
 }
 
 // Undo every staged claim: clear the bit of each, scrub the block, and then

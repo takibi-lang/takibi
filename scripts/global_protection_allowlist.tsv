@@ -64,9 +64,7 @@ kernel/drivers/serial/pl011.tkb	uart	read-by uart_rx_ready,uart_isr_getc,uart_de
 kernel/drivers/virtio_used.tkb	virtio_used_reset_confirmed	read-by virtio_used_quiet: 2026-10-31 lock: set just before its one read in virtio_used_reclaim_after_reset; the block driver is the only caller, under block_device_lock or on core 0 at boot
 kernel/fs/ext2/ext2.tkb	ext2_fence_pending	read-by ext2_recover_with: 2026-10-31 lock: mutators under ext2_mutation_lock, a TaskMutex (scripts/buildcheck_ext2_mutation_guard.py checks the callers); recover runs in the boot fixture
 kernel/fs/ext2/ext2.tkb	ext2_fence_pending_count	read-by ext2_fence_pending_add,ext2_recover_with: 2026-10-31 lock: as ext2_fence_pending
-kernel/fs/ext2/ext2.tkb	ext2_scratch	read-by ext2_byte,ext2_bitmap_fill: 2026-10-31 slot: per operation by the linear Ext2Slot, held across preemption and sleep; no CPU selects it
 kernel/fs/ext2/ext2.tkb	ext2_undo_rows	read-by ext2_undo_put_back,ext2_undo_write: 2026-10-31 lock: one mutation at a time under ext2_mutation_lock, by the same build check
-kernel/fs/ext2/ext2.tkb	ext2_write_blocks	read-by ext2_write_allocations_block: 2026-10-31 slot: rows of the Ext2Slot holder
 kernel/init/ext2_fixture.tkb	ext2_release_fenced	read-by ext2_release_case,ext2_release_failure_check: 2026-10-31 retain-fixture: the boot ext2 fixture, core 0 before userspace
 kernel/init/ext2_fixture.tkb	ext2_release_first	read-by ext2_release_names_are,ext2_release_run: 2026-10-31 retain-fixture: the boot ext2 fixture's inode, core 0 before userspace
 kernel/init/ext2_fixture.tkb	ext2_release_second	read-by ext2_release_names_are,ext2_release_setup: 2026-10-31 retain-fixture: as ext2_release_first
