@@ -186,6 +186,26 @@ fn preempt_count_after_switch() {
     preempt_count_reset();
 }
 
+// GitHub issue #1380 (maintainer: a linear token): the idle stack's count was
+// reset on this entry. kernel_idle_loop takes one, so an idle entry that skips
+// the reset does not compile; the stage 8 land stopped on one that did
+// (kernel_idle_tick_reenter, #1381). Minted only by
+// preempt_count_idle_reset, spent by the loop's idle_stack_clean_enter.
+linear struct IdleStackClean[unit: usize] {
+    private reset: usize;
+}
+
+// Reset the idle stack's count and say so: the only way to an idle loop.
+fn preempt_count_idle_reset() -> IdleStackClean[0] {
+    preempt_count_reset();
+    let mut clean: IdleStackClean[0] = { 1 };
+    return clean;
+}
+
+// The idle loop, entered on a reset stack.
+inline fn idle_stack_clean_enter(clean: sink IdleStackClean[0]) {
+}
+
 // GitHub issue #638 slice 3: the check an El1 resume makes before
 // preempt_count_after_switch resets its stack's count. A frame is switched
 // away from only at count zero and its stack keeps that count while it is

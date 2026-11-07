@@ -16,10 +16,9 @@ placed above it:
   word when it fills a fresh stack with poison;
 - both entry files zero the word of each stack a core stands on before
   anything runs on it;
-- every idle entry user_entry.S branches to (kernel_idle_*_reenter in
-  secondary.tkb) resets the idle stack's word before the loop: the idle loop's own
-  start leaves a span raised there when it resumes a process (a tick entry
-  without the reset stopped the stage 8 land, #638);
+- (no longer here: every idle entry resetting the idle stack's word before
+  the loop is the compiler's since #1380 -- kernel_idle_loop takes the
+  linear IdleStackClean that only preempt_count_idle_reset mints);
 - every IRQ exception_entry runs its handler on irq_stack_top, and the
   compiler's dispatch-stack sequence zeroes that stack's word on an entry
   that is not nested: a tick that switched leaves its span raised there
@@ -41,8 +40,6 @@ LINKERS = ("kernel/arch/arm64/boot/link.ld",
 ENTRIES = ("kernel/arch/arm64/boot/entry.S",
            "kernel/arch/arm64/boot/entry_qemu.S")
 PROCESS = "kernel/kernel/process.tkb"
-USER_ENTRY = "kernel/arch/arm64/kernel/user_entry.S"
-SECONDARY = "kernel/arch/arm64/kernel/secondary.tkb"
 EXCEPTION_FRAME = "kernel/arch/arm64/kernel/exception_frame.tkb"
 CODEGEN = "lib/llvm_gen.ml"
 IRQ_RESET = '\\tmov\\tsp, x1\\n\\tstr\\txzr, [x1]\\n.L%s_nested:'
@@ -92,28 +89,6 @@ def entry_errors(name, text):
     return errors
 
 
-def idle_entry_errors(entry_text, secondary_text):
-    errors = []
-    names = sorted(set(re.findall(r"adr\s+x5,\s+(kernel_idle_\w+_reenter)",
-                                  entry_text)))
-    if not names:
-        errors.append(f"{USER_ENTRY}: no idle entry found")
-    for name in names:
-        body = re.search(r"\nfn " + name + r"\(\) \{\n(.*?)\n\}", secondary_text,
-                         re.S)
-        if body is None:
-            errors.append(f"{SECONDARY}: {name} is not defined")
-            continue
-        first = [l.strip() for l in body.group(1).split("\n")]
-        if ("preempt_count_after_switch();" not in first or
-                "kernel_idle_loop();" not in first or
-                first.index("preempt_count_after_switch();") >
-                first.index("kernel_idle_loop();")):
-            errors.append(f"{SECONDARY}: {name} does not reset the idle "
-                          "stack's preempt word before the idle loop")
-    return errors
-
-
 def irq_entry_errors(frame_text, codegen_text):
     errors = []
     entries = re.findall(r"exception_entry (\w+) \{(.*?)\n\}", frame_text, re.S)
@@ -131,8 +106,7 @@ def irq_entry_errors(frame_text, codegen_text):
 
 
 def check(files):
-    errors = idle_entry_errors(files[USER_ENTRY], files[SECONDARY])
-    errors += irq_entry_errors(files[EXCEPTION_FRAME], files[CODEGEN])
+    errors = irq_entry_errors(files[EXCEPTION_FRAME], files[CODEGEN])
     for name in LINKERS:
         errors += linker_errors(name, files[name])
     errors += process_errors(files[PROCESS])
@@ -151,7 +125,6 @@ def self_test(files):
         (ENTRIES[0], ":lo12:irq_stack_top\n    str     xzr, [x9, x0]",
          ":lo12:irq_stack_top\n    nop"),
         (ENTRIES[1], "    str     xzr, [x0]\n", ""),
-        (SECONDARY, "preempt_count_after_switch();", ""),
         (EXCEPTION_FRAME, "dispatch_stack: irq_stack_top;", ""),
         (CODEGEN, IRQ_RESET, IRQ_RESET.replace("\\tstr\\txzr, [x1]\\n", "")),
     ]
@@ -169,8 +142,7 @@ def self_test(files):
 
 def main():
     files = {name: (ROOT / name).read_text()
-             for name in LINKERS + ENTRIES + (PROCESS, USER_ENTRY, SECONDARY,
-                                               EXCEPTION_FRAME, CODEGEN)}
+             for name in LINKERS + ENTRIES + (PROCESS, EXCEPTION_FRAME, CODEGEN)}
     errors = check(files)
     for error in errors:
         print(f"ERROR kernel-stack-top-reserve: {error}")

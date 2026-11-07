@@ -182,7 +182,7 @@ fn kernel_secondary_main(context: usize) !{unsafe} {
             timer_irq_setup();
             gic_pmu_core_enable();
             enable_irq();
-            kernel_idle_loop();
+            kernel_idle_loop(preempt_count_idle_reset());
         }
     }
     // Falls through to the entry path's own park for any core that is not
@@ -195,7 +195,8 @@ fn kernel_secondary_main(context: usize) !{unsafe} {
 // the reenters below once it has left a process's stack for its idle stack
 // (user_entry.S, .Lidle_stack). It leaves as soon as a process this core may
 // run is Ready: every IRQ still arrives here, and each wake re-asks.
-fn kernel_idle_loop() !{unsafe} {
+fn kernel_idle_loop(clean: sink IdleStackClean[0]) !{unsafe} {
+    idle_stack_clean_enter(clean);
     let core_id: usize = cpu_id();
     enable_irq();
     while (true) {
@@ -293,30 +294,26 @@ fn kernel_idle_loop() !{unsafe} {
 // GitHub issue #831: core 0's boot work is done and its boot context given
 // back; nothing is left to release.
 fn kernel_idle_boot_reenter() {
-    preempt_count_after_switch();
-    kernel_idle_loop();
+    kernel_idle_loop(preempt_count_idle_reset());
 }
 
 // An EL0 process exited with no other eligible process on this CPU.
 fn kernel_idle_exit_reenter() {
     kernel_process_stack_idle_complete();
-    preempt_count_after_switch();
-    kernel_idle_loop();
+    kernel_idle_loop(preempt_count_idle_reset());
 }
 
 // GitHub issue #583: a wait was published Blocked with no successor.
 fn kernel_idle_block_reenter() {
     kernel_process_stack_idle_blocked();
-    preempt_count_after_switch();
-    kernel_idle_loop();
+    kernel_idle_loop(preempt_count_idle_reset());
 }
 
 // GitHub issues #9 and #592: a live process was handed away -- a peer's
 // migration to core 0, or core 0 leaving a process its affinity excludes.
 fn kernel_idle_yield_reenter() {
     kernel_process_stack_idle_yield();
-    preempt_count_after_switch();
-    kernel_idle_loop();
+    kernel_idle_loop(preempt_count_idle_reset());
 }
 
 // Called by each platform's timer branch after it has acknowledged the
@@ -340,9 +337,9 @@ fn kernel_idle_tick_reenter() {
     // own start raised before it resumed the process (kernel_process_
     // secondary_start); like every idle entry, reset it, or the next wfi's
     // blockable check finds it (found in the stage 8 land, alloc-rollback).
-    preempt_count_after_switch();
+    let clean: IdleStackClean[0] = preempt_count_idle_reset();
     workload_profile_idle_enter();
-    kernel_idle_loop();
+    kernel_idle_loop(clean);
 }
 
 // The one timer-tick entry for every core (GitHub issues #447, #775, #932).
