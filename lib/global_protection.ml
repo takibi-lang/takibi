@@ -12,6 +12,11 @@
    - `[T; N]`: the protection of T (an array of protected cells);
    - `AtomicWord` -> atomic;
    - `LockedCell(T)`, `RegionPool(T)` (generated as `RegionPool__T`) -> lock;
+   - `InitOnce`, the struct kernel/lib/init_once.tkb defines, -> lock
+     (GitHub issue #1418): its fields are private, so only that file's
+     init_once_begin/commit/cancel touch them, and they write `complete`
+     only between acquiring and releasing the struct's own TaskMutex. A
+     struct of that name defined anywhere else is not this one;
    - `Place(T)` -> place;  `BootOnce(T)` -> boot_once (#1013);
    - a `struct per_cpu` store -> per_cpu;
    - a `struct dma_fixed` record -> dma_fixed;
@@ -26,6 +31,9 @@
 open Ast
 
 let format_version = 3
+
+(* The one file whose InitOnce is the lock-protected one (GitHub issue #1418). *)
+let init_once_file = "kernel/lib/init_once.tkb"
 
 let columns = [ "file"; "line"; "name"; "visibility"; "qualifier"; "type"; "protection" ]
 
@@ -52,9 +60,15 @@ let rec spell = function
 let write_table (out : out_channel) (prog : toplevel list) =
   (* Plain struct fields by name, and the structs a protocol generated. *)
   let fields = Hashtbl.create 256 and protocol = Hashtbl.create 16 in
+  let init_once_here = ref false in
   List.iter (function
     | StructDef (name, fs, _, _, _, loc) ->
         Hashtbl.replace fields name fs;
+        if name = "InitOnce"
+           && (let f = source_file_of_loc loc in
+               f = init_once_file
+               || String.ends_with ~suffix:("/" ^ init_once_file) f) then
+          init_once_here := true;
         if String.starts_with ~prefix:Device_protocol_registry.prefix
              (source_file_of_loc loc)
         then Hashtbl.replace protocol name ()
@@ -78,6 +92,7 @@ let write_table (out : out_channel) (prog : toplevel list) =
     else if String.starts_with ~prefix:"RegionPool__" n then "lock"
     else if Per_cpu_registry.is_store n then "per_cpu"
     else if Dma_fixed_registry.is_fixed n then "dma_fixed"
+    else if n = "InitOnce" && !init_once_here then "lock"
     else if Hashtbl.mem protocol n then "protocol"
     else if List.mem n seen then "none"
     else match Hashtbl.find_opt fields n with

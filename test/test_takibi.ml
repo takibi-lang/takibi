@@ -3255,6 +3255,27 @@ let infer_tests = [
           "lock", "composite"; "mixed", "none"; "empty", "none";
           "fixed", "absent" ]);
 
+  Alcotest.test_case "global protection: InitOnce from init_once.tkb is a lock (#1418)" `Quick
+    (fun () ->
+      let row file =
+        Compilation_state.reset ();
+        let lexbuf = Lexing.from_string
+            "struct InitOnce { private complete: bool; }\n\
+             let mut once: InitOnce;\n\
+             fn main() -> usize { return 0; }\n" in
+        Lexing.set_filename lexbuf file;
+        let prog = Parser.program Lexer.read lexbuf in
+        let table = Filename.temp_file "globals" ".tsv" in
+        Out_channel.with_open_bin table (fun oc -> Global_protection.write_table oc prog);
+        let text = In_channel.with_open_bin table In_channel.input_all in
+        Sys.remove table;
+        List.find_map (fun r -> match String.split_on_char '\t' r with
+          | _ :: _ :: "once" :: rest -> Some (List.nth rest 3) | _ -> None)
+          (String.split_on_char '\n' text) in
+      Alcotest.(check (option string)) "init_once.tkb's" (Some "lock")
+        (row "kernel/lib/init_once.tkb");
+      Alcotest.(check (option string)) "a same-named struct elsewhere" (Some "none")
+        (row "kernel/other.tkb"));
   Alcotest.test_case "call graph body hash ignores comments, not literals" `Quick
     (fun () ->
       let hash src = List.assoc "body_hash" (List.assoc "f" (call_graph_rows src)) in

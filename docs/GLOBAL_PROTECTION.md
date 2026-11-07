@@ -58,14 +58,14 @@ Tried in this order; an array `[T; N]` takes the class of `T`.
 | --- | --- |
 | `region` | a `region let mut` backing, reached only through its claim |
 | `atomic` | `AtomicWord` |
-| `lock` | `LockedCell(T)`, `RegionPool(T)` |
+| `lock` | `LockedCell(T)`, `RegionPool(T)`, `InitOnce` as kernel/lib/init_once.tkb defines it (#1418: its private `complete` is written only under its own `TaskMutex`, by that file) |
 | `place` | `Place(T)` |
 | `boot_once` | `BootOnce(T)`: written under one `BootPhase`, read after by `boot_once_get` |
 | `per_cpu` | a `struct per_cpu` store |
 | `dma_fixed` | a `struct dma_fixed` record |
 | `protocol` | a struct a `protocol` declaration generated |
 | `composite` | a plain struct with at least one field, every field protected or declared `guarded_by(L)`: `Mutex` and `TaskMutex` (one `AtomicWord`), the `Place` slot structs, `PeerTally` |
-| `none` | anything else: integers, `bool`, arrays of those, structs with one unprotected field, `io` words, `InitOnce`, `IoHandle` |
+| `none` | anything else: integers, `bool`, arrays of those, structs with one unprotected field, `io` words, `IoHandle` |
 
 A `scratch` global is per-call storage that is still one cell shared by
 every core, so the ratchet counts it with `none`.
@@ -349,3 +349,10 @@ file's comment lines are not rows.
   gone. The last event DWORD3, the foreign-event count and the await words stay
   listed: no protocol owner holds them (#1395's lock-guard parameters).
   233 -> 231 unprotected.
+- 2026-11-07: `InitOnce` is classified `lock` (#1418), the classifier's own
+  rule, not a new type: kernel/lib/init_once.tkb's struct keeps `complete`
+  private and writes it only between `task_mutex_acquire` and
+  `task_mutex_release` of its own `TaskMutex`, which is what the rows said.
+  A struct named `InitOnce` from any other file stays `none`. The two
+  `net_init_once` rows (virtio-net, GEM) and `init_once_probe_gate` go.
+  231 -> 228 unprotected.

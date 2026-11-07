@@ -56,7 +56,6 @@ kernel/drivers/net/rp1_gem.tkb	gem_pkt_kept_len	read-by net_packet_kept_claim: 2
 kernel/drivers/net/rp1_gem.tkb	gem_rx_pkt	read-by net_rx_acquire,gem_rearm_rx,kernel_net_rx_frame_pending: 2026-10-31 token: under the one NetRxCanAcquire token, kept across preemption; DDB reads it with the world stopped
 kernel/drivers/net/rp1_gem.tkb	gem_rx_ring_cpu_address	read-by kernel_net_rx_frame_pending: 2026-10-31 boot: recorded when the ring is programmed in net_init; DDB reads it stopped
 kernel/drivers/net/rp1_gem.tkb	gem_tx_next	read-by gem_tx_next_slot: 2026-10-31 token: next TX descriptor, under the one NetRxCanAcquire token
-kernel/drivers/net/rp1_gem.tkb	net_init_once	read-by net_init: 2026-10-31 protocol: InitOnce's own operations gate the one boot init
 kernel/drivers/net/rp1_gem.tkb	rp1_clocks	read-by net_init: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
 kernel/drivers/net/rp1_gem.tkb	rp1_gpio_ctrl	read-by gem_phy_reset: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
 kernel/drivers/net/rp1_gem.tkb	rp1_gpio_pads	read-by gem_phy_reset: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
@@ -66,7 +65,6 @@ kernel/drivers/net/rp1_gem_desc.tkb	gem_pkt_rx_seen	read-by gem_pkt_received: 20
 kernel/drivers/net/rp1_gem_desc.tkb	gem_pkt_tx_seen	read-by gem_pkt_sent: 2026-10-31 token: as gem_pkt_rx_seen, for transmit
 kernel/drivers/net/rp1_gem_desc.tkb	gem_rx_seen_filled	read-by gem_rx_ring_filled: 2026-10-31 token: what the latest ring snapshot showed, under the one NetRxCanAcquire token
 kernel/drivers/net/rp1_gem_desc.tkb	gem_tx_seen_used	read-by gem_tx_ring_used: 2026-10-31 token: as gem_rx_seen_filled, for transmit
-kernel/drivers/net/virtio_net.tkb	net_init_once	read-by net_init: 2026-10-31 protocol: InitOnce's own operations gate the one boot init
 kernel/drivers/net/virtio_net.tkb	rx_avail_idx	read-by net_init,virtio_net_rx_refill: 2026-10-31 token: RX avail shadow, under the one NetRxCanAcquire token; net_init at boot
 kernel/drivers/net/virtio_net.tkb	rx_desc_pkt	read-by net_rx_acquire,virtio_net_rx_refill: 2026-10-31 token: buffer per RX descriptor, under the one NetRxCanAcquire token
 kernel/drivers/net/virtio_net.tkb	rx_used_seen	read-by net_rx_acquire,kernel_net_rx_frame_pending: 2026-10-31 token: RX used shadow, under the one NetRxCanAcquire token; DDB reads it with the world stopped
@@ -115,7 +113,6 @@ kernel/kernel/fd_table.tkb	fd_refcount_probe_ready	read-by fd_refcount_contentio
 kernel/kernel/fd_table.tkb	fd_slot_total	read-by unified_object_ref_bound,fd_block_publish: 2026-10-31 retain-pools: the refcount bound, under the same guard as SharedObject.refs; a GuardedFieldGuard in signatures enforces that, which the protection class does not see
 kernel/kernel/freelist_contention_evidence.tkb	freelist_probe	read-by freelist_probe_cycle,freelist_contention_phase: 2026-10-31 retain-fixture: the probe's two cores; the core's own operations are the protocol under test
 kernel/kernel/freelist_contention_evidence.tkb	freelist_probe_ready	read-by freelist_probe_init: 2026-10-31 retain-fixture: first-run guard of the probe, core 0
-kernel/kernel/init_once_contention_evidence.tkb	init_once_probe_gate	read-by init_once_probe_locked_attempt: 2026-10-31 retain-fixture: the probe's locked phase on both cores, through InitOnce's own operations
 kernel/kernel/init_once_contention_evidence.tkb	init_once_probe_naive_complete	read-by init_once_contention_probe,init_once_contention_secondary_run: 2026-10-31 retain-fixture: the deliberately unlocked phase: racing on it is what the probe measures
 kernel/kernel/log_storm_evidence.tkb	log_storm_last_round	read-by log_storm_is_armed,log_storm_secondary_run: 2026-10-31 retain-fixture: each secondary's own element, in its idle loop
 kernel/kernel/log_storm_evidence.tkb	log_storm_trace_rounds	read-by log_storm_trace_probe: 2026-10-31 retain-fixture: round count of the core 0 probe, one calling process
