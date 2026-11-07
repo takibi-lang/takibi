@@ -38,16 +38,8 @@ PENDING = "pending"
 # (file, global) -> (kind, reader or reason)
 LISTED = {
     # Slot pools: indexed by a slot token's index, not by the CPU.
-    ("kernel/fs/ext2/ext2.tkb", "ext2_scratch"): (POOL, "Ext2Slot"),
     ("kernel/fs/ext2/ext2.tkb", "ext2_slot_words"): (POOL, "Ext2Slot's acquire words"),
     ("kernel/drivers/block/block_slot.tkb", "block_slot_words"): (POOL, "BlockSlot's acquire words"),
-    ("kernel/drivers/block/memory.tkb", "block_run_data"): (POOL, "BlockSlot"),
-    ("kernel/drivers/block/memory.tkb", "block_run_backend"): (POOL, "BlockSlot"),
-    ("kernel/drivers/block/memory.tkb", "block_run_first"): (POOL, "BlockSlot"),
-    ("kernel/drivers/block/memory.tkb", "block_run_count"): (POOL, "BlockSlot"),
-    ("kernel/drivers/block/memory.tkb", "block_run_epoch"): (POOL, "BlockSlot"),
-    ("kernel/drivers/block/memory.tkb", "block_run_next"): (POOL, "BlockSlot"),
-    ("kernel/drivers/block/memory.tkb", "block_run_next_backend"): (POOL, "BlockSlot"),
     ("kernel/drivers/block/memory.tkb", "block_run_reads"): (POOL, "BlockSlot; totalled by the block report"),
     ("kernel/drivers/block/memory.tkb", "block_run_hits"): (POOL, "BlockSlot; totalled by the block report"),
     ("kernel/drivers/block/memory.tkb", "block_read_calls"): (POOL, "BlockSlot; totalled by the block report"),
