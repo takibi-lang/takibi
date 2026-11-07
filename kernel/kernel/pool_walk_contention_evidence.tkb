@@ -41,6 +41,7 @@
 //   view lives inside its caller's pool guard, which the type states.
 // - The verdict is a LOWER BOUND on a real machine, like every QEMU
 //   concurrency result -- see kernel/CONCURRENCY.md.
+use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/peer_tick_window.tkb";
 use "kernel/lib/peer_round.tkb";
 use "kernel/lib/execution_model.tkb";
@@ -58,7 +59,7 @@ struct PoolWalkItem {
 }
 
 private let mut pool_walk_pool: RegionPool(PoolWalkItem);
-private let mut pool_walk_ready: bool = false;
+private let mut pool_walk_ready: AtomicWord;
 private let mut pool_walk_floor: RegionHeld(PoolWalkItem);
 
 private let mut pool_walk_armed: AtomicWord;
@@ -156,8 +157,8 @@ private fn pool_walk_release(held: RegionHeld(PoolWalkItem)) -> bool !{unsafe} {
 // Core 0, before arming: the one chunk and the floor record. The chunk is
 // kept for the rest of the boot (a walked pool is never shrunk).
 private fn pool_walk_init() -> bool !{unsafe} {
-    if (pool_walk_ready) { return region_held_address(pool_walk_floor) != 0; }
-    pool_walk_ready = true;
+    if (atomic_word_load(&pool_walk_ready) != 0) { return region_held_address(pool_walk_floor) != 0; }
+    atomic_word_store(&pool_walk_ready, 1);
     pool_walk_floor = region_held_none__PoolWalkItem();
     match page_alloc_contiguous(POOL_WALK_CHUNK_PAGES, PageOwnerTag::PoolChunk) {
         PageRunAllocResult::OutOfMemory => { return false; }

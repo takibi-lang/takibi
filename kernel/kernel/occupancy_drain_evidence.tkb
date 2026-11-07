@@ -52,6 +52,7 @@
 //   rather than whatever else shares a live instance -- the same reason
 //   every sibling probe owns its own instance.
 
+use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/peer_tick_window.tkb";
 use "kernel/lib/peer_round.tkb";
 use "kernel/lib/occupancy.tkb";
@@ -74,8 +75,8 @@ private let mut occupancy_probe_armed: AtomicWord;
 private let mut occupancy_probe_tally: PeerTally;
 // Peers 1..release may leave.
 private let mut occupancy_probe_release: AtomicWord;
-private let mut occupancy_probe_teardowns: usize;
-private let mut world_stop_probe_inspections: usize;
+private let mut occupancy_probe_teardowns: AtomicWord;
+private let mut world_stop_probe_inspections: AtomicWord;
 private let mut world_stop_stale_probe_controller: WorldStop;
 
 private fn occupancy_probe_armed_address() -> *AtomicWord {
@@ -131,7 +132,7 @@ private fn occupancy_drain_report(stage: *u8, busy: usize, empty: usize)
     kernel_boot_log(" empty=");
     uart_put_udec(empty);
     kernel_boot_log(" teardowns=");
-    uart_put_udec(occupancy_probe_teardowns);
+    uart_put_udec(atomic_word_load(&occupancy_probe_teardowns));
     kernel_boot_log(" spins=");
     uart_put_udec(OCCUPANCY_PROBE_DRAIN_SPINS);
     kernel_boot_log("\n");
@@ -142,7 +143,7 @@ private fn occupancy_drain_report(stage: *u8, busy: usize, empty: usize)
 // has no proof to pass, so its refusal is the absence of a call rather
 // than a check somebody has to remember.
 private fn occupancy_probe_teardown(proof: borrow Quiesced[region]) {
-    occupancy_probe_teardowns = occupancy_probe_teardowns + 1;
+    atomic_word_fetch_add(&occupancy_probe_teardowns, 1);
 }
 
 // One drain with the probe's bound: true when it came back Empty.
@@ -164,7 +165,7 @@ private fn occupancy_probe_drain_once() -> bool !{unsafe} {
 
 fn occupancy_drain_probe() -> bool !{unsafe} {
     atomic_word_store(&occupancy_probe_release, 0);
-    occupancy_probe_teardowns = 0;
+    atomic_word_store(&occupancy_probe_teardowns, 0);
     peer_tally_reset(&occupancy_probe_tally, kernel_online_core_count());
     let peers: usize = peer_tally_peers(&occupancy_probe_tally);
     atomic_word_store(occupancy_probe_armed_address(), 1);
@@ -216,13 +217,13 @@ fn occupancy_drain_probe() -> bool !{unsafe} {
     // teardown -- the Busy arm had no proof to spend, which is the
     // property the token exists for.
     return peers >= 1 && busy_seen == peers && empty_seen == 1 &&
-           occupancy_probe_teardowns == 1;
+           atomic_word_load(&occupancy_probe_teardowns) == 1;
 }
 
 // The guarded operation cannot accept WorldStopPartial: its parameter is the
 // complete token itself, so a partial stop has no source for this call.
 private fn world_stop_probe_inspect(stopped: borrow WorldStopped[id]) {
-    world_stop_probe_inspections = world_stop_probe_inspections + 1;
+    atomic_word_fetch_add(&world_stop_probe_inspections, 1);
 }
 
 // Exercise both runtime outcomes. The full path sends a real SGI to every
@@ -230,7 +231,7 @@ private fn world_stop_probe_inspect(stopped: borrow WorldStopped[id]) {
 // the same online peers deliberately do not acknowledge and must produce
 // Partial. GitHub issue #848: every online core, not core 0 and core 1 only.
 fn world_stop_probe() -> bool !{unsafe} {
-    world_stop_probe_inspections = 0;
+    atomic_word_store(&world_stop_probe_inspections, 0);
     let online: usize = kernel_online_core_count();
     let mut full: bool = false;
     let mut acknowledged: bool = false;
@@ -361,7 +362,7 @@ fn world_stop_probe() -> bool !{unsafe} {
     kernel_boot_log(" resumed=");
     uart_put_udec(resumed_count);
     kernel_boot_log(" inspections=");
-    uart_put_udec(world_stop_probe_inspections);
+    uart_put_udec(atomic_word_load(&world_stop_probe_inspections));
     kernel_boot_log(" repeated=");
     uart_put_udec(repeated);
     kernel_boot_log(" busy=");
@@ -370,7 +371,7 @@ fn world_stop_probe() -> bool !{unsafe} {
     if (stale) { uart_put_udec(1); } else { uart_put_udec(0); }
     kernel_boot_log("\n");
     return full && partial_ok && resumed &&
-           world_stop_probe_inspections == 1 && repeated == 16 && busy == 16 && stale;
+           atomic_word_load(&world_stop_probe_inspections) == 1 && repeated == 16 && busy == 16 && stale;
 }
 
 // GitHub issue #632: a world stop that a PEER begins. world_stop_probe above

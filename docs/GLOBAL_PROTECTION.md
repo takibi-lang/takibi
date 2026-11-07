@@ -415,3 +415,14 @@ entries below that date are history, left as written.
   row check for a refined `k`. `ext2_undo_rows`, `ext2_fence_pending` and
   `ext2_fence_pending_count` stay listed: one mutation at a time holds them
   under `ext2_mutation_lock`, not a slot, so owned_by does not apply.
+- 2026-11-07 (#1159): the contention and drain probes' gates and counters to
+  `AtomicWord`: `pool_contention_evidence.tkb`'s `contention_pool_ready` and
+  `contention_pool_grown`, `freelist_contention_evidence.tkb`'s
+  `freelist_probe_ready`, `schedule_contention_evidence.tkb`'s
+  `schedule_probe_ready` and `schedule_probe_attempts`,
+  `occupancy_drain_evidence.tkb`'s `occupancy_probe_teardowns` and
+  `world_stop_probe_inspections`, `pool_walk_contention_evidence.tkb`'s
+  `pool_walk_ready` and `log_storm_evidence.tkb`'s `log_storm_trace_rounds`.
+  `init_once_contention_evidence.tkb`'s naive flag stays: it is the control's
+  unprotected word on purpose.
+

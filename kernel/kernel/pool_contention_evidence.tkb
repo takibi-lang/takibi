@@ -37,6 +37,7 @@
 //   claims they are -- what matters is that BOTH advanced, which is what
 //   makes it contention rather than one core taking turns with itself.
 
+use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/peer_tick_window.tkb";
 use "kernel/lib/peer_round.tkb";
 struct ContentionItem {
@@ -71,8 +72,8 @@ const CONTENTION_ROUNDS: usize = 4096;
 const CONTENTION_OUTSIDE_WORK: usize = 64;
 
 private let mut contention_pool: RegionPool(ContentionItem);
-private let mut contention_pool_ready: bool = false;
-private let mut contention_pool_grown: bool = false;
+private let mut contention_pool_ready: AtomicWord;
+private let mut contention_pool_grown: AtomicWord;
 const CONTENTION_CHUNK_PAGES: usize = 1;
 
 // The handshake and the results. Atomics, not `io`, because these are read
@@ -117,8 +118,8 @@ private fn contention_pool_unlock(
 
 // Core 0 only, before arming: the pool's one chunk.
 private fn contention_pool_init() !{unsafe} {
-    if (contention_pool_ready) { return; }
-    contention_pool_ready = true;
+    if (atomic_word_load(&contention_pool_ready) != 0) { return; }
+    atomic_word_store(&contention_pool_ready, 1);
     match page_alloc_contiguous(CONTENTION_CHUNK_PAGES, PageOwnerTag::PoolChunk) {
         PageRunAllocResult::OutOfMemory => {}
         PageRunAllocResult::Allocated(run_owner) => {
@@ -126,7 +127,7 @@ private fn contention_pool_init() !{unsafe} {
             let RegionBytes::Assumed(chunk) = page_run_into_region(run_owner) else {};
             let guard = contention_pool_lock();
             match region_pool_grow(guard, chunk) {
-                RegionGrow(ContentionItem)::Grown => { contention_pool_grown = true; }
+                RegionGrow(ContentionItem)::Grown => { atomic_word_store(&contention_pool_grown, 1); }
                 RegionGrow(ContentionItem)::TooSmall(back) => {
                     region_release(back);
                     page_run_transferred_release_physical(base, CONTENTION_CHUNK_PAGES);
@@ -274,7 +275,7 @@ fn pool_contention_probe() -> bool !{unsafe} {
     // allocator. Their addresses are kept so they can be given back.
     let mut floor: [RegionHeld(ContentionItem); CONTENTION_FLOOR];
     let mut held: usize = 0;
-    if (contention_pool_grown == false) {
+    if (atomic_word_load(&contention_pool_grown) == 0) {
         contention_report("floor" as *u8);
         return false;
     }

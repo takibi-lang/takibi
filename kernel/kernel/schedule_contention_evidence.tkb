@@ -41,6 +41,7 @@
 //   racing path loses increments to the race it is being used to detect,
 //   and two racy counters losing the same amount report success.
 
+use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/peer_tick_window.tkb";
 use "kernel/lib/peer_round.tkb";
 use "kernel/kernel/process.tkb";
@@ -67,7 +68,7 @@ const SCHEDULE_CONTENTION_OUTSIDE_WORK: usize = 512;
 // never run, and driven to Exited and reaped at the end so the pool and
 // the stack run come back.
 private let mut schedule_probe_handle: ProcessHandle;
-private let mut schedule_probe_ready: bool = false;
+private let mut schedule_probe_ready: AtomicWord;
 
 // 1 while some core believes it holds a claim on that handle. A core that
 // swaps in 1 and finds 1 already there is the second holder -- which is
@@ -208,7 +209,7 @@ const SCHEDULE_CONTENTION_ATTEMPT_SECONDS: i64 = 5;
 
 // Phase 1 attempts spent by the run being reported. Printed, never
 // asserted: how hard the machine made this is evidence about the machine.
-private let mut schedule_probe_attempts: usize;
+private let mut schedule_probe_attempts: AtomicWord;
 
 // Every online peer runs this from its idle loop while the probe is armed.
 fn schedule_contention_secondary_run(cpu: usize) !{unsafe} {
@@ -253,7 +254,7 @@ private fn schedule_contention_report(stage: *u8) !{unsafe} {
     kernel_boot_log(" overlap=");
     uart_put_udec(atomic_word_load(schedule_probe_overlap_address()));
     kernel_boot_log(" attempts=");
-    uart_put_udec(schedule_probe_attempts);
+    uart_put_udec(atomic_word_load(&schedule_probe_attempts));
     kernel_boot_log("\n");
 }
 
@@ -323,7 +324,7 @@ fn schedule_contention_probe() -> bool !{unsafe} {
     // #437 moved PID 1 once and 17 of 39 views changed). The record and
     // its stack run are given back too, below.
     let pid_before: usize = scheduled_process_pid_counter();
-    if (schedule_probe_ready == false) {
+    if (atomic_word_load(&schedule_probe_ready) == 0) {
         // The TABLE, not just the pool, and the difference is measurable
         // rather than stylistic: scheduled_process_pool_init_for_probe()
         // leaves the three other slot-keyed tables holding a previous
@@ -350,7 +351,7 @@ fn schedule_contention_probe() -> bool !{unsafe} {
                 // to come from the per-pid placement rule refusing this pid
                 // on every peer, which is why flipping the default placement
                 // fail-stopped a core with no EL0 frame here.
-                schedule_probe_ready = true;
+                atomic_word_store(&schedule_probe_ready, 1);
             }
         }
     }
@@ -391,7 +392,7 @@ fn schedule_contention_probe() -> bool !{unsafe} {
            attempts < SCHEDULE_CONTENTION_ATTEMPTS &&
            read_cntpct() - attempt_start < attempt_budget) {
         attempts = attempts + 1;
-        schedule_probe_attempts = attempts;
+        atomic_word_store(&schedule_probe_attempts, attempts);
         unlocked_ran = schedule_contention_run_phase(0);
         if (unlocked_ran) {
             raced = schedule_contention_duplicate_count();
@@ -443,7 +444,7 @@ fn schedule_contention_probe() -> bool !{unsafe} {
         OccupancyDrainResult::Empty(proof) => {
             let cleaned: bool = schedule_probe_teardown(proof);
             quiesced_release(proof);
-            schedule_probe_ready = false;
+            atomic_word_store(&schedule_probe_ready, 0);
             scheduled_process_pid_counter_restore(pid_before);
             // WHICH term went false, in the same `schedule contention:`
             // line shape the verdict uses, so it lands in the

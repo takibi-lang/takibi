@@ -33,6 +33,7 @@
 // - Says nothing about generations. FreelistOwner's generation is what
 //   makes a STALE handle detectable; this is about two LIVE ones.
 
+use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/peer_tick_window.tkb";
 use "kernel/lib/peer_round.tkb";
 use "kernel/lib/freelist.tkb";
@@ -53,7 +54,7 @@ must_use variant FreelistProbeRendezvousResult {
 }
 
 private let mut freelist_probe: FreelistCore(FREELIST_CONTENTION_SLOTS);
-private let mut freelist_probe_ready: bool = false;
+private let mut freelist_probe_ready: AtomicWord;
 
 // One word per slot: 1 while some core believes it exclusively holds that
 // index. Two cores handed the same index find it already 1, which is the
@@ -124,8 +125,8 @@ private fn freelist_probe_held_address(
 }
 
 private fn freelist_probe_init() {
-    if (freelist_probe_ready) { return; }
-    freelist_probe_ready = true;
+    if (atomic_word_load(&freelist_probe_ready) != 0) { return; }
+    atomic_word_store(&freelist_probe_ready, 1);
     freelist_core_init(&freelist_probe);
     // No mutex_init: a global Mutex is free from .bss, and initialising it
     // behind this `ready` flag would be the same lazy-init race the tag
