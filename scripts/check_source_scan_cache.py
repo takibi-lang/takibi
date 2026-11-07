@@ -37,6 +37,7 @@ HELPER = "source_scan"
 
 # check module -> why its controls do not re-scan many files. Reviewed only.
 REVIEWED = {
+    "check_land_env_isolation": "controls call problems() on planted temp files, not the tree",
     "check_no_record_sink": "controls call violations() on inline text, not load()",
     "check_fd_clone_transaction": "scans one file (fd_table.tkb) per call",
     "check_agents_paths": "reads AGENTS.md and a file listing, not sources",
