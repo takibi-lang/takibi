@@ -10,6 +10,7 @@ unset TAKIBI_LANE_TIMING_DIR TAKIBI_AWAIT_TIMING_LANE
 # GitHub issue #1145: run inside a land, the outer land.sh exports this, and
 # every simulated worker below would skip the land wait (land 905dab71 red).
 unset TAKIBI_LAND_ALLCHECK
+unset TAKIBI_RESOURCE_LEASE_HELD
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 helper="$repo_root/scripts/resource_lease.sh"

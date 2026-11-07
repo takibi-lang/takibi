@@ -18,6 +18,8 @@ from pass_line import CaseCount, report_pass
 # a case that wants one sets it on that one call.
 os.environ.pop('TAKIBI_LAND_ALLCHECK', None)
 os.environ.pop('TAKIBI_LANE_TIMING_DIR', None)
+os.environ.pop('TAKIBI_AWAIT_TIMING_LANE', None)
+os.environ.pop('TAKIBI_RESOURCE_LEASE_HELD', None)
 
 CASES = CaseCount()
 

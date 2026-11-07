@@ -6,7 +6,8 @@ land.sh, so every simulated worker skipped the land wait and the control
 passed only outside a land (#1145); the same shape with
 TAKIBI_LANE_TIMING_DIR had leaked planted receipts into allcheck (#914).
 
-Every member scripts/land_env_members.py selects must clear both variables
+Every member scripts/land_env_members.py selects must clear the land variables (land_env_members.VARIABLES; #1408 added
+TAKIBI_AWAIT_TIMING_LANE and TAKIBI_RESOURCE_LEASE_HELD)
 for its whole run, at top level (column 0), so no later case inherits them:
 
     shell:   unset ... TAKIBI_LAND_ALLCHECK ... TAKIBI_LANE_TIMING_DIR ...

@@ -14,6 +14,7 @@ set -uo pipefail
 # GitHub issue #1389: inside a land these come from the outer land.sh; each
 # case below sets TAKIBI_LANE_TIMING_DIR on its own call.
 unset TAKIBI_LAND_ALLCHECK TAKIBI_LANE_TIMING_DIR
+unset TAKIBI_AWAIT_TIMING_LANE TAKIBI_RESOURCE_LEASE_HELD
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_LANE="$REPO_ROOT/scripts/run_lane.sh"

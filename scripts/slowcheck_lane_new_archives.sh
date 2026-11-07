@@ -35,6 +35,7 @@ export TAKIBI_LANE_ARTIFACT_ROOT="$work/root"
 unset TAKIBI_LANE_TIMING_DIR TAKIBI_ARCHIVE_EXPECTED TAKIBI_LANE_RUN_ID
 # GitHub issue #1389: a land exports this to its allcheck.
 unset TAKIBI_LAND_ALLCHECK
+unset TAKIBI_AWAIT_TIMING_LANE TAKIBI_RESOURCE_LEASE_HELD
 
 # run CASE COMMAND...: run_lane.sh with a fake lane body; output in $work/CASE.out.
 run() {

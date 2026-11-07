@@ -5,13 +5,16 @@ A control that drives scripts/resource_lease.sh, vcpu_lease.sh, run_lane.sh,
 lane_timing.sh or land.sh reads the land's environment: TAKIBI_LAND_ALLCHECK
 (exported by land.sh around its allcheck, #1145) makes every simulated worker
 skip the land wait, and TAKIBI_LANE_TIMING_DIR (#914) sends planted receipts
-into the enclosing allcheck's summary. slowcheck_resource_lease.sh inherited
+into the enclosing allcheck's summary. TAKIBI_AWAIT_TIMING_LANE (run_lane.sh)
+names the enclosing lane in a control's await receipts, and
+TAKIBI_RESOURCE_LEASE_HELD (resource_lease.sh) tells a control's lease that
+the enclosing lane already holds one (#1408). slowcheck_resource_lease.sh inherited
 the first and passed only outside a land.
 
 The member set is lexical and fail-closed: every scripts/check_* and
 scripts/slowcheck_* file that names one of those scripts belongs, unless
 EXEMPT gives the reason it only reads them as text. Both
-check_land_env_isolation.py (each member clears the two variables itself)
+check_land_env_isolation.py (each member clears the variables itself)
 and slowcheck_land_env_rerun.sh (each member runs a second time under a
 simulated land) take the set from here.
 
@@ -22,7 +25,8 @@ import re
 
 ROOT = Path(__file__).resolve().parent.parent
 MACHINERY = re.compile(r'\b(?:resource_lease|vcpu_lease|run_lane|lane_timing|land)\.sh\b')
-VARIABLES = ('TAKIBI_LAND_ALLCHECK', 'TAKIBI_LANE_TIMING_DIR')
+VARIABLES = ('TAKIBI_LAND_ALLCHECK', 'TAKIBI_LANE_TIMING_DIR',
+             'TAKIBI_AWAIT_TIMING_LANE', 'TAKIBI_RESOURCE_LEASE_HELD')
 
 # Members that name a machinery script only as text they scan, never run.
 EXEMPT = {

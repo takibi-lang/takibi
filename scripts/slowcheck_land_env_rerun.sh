@@ -8,7 +8,8 @@
 # every control scripts/land_env_members.py selects again with the land's
 # state planted: TAKIBI_LAND_ALLCHECK=1, a temp TAKIBI_SESSION_REGISTRY whose
 # land.lock this shell holds through resource_lease_land_hold (as land.sh
-# does), and a temp TAKIBI_LANE_TIMING_DIR that must stay empty afterwards.
+# does), a temp TAKIBI_LANE_TIMING_DIR that must stay empty afterwards,
+# and TAKIBI_AWAIT_TIMING_LANE and TAKIBI_RESOURCE_LEASE_HELD (#1408).
 #
 # Only these members get the environment: exported to every member, it
 # would also make them skip the #1145 land wait outside a land.
@@ -27,6 +28,11 @@ fi
 export TAKIBI_SESSION_REGISTRY="$tmp_dir/registry"
 export TAKIBI_LANE_TIMING_DIR="$tmp_dir/timing"
 mkdir -p "$TAKIBI_LANE_TIMING_DIR"
+# GitHub issue #1408: the enclosing lane's name and a lease the enclosing
+# lane claims to hold. A member that inherits the second has its first
+# acquire refused ("claims ... without its lock").
+export TAKIBI_AWAIT_TIMING_LANE=simulated-land-lane
+export TAKIBI_RESOURCE_LEASE_HELD=simulated-held
 # shellcheck source=vcpu_lease.sh
 . "$repo_root/scripts/vcpu_lease.sh"
 TAKIBI_SESSION=simulated-land resource_lease_land_hold simulated
@@ -40,7 +46,7 @@ for member in "${members[@]}"; do
     if ! "${runner[@]}" > "$tmp_dir/out" 2>&1; then
         cat "$tmp_dir/out" >&2
         echo "FAIL land-env-rerun: $(basename "$member") failed inside a simulated land" \
-             "(TAKIBI_LAND_ALLCHECK=1, land.lock held); it reads the outer land's state (#1389)" >&2
+             "(TAKIBI_LAND_ALLCHECK=1, land.lock held, a lane name and a held lease planted); it reads the outer land's state (#1389)" >&2
         exit 1
     fi
 done

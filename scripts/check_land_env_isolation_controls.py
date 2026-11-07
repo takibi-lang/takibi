@@ -11,14 +11,20 @@ from pass_line import CaseCount, report_pass
 
 CASES = CaseCount()
 
-GOOD_SH = '#!/bin/bash\nunset TAKIBI_LANE_TIMING_DIR TAKIBI_LAND_ALLCHECK\nbash scripts/run_lane.sh x true\n'
+GOOD_SH = ('#!/bin/bash\nunset TAKIBI_LANE_TIMING_DIR TAKIBI_LAND_ALLCHECK\n'
+           'unset TAKIBI_AWAIT_TIMING_LANE TAKIBI_RESOURCE_LEASE_HELD\nbash scripts/run_lane.sh x true\n')
 GOOD_PY = ("import os\nos.environ.pop('TAKIBI_LAND_ALLCHECK', None)\n"
-           "os.environ.pop(\"TAKIBI_LANE_TIMING_DIR\", None)\n# scripts/land.sh\n")
+           "os.environ.pop(\"TAKIBI_LANE_TIMING_DIR\", None)\n"
+           "os.environ.pop('TAKIBI_AWAIT_TIMING_LANE', None)\n"
+           "os.environ.pop('TAKIBI_RESOURCE_LEASE_HELD', None)\n# scripts/land.sh\n")
 BAD = {
     # The #1145 shape: TAKIBI_LAND_ALLCHECK inherited.
     'slowcheck_inherits_land.sh': '#!/bin/bash\nunset TAKIBI_LANE_TIMING_DIR\nbash scripts/resource_lease.sh\n',
     # The #914 shape: receipts sent to the enclosing allcheck.
     'check_inherits_timing_controls.py': "import os\nos.environ.pop('TAKIBI_LAND_ALLCHECK', None)\n# lane_timing.sh\n",
+    # The #1408 shape: the first two cleared, a held lease inherited.
+    'slowcheck_inherits_lease.sh': ('#!/bin/bash\nunset TAKIBI_LANE_TIMING_DIR TAKIBI_LAND_ALLCHECK\n'
+                                    'unset TAKIBI_AWAIT_TIMING_LANE\nbash scripts/resource_lease.sh\n'),
     # Indented: clears only inside one function, later cases inherit.
     'slowcheck_indented.sh': '#!/bin/bash\nf() {\n    unset TAKIBI_LAND_ALLCHECK TAKIBI_LANE_TIMING_DIR\n}\n# vcpu_lease.sh\n',
     # Named in a comment only, not cleared.
