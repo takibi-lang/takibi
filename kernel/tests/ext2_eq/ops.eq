@@ -20,7 +20,8 @@
 #                       scripts/ext2_eq.py DIND_BLOCKS; at most once)
 #
 # The script runs from /etc/init.sh after /bin/user_payload has released its
-# ENOSPC fillers; the rows share the image's free space (about 230 blocks).
+# ENOSPC fillers; the rows share the image's free space (about 360 blocks
+# since #1413 shrank /pad by 128).
 # Every command writing a file is an external one (/bin/busybox APPLET):
 # printf writes nothing on the guest (#1067) and cat's sendfile goes to the
 # console (#1070). (dup3 duplicates any file descriptor; the earlier note
