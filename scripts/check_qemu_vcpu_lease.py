@@ -41,7 +41,9 @@ def problems(name, text):
     # The import must be the module's own: one pasted into an embedded script
     # string (a gdb Python block) matches every regex above and then fails
     # with NameError at run time, which is how the churn-gdb lane first broke.
-    if name.endswith(".py") and "qemu_vcpu_lease" in text:
+    # Only an import statement counts: a file merely naming this check
+    # (scripts/land_env_members.py, #1389) is not a lease user.
+    if name.endswith(".py") and re.search(r"^\s*(?:from|import)\s+qemu_vcpu_lease\b", text, re.M):
         tree = ast.parse(text)
         if not any(isinstance(node, ast.ImportFrom) and node.module == "qemu_vcpu_lease"
                    for node in tree.body):
