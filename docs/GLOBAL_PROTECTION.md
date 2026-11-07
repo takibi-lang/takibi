@@ -198,6 +198,11 @@ by a source scan with different edges).
 Every figure is a count of allowlist rows, the trust ledger's number; the
 file's comment lines are not rows.
 
+From 2026-11-07 (maintainer) entries name what moved and why, not a count:
+the current count is what `make kernelbuild`'s `PASS global-protection` line
+and the trust ledger's `unprotected_globals` report. The figures in the
+entries below that date are history, left as written.
+
 - 2026-10-29: `kernel/kernel/stall_probe.tkb`'s 13 words (per-CPU notes,
   watched pids, the event ring and its cursor) become `AtomicWord`; the
   ring cursor is one `fetch_add`, so two cores no longer take one slot.
