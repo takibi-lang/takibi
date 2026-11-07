@@ -28,6 +28,10 @@ Subcommands:
            Also <out>.speedscope.json (#502): one sampled profile per CPU,
            stacks rooted at level and pid, a stopped chain's reason named,
            EL0 samples marked leaf-only.
+  http-bulk  capture around N HTTP fetches of --http-path, fold, and write
+           bulk-profile.json: the EL0/EL1/masked shares, stop reasons and top
+           functions (#520 ask 1). On QEMU the timing is not evidence; the
+           report says so.
 
 Usage:
   profile_kernel_session.py capture --target rpi5 [--root TREE]
@@ -605,25 +609,93 @@ def capture(args) -> int:
     return status
 
 
+# GitHub issue #520 ask 1: a profile session around an HTTP bulk transfer,
+# with its CPU-class breakdown. On QEMU the classification is real (where the
+# samples land: EL0, EL1, masked) but the timing is not evidence: QEMU's
+# cycle counter follows virtual time (profile_session.tkb's limitations).
+QEMU_TIMING_NOTE = ("QEMU: the cycle counter follows virtual time, so rates and "
+                    "durations here are not performance evidence; the EL0/EL1/"
+                    "masked split says where samples landed, not how long anything took")
+
+
+def bulk_report(summary: dict, timings: list, target: str) -> dict:
+    """The #520 breakdown from a fold summary and the transfer timings."""
+    total = summary["weight"] or 1
+    report = {
+        "target": target,
+        "transfers": len(timings),
+        "bytes": sum(t["bytes"] for t in timings),
+        "seconds": sum(t["seconds"] for t in timings),
+        "samples": summary["samples"],
+        "weight": summary["weight"],
+        "el0_share": summary["el0_weight"] / total,
+        "el1_share": summary["el1_weight"] / total,
+        "masked_share": summary["masked_weight"] / total,
+        "stops": summary["stops"],
+        "top_inclusive": summary.get("top_inclusive", []),
+        "top_self": summary.get("top_self", []),
+        "timing_is_evidence": target != "qemu",
+    }
+    if target == "qemu":
+        report["note"] = QEMU_TIMING_NOTE
+    return report
+
+
+def cmd_http_bulk(args) -> int:
+    args.command = ""
+    args.two_writers = 0
+    args.races_only = False
+    status = capture(args)
+    if status != 0:
+        return status
+    out = Path(args.out)
+    fold_args = argparse.Namespace(console=str(out / "console.log"), elf=args.elf,
+                                   nm=args.nm, top=args.top,
+                                   out=str(out / "bulk.folded"))
+    if cmd_fold(fold_args) != 0:
+        return 1
+    summary = json.loads(Path(str(out / "bulk.folded") + ".json").read_text())
+    timings = json.loads((out / "http.json").read_text())
+    report = bulk_report(summary, timings, args.target)
+    (out / "bulk-profile.json").write_text(json.dumps(report, indent=2) + "\n")
+    print(f"[profile] bulk: {report['transfers']} transfers, {report['bytes']} bytes; "
+          f"el0 {100 * report['el0_share']:.1f}% el1 {100 * report['el1_share']:.1f}% "
+          f"masked {100 * report['masked_share']:.1f}%")
+    if args.target == "qemu":
+        print(f"[profile] note: {QEMU_TIMING_NOTE}")
+    print(f"[profile] report: {out / 'bulk-profile.json'}")
+    return 0
+
+
+def capture_arguments(parser) -> None:
+    parser.add_argument("--target", choices=("qemu", "rpi5"), required=True)
+    parser.add_argument("--root", default=str(HERE.parent))
+    parser.add_argument("--start", default="start 240000 2048 16")
+    parser.add_argument("--warmup", type=int, default=2)
+    parser.add_argument("--http-path", default="/bin/busybox.static")
+    parser.add_argument("--http-seconds", type=float, default=60)
+    parser.add_argument("--command-seconds", type=float, default=300)
+    parser.add_argument("--boot-seconds", type=float, default=1800)
+    parser.add_argument("--dump-seconds", type=float, default=900)
+    parser.add_argument("--out", required=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="action", required=True)
     cap = sub.add_parser("capture")
-    cap.add_argument("--target", choices=("qemu", "rpi5"), required=True)
-    cap.add_argument("--root", default=str(HERE.parent))
-    cap.add_argument("--start", default="start 240000 2048 16")
+    capture_arguments(cap)
     cap.add_argument("--two-writers", type=int, default=0)
     cap.add_argument("--races-only", action="store_true")
     cap.add_argument("--http", type=int, default=0)
-    cap.add_argument("--warmup", type=int, default=2)
-    cap.add_argument("--http-path", default="/bin/busybox.static")
-    cap.add_argument("--http-seconds", type=float, default=60)
     cap.add_argument("--command", default="")
-    cap.add_argument("--command-seconds", type=float, default=300)
-    cap.add_argument("--boot-seconds", type=float, default=1800)
-    cap.add_argument("--dump-seconds", type=float, default=900)
-    cap.add_argument("--out", required=True)
+    bulk = sub.add_parser("http-bulk")
+    capture_arguments(bulk)
+    bulk.add_argument("--http", type=int, default=4)
+    bulk.add_argument("--elf", required=True)
+    bulk.add_argument("--nm", default="nm")
+    bulk.add_argument("--top", type=int, default=15)
     fol = sub.add_parser("fold")
     fol.add_argument("--elf", required=True)
     fol.add_argument("--console", required=True)
@@ -644,6 +716,8 @@ def main() -> int:
         return capture(args)
     if args.action == "check":
         return cmd_check(args)
+    if args.action == "http-bulk":
+        return cmd_http_bulk(args)
     return cmd_fold(args)
 
 

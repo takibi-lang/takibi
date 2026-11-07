@@ -104,6 +104,16 @@ def main():
     ok &= expect("speedscope: a stopped chain names its stop below the root",
                  [snames[i] for i in sdoc["profiles"][0]["samples"][0]][:2] ==
                  ["[el1 pid=7]", "[stack stopped: depth]"])
+    bulk = tool.bulk_report(summary, [{"bytes": 100, "seconds": 0.5},
+                                      {"bytes": 50, "seconds": 0.25}], "qemu")
+    ok &= expect("bulk report: shares from the fold weights",
+                 bulk["el1_share"] == 0.8 and bulk["el0_share"] == 0.2 and
+                 bulk["masked_share"] == 0.4 and bulk["bytes"] == 150)
+    ok &= expect("bulk report: QEMU timing is marked not evidence",
+                 bulk["timing_is_evidence"] is False and "virtual time" in bulk["note"])
+    ok &= expect("bulk report: RPi5 timing carries no such note",
+                 tool.bulk_report(summary, [], "rpi5")["timing_is_evidence"] is True and
+                 "note" not in tool.bulk_report(summary, [], "rpi5"))
     proc = ("cpu0 stored 2 lost 0 irqsoff_ticks 0 from 0x0 0x0 0x0 to 0x0 0x0 0x0\n"
             "cpu1 stored 1 lost 1 irqsoff_ticks 77 from 0x2008 0x3004 0x0 "
             "to 0x1010 0x0 0x0\n")
