@@ -109,17 +109,18 @@ if [ "$armed" != true ]; then
     exit 1
 fi
 
-# GitHub issue #666: record how much of this wait's 100 x 0.1 s budget the
-# overflow line used. The budget and the verdict below are unchanged.
+# GitHub issue #1415: the wait for the overflow line is a no-progress budget
+# (10 s without the UART log growing, capped at 180 s), as #1365 made the FDT
+# boots wait: a guest still printing under host load is late, not stopped.
+# GitHub issue #666 still records the arrival against 10 s.
 overflow_wait_started=$(date +%s.%N)
 overflow_arrived=
-for _ in $(seq 1 100); do
-    if grep -q 'kernel stack: OVERFLOW at exception entry' "$UART_LOG"; then
-        overflow_arrived=--arrived
-        break
-    fi
-    sleep 0.1
-done
+overflow_wait_note=
+if overflow_wait_note=$(python3 "$REPO_ROOT/scripts/await_log_line.py" \
+        --log "$UART_LOG" --pattern 'kernel stack: OVERFLOW at exception entry' \
+        --quiet 10 --cap 180); then
+    overflow_arrived=--arrived
+fi
 python3 "$REPO_ROOT/scripts/await_timing.py" \
     --path "$ARTIFACT_DIR/await-overflow.jsonl" \
     --label "kernel/qemu stack-overflow" \
@@ -130,7 +131,11 @@ python3 "$REPO_ROOT/scripts/await_timing.py" \
 
 if ! grep -Eq '^kernel stack: OVERFLOW at exception entry \(issue #377\) sp=[0-9]+ below the boot stack$' \
         "$UART_LOG"; then
-    echo "FAIL kernel/qemu stack-overflow: expected the entry guard's report" >&2
+    if [ -z "$overflow_arrived" ]; then
+        echo "FAIL kernel/qemu stack-overflow: the entry guard's report did not arrive ($overflow_wait_note)" >&2
+    else
+        echo "FAIL kernel/qemu stack-overflow: expected the entry guard's report" >&2
+    fi
     sed 's/^/  /' "$UART_LOG" >&2 || true
     exit 1
 fi

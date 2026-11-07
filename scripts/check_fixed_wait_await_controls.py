@@ -150,6 +150,54 @@ def main() -> int:
         cases += 1
         if found or driver.last_end != "cap" or "cap" not in driver.wait_note():
             problems.append(f"an endless guest did not stop at the cap: {driver.last_end}")
+        # GitHub issue #1415: the stack-overflow runner's wait
+        # (await_log_line.py) is a no-progress budget too. A fake clock moves
+        # 1 s per sleep and each sleep appends a line; the report lands at
+        # 15 s, which the old 100 x 0.1 s loop cut off.
+        spec = importlib.util.spec_from_file_location(
+            "await_log_line", ROOT / "scripts/await_log_line.py")
+        awaiter = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(awaiter)
+        log = base / "uart.log"
+        fake = [0.0]
+
+        def growing(arrive_at, endless=False):
+            log.write_text("boot\n")
+            fake[0] = 0.0
+
+            def sleep(_):
+                fake[0] += 1.0
+                with log.open("a") as f:
+                    if not endless and fake[0] >= arrive_at:
+                        f.write("kernel stack: OVERFLOW at exception entry\n")
+                    else:
+                        f.write("tick\n")
+            return sleep
+
+        arrived, reason = awaiter.wait(
+            log, "kernel stack: OVERFLOW", 10.0, 180.0,
+            clock=lambda: fake[0], sleep=growing(15.0))
+        cases += 1
+        if not arrived:
+            problems.append(f"the overflow wait cut off a guest still printing at 15 s: {reason}")
+
+        log.write_text("boot\n")
+        fake[0] = 0.0
+
+        def still(_):
+            fake[0] += 1.0
+        arrived, reason = awaiter.wait(log, "kernel stack: OVERFLOW", 10.0, 180.0,
+                                       clock=lambda: fake[0], sleep=still)
+        cases += 1
+        if arrived or "no output for 10 s" != reason:
+            problems.append(f"a silent log did not end as quiet: {reason}")
+
+        arrived, reason = awaiter.wait(
+            log, "kernel stack: OVERFLOW", 10.0, 180.0,
+            clock=lambda: fake[0], sleep=growing(0.0, endless=True))
+        cases += 1
+        if arrived or "cap" not in reason:
+            problems.append(f"an endless log did not stop at the cap: {reason}")
 
         # The shell runner's command line: same rows, same margin line.
         for arrived_flag, ended, status, fraction in (
