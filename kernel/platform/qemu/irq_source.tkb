@@ -51,7 +51,8 @@ const IRQ_SOURCE_NONE: u32 = 0xFFFFFFFF;
 // issue #237 M4).
 private fn irq_source_code(id: u32) -> u32 {
     if (id == qemu_pmu_gic_intid) { return IrqSource::Pmu as u32; }
-    if (virtio_net_gic_intid >= 0 && id == (virtio_net_gic_intid as u32)) {
+    let net_intid: i32 = virtio_net_intid();
+    if (net_intid >= 0 && id == (net_intid as u32)) {
         return IrqSource::Net as u32;
     }
     if (id == boot_once_get(&qemu_uart_gic_intid)) { return IrqSource::Uart as u32; }

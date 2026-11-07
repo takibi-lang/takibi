@@ -149,14 +149,30 @@ const VIRTIO_NET_F_MAC: u32 = 32; // bit 5: device exposes its MAC in Config spa
 
 // Discovered from the boot DTB -- see this file's header for why (QEMU does not
 // always attach a lone virtio-net-device to slot 0).
-let mut virtio_base: i32 = 0;
+// GitHub issue #1159: both discovery words are BootOnce: written by the boot
+// DTB walk under the boot phase, read freely after. A transport that was
+// never found leaves them unwritten, which virtio_net_base and
+// virtio_net_intid read as 0 and -1.
+let mut virtio_base: BootOnce(i32);
 // The transport's registers, attached by the platform device map when it
 // finds the net device; virtio_base stays its discovery record.
 let mut virtio_net_regs: IoHandle(VirtioMmioRegs);
 // The DTB decoder returns the architectural GIC INTID, including the SPI
 // base conversion. -1 means that no active virtio-net transport was found;
 // interrupt dispatch guards that sentinel before comparing it with GICC_IAR.
-let mut virtio_net_gic_intid: i32 = -1;
+let mut virtio_net_gic_intid: BootOnce(i32);
+
+fn virtio_net_base() -> i32 {
+    if (boot_once_is_written(&virtio_base)) { return boot_once_get(&virtio_base); }
+    return 0;
+}
+
+fn virtio_net_intid() -> i32 {
+    if (boot_once_is_written(&virtio_net_gic_intid)) {
+        return boot_once_get(&virtio_net_gic_intid);
+    }
+    return -1;
+}
 private let mut net_init_once: InitOnce;
 // GitHub issue #830: the IRQ handler sets these on whichever core the
 // rotating NIC route delivered to, while the capability holder clears and
@@ -200,7 +216,7 @@ let mut tx_avail_idx: VirtioRingIndex =
     VirtioRingIndex::Zero;
 
 fn virtio_net_find() -> bool !{unsafe} {
-    return virtio_base != 0 && virtio_net_gic_intid >= 0;
+    return virtio_net_base() != 0 && virtio_net_intid() >= 0;
 }
 
 // Called from net_init() after the boot path has selected the transport.
@@ -212,8 +228,9 @@ fn virtio_net_find() -> bool !{unsafe} {
 // GICD_ISENABLER/ICPENDR are one bit per INTID (32 per 4-byte register),
 // GICD_ITARGETSR is one byte per INTID.
 fn virtio_net_gic_enable() {
-    if (virtio_net_gic_intid < 0) { return; }
-    let intid: u32 = virtio_net_gic_intid as u32;
+    let found: i32 = virtio_net_intid();
+    if (found < 0) { return; }
+    let intid: u32 = found as u32;
     gic_intid_clear_pending(intid);
     gic_intid_enable(intid);
     // GitHub issue #830: the rotating route (or the boot fixture's pin).

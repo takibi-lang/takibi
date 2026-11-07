@@ -86,8 +86,8 @@ fn kernel_platform_net_link_up(phase: borrow BootPhase[boot]) {
 fn kernel_test_platform_network() {
     // GitHub issue #830: ARP and ICMP run with the NIC SPI pinned to one
     // non-zero core; the TCP echo after them runs with it rotating.
-    if (virtio_net_gic_intid >= 0) {
-        nic_irq_evidence_pin_begin(virtio_net_gic_intid as u32);
+    if (virtio_net_intid() >= 0) {
+        nic_irq_evidence_pin_begin(virtio_net_intid() as u32);
     }
     match network_capability_take() {
         NetworkCapabilityTakeResult::Empty => {}
@@ -223,9 +223,9 @@ fn main() !{unsafe} {
             kernel_boot_log("\n");
             kernel_boot_log("psci: source=dtb method=hvc applied_to_cpu_on=yes\n");
             kernel_boot_log("virtio: source=dtb net_base_bytes=");
-            uart_put_udec(virtio_base as usize);
+            uart_put_udec(virtio_net_base() as usize);
             kernel_boot_log(" net_intid=");
-            uart_put_udec(virtio_net_gic_intid as usize);
+            uart_put_udec(virtio_net_intid() as usize);
             kernel_boot_log(" block_base_bytes=");
             uart_put_udec(virtio_blk_base as usize);
             kernel_boot_log("\n");

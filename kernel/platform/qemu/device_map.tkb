@@ -71,7 +71,7 @@ must_use variant QemuVirtioDtbResult {
 // GitHub issue #1013: the DTB's PSCI method, read by every CPU_ON.
 let mut qemu_psci_use_hvc: BootOnce(bool);
 
-fn qemu_virtio_apply_boot_dtb(dtb: usize)
+fn qemu_virtio_apply_boot_dtb(phase: borrow BootPhase[boot], dtb: usize)
         -> QemuVirtioDtbResult !{unsafe} {
     let mut index: usize = 0;
     let mut net_found: bool = false;
@@ -110,9 +110,9 @@ fn qemu_virtio_apply_boot_dtb(dtb: usize)
                             }
                             IoAttach::Attached => {}
                         }
-                        virtio_base = transport.base as i32;
-                        virtio_net_gic_intid =
-                            transport.interrupt.intid as i32;
+                        boot_once_set(&virtio_base, phase, transport.base as i32);
+                        boot_once_set(&virtio_net_gic_intid, phase,
+                                      transport.interrupt.intid as i32);
                         net_found = true;
                     } else if (*device == 2) {
                         if (block_found) {
@@ -212,7 +212,7 @@ fn qemu_boot_devices_apply_dtb(phase: borrow BootPhase[boot]) -> QemuBootDevices
                                             boot_once_set(&qemu_psci_use_hvc, phase, true);
                                         }
                                     }
-                                    match qemu_virtio_apply_boot_dtb(dtb) {
+                                    match qemu_virtio_apply_boot_dtb(phase, dtb) {
                                         QemuVirtioDtbResult::Invalid => {
                                             return QemuBootDevicesResult::Invalid;
                                         }

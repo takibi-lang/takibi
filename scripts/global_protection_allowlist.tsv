@@ -70,8 +70,6 @@ kernel/drivers/net/virtio_net.tkb	rx_desc_pkt	read-by net_rx_acquire,virtio_net_
 kernel/drivers/net/virtio_net.tkb	rx_used_seen	read-by net_rx_acquire,kernel_net_rx_frame_pending: 2026-10-31 token: RX used shadow, under the one NetRxCanAcquire token; DDB reads it with the world stopped
 kernel/drivers/net/virtio_net.tkb	tx_avail_idx	read-by virtio_net_tx_ring: 2026-10-31 token: TX avail shadow, under the one NetRxCanAcquire token
 kernel/drivers/net/virtio_net.tkb	tx_used_seen	read-by virtio_net_tx_finish,virtio_net_tx_used_pending: 2026-10-31 token: TX used shadow, under the one NetRxCanAcquire token
-kernel/drivers/net/virtio_net.tkb	virtio_base	read-by virtio_net_find,main: 2026-10-31 boot: set by the DTB device map on core 0; never written after
-kernel/drivers/net/virtio_net.tkb	virtio_net_gic_intid	read-by virtio_net_find,irq_source_code: 2026-10-31 boot: set once by the DTB device map before the SPI is enabled; IRQ dispatch compares it on any core
 kernel/drivers/net/virtio_net.tkb	virtio_net_queues	read-by virtio_queue_setup: 2026-10-31 token: descriptor and avail writes under the one NetRxCanAcquire token; the device reads them; the setup address is boot only
 kernel/drivers/net/virtio_net.tkb	virtio_net_regs	read-by net_init,virtio_net_irq_handler,net_read_mac: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
 kernel/drivers/net/virtio_net.tkb	virtio_net_used_addr	read-by kernel_net_rx_frame_pending: 2026-10-31 boot: written by virtio_queue_setup; DDB reads it stopped

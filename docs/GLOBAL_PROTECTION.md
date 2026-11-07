@@ -356,3 +356,10 @@ file's comment lines are not rows.
   A struct named `InitOnce` from any other file stays `none`. The two
   `net_init_once` rows (virtio-net, GEM) and `init_once_probe_gate` go.
   231 -> 228 unprotected.
+- 2026-11-07: virtio-net's discovery words (#1159). `virtio_base` and
+  `virtio_net_gic_intid`, whose rows said "set by the DTB device map on core 0;
+  never written after", are `BootOnce(i32)`: the QEMU DTB walk
+  (`qemu_virtio_apply_boot_dtb`, now taking the `BootPhase`) sets them, and
+  `virtio_net_base`/`virtio_net_intid` read them, an unwritten cell (no
+  transport found) reading as 0 and -1 as the old initialisers did. The IRQ
+  dispatcher reads through the same accessor. 228 -> 226 unprotected.
