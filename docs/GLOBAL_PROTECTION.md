@@ -397,3 +397,9 @@ entries below that date are history, left as written.
   classed `lock` (lib/global_protection.ml), which counts `fd_table.tkb`'s
   `fd_slot_total`; its guard proves the guarded-field lock is held, not which
   cell's (kernel/lib/locked_cell.tkb).
+- 2026-11-07 (#1159): `kernel/init/test_driver.tkb`'s nine fixture words to
+  `AtomicWord`: the five end-of-fixture baselines and PID 1's root key the
+  boot thread takes and PID 1's deferred report reads, the report's one-shot
+  `init_boot_fixture_pending` (now claimed by compare-and-swap, so the
+  report runs once) and `init_boot_fixture_reported`, and
+  `clone_growth_probe_ok`.

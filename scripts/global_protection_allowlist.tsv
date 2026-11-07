@@ -80,22 +80,13 @@ kernel/init/ext2_fixture.tkb	ext2_release_second	read-by ext2_release_names_are,
 kernel/init/ext2_fixture.tkb	ext2_write_fixture_bitmap	read-by ext2_io_bitmap_matches,ext2_write_indirect_check: 2026-10-31 retain-fixture: the boot ext2 fixture's own checks, core 0 before userspace
 kernel/init/ext2_fixture.tkb	ext2_write_fixture_readback	read-by ext2_io_file_is,ext2_exhaustion_mode: 2026-10-31 retain-fixture: the boot ext2 fixture's read-back comparisons, core 0 before userspace
 kernel/init/ext2_fixture.tkb	ext2_write_fixture_source	read-by ext2_io_file_is,ext2_release_full_file: 2026-10-31 retain-fixture: the boot ext2 fixture compares what it wrote against this, core 0 before userspace
-kernel/init/test_driver.tkb	address_space_baseline	read-by kernel_init_boot_fixture_poll: 2026-10-31 retain-fixture: the deferred end-of-fixture leak report; taken in kernel_test_driver_run and kernel_init_process_start
 kernel/init/test_driver.tkb	boot_exec_windows	read-by kernel_test_driver_run: 2026-10-31 boot: the loader check's windows, core 0 once before any exec
 kernel/init/test_driver.tkb	boot_execution	read-by kernel_process_child_exec_prepare_with,kernel_exec_primary_is_busybox_extras: 2026-10-31 boot: written by the boot thread before PID 1 runs, read-only for every later exec; BootOnce would fit but reads as a two-field record
-kernel/init/test_driver.tkb	clone_growth_probe_ok	read-by kernel_init_script_success_evidence: 2026-10-31 retain-fixture: prints the vm fork child stack growth line a lane reads
 kernel/init/test_driver.tkb	exec_windows	read-by kernel_process_child_exec_prepare: 2026-10-31 slot: by the linear ExecWindowSlot, held across ext2 sleeps; no CPU selects it
 kernel/init/test_driver.tkb	ext2_read_fixture	read-by ext2_create_check,ext2_io_file_is: 2026-10-31 retain-fixture: the boot ext2 fixture reads file bytes here and compares them, core 0 before userspace
 kernel/init/test_driver.tkb	ext2_symlink_fixture	read-by kernel_ext2_fixture_run: 2026-10-31 retain-fixture: the boot ext2 fixture's symlink target buffer
-kernel/init/test_driver.tkb	fd_context_baseline	read-by kernel_init_boot_fixture_poll: 2026-10-31 retain-fixture: the deferred end-of-fixture leak report; taken once in kernel_test_driver_run
-kernel/init/test_driver.tkb	image_record_baseline	read-by kernel_init_boot_fixture_poll: 2026-10-31 retain-fixture: the deferred end-of-fixture leak report
-kernel/init/test_driver.tkb	init_boot_fixture_pending	read-by kernel_init_boot_fixture_poll: 2026-10-31 retain-fixture: one-shot gate of the deferred report, polled on the syscall path; the pid 1 test leaves one process as the taker, by check then clear rather than a swap
-kernel/init/test_driver.tkb	init_boot_fixture_reported	read-by kernel_init_boot_fixture_reaped: 2026-10-31 retain-fixture: whether the deferred report ran, read when PID 1's fixture child is reaped
 kernel/init/test_driver.tkb	init_boot_fixture_status	read-by kernel_init_script_success_evidence: 2026-10-31 retain-fixture: stored when PID 1 reaps the fixture child, printed after by PID 1
 kernel/init/test_driver.tkb	kernel_test_init_script	read-by kernel_test_driver_run: 2026-10-31 retain-fixture: main's choice of init script, one read on the boot path
-kernel/init/test_driver.tkb	page_baseline	read-by kernel_init_boot_fixture_poll: 2026-10-31 retain-fixture: the deferred end-of-fixture page-leak report
-kernel/init/test_driver.tkb	page_baseline_init_root	read-by kernel_init_mmap_region_pages: 2026-10-31 retain-fixture: PID 1's root key, set before PID 1 runs; the leak report reads it
-kernel/init/test_driver.tkb	process_pool_baseline	read-by kernel_init_boot_fixture_poll: 2026-10-31 retain-fixture: the deferred end-of-fixture process-pool report (#270)
 kernel/init/test_driver.tkb	rootfs_metadata	read-by kernel_test_driver_run: 2026-10-31 retain-boot: the boot read of the image's metadata; the exec plan borrows this permanent buffer afterward
 kernel/kernel/fd_table.tkb	fd_refcount_probe_handle	read-by fd_refcount_probe_cycle,fd_refcount_contention_probe: 2026-10-31 retain-fixture: the contention probe's two cores; published before the rendezvous, an order the probe keeps by hand
 kernel/kernel/fd_table.tkb	fd_refcount_probe_ready	read-by fd_refcount_contention_probe: 2026-10-31 retain-fixture: first-run guard of the probe, core 0

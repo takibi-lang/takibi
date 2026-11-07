@@ -143,34 +143,38 @@ private let mut boot_execution: BootExecutionContext;
 // PID 1 is BusyBox init now and never returns there, so the report runs
 // from a hook instead and the baselines have to outlive the function that
 // takes them.
-private let mut process_pool_baseline: usize;
-private let mut address_space_baseline: usize;
-private let mut image_record_baseline: usize;
-private let mut fd_context_baseline: usize;
-private let mut page_baseline: usize;
+// AtomicWord (GitHub issue #1159): written by the boot thread, read by PID 1's
+// report on whichever core it runs.
+private let mut process_pool_baseline: AtomicWord;
+private let mut address_space_baseline: AtomicWord;
+private let mut image_record_baseline: AtomicWord;
+private let mut fd_context_baseline: AtomicWord;
+private let mut page_baseline: AtomicWord;
 // GitHub issue #1151: PID 1's root key, for the pages its mmap region holds
 // at the end of the run. PID 1 is permanent, and its mappings are taken
 // after the baseline: mmap used to hand out pages of the heap arena exec had
 // already mapped, and now maps region pages on first touch.
-private let mut page_baseline_init_root: usize;
+private let mut page_baseline_init_root: AtomicWord;
 
 // What PID 1's mmap region holds: its resident region pages and the bitmap
 // pool's chunks (PID 1's bitmap is the only one left once every fixture
 // process is reaped; a chunk held for another would still count as a leak
 // through the pool-space view's nonfree count).
 private fn kernel_init_mmap_region_pages() -> usize !{unsafe} {
-    if (page_baseline_init_root == 0 ||
-        address_space_root_key_valid(page_baseline_init_root) == false) {
+    let init_root: usize = atomic_word_load(&page_baseline_init_root);
+    if (init_root == 0 || address_space_root_key_valid(init_root) == false) {
         return mmap_region_pool_pages();
     }
-    return mmap_region_resident_pages(address_space_root_of_key(page_baseline_init_root)) +
+    return mmap_region_resident_pages(address_space_root_of_key(init_root)) +
            mmap_region_pool_pages();
 }
-private let mut init_boot_fixture_reported: bool;
+// AtomicWord, 1 for true (GitHub issue #1159). pending is claimed by
+// compare-and-swap, so the deferred report runs once.
+private let mut init_boot_fixture_reported: AtomicWord;
 // The reaped child's exit status, printed by kernel_init_script_success_evidence.
 private let mut init_boot_fixture_status: ProcessEnd;
-private let mut init_boot_fixture_pending: bool;
-private let mut clone_growth_probe_ok: bool;
+private let mut init_boot_fixture_pending: AtomicWord;
+private let mut clone_growth_probe_ok: AtomicWord;
 
 struct Ext2ExecImage {
     plan: DistroElfLoadPlan;
@@ -475,17 +479,17 @@ private fn dead_slot_fallback_uses() -> usize {
 }
 
 fn kernel_init_boot_fixture_reaped(reaper_pid: usize, status: ProcessEnd) {
-    if (init_boot_fixture_reported) { return; }
+    if (atomic_word_load(&init_boot_fixture_reported) != 0) { return; }
     if (reaper_pid != 1) { return; }
-    init_boot_fixture_pending = true;
     init_boot_fixture_status = status;
+    atomic_word_store(&init_boot_fixture_pending, 1);
 }
 
 fn kernel_init_boot_fixture_poll(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) !{unsafe} {
-    if (init_boot_fixture_pending == false) { return; }
+    if (atomic_word_load(&init_boot_fixture_pending) == 0) { return; }
     if (kernel_process_current_pid() != 1) { return; }
-    init_boot_fixture_pending = false;
-    init_boot_fixture_reported = true;
+    if (atomic_word_compare_exchange(&init_boot_fixture_pending, 1, 0) == false) { return; }
+    atomic_word_store(&init_boot_fixture_reported, 1);
     kernel_init_script_socket_evidence();
     kernel_init_script_success_evidence(current_authority);
     // GitHub issue #207: every page released across this
@@ -759,28 +763,28 @@ fn kernel_init_boot_fixture_poll(current_authority: borrow ProcessCurrent[curren
     // Measured before it was written: the only two live records at this
     // point were pid 1 (Running) and one pid in Exited.
     kernel_process_reap_own_zombies();
-    if (scheduled_process_pool_live_count() == process_pool_baseline &&
-        address_space_live_count() == address_space_baseline &&
-        process_image_record_live_count() == image_record_baseline &&
-        unified_fd_context_live_count() == fd_context_baseline) {
+    if (scheduled_process_pool_live_count() == atomic_word_load(&process_pool_baseline) &&
+        address_space_live_count() == atomic_word_load(&address_space_baseline) &&
+        process_image_record_live_count() == atomic_word_load(&image_record_baseline) &&
+        unified_fd_context_live_count() == atomic_word_load(&fd_context_baseline)) {
         kernel_boot_log("resources: pooled per-process records back to the baseline\n");
     } else {
         kernel_boot_log("resources: POOLED RECORDS LEAKED process=");
         uart_put_udec(scheduled_process_pool_live_count());
         kernel_boot_log("/");
-        uart_put_udec(process_pool_baseline);
+        uart_put_udec(atomic_word_load(&process_pool_baseline));
         kernel_boot_log(" root=");
         uart_put_udec(address_space_live_count());
         kernel_boot_log("/");
-        uart_put_udec(address_space_baseline);
+        uart_put_udec(atomic_word_load(&address_space_baseline));
         kernel_boot_log(" image=");
         uart_put_udec(process_image_record_live_count());
         kernel_boot_log("/");
-        uart_put_udec(image_record_baseline);
+        uart_put_udec(atomic_word_load(&image_record_baseline));
         kernel_boot_log(" fdctx=");
         uart_put_udec(unified_fd_context_live_count());
         kernel_boot_log("/");
-        uart_put_udec(fd_context_baseline);
+        uart_put_udec(atomic_word_load(&fd_context_baseline));
         kernel_boot_log("\n");
     }
     // GitHub issue #543: every byte the UART received this boot either
@@ -856,7 +860,7 @@ fn kernel_init_boot_fixture_poll(current_authority: borrow ProcessCurrent[curren
     kernel_console_measure_report();
     kernel_log_ring_report();
     if (page_allocator_live_count() - kernel_process_spare_stack_run_pages() -
-            kernel_init_mmap_region_pages() == page_baseline) {
+            kernel_init_mmap_region_pages() == atomic_word_load(&page_baseline)) {
         kernel_boot_log("resources: pages=0\n");
         // GitHub issue #376: reported beside the other
         // end-of-run resource facts, and for the same
@@ -875,7 +879,7 @@ fn kernel_init_boot_fixture_poll(current_authority: borrow ProcessCurrent[curren
         kernel_boot_log(" init_mmap=");
         uart_put_udec(kernel_init_mmap_region_pages());
         kernel_boot_log(" baseline=");
-        uart_put_udec(page_baseline);
+        uart_put_udec(atomic_word_load(&page_baseline));
         kernel_boot_log("\n");
     }
     kernel_pool_space_report("bounded_end");
@@ -1151,7 +1155,7 @@ fn kernel_init_script_success_evidence(current_authority: borrow ProcessCurrent[
     if (kernel_process_clone_evidence(current_authority)) {
         kernel_boot_log("vm fork: private pages=132 reclaimed\n");
     }
-    if (clone_growth_probe_ok) {
+    if (atomic_word_load(&clone_growth_probe_ok) != 0) {
         kernel_boot_log("vm fork: child stack growth ok\n");
     }
     let (exec_reaps, exec_reaps_clean, exec_stack_growths) =
@@ -1430,7 +1434,9 @@ fn kernel_test_common_probes() !{unsafe} {
     // took a translation fault on its next push. So it runs here, among the
     // probes. Since #831 PID 1 has a root of its own and root 0 is only the
     // kernel's, which the boot thread runs on.
-    clone_growth_probe_ok = process_image_clone_growth_probe();
+    if (process_image_clone_growth_probe()) {
+        atomic_word_store(&clone_growth_probe_ok, 1);
+    }
     if (address_space_asid_rollover_probe()) {
         // The width is PRINTED, not asserted in the message: the view
         // fixture is what says this hardware reports 16, so a part that
@@ -1520,10 +1526,10 @@ fn kernel_test_driver_run() {
     if (fd_context_ready == false || image_record_ready == false) {
         kernel_boot_log("resources: boot thread records unavailable at baseline\n");
     }
-    process_pool_baseline = scheduled_process_pool_live_count();
-    address_space_baseline = address_space_live_count();
-    image_record_baseline = process_image_record_live_count();
-    fd_context_baseline = unified_fd_context_live_count();
+    atomic_word_store(&process_pool_baseline, scheduled_process_pool_live_count());
+    atomic_word_store(&address_space_baseline, address_space_live_count());
+    atomic_word_store(&image_record_baseline, process_image_record_live_count());
+    atomic_word_store(&fd_context_baseline, unified_fd_context_live_count());
     // Descriptor BLOCKS are deliberately not in this set. A block is
     // allocated when a descriptor is installed, not when a process
     // acquires its context, so it is not part of the acquisition chain
@@ -1549,8 +1555,8 @@ fn kernel_test_driver_run() {
     // is a pooled process and takes the run the probes parked, and a child
     // reaped later parks another, so whether one is parked differs between
     // the two points. `pages=0` still does NOT mean nothing is held.
-    page_baseline = page_allocator_live_count() -
-        kernel_process_spare_stack_run_pages();
+    atomic_word_store(&page_baseline, page_allocator_live_count() -
+        kernel_process_spare_stack_run_pages());
     kernel_test_platform_network();
     nic_irq_evidence_unpin();
     kernel_test_platform_storage();
@@ -1828,12 +1834,12 @@ private fn kernel_init_process_start(mount: Ext2Mount, image: Ext2ExecImage) !{u
             // the boot thread's record and fd context in them, which PID 1's
             // replace; PID 1's root and image record are its own (the boot
             // thread runs on root 0), so one of each is added.
-            page_baseline = page_allocator_live_count() -
-                kernel_process_spare_stack_run_pages();
-            page_baseline_init_root = root_slot_word(address_space_root_slot(
-                scheduled_process_address_space_root_lookup(init_slot)));
-            address_space_baseline = address_space_baseline + 1;
-            image_record_baseline = image_record_baseline + 1;
+            atomic_word_store(&page_baseline, page_allocator_live_count() -
+                kernel_process_spare_stack_run_pages());
+            atomic_word_store(&page_baseline_init_root, root_slot_word(address_space_root_slot(
+                scheduled_process_address_space_root_lookup(init_slot))));
+            atomic_word_fetch_add(&address_space_baseline, 1);
+            atomic_word_fetch_add(&image_record_baseline, 1);
             kernel_process_boot_handoff();
             kernel_idle_boot_enter();
         }
