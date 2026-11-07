@@ -408,7 +408,6 @@ entries below that date are history, left as written.
   `g[slot.index]`; `block_run_data` becomes one `BlockRunBuffer` per slot, a
   struct so the device read slices it as a field (same bytes), and
   `block_run_transfer_locked` takes the `BlockSlot` instead of its number.
-  217 -> 210 unprotected.
 - 2026-11-07: ext2's slot scratch (#1159 option B1, step 4). `ext2_scratch` is
   `owned_by(Ext2Slot.index, 1)` and `ext2_write_blocks`
   `owned_by(Ext2Slot.index, EXT2_MAX_WRITE_ALLOCATIONS)`; every use already
@@ -416,4 +415,3 @@ entries below that date are history, left as written.
   row check for a refined `k`. `ext2_undo_rows`, `ext2_fence_pending` and
   `ext2_fence_pending_count` stay listed: one mutation at a time holds them
   under `ext2_mutation_lock`, not a slot, so owned_by does not apply.
-  210 -> 208 unprotected.
