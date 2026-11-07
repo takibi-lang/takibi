@@ -25,6 +25,9 @@ if [ "$held" -lt "$smp" ]; then
          "resource_lease_vcpu_acquire in bash, scripts/vcpu_lease_run.sh otherwise." >&2
     exit 1
 fi
+# One lane chain per worktree (GitHub issue #1433, scripts/qemu_lane_owner.sh).
+. "$(dirname "$0")/qemu_lane_owner.sh"
+qemu_lane_owner_claim || exit 1
 # The kernel's virtio drivers speak only the modern virtio-mmio transport
 # (Version 2), and QEMU's virt machine defaults to the legacy one, so every
 # guest gets the modern one here rather than from each runner (GitHub issue

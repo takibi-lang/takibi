@@ -331,6 +331,7 @@ for several rounds it gated `allbuild` so no kernel lane ran at all.
 | `slowcheck_board_link_gate.sh` | Controls for the shared board-link gate |
 | `slowcheck_kernel_net_readiness.py` | Controls for the host peer's readiness waits, with no QEMU in the room |
 | `slowcheck_qemu_session_ports.sh` | Regression controls for the per-session QEMU port block claim |
+| `slowcheck_qemu_lane_owner.sh` | One QEMU lane chain per worktree (#1433): a guest of a second chain is refused while the owner lives, the owner's own parallel lanes are admitted, dead and reused-PID owners are released, and `scripts/qemu.sh` and the Makefile carry the gate |
 | `slowcheck_land_env_rerun.sh` | runs the `scripts/land_env_members.py` controls a second time inside a simulated land (`TAKIBI_LAND_ALLCHECK=1`, a temp registry whose land.lock it holds, a temp `TAKIBI_LANE_TIMING_DIR` that must stay empty, a lane name and a held lease planted, #1408), so a control that reads the outer land's state goes red outside a land (#1389). Only these members get the environment, which would skip the #1145 wait elsewhere |
 | `slowcheck_resource_lease.sh` | Regression controls for cross-container board and aggregate-suite leases, and the vCPU grant order (longest lane first, #927) |
 | `slowcheck_run_kernel_build_locked.sh` | Regression controls for the cross-Make kernel build lock |

@@ -25,6 +25,15 @@ MAKEFLAGS += -j$(TAKIBI_JOBS)
 endif
 MAKEFLAGS += -Oline --no-print-directory
 
+# GitHub issue #1433: the QEMU lanes of one top-level make are one chain and
+# may run at once; a guest of another chain in this worktree is refused
+# (scripts/qemu_lane_owner.sh). The top-level make names the chain by its
+# own PID (the $(shell)'s parent), and every sub-make inherits it.
+ifndef TAKIBI_LANE_ROOT_PID
+TAKIBI_LANE_ROOT_PID := $(shell echo $$PPID)
+endif
+export TAKIBI_LANE_ROOT_PID
+
 # GitHub issue #1223: a recipe that fails deletes the target it was writing.
 # Several object recipes run checks after the compile (the ext2 mutation
 # guard, the unused-coverage and raw-deref ratchets); without this a failed
