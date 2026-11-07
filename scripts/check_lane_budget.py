@@ -120,15 +120,16 @@ def keep_green(source: pathlib.Path, dest: pathlib.Path) -> None:
     staging.rename(dest)
     shutil.rmtree(old, ignore_errors=True)
 QEMU_LANE_LIMIT = 25
-# Derivation (maintainer decision 2026-11-06, #1198; PROVISIONAL until
-# re-derived from two quiet allchecks and one run beside a CPU hog, scheduled
-# between lands): a cicheck on e9165ac1 under host load (load average 5-21)
-# used 10470.6 CPU s over 32 lanes -- modelcheck's multi-threaded TLC 3977,
-# probe-ticks 1008, alloc-rollback 747 -- and langcheck alone 49.7 s; with
-# the unmeasured RPi5 lane, about 10.6k for allcheck. The limit is that plus
-# the usual 30 % headroom. CPU runs about 2.3x the old busy wall seconds
-# (about 4.6k), since a guest's vCPUs and TLC's workers run in parallel.
-LANE_CPU_SECONDS_LIMIT = 13800.0
+# Derivation (maintainer decision 2026-11-06, #1198; re-derived 2026-11-07 as
+# that decision prescribed): two quiet allchecks on main 23515f90 (no other
+# QEMU work on the host) used 11465.5 and 11258.8 CPU s over 34 lanes (1.8 %
+# apart); the larger plus the usual 30 % headroom is 14900. The same allcheck
+# beside twelve nice-19 busy loops used 12983.4 (+13 %: contention inflates
+# CPU time too, if far less than wall time), inside the limit. The previous
+# provisional 13800 came from one loaded cicheck before the TcpAccept,
+# two-child Wait4Block and StackOwnership variants grew modelcheck (3977 ->
+# about 5200 CPU s).
+LANE_CPU_SECONDS_LIMIT = 14900.0
 
 
 def rules(text: str) -> dict[str, list[str]]:
