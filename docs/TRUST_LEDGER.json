@@ -2854,6 +2854,39 @@
       "changes": {
         "unprotected_globals": "Atomic(E): #1159 rule 2: scheduled_process_freed_site, _missing_site and kernel_process_exec_failure_reason become Atomic(E) cells"
       }
+    },
+    {
+      "date": "2026-11-07",
+      "head": "8e9da10a",
+      "counts": {
+        "raw_mint_files": 14,
+        "frame_lines": 12071,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 200,
+        "raw_deref_io": 7,
+        "raw_deref_builtin_region": 113,
+        "raw_deref_generated": 0,
+        "unsafe_blocks": 157,
+        "extern_fns": 73,
+        "invariant_stop_sites": 134,
+        "static_assert_premises": 23,
+        "assembly_lines": 2845,
+        "per_cpu_ordinary_arrays": 54,
+        "per_cpu_stores": 7,
+        "raw_cpu_id_calls": 147,
+        "trust_build_checks": 17,
+        "tla_review_stamps": 146,
+        "judge_defects_range": 1,
+        "judge_defects_init": 0,
+        "judge_defects_region_overlay": 0,
+        "unprotected_globals": 162,
+        "frame_api_ratchet": 7
+      },
+      "changes": {
+        "unprotected_globals": "SetOnce: #1159 rule 3: syscall_filesystem and process_image_root0_record become SetOnce cells",
+        "invariant_stop_sites": "#1159 rule 3: a second SetOnce claim on the two boot-set cells, and a read of an unset cell, stop the kernel instead of overwriting or reading zero",
+        "per_cpu_ordinary_arrays": "owned_by (#1436, #1437): exec_windows and process_image_staging are owned_by slot pools, counted by type"
+      }
     }
   ]
 }
