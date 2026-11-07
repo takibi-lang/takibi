@@ -20,14 +20,23 @@ from pass_line import report_pass
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 # The shim itself, its helpers, and the lease control, which writes a fake
-# qemu-system-aarch64 to prove the shim refuses an unleased guest; and the
-# lane-owner control, which only greps the shim for its gate (#1433).
+# qemu-system-aarch64 to prove the shim refuses an unleased guest.
 EXEMPT = {"scripts/qemu.sh", "scripts/check_qemu_vcpu_lease.py",
-          "scripts/qemu_vcpu_lease.py", "scripts/slowcheck_resource_lease.sh",
-          "scripts/slowcheck_qemu_lane_owner.sh"}
+          "scripts/qemu_vcpu_lease.py", "scripts/slowcheck_resource_lease.sh"}
 DIRECT = re.compile(r"qemu-system-aarch64")
 MATCHER = re.compile(r"\b(pgrep|pkill)\b")
-SHIM = re.compile(r"^[^#]*scripts/qemu\.sh|^from qemu_vcpu_lease import", re.M)
+# GitHub issue #1442: a file RUNS the shim when the shim is a command, not
+# when it merely names it (a grep of it, a message about it). A command is
+# the shim's path in command position on a shell line -- after optional
+# `exec`, `timeout N`, `nice [-n N]`, `env` and VAR=value words -- or the
+# head of a Python argv list (`[os.path.join(..., "scripts/qemu.sh"), ...`,
+# `[str(root / 'scripts/qemu.sh'), ...`), or an import of the leased
+# wrapper.
+SHIM = re.compile(
+    r"""^\s*(?:(?:exec|env|timeout\s+\S+|nice(?:\s+-n\s*\S+)?|[A-Za-z_][A-Za-z0-9_]*=\S*)\s+)*"""
+    r"""["']?[^"'\s#]*scripts/qemu\.sh["']?(?:\s|$)"""
+    r"""|\[\s*(?:[\w.]+\([^)\n]*)?["'][^"'\n]*scripts/qemu\.sh["']"""
+    r"""|^\s*from qemu_vcpu_lease import""", re.M)
 LEASE = re.compile(r"resource_lease_vcpu_acquire|\blease\(")
 
 
@@ -58,7 +67,13 @@ def main():
     if not problems("x.sh", "qemu-system-aarch64 -smp 2\n") \
             or not problems("x.py", 'from qemu_vcpu_lease import QEMU\n') \
             or problems("x.sh", 'pgrep -f "qemu-system-aarch64.*"\n') \
-            or not problems("x.py", 'S = """\nfrom qemu_vcpu_lease import QEMU, lease\n"""\nlease()\n'):
+            or not problems("x.py", 'S = """\nfrom qemu_vcpu_lease import QEMU, lease\n"""\nlease()\n') \
+            or not problems("x.sh", '"$R/scripts/qemu.sh" -smp 2 \\\n') \
+            or not problems("x.sh", 'timeout "$T" "$R/scripts/qemu.sh" -m 1024\n') \
+            or not problems("x.py", 'cmd = [os.path.join(R, "scripts/qemu.sh"), "-m"]\n') \
+            or not problems("x.sh", "command = [str(root / 'scripts/qemu.sh'), '-m']\n") \
+            or problems("x.sh", 'grep -q gate "$R/scripts/qemu.sh" || fail "scripts/qemu.sh has no gate"\n') \
+            or problems("x.py", 'print("start guests through scripts/qemu.sh")\n'):
         print("FAIL qemu-vcpu-lease: the check's own controls no longer behave")
         return 1
     files = subprocess.run(["git", "ls-files", "*.sh", "*.py"], cwd=ROOT,
