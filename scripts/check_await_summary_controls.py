@@ -14,6 +14,11 @@ from unittest.mock import patch
 from await_timing import AwaitTiming
 from pass_line import CaseCount, report_pass
 
+# GitHub issue #1389: run inside a land, these come from the outer land.sh;
+# a case that wants one sets it on that one call.
+os.environ.pop('TAKIBI_LAND_ALLCHECK', None)
+os.environ.pop('TAKIBI_LANE_TIMING_DIR', None)
+
 CASES = CaseCount()
 
 ROOT = Path(__file__).resolve().parent.parent

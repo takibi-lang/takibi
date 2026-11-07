@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """Exercise the milestone review gate without Git, a board, or a wait."""
+import os
 import copy
 from pathlib import Path
 import sys
 sys.dont_write_bytecode = True
 from space_checkpoint import REVIEW, production_source, source_digest, validate_review
 from pass_line import CaseCount, report_pass
+
+# GitHub issue #1389: run inside a land, these come from the outer land.sh;
+# a case that wants one sets it on that one call.
+os.environ.pop('TAKIBI_LAND_ALLCHECK', None)
+os.environ.pop('TAKIBI_LANE_TIMING_DIR', None)
 
 
 def main():

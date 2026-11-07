@@ -11,6 +11,9 @@
 # an equally long one costs nothing to shorten -- so the summary is required
 # to name a different lane for each when the records say so.
 set -uo pipefail
+# GitHub issue #1389: inside a land these come from the outer land.sh; each
+# case below sets TAKIBI_LANE_TIMING_DIR on its own call.
+unset TAKIBI_LAND_ALLCHECK TAKIBI_LANE_TIMING_DIR
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_LANE="$REPO_ROOT/scripts/run_lane.sh"

@@ -33,6 +33,8 @@ mkdir -p "$work/capture"
 printf 'uart\n' >"$work/capture/uart.log"
 export TAKIBI_LANE_ARTIFACT_ROOT="$work/root"
 unset TAKIBI_LANE_TIMING_DIR TAKIBI_ARCHIVE_EXPECTED TAKIBI_LANE_RUN_ID
+# GitHub issue #1389: a land exports this to its allcheck.
+unset TAKIBI_LAND_ALLCHECK
 
 # run CASE COMMAND...: run_lane.sh with a fake lane body; output in $work/CASE.out.
 run() {
