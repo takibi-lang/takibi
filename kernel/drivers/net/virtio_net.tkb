@@ -428,13 +428,14 @@ fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
             return NetRxAcquire::None(view NetRxCanAcquire);
         }
     };
-    let VirtioPktHeld::RxPosted(posted) = held else {
+    let VirtioPktHeld::RxPosted(held_posted) = held else {
         VirtioPktHeld::Free(p) => { virtio_pkt_lost(VirtioPktHeld::Free(p)); return NetRxAcquire::None(view NetRxCanAcquire); }
         VirtioPktHeld::TxPosted(p) => { virtio_pkt_lost(VirtioPktHeld::TxPosted(p)); return NetRxAcquire::None(view NetRxCanAcquire); }
         VirtioPktHeld::Unconfirmed(p) => { virtio_pkt_lost(VirtioPktHeld::Unconfirmed(p)); return NetRxAcquire::None(view NetRxCanAcquire); }
         VirtioPktHeld::Kept(p) => { virtio_pkt_lost(VirtioPktHeld::Kept(p)); return NetRxAcquire::None(view NetRxCanAcquire); }
     };
-    virtio_pkt_note_rx_used(ring.idx, rx_used_seen);
+    let mut posted = held_posted;
+    virtio_pkt_note_rx_used(posted, ring.idx, rx_used_seen);
     match VirtioPkt_virtio_pkt_received(posted) {
         VirtioPkt_virtio_pkt_received_Outcome::PktEmpty => {
             virtio_pkt_park(pool_slot, VirtioPktHeld::RxPosted(posted));
@@ -489,13 +490,14 @@ private fn virtio_net_rx_post(index: {0..<8 as usize}) -> bool {
         VirtioPktHeld::Unconfirmed(p) => { virtio_pkt_park(pool_slot, VirtioPktHeld::Unconfirmed(p)); return false; }
         VirtioPktHeld::Kept(p) => { virtio_pkt_park(pool_slot, VirtioPktHeld::Kept(p)); return false; }
     };
+    let mut address: usize = 0;
     match VirtioPkt_virtio_pkt_post_rx(free) {
         VirtioPkt_virtio_pkt_post_rx_Result::RxPosted(posted) => {
+            address = virtio_pkt_rx_address(posted);
             virtio_pkt_park(pool_slot, VirtioPktHeld::RxPosted(posted));
         }
     }
-    desc_set(0, index, virtio_pkt_published_address(),
-             RX_BUF_SIZE, VIRTQ_DESC_F_WRITE);
+    desc_set(0, index, address, RX_BUF_SIZE, VIRTQ_DESC_F_WRITE);
     rx_desc_pkt[index] = pool_slot;
     return true;
 }
@@ -579,12 +581,14 @@ private fn net_transmit(reply: sink NetRxReplyReady[pb, po]) -> NetTxInFlight[pb
     // header is all zero (no offloads are negotiated).
     let header = VirtioPkt_Filled_bytes(reply.pkt, 0);
     for i: usize in 0..<VIRTIO_NET_HDR_LEN { header[i] = 0; }
+    let mut address: usize = 0;
     match VirtioPkt_virtio_pkt_post_tx(reply.pkt) {
         VirtioPkt_virtio_pkt_post_tx_Result::TxPosted(posted) => {
+            address = virtio_pkt_tx_address(posted);
             virtio_pkt_park(slot, VirtioPktHeld::TxPosted(posted));
         }
     }
-    virtio_net_tx_ring((len + (VIRTIO_NET_HDR_LEN as i32)) as usize);
+    virtio_net_tx_ring(address, (len + (VIRTIO_NET_HDR_LEN as i32)) as usize);
     let mut in_flight: NetTxInFlight[pb, po] = { slot };
     return in_flight;
 }
@@ -669,12 +673,14 @@ fn net_packet_kept_resend(ready: sink NetRxCanAcquire, kept: sink NetPacketKept[
         return ready;
     }
     workload_profile_note_network_tx(len as usize);
+    let mut address: usize = 0;
     match VirtioPkt_virtio_pkt_post_tx(kept.pkt) {
         VirtioPkt_virtio_pkt_post_tx_Result::TxPosted(posted) => {
+            address = virtio_pkt_tx_address(posted);
             virtio_pkt_park(slot, VirtioPktHeld::TxPosted(posted));
         }
     }
-    virtio_net_tx_ring((len + (VIRTIO_NET_HDR_LEN as i32)) as usize);
+    virtio_net_tx_ring(address, (len + (VIRTIO_NET_HDR_LEN as i32)) as usize);
     virtio_net_tx_finish(slot, true, len);
     virtio_net_rx_refill();
     return ready;
@@ -728,21 +734,22 @@ private fn virtio_net_send_built(slot: usize, keep: bool,
     for i: usize in 0..<VIRTIO_NET_HDR_LEN { out[i] = 0; }
     slice_copy(out[VIRTIO_NET_HDR_LEN..<VIRTIO_NET_HDR_LEN + (safe_len as usize)],
                bytes[0..<safe_len as usize]);
+    let mut address: usize = 0;
     match VirtioPkt_virtio_pkt_send(free) {
         VirtioPkt_virtio_pkt_send_Result::TxPosted(posted) => {
+            address = virtio_pkt_tx_address(posted);
             virtio_pkt_park(slot, VirtioPktHeld::TxPosted(posted));
         }
     }
-    virtio_net_tx_ring(VIRTIO_NET_HDR_LEN + (safe_len as usize));
+    virtio_net_tx_ring(address, VIRTIO_NET_HDR_LEN + (safe_len as usize));
     let kept: bool = virtio_net_tx_finish(slot, keep, safe_len) && keep;
     virtio_net_rx_refill();
     return kept;
 }
 
-// The doorbell for one transmit: descriptor 0 at the address the latest
-// tx publication took from its TxPosted owner's span.
-fn virtio_net_tx_ring(length: usize) {
-    let address: usize = virtio_pkt_published_address();
+// The doorbell for one transmit: descriptor 0 at the address its TxPosted
+// owner's span gave (virtio_pkt_tx_address).
+fn virtio_net_tx_ring(address: usize, length: usize) {
     desc_set(1, 0, address, length as isize, 0);
     avail_ring_set(1, 0, 0);
     tx_avail_idx = virtio_ring_index_next(tx_avail_idx);

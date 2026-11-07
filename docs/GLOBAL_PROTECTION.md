@@ -363,3 +363,14 @@ file's comment lines are not rows.
   `virtio_net_base`/`virtio_net_intid` read them, an unwritten cell (no
   transport found) reading as 0 and -1 as the old initialisers did. The IRQ
   dispatcher reads through the same accessor. 228 -> 226 unprotected.
+- 2026-11-07: virtio-net's packet relays (#1159, #1416's first part). The
+  descriptor address no longer passes through `virtio_pkt_addr`: the caller
+  asks the just-posted owner (`virtio_pkt_rx_address`/`virtio_pkt_tx_address`,
+  the reviewed `virtio_span_address` writers) before parking it. The used-ring
+  observation `virtio_pkt_rx_seen` is a field of the `VirtioPkt` `RxPosted`
+  state (#1395's state data), set through the owner by
+  `virtio_pkt_note_rx_used` and read by the `virtio_pkt_received` lowering;
+  `fill` drops it with the state. 226 -> 224 unprotected. The ring shadows the
+  `NetRxCanAcquire` view guards stay listed: carrying them needs the token to
+  be an indexed linear struct, a change of the net layer's shared spelling
+  (#1416).

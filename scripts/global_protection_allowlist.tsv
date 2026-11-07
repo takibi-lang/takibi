@@ -74,8 +74,6 @@ kernel/drivers/net/virtio_net.tkb	virtio_net_queues	read-by virtio_queue_setup: 
 kernel/drivers/net/virtio_net.tkb	virtio_net_regs	read-by net_init,virtio_net_irq_handler,net_read_mac: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
 kernel/drivers/net/virtio_net.tkb	virtio_net_used_addr	read-by kernel_net_rx_frame_pending: 2026-10-31 boot: written by virtio_queue_setup; DDB reads it stopped
 kernel/drivers/net/virtio_net.tkb	virtio_pkt_kept_len	read-by net_packet_kept_claim: 2026-10-31 token: written before the Kept packet is parked and read after a claim takes it out of the slot's lock
-kernel/drivers/net/virtio_net_tx_dma.tkb	virtio_pkt_addr	read-by virtio_pkt_published_address: 2026-10-31 token: address from a post to its descriptor, both under the one NetRxCanAcquire token
-kernel/drivers/net/virtio_net_tx_dma.tkb	virtio_pkt_rx_seen	read-by virtio_pkt_received: 2026-10-31 token: used-ring observation consumed once, under the one NetRxCanAcquire token
 kernel/drivers/serial/pl011.tkb	uart	read-by uart_rx_ready,uart_isr_getc,uart_debug_putc: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
 kernel/drivers/virtio_used.tkb	virtio_used_reset_confirmed	read-by virtio_used_quiet: 2026-10-31 lock: set just before its one read in virtio_used_reclaim_after_reset; the block driver is the only caller, under block_device_lock or on core 0 at boot
 kernel/fs/ext2/ext2.tkb	ext2_fence_pending	read-by ext2_recover_with: 2026-10-31 lock: mutators under ext2_mutation_lock, a TaskMutex (scripts/buildcheck_ext2_mutation_guard.py checks the callers); recover runs in the boot fixture
