@@ -302,7 +302,9 @@ protocol GemPkt[inst: usize] retains region(GemPacket)[b, GEM_PKT_ONE] txrx {
     // GitHub issue #1416: whether the ring's completes observation saw this
     // buffer's descriptor done, noted on the owner by the driver (state data).
     state RxPosted[req] device { seen: u8 = 0; }
-    state Filled access write;
+    // GitHub issue #1416: a Kept buffer's frame length, carried by its Filled
+    // owner (state data) from the keeping completion to the claim.
+    state Filled access write { kept_len: u16 = 0; }
     state TxPosted[req] device access read { seen: u8 = 0; }
     state Unconfirmed[req] device;
     init Free;
@@ -475,4 +477,13 @@ fn gem_pkt_free_index() -> usize {
         }
     }
     return GEM_PKTS;
+}
+
+// The length a keeping completion recorded on its Filled owner (#1416).
+fn gem_pkt_note_kept_len(s: borrow mut GemPkt_Filled[b, o, 1], len: {0..<1515 as i32}) {
+    GemPkt_Filled_set_kept_len(s, len as u16);
+}
+fn gem_pkt_kept_len(s: borrow GemPkt_Filled[b, o, 1]) -> {0..<1515 as i32} {
+    let v: i32 = GemPkt_Filled_kept_len(s) as i32;
+    return max(min(v, 1514), 0);
 }

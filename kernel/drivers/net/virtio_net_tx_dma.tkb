@@ -48,7 +48,9 @@ protocol VirtioPkt[inst: usize] retains region(VirtioPacket)[b, VIRTIO_PKT_ONE] 
     // this buffer's descriptor, carried by the owner (#1395's state data)
     // from the read to the observation that consumes it.
     state RxPosted[req] device { seen: u8 = 0; }
-    state Filled access write;
+    // GitHub issue #1416: a Kept buffer's frame length, carried by its Filled
+    // owner (state data) from the keeping completion to the claim.
+    state Filled access write { kept_len: u16 = 0; }
     // GitHub issue #1416: the TX used shadow its observation compares
     // with, copied from the capability by virtio_pkt_note_tx_shadow.
     state TxPosted[req] device access read { used_seen: u16 = 0; }
@@ -267,4 +269,13 @@ fn virtio_pkt_free_index() -> usize {
         }
     }
     return VIRTIO_PKT_NONE;
+}
+
+// The length a keeping completion recorded on its Filled owner (#1416).
+fn virtio_pkt_note_kept_len(s: borrow mut VirtioPkt_Filled[b, o, 1], len: {0..<1515 as i32}) {
+    VirtioPkt_Filled_set_kept_len(s, len as u16);
+}
+fn virtio_pkt_kept_len(s: borrow VirtioPkt_Filled[b, o, 1]) -> {0..<1515 as i32} {
+    let v: i32 = VirtioPkt_Filled_kept_len(s) as i32;
+    return max(min(v, 1514), 0);
 }

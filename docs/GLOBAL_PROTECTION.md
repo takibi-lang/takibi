@@ -499,3 +499,9 @@ entries below that date are history, left as written.
   `seen` field of its `RxPosted`/`TxPosted` owner, noted by the driver once
   the ring answered (`gem_pkt_note_received`, `gem_pkt_note_sent`), not as
   `gem_pkt_rx_seen`/`gem_pkt_tx_seen`.
+  `gem_pkt_rx_seen`/`gem_pkt_tx_seen`.
+- 2026-11-07: the kept frame lengths (#1416). `gem_pkt_kept_len` and
+  `virtio_pkt_kept_len` leave the allowlist: a Kept buffer's length is a
+  `kept_len` field of its `GemPkt`/`VirtioPkt` `Filled` owner (#1395's state
+  data), recorded by the keeping completion (`*_note_kept_len`) and read by
+  `net_packet_kept_claim` (`*_kept_len`).

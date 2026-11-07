@@ -148,8 +148,6 @@ variant NetKeptClaim {
 const GEM_PKT_RESERVE: usize = 2;
 // The slot net_tx_keep_slot names when nothing may be kept.
 const NET_KEPT_NONE: usize = 4;
-// Each Kept slot's frame length, set by the keeping transmit.
-private let mut gem_pkt_kept_len: [{0..<1515 as i32}; 4];
 
 fn net_rx_packet(len: {0..<1515 as i32}, index: usize,
                  pkt: GemPkt_Filled[pb, po, 1], ready: sink NetRxCanAcquire[net])
@@ -603,7 +601,7 @@ fn net_packet_kept_claim(index: usize) -> NetKeptClaim {
         GemPktHeld::TxPosted(p) => { gem_pkt_park(index, GemPktHeld::TxPosted(p)); return NetKeptClaim::None; }
         GemPktHeld::Unconfirmed(p) => { gem_pkt_park(index, GemPktHeld::Unconfirmed(p)); return NetKeptClaim::None; }
     };
-    let len: {0..<1515 as i32} = gem_pkt_kept_len[index];
+    let len: {0..<1515 as i32} = gem_pkt_kept_len(pkt);
     return NetKeptClaim::Claimed(net_packet_kept(len, index, pkt));
 }
 
@@ -814,8 +812,9 @@ private fn gem_tx_finish(r: borrow mut NetRxCanAcquire[net], slot: {0..<2 as usi
         match GemPkt_gem_pkt_sent(posted) {
             GemPkt_gem_pkt_sent_Outcome::PktSent(witness) => {
                 if (keep && index < GEM_PKTS) {
-                    gem_pkt_kept_len[index] = len;
-                    gem_pkt_park(index, GemPktHeld::Kept(GemPkt_gem_pkt_kept(posted, witness)));
+                    let mut kept_pkt = GemPkt_gem_pkt_kept(posted, witness);
+                    gem_pkt_note_kept_len(kept_pkt, len);
+                    gem_pkt_park(index, GemPktHeld::Kept(kept_pkt));
                     gem_rearm_rx(r);
                     return true;
                 }

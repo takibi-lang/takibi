@@ -133,8 +133,6 @@ variant NetKeptClaim {
 const VIRTIO_PKT_RESERVE: usize = 9;
 // The slot net_tx_keep_slot names when nothing may be kept.
 const NET_KEPT_NONE: usize = 10;
-// Each Kept slot's frame length, set by the keeping transmit.
-private let mut virtio_pkt_kept_len: [{0..<1515 as i32}; 10];
 
 fn net_rx_packet(len: {0..<1515 as i32}, slot: usize,
                  pkt: VirtioPkt_Filled[pb, po, 1], ready: sink NetRxCanAcquire[net])
@@ -581,7 +579,7 @@ fn net_packet_kept_claim(slot: usize) -> NetKeptClaim {
         VirtioPktHeld::TxPosted(p) => { virtio_pkt_park(slot, VirtioPktHeld::TxPosted(p)); return NetKeptClaim::None; }
         VirtioPktHeld::Unconfirmed(p) => { virtio_pkt_park(slot, VirtioPktHeld::Unconfirmed(p)); return NetKeptClaim::None; }
     };
-    let len: {0..<1515 as i32} = virtio_pkt_kept_len[slot];
+    let len: {0..<1515 as i32} = virtio_pkt_kept_len(pkt);
     return NetKeptClaim::Claimed(net_packet_kept(len, slot, pkt));
 }
 
@@ -661,8 +659,9 @@ private fn virtio_net_tx_finish(r: borrow mut NetRxCanAcquire[net], slot: usize,
         match VirtioPkt_virtio_pkt_sent(posted) {
             VirtioPkt_virtio_pkt_sent_Outcome::PktSent(witness) => {
                 if (keep && slot < VIRTIO_PKTS) {
-                    virtio_pkt_kept_len[slot] = len;
-                    virtio_pkt_park(slot, VirtioPktHeld::Kept(VirtioPkt_virtio_pkt_kept(posted, witness)));
+                    let mut kept_pkt = VirtioPkt_virtio_pkt_kept(posted, witness);
+                    virtio_pkt_note_kept_len(kept_pkt, len);
+                    virtio_pkt_park(slot, VirtioPktHeld::Kept(kept_pkt));
                 } else {
                     virtio_pkt_park(slot, VirtioPktHeld::Free(VirtioPkt_virtio_pkt_done(posted, witness)));
                 }
