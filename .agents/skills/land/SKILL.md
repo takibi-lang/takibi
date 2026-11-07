@@ -33,7 +33,10 @@ the rule above in code. It:
    `docs/SPACE_CHECKPOINT.json` takes origin/main's side, and the branch's
    own review (which had to be current for the branch before the rebase) is
    re-recorded for the rebased head in one new commit, which the gates below
-   test; any other conflict stops with exit 4 as before;
+   test; a `docs/TRUST_LEDGER.json` conflict also takes origin/main's
+   side, and the branch's ledger entries are re-appended on the rebased
+   tree when they are missing or no longer check (#1438); any other
+   conflict stops with exit 4 as before;
 3. records `HEAD` as the tested commit, runs `make langcheck`, `make test`
    and `make linuxcheck` separately, and stops at the first failing lane;
    after they pass, runs `make clean && make allcheck`, logging to

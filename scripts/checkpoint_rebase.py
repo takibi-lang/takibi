@@ -28,6 +28,17 @@ happens before the checkpoint re-record, so the re-recorded review covers
 the final tree. Any other README conflict is
 a conflict like any other: exit 4.
 
+docs/TRUST_LEDGER.json (GitHub issue #1438) is the third such file: a
+branch that appended ledger entries meets upstream's own appends, either as
+a conflict or as a clean merge whose series is out of order. A conflict
+there takes upstream's side, as the checkpoint does. After the rebase, when
+the branch had appended entries and either one of them is missing from the
+rebased series (a conflict took upstream's side) or `scripts/check_trust_ledger.py`
+refuses the rebased tree, the ledger is reset to upstream's and the branch's
+reasons are re-appended in one entry measured on the rebased tree
+(`--append --reason CAT=TEXT ...`), in one new commit. If that append is
+refused too, the helper stops: exit 4.
+
 Exit status: 0 rebased (and re-recorded if needed); 2 the checkpoint needs a
 review; 4 the rebase stopped on a conflict other than the checkpoint and a
 stamp-only model map, or the restamped model map does not check.
@@ -59,6 +70,8 @@ def unmerged():
 
 
 MODEL_MAP = 'kernel/models/README.md'
+LEDGER = 'docs/TRUST_LEDGER.json'
+LEDGER_CHECK = 'scripts/check_trust_ledger.py'
 STAMP_RE = re.compile(r'^(\| `.*\|) `[0-9a-f]+` \|$')
 BLANK = ' `-` |'
 
@@ -128,7 +141,7 @@ def rebase(onto, env):
     step = git('rebase', '--rebase-merges', onto, check=False, env=env)
     while step.returncode != 0:
         paths = unmerged()
-        others = [p for p in paths if p not in (REVIEW, MODEL_MAP)]
+        others = [p for p in paths if p not in (REVIEW, MODEL_MAP, LEDGER)]
         if not paths or others or (MODEL_MAP in paths and not resolve_stamp_only(MODEL_MAP)):
             sys.stderr.write(step.stdout + step.stderr)
             print('checkpoint_rebase: conflict outside ' + REVIEW + ' and a stamp-only ' +
@@ -145,6 +158,12 @@ def rebase(onto, env):
             git('add', '--', REVIEW)
             resolved += 1
             print(f'checkpoint_rebase: took upstream {REVIEW} at {at}')
+        if LEDGER in paths:
+            # Upstream's series; the branch's entries are re-appended after
+            # the rebase (relog).
+            git('checkout', '--ours', '--', LEDGER)
+            git('add', '--', LEDGER)
+            print(f'checkpoint_rebase: took upstream {LEDGER} at {at}')
         if git('diff', '--cached', '--quiet', check=False).returncode == 0:
             step = git('rebase', '--skip', check=False, env=env)
         else:
@@ -171,6 +190,52 @@ def restamp_map(env, upstream):
     return True
 
 
+def ledger_series(rev):
+    shown = git('show', f'{rev}:{LEDGER}', check=False)
+    if shown.returncode != 0:
+        return None
+    return json.loads(shown.stdout).get('series', [])
+
+
+def relog(orig, old_base, upstream, env):
+    """Re-append the branch's ledger entries on the rebased tree; False when refused."""
+    mine, base = ledger_series(orig), ledger_series(old_base)
+    if mine is None or not os.path.exists(LEDGER_CHECK):
+        return True
+    seen = {json.dumps(e, sort_keys=True) for e in (base or [])}
+    added = [e for e in mine if json.dumps(e, sort_keys=True) not in seen]
+    if not added:
+        return True
+    now = {json.dumps(e, sort_keys=True) for e in (ledger_series('HEAD') or [])}
+    check = subprocess.run([sys.executable, LEDGER_CHECK], text=True, capture_output=True)
+    if check.returncode == 0 and all(json.dumps(e, sort_keys=True) in now for e in added):
+        return True
+    reasons = {}
+    for entry in added:
+        for category, text in entry.get('changes', {}).items():
+            reasons[category] = (reasons[category] + '; ' + text) if category in reasons else text
+    upstream_text = git('show', f'{upstream}:{LEDGER}', check=False)
+    if upstream_text.returncode == 0:
+        with open(LEDGER, 'w', encoding='utf-8') as handle:
+            handle.write(upstream_text.stdout)
+    args = [sys.executable, LEDGER_CHECK, '--append']
+    for category, text in sorted(reasons.items()):
+        args += ['--reason', f'{category}={text}']
+    appended = subprocess.run(args, text=True, capture_output=True)
+    if appended.returncode != 0:
+        sys.stderr.write(check.stdout + appended.stdout + appended.stderr)
+        print(f'checkpoint_rebase: re-appending the branch\'s {LEDGER} entries was refused; '
+              'the rebase is finished and the ledger is left uncommitted', file=sys.stderr)
+        return False
+    git('add', '--', LEDGER)
+    git('commit', '--quiet', '-m', f'Trust ledger: re-appended after rebase onto {upstream[:8]}',
+        '-m', 'Written by scripts/checkpoint_rebase.py (#1438): the branch\'s ledger entries '
+        'did not check on the rebased tree, so upstream\'s series was kept and their reasons '
+        're-appended in one entry measured here.', env=env)
+    print(f'checkpoint_rebase: re-appended {LEDGER} at {out("rev-parse", "--short", "HEAD")}')
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--onto', default='origin/main')
@@ -190,6 +255,8 @@ def main():
         return 4
     resolved, stamped = outcome
     if stamped and not restamp_map(env, upstream):
+        return 4
+    if not relog(orig, old_base, upstream, env):
         return 4
     head = out('rev-parse', 'HEAD')
     if not resolved or review_valid(head, upstream):

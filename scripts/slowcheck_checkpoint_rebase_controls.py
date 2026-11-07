@@ -164,10 +164,22 @@ def main():
         assert (repo.root / '.git/rebase-merge').exists(), 'non-stamp map conflict must stop'
         assert MAP in repo.git('diff', '--name-only', '--diff-filter=U').stdout.split()
         cases += 1
+    with tempfile.TemporaryDirectory(prefix='takibi-ckpt-rebase-') as tmp:
+        repo = ledger_scenario(tmp)
+        result = repo.run(HELPER, '--onto', 'main')
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert 're-appended' in result.stdout, result.stdout
+        series = json.loads((repo.root / LEDGER).read_text())['series']
+        assert [e['n'] for e in series] == [1, 2, 3], series
+        assert series[1]['changes'] == {'y': 'main'} and series[2]['changes'] == {'x': 'topic'}, series
+        assert repo.git('log', '-1', '--format=%s').stdout.startswith('Trust ledger: re-appended')
+        assert repo.git('status', '--porcelain').stdout == ''
+        cases += 1
     report_pass('checkpoint-rebase-controls',
                 f'{cases} scripted rebases; checkpoint-only conflict re-records, mixed conflict stops, '
                 'stale branch review refused, clean rebase untouched, stamp-only model map '
-                'conflict restamps, non-stamp model map conflict stops', cases=cases)
+                'conflict restamps, non-stamp model map conflict stops, a branch ledger entry '
+                'is re-appended after upstream\'s', cases=cases)
 
 
 MAP = 'kernel/models/README.md'
@@ -214,6 +226,50 @@ def map_scenario(tmp, kept=None):
     repo.write('kernel/a.tkb', 'a1\n')
     repo.write(MAP, map_text('2222', kept='main kept' if kept else 'kept'))
     repo.commit('main work', review='main review')
+    repo.git('switch', '-q', 'topic')
+    return repo
+
+
+LEDGER = 'docs/TRUST_LEDGER.json'
+# Stands in for scripts/check_trust_ledger.py (#1438): entries are numbered,
+# the check refuses a gap, and --append adds the next number with its reasons.
+FAKE_LEDGER_CHECK = '''import json, pathlib, sys
+path = pathlib.Path(__file__).resolve().parent.parent / 'docs/TRUST_LEDGER.json'
+data = json.loads(path.read_text())
+series = data['series']
+if sys.argv[1:2] == ['--append']:
+    changes = {}
+    args = iter(sys.argv[2:])
+    for arg in args:
+        if arg == '--reason':
+            key, _, text = next(args).partition('=')
+            changes[key] = text
+    series.append({'n': len(series) + 1, 'changes': changes})
+    path.write_text(json.dumps(data, indent=2) + '\\n')
+    sys.exit(0)
+sys.exit(0 if [e['n'] for e in series] == list(range(1, len(series) + 1)) else 1)
+'''
+
+
+def ledger_text(*entries):
+    return json.dumps({'series': [dict(n=n, changes=c) for n, c in entries]}, indent=2) + '\n'
+
+
+def ledger_scenario(tmp):
+    """Both sides append entry 2; the branch's must come back as entry 3."""
+    repo = Repo(Path(tmp))
+    repo.write('kernel/a.tkb', 'a0\n')
+    repo.write('docs/evidence.tsv', 'measured\n')
+    repo.write('scripts/check_trust_ledger.py', FAKE_LEDGER_CHECK)
+    repo.write(LEDGER, ledger_text((1, {'*': 'first'})))
+    repo.commit('base', review='base review')
+    repo.git('switch', '-q', '-c', 'topic')
+    repo.write('docs/notes.md', 'topic\n')
+    repo.write(LEDGER, ledger_text((1, {'*': 'first'}), (2, {'x': 'topic'})))
+    repo.commit('topic ledger')
+    repo.git('switch', '-q', 'main')
+    repo.write(LEDGER, ledger_text((1, {'*': 'first'}), (2, {'y': 'main'})))
+    repo.commit('main ledger')
     repo.git('switch', '-q', 'topic')
     return repo
 
