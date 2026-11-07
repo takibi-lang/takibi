@@ -118,3 +118,4 @@ kernel/mm/process_image.tkb	process_image_record_lost	ladder	1	-	#1308	an image-
 kernel/mm/process_image.tkb	process_image_record_read	ladder	1	-	#1308	as process_image_record_lost, for a read
 kernel/kernel/process.tkb	kernel_process_current_root	ladder	1	-	#1308	a ProcessCurrent witness on a CPU with no current process: its mints should exclude that
 kernel/kernel/cpu_authority.tkb	preempt_count_el1_resume_check	unmodelled	1	-	#638	an El1 frame resumes with its own stack count at zero: it was switched away only at zero, and the stack keeps its count while it is away
+kernel/kernel/process.tkb	kernel_process_stack_switch_complete	ladder	1	-	#850	an El1 frame resumes with the priority mask open (#638 stage 9, option D): it was frozen after irq_nest_close; the IrqState token on the switch could carry it statically
