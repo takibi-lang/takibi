@@ -6,7 +6,10 @@ A global `[T; KERNEL_MAX_CORES]` is one of three things:
 - a per-CPU store: T is a `struct per_cpu`, and the compiler lets only the
   CpuHere a preempt_off block mints index it (#704, #638);
 - a slot pool: per-operation state held across a call that may block,
-  indexed by a linear slot token, never by the CPU (#638);
+  indexed by a linear slot token, never by the CPU (#638). A global
+  declared `owned_by(T.f, S)` is one by its type -- the compiler admits only
+  g[t.f * S + k] with t a T (#1159) -- and needs no entry here (#1437); an
+  entry for one is stale;
 - an ordinary array that another CPU reads (a total, DDB, a probe, a boot
   handshake) or that waits on a decision. SPEC.md, "Per-CPU Storage": a
   cross-CPU read is not expressible on a per_cpu store, so these stay
@@ -51,7 +54,6 @@ LISTED = {
     ("kernel/drivers/block/memory.tkb", "block_write_calls"): (POOL, "BlockSlot; totalled by the block report"),
     ("kernel/drivers/block/memory.tkb", "block_device_waits"): (POOL, "BlockSlot; totalled by the block report"),
     ("kernel/drivers/block/memory.tkb", "block_single_reads"): (POOL, "BlockSlot; totalled by the block report"),
-    ("kernel/drivers/block/block_cache.tkb", "block_cache_tick"): (POOL, "BlockSlot's index"),
     ("kernel/drivers/block/block_cache.tkb", "block_cache_hits"): (POOL, "BlockSlot's index; totalled by the block report"),
     ("kernel/mm/process_image.tkb", "process_image_staging"): (POOL, "ProcessImageSlot"),
     ("kernel/mm/process_image.tkb", "process_image_slot_words"): (POOL, "ProcessImageSlot's acquire words"),
@@ -108,7 +110,20 @@ LISTED = {
 DECL = re.compile(
     r"^(?:private\s+)?(?:scratch\s+)?(?:region\s+)?let\s+mut\s+(\w+)\s*:\s*"
     r"\[\s*([A-Za-z_]\w*)\s*;\s*KERNEL_MAX_CORES\s*\]", re.M)
+# The declaration's owned_by clause follows its type (`] owned_by(`).
+OWNED = re.compile(
+    r"^(?:private\s+)?(?:scratch\s+)?(?:region\s+)?let\s+mut\s+(\w+)\s*:\s*"
+    r"\[[^\]]*\]\s*owned_by\s*\(", re.M)
 PER_CPU = re.compile(r"^\s*(?:private\s+)?struct\s+per_cpu\s+(\w+)", re.M)
+
+
+def owned_globals(texts):
+    """{(file, global)} declared owned_by a slot token (#1437)."""
+    owned = set()
+    for relative, text in texts.items():
+        for match in OWNED.finditer(code_only(text)):
+            owned.add((relative, match.group(1)))
+    return owned
 
 
 def scan(texts):
@@ -127,8 +142,14 @@ def scan(texts):
 
 def problems_of(texts, listed):
     found, per_cpu = scan(texts)
+    owned = owned_globals(texts)
     problems = []
     for key, element in sorted(found.items()):
+        if key in owned:
+            if key in listed:
+                problems.append(f"{key[0]}: {key[1]} is declared owned_by a slot "
+                                "token, which the compiler checks; remove its stale entry")
+            continue
         if element in per_cpu:
             if key in listed:
                 problems.append(f"{key[0]}: {key[1]} is a per_cpu store now; "
@@ -164,11 +185,17 @@ def controls():
     for label, (texts, listed) in cases.items():
         if not problems_of(texts, listed):
             sys.exit(f"ERROR per-cpu-arrays: control '{label}' was not refused")
+    owned = {"k/f.tkb": "private let mut pool: [usize; KERNEL_MAX_CORES]\n"
+                        "    owned_by(BlockSlot.index, 1);\n"}
+    if problems_of(owned, {}):
+        sys.exit("ERROR per-cpu-arrays: control: an owned_by slot pool was refused")
+    if not problems_of(owned, {("k/f.tkb", "pool"): (POOL, "x")}):
+        sys.exit("ERROR per-cpu-arrays: control: a stale entry for an owned_by pool was accepted")
     if problems_of({"k/d.tkb": "// let mut c: [usize; KERNEL_MAX_CORES];\n"}, {}):
         sys.exit("ERROR per-cpu-arrays: control: a comment was refused")
     if problems_of({"k/e.tkb": "fn f() {\n    let mut local: [usize; KERNEL_MAX_CORES];\n}\n"}, {}):
         sys.exit("ERROR per-cpu-arrays: control: a function local was refused")
-    return len(cases) + 3
+    return len(cases) + 5
 
 
 def main():
