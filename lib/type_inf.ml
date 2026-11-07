@@ -1204,6 +1204,7 @@ let check_integer_literal_target_shape loc (e : Ast.expr) (target : ty) =
        | None -> ())
   (* GitHub issue #1024: SrcLoc is opaque; only src_loc() makes one. *)
   | TSrcLoc ->
+      (* fold-not-proof: a rejection; the value only names the literal. *)
       (match Const_env.bound_value e with
        | Some k ->
            raise (TypeError (loc, Printf.sprintf
