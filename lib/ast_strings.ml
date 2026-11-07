@@ -113,7 +113,8 @@ let item (top : Ast.toplevel) : item =
   let proto_ref (r : Ast.proto_ref) =
     plain r.pr_name; list (fun (s, _) -> comma s) r.pr_args in
   let proto_item = function
-    | Ast.PState (r, ss) -> proto_ref r; list plain ss
+    | Ast.PState (r, ss, fs) -> proto_ref r; list plain ss;
+      List.iter (fun (f, t, _) -> plain f; ty t) fs
     | Ast.PInit r -> proto_ref r
     | Ast.PTransition (s, a, b, alts, ss, _) ->
         comma s; proto_ref a; opt proto_ref b;

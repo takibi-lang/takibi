@@ -649,7 +649,7 @@ proto_item:
   | k = IDENT r = proto_ref attrs = list(IDENT) SEMI
     { let loc = $symbolstartpos in
       match k with
-      | "state" -> PState (r, attrs)
+      | "state" -> PState (r, attrs, [])
       | "init" when attrs = [] && r.pr_args = [] -> PInit r
       | "property" when attrs = [] && r.pr_args = [] -> PProperty (r.pr_name, loc)
       | _ -> raise (Types.TypeError (loc, Printf.sprintf
@@ -677,6 +677,13 @@ proto_item:
             (r, extra)) alts, loc)
       | _ -> raise (Types.TypeError (loc, Printf.sprintf
                "unknown protocol item '%s %s'" k n)) }
+  | k = IDENT r = proto_ref attrs = list(IDENT)
+    LBRACE fs = nonempty_list(proto_field) RBRACE
+    { let loc = $symbolstartpos in
+      if k <> "state" then
+        raise (Types.TypeError (loc, Printf.sprintf
+          "only a protocol state carries fields, not '%s %s'" k r.pr_name));
+      PState (r, attrs, fs) }
   | k = IDENT n = IDENT v = INT SEMI
     { let loc = $symbolstartpos in
       if k <> "model" then
@@ -690,6 +697,11 @@ proto_mod:
   | m = IDENT { m }
   | REQUIRES { "requires" }
   | ENSURES { "ensures" }
+
+(* GitHub issue #1395: one data field of a protocol state, with the value
+   it takes whenever the state is entered from a state without it. *)
+proto_field:
+  | n = IDENT COLON t = type_expr ASSIGN v = INT SEMI { (n, t, v) }
 
 proto_ref:
   | n = IDENT args = loption(delimited(LBRACKET, separated_nonempty_list(COMMA, proto_arg), RBRACKET))

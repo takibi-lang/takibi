@@ -49,6 +49,12 @@ type state = {
      a writable state of a device protocol that also yields the span, for
      structures that hold their own address (an xHCI Link TRB) or whose
      address programs the controller while the CPU writes them. *)
+  s_fields : (string * Ast.type_expr * int64) list;
+  (* GitHub issue #1395: data the state owner carries (a ring's dequeue
+     index and cycle state), private to the generated code and reached
+     through P_S_<f> (borrow) and P_S_set_<f> (borrow mut). A field is
+     carried along an edge into a state declaring the same field with the
+     same type, and takes its declared initial value otherwise. *)
 }
 
 type outcome = {
@@ -184,7 +190,7 @@ let validate (d : protocol_decl) : t =
   if List.length idx <> 2 then
     fail loc "protocol '%s' must retain region(T)[base, length]" d.proto_name;
   let states = List.filter_map (function
-    | PState (r, attrs) ->
+    | PState (r, attrs, fields) ->
         List.iter (fun (a, fresh) ->
           if fresh then fail r.pr_loc "state '%s' parameter '%s' cannot be fresh"
             r.pr_name a) r.pr_args;
@@ -208,8 +214,20 @@ let validate (d : protocol_decl) : t =
         if w && dev then
           fail r.pr_loc "state '%s' cannot be both 'access write' and 'device'"
             r.pr_name;
+        check_distinct r.pr_loc "state field" (List.map (fun (f, _, _) -> f) fields);
+        List.iter (fun (f, t, _) ->
+          if f = "memory" || (String.length f >= 4 && String.sub f 0 4 = "set_")
+             || List.mem f [ "write"; "read"; "bytes"; "span"; "span_at" ] then
+            fail r.pr_loc "state '%s' field '%s' collides with a generated name"
+              r.pr_name f;
+          match t with
+          | TypeBool | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeUsize
+          | TypeI8 | TypeI16 | TypeI32 | TypeI64 | TypeIsize -> ()
+          | _ -> fail r.pr_loc "state '%s' field '%s' must have a scalar type"
+                   r.pr_name f) fields;
         Some ({ s_name = r.pr_name; s_params = params; s_write = w;
-                s_read = rd; s_device = dev; s_addressed = ad }, r.pr_loc)
+                s_read = rd; s_device = dev; s_addressed = ad;
+                s_fields = fields }, r.pr_loc)
     | _ -> None) d.proto_items in
   check_distinct loc "state" (List.map (fun (s, _) -> s.s_name) states);
   let states = List.map fst states in
@@ -894,8 +912,35 @@ let source_of ?bytes_field (d : protocol_decl) (p : t) : string =
     add "linear struct %s_%s[%s] {" pn s.s_name
       (String.concat ", " (struct_params
                           @ List.map (fun x -> x ^ ": usize") s.s_params));
+    (* Data fields first: the owner literal `{ s.f, ..., s.memory }` reads
+       them before the region moves out of the consumed owner. *)
+    List.iter (fun (f, t, _) ->
+      add "    private %s: %s;" f (type_source d.proto_loc t)) s.s_fields;
     add "    private memory: %s;" field_region;
     add "}") p.states;
+  (* GitHub issue #1395: a state's data, read through a shared borrow and
+     written through a mutable one: exclusivity is the owner's. *)
+  List.iter (fun s ->
+    let owner = ty s.s_name s.s_params in
+    List.iter (fun (f, t, _) ->
+      let t = type_source d.proto_loc t in
+      add "inline fn %s_%s_%s(s: borrow %s) -> %s {" pn s.s_name f owner t;
+      add "    return s.%s;" f;
+      add "}";
+      add "inline fn %s_%s_set_%s(s: borrow mut %s, value: %s) {" pn s.s_name f owner t;
+      add "    s.%s = value;" f;
+      add "}") s.s_fields) p.states;
+  (* The owner literal of state [target] built from [src]'s owner (None:
+     from the bare region): each field carried or initialised. *)
+  let lit ?src target =
+    let st = state target in
+    let src_fields = match src with
+      | None -> [] | Some s -> (state s).s_fields in
+    let fs = List.map (fun (f, t, v) ->
+      if List.exists (fun (f', t', _) -> f' = f && t' = t) src_fields
+      then "s." ^ f else Int64.to_string v) st.s_fields in
+    Printf.sprintf "{ %s }" (String.concat ", "
+      (fs @ [ (match src with None -> "memory" | Some _ -> "s.memory") ])) in
   (* CPU access exists only for `access write` states: element reads and
      writes through the retained region, the index proved below the count
      at each call (`where`), with no escaping pointer. *)
@@ -947,7 +992,7 @@ let source_of ?bytes_field (d : protocol_decl) (p : t) : string =
       end) p.states;
   add "fn %s_init(memory: %s) -> %s {" pn region (ty p.init []);
   if device then add "    %s(memory);" Device_protocol_registry.own_lines;
-  add "    let mut owner: %s = { memory };" (ty p.init []);
+  add "    let mut owner: %s = %s;" (ty p.init []) (lit p.init);
   add "    return owner;";
   add "}";
   add "inline fn %s_release(owner: %s) -> %s {" pn (ty p.init []) region;
@@ -987,7 +1032,8 @@ let source_of ?bytes_field (d : protocol_decl) (p : t) : string =
       add "inline fn %s_%s_value(snap: borrow %s) -> %s {" pn o.o_name sty elem;
       add "    return snap.value;";
       add "}";
-      add "fn %s_%s_release(s: borrow %s, snap: sink %s) {" pn o.o_name
+      add "fn %s_%s_release(s: borrow%s %s, snap: sink %s) {" pn o.o_name
+        (if (state subj.pr_name).s_fields <> [] then " mut" else "")
         (ty subj.pr_name args) sty;
       add "    %s_release(s);" name;
       add "}") snap;
@@ -1086,7 +1132,8 @@ let source_of ?bytes_field (d : protocol_decl) (p : t) : string =
         add "fn %s_%s(%s) -> %s {" pn name params ret;
         if spend <> "" then add "    %s" spend;
         add "    %s(s.memory);" prepare;
-        add "    let mut next: %s = { s.memory };" (target_ty a ~packed:true);
+        add "    let mut next: %s = %s;" (target_ty a ~packed:true)
+          (lit ~src:input.pr_name a.pa_state.pr_name);
         add "    %s(next);" name;
         if fresh then add "    return %s_%s_Result::%s(next);" pn name (label a)
         else add "    return next;";
@@ -1097,7 +1144,8 @@ let source_of ?bytes_field (d : protocol_decl) (p : t) : string =
       add "fn %s_%s(%s) -> %s {" pn name params (target_ty a ~packed:false);
       add "    %s%s(s);" spend name;
       finish a "    ";
-      add "    let mut next: %s = { s.memory };" (target_ty a ~packed:false);
+      add "    let mut next: %s = %s;" (target_ty a ~packed:false)
+        (lit ~src:input.pr_name a.pa_state.pr_name);
       add "    return next;";
       add "}"
     end else begin
@@ -1111,7 +1159,8 @@ let source_of ?bytes_field (d : protocol_decl) (p : t) : string =
       List.iter (fun a ->
         add "        %s_%s_Choice::%s => {" pn name (label a);
         finish a "            ";
-        add "            let mut next: %s = { s.memory };" (target_ty a ~packed:true);
+        add "            let mut next: %s = %s;" (target_ty a ~packed:true)
+          (lit ~src:input.pr_name a.pa_state.pr_name);
         add "            return %s_%s_Result::%s(next);" pn name (label a);
         add "        }") alts;
       add "    }";
@@ -1168,8 +1217,14 @@ let check_lowering (prog : toplevel list) (d : protocol_decl) (p : t) =
     | Some (FuncDef f) ->
         let owner = Printf.sprintf "%s_%s" p.name input.pr_name in
         let arity = 3 + List.length input.pr_args in
+        (* GitHub issue #1395: a snapshot release on a state that carries
+           data takes the owner mutably, so it can advance that data. *)
+        let mut_release = String.ends_with ~suffix:"_release" n
+          && (List.find (fun s -> s.s_name = input.pr_name) p.states).s_fields <> [] in
         let param_ok = match f.params with
-          | [ (_, Some (TypeBorrow (TypeIndexed (name, args)))) ] ->
+          | [ (_, Some (TypeBorrowMut (TypeIndexed (name, args)))) ] when mut_release ->
+              name = owner && List.length args = arity
+          | [ (_, Some (TypeBorrow (TypeIndexed (name, args)))) ] when not mut_release ->
               name = owner && List.length args = arity
                 && not (snapshot_observe n)
           | [ (_, Some (TypeBorrow (TypeIndexed (name, args)))); (_, Some t) ] ->
@@ -1309,6 +1364,26 @@ let drop_unreferenced (program : toplevel list) (generated : toplevel list list)
     | FuncDef f -> Names.mem f.name kept
     | _ -> true)) generated
 
+(* GitHub issue #1395 (maintainer decision): a state field's setter is a
+   private function of the DECLARING file, so only the protocol's own
+   lowerings and that file's helpers can change the data; any holder of the
+   owner may read it. The setter keeps its `<protocol P>` def_loc (its body
+   writes the private field, and the def_loc is its definition key); the
+   registry tells Type_inf which file it is private to. *)
+let setter_names (p : t) =
+  List.concat_map (fun s ->
+    List.map (fun (f, _, _) -> Printf.sprintf "%s_%s_set_%s" p.name s.s_name f)
+      s.s_fields) p.states
+
+let seal_setters (d : protocol_decl) (p : t) (items : toplevel list) =
+  let setters = setter_names p in
+  List.map (function
+    | FuncDef f when List.mem f.name setters ->
+        Hashtbl.replace Device_protocol_registry.field_setters f.name
+          (source_file_of_loc d.proto_loc);
+        FuncDef { f with is_private = true }
+    | item -> item) items
+
 let lower (prog : toplevel list) : toplevel list =
   declared_device_files := [];
   ignore (extract prog);
@@ -1317,8 +1392,8 @@ let lower (prog : toplevel list) : toplevel list =
         let p = validate d in
         check_device d p;
         check_lowering prog d p;
-        `Generated (parse_generated p.name
-                      (source_of ?bytes_field:(element_bytes prog d) d p))
+        `Generated (seal_setters d p (parse_generated p.name
+                      (source_of ?bytes_field:(element_bytes prog d) d p)))
     | item -> `Item item) prog in
   let program = List.filter_map (function `Item i -> Some i | _ -> None) expanded in
   let generated = List.filter_map (function `Generated g -> Some g | _ -> None) expanded in

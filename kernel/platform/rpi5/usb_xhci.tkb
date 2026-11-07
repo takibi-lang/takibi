@@ -114,8 +114,6 @@ let mut xhci_dcbaa: [u32; 65 * 2] align(64);
 
 let mut xhci_slot_id: usize = 0;
 let mut xhci_last_evt_dw3: u32 = 0;
-let mut xhci_evt_idx: usize = 0;
-let mut xhci_evt_cycle: u32 = 1;
 
 let mut xhci_msc_config_value: u32 = 0;
 let mut xhci_msc_interface_num: u32 = 0;
@@ -141,30 +139,16 @@ let mut xhci_bulk_out_dci: usize = 0;
 // block_device_lock. Every transport entry takes the BlockDeviceGuard, so
 // "disk I/O after boot only under the lock, core 0 before" is in the
 // signatures: the boot bring-up and rootfs provisioning take the guard too.
-// The event ring's dequeue cursor, the last matched event's DWORD3 and the
-// foreign-event count stay globals: they are written under the XhciEvents and
-// XhciRing protocols' generated operations, whose signatures cannot carry the
-// guard.
+// Every ring's cursor -- each producer ring's enqueue index and cycle, the
+// event ring's dequeue index and cycle -- is its protocol owner's own state
+// (usb_xhci_rings.tkb, GitHub issue #1395). The last matched event's DWORD3
+// and the foreign-event count stay globals: they are written under the
+// XhciEvents and XhciRing protocols' generated operations, whose signatures
+// cannot carry the guard.
 linear struct XhciTransportState[unit: usize] {
-    ep0_enq: usize;
-    ep0_cycle: u32;
-    bulk_in_enq: usize;
-    bulk_in_cycle: u32;
-    bulk_out_enq: usize;
-    bulk_out_cycle: u32;
-    cmd_enq: usize;
-    cmd_cycle: u32;
     msc_tag: u32;
 }
 struct XhciTransport {
-    ep0_enq: usize;
-    ep0_cycle: u32;
-    bulk_in_enq: usize;
-    bulk_in_cycle: u32;
-    bulk_out_enq: usize;
-    bulk_out_cycle: u32;
-    cmd_enq: usize;
-    cmd_cycle: u32;
     msc_tag: u32;
 }
 struct XhciTransportStore {
@@ -177,18 +161,10 @@ private fn xhci_transport_retire(state: sink XhciTransportState[0]) {}
 // A copy of the record; Empty (never stored) reads as the reset state: every
 // cycle 1, the command cursor past bring-up's three fixed slots.
 fn xhci_transport(guard: borrow BlockDeviceGuard[&block_device_lock]) -> XhciTransport {
-    let mut v: XhciTransport = { 0, 1, 0, 1, 0, 1, 3, 1, 0 };
+    let mut v: XhciTransport = { 0 };
     match place_take(guard, xhci_transport_store_place.state) {
         Place::Empty => {}
         Place::Full(s) => {
-            v.ep0_enq = s.ep0_enq;
-            v.ep0_cycle = s.ep0_cycle;
-            v.bulk_in_enq = s.bulk_in_enq;
-            v.bulk_in_cycle = s.bulk_in_cycle;
-            v.bulk_out_enq = s.bulk_out_enq;
-            v.bulk_out_cycle = s.bulk_out_cycle;
-            v.cmd_enq = s.cmd_enq;
-            v.cmd_cycle = s.cmd_cycle;
             v.msc_tag = s.msc_tag;
             let Place::Empty = place_put(guard, xhci_transport_store_place.state, s);
         }
@@ -197,10 +173,7 @@ fn xhci_transport(guard: borrow BlockDeviceGuard[&block_device_lock]) -> XhciTra
 }
 
 fn xhci_transport_store(guard: borrow BlockDeviceGuard[&block_device_lock], v: XhciTransport) {
-    let mut s: XhciTransportState[0] = {
-        v.ep0_enq, v.ep0_cycle, v.bulk_in_enq, v.bulk_in_cycle,
-        v.bulk_out_enq, v.bulk_out_cycle, v.cmd_enq, v.cmd_cycle,
-        v.msc_tag };
+    let mut s: XhciTransportState[0] = { v.msc_tag };
     match place_put(guard, xhci_transport_store_place.state, s) {
         Place::Empty => {}
         Place::Full(previous) => { xhci_transport_retire(previous); }
@@ -239,16 +212,18 @@ fn xhci_transport_store(guard: borrow BlockDeviceGuard[&block_device_lock], v: X
 // examples/rp1_usb_smoke/rp1_usb_smoke.tkb never hit this only because
 // it happened to issue one fewer control transfer and stopped at 14.
 
-fn xhci_cmd_advance(guard: borrow BlockDeviceGuard[&block_device_lock]) !{unsafe} {
-    let mut t: XhciTransport = xhci_transport(guard);
-    t.cmd_enq = t.cmd_enq + 1;
+// The Command Ring's cursor after one command at `enq` (GitHub issue
+// #1395: the cursor is the XhciRing owner's own).
+fn xhci_cmd_advance(enq: usize, cycle: u32) !{unsafe} {
+    let mut next: usize = enq + 1;
+    let mut cyc: u32 = cycle;
     let link_idx: usize = CMD_RING_TRBS - 1;
-    if (t.cmd_enq + 1 > link_idx) {
-        xhci_ring_close(XHCI_RING_CMD, t.cmd_enq, t.cmd_cycle, 23);
-        t.cmd_enq = 0;
-        t.cmd_cycle = 1 - t.cmd_cycle;
+    if (next + 1 > link_idx) {
+        xhci_ring_close(XHCI_RING_CMD, next, cyc, 23);
+        next = 0;
+        cyc = 1 - cyc;
     }
-    xhci_transport_store(guard, t);
+    xhci_ring_set_cursor(XHCI_RING_CMD, next, cyc);
 }
 
 // TX uses the ordinary bounce buffer; RX uses a separate protected fixed
@@ -437,14 +412,16 @@ private fn usb_ctrl_xfer(guard: borrow BlockDeviceGuard[&block_device_lock], bm_
     // must be published rather than simply jumped over.
     let need: usize = 3;
     let ep0_link_idx: usize = EP0_RING_TRBS - 1;
-    let mut t: XhciTransport = xhci_transport(guard);
-    if (t.ep0_enq + need > ep0_link_idx) {
-        xhci_ring_close(XHCI_RING_EP0, t.ep0_enq, t.ep0_cycle, 8);
-        t.ep0_enq = 0;
-        t.ep0_cycle = 1 - t.ep0_cycle;
+    let XhciRingCursor::Known(cursor) = xhci_ring_cursor(XHCI_RING_EP0) else {
+        XhciRingCursor::Busy => { return 0; }
+    };
+    let mut first_idx: usize = cursor.enq;
+    let mut cyc: u32 = cursor.cycle;
+    if (first_idx + need > ep0_link_idx) {
+        xhci_ring_close(XHCI_RING_EP0, first_idx, cyc, 8);
+        first_idx = 0;
+        cyc = 1 - cyc;
     }
-    let first_idx: usize = t.ep0_enq;
-    let cyc: u32 = t.ep0_cycle;
 
     let mut trt: u32 = 0;
     if (has_data) {
@@ -473,8 +450,7 @@ private fn usb_ctrl_xfer(guard: borrow BlockDeviceGuard[&block_device_lock], bm_
         if (dir_in) { st_dir = 0; }
     }
     let mut status: Trb = { 0, 0, 0, cyc | (1 << 5) | (4 << 10) | (st_dir << 16) };
-    t.ep0_enq = idx + 1;
-    xhci_transport_store(guard, t);
+    xhci_ring_set_cursor(XHCI_RING_EP0, idx + 1, cyc);
     let mut td: [Trb; 3];
     td[0] = setup;
     let mut count: usize = 2;
@@ -500,16 +476,16 @@ private fn usb_ctrl_xfer(guard: borrow BlockDeviceGuard[&block_device_lock], bm_
 // through usb_bulk_in, an OUT one through usb_bulk_out.
 private fn usb_bulk_xfer(guard: borrow BlockDeviceGuard[&block_device_lock], dir_in: bool, buf_dma: usize, length: u32) -> u32 !{unsafe} {
     let mut ring: usize = XHCI_RING_BULK_OUT;
-    let mut t: XhciTransport = xhci_transport(guard);
-    let mut enq: usize = t.bulk_out_enq;
-    let mut cyc: u32 = t.bulk_out_cycle;
     let mut dci: usize = xhci_bulk_out_dci;
     if (dir_in) {
         ring = XHCI_RING_BULK_IN;
-        enq = t.bulk_in_enq;
-        cyc = t.bulk_in_cycle;
         dci = xhci_bulk_in_dci;
     }
+    let XhciRingCursor::Known(cursor) = xhci_ring_cursor(ring) else {
+        XhciRingCursor::Busy => { return 0; }
+    };
+    let mut enq: usize = cursor.enq;
+    let mut cyc: u32 = cursor.cycle;
 
     // Same Link-TRB discipline as the EP0 ring -- see
     // xhci_ring_close_segment. A bulk TD is a single TRB here, so this
@@ -535,15 +511,7 @@ private fn usb_bulk_xfer(guard: borrow BlockDeviceGuard[&block_device_lock], dir
     };
     let trb_idx: usize = enq;
 
-    enq = enq + 1;
-    if (dir_in) {
-        t.bulk_in_enq = enq;
-        t.bulk_in_cycle = cyc;
-    } else {
-        t.bulk_out_enq = enq;
-        t.bulk_out_cycle = cyc;
-    }
-    xhci_transport_store(guard, t);
+    xhci_ring_set_cursor(ring, enq + 1, cyc);
     let mut td: [Trb; 3];
     td[0] = normal;
     td[1] = normal;
@@ -580,13 +548,15 @@ fn xhci_run_command(guard: borrow BlockDeviceGuard[&block_device_lock], dw0: u32
                     dci: usize) -> u32 !{unsafe} {
     let dci_u32: u32 = dci as u32;
     let slot_u32: u32 = xhci_slot_id as u32;
-    let mut t: XhciTransport = xhci_transport(guard);
+    let XhciRingCursor::Known(cursor) = xhci_ring_cursor(XHCI_RING_CMD) else {
+        XhciRingCursor::Busy => { return 0; }
+    };
     let mut command: Trb = {
         dw0, dw1, dw2,
-        t.cmd_cycle | (trb_type << 10) | (dci_u32 << 16) | (slot_u32 << 24)
+        cursor.cycle | (trb_type << 10) | (dci_u32 << 16) | (slot_u32 << 24)
     };
-    let cmd_idx: usize = t.cmd_enq;
-    xhci_cmd_advance(guard);
+    let cmd_idx: usize = cursor.enq;
+    xhci_cmd_advance(cursor.enq, cursor.cycle);
     let mut td: [Trb; 3];
     td[0] = command;
     td[1] = command;
@@ -618,24 +588,19 @@ fn xhci_reset_endpoint(guard: borrow BlockDeviceGuard[&block_device_lock], dci: 
 // soon as the STALL arrives; the class driver clears the device-side halt
 // afterward before retrying the transfer.
 fn xhci_recover_bulk_stall(guard: borrow BlockDeviceGuard[&block_device_lock], dir_in: bool, ep_addr: u32, dci: usize) !{unsafe} {
-    if (dir_in) {
-        match xhci_ring_dma(XHCI_RING_BULK_IN) {
-            XhciRingAddress::Known(ring_dma) => {
-                let mut t: XhciTransport = xhci_transport(guard);
-                xhci_reset_endpoint(guard, dci, ring_dma, t.bulk_in_enq * 16,
-                                    t.bulk_in_cycle);
+    let mut ring: usize = XHCI_RING_BULK_OUT;
+    if (dir_in) { ring = XHCI_RING_BULK_IN; }
+    match xhci_ring_dma(ring) {
+        XhciRingAddress::Known(ring_dma) => {
+            match xhci_ring_cursor(ring) {
+                XhciRingCursor::Known(cursor) => {
+                    xhci_reset_endpoint(guard, dci, ring_dma, cursor.enq * 16,
+                                        cursor.cycle);
+                }
+                XhciRingCursor::Busy => {}
             }
-            XhciRingAddress::Busy => {}
         }
-    } else {
-        match xhci_ring_dma(XHCI_RING_BULK_OUT) {
-            XhciRingAddress::Known(ring_dma) => {
-                let mut t: XhciTransport = xhci_transport(guard);
-                xhci_reset_endpoint(guard, dci, ring_dma, t.bulk_out_enq * 16,
-                                    t.bulk_out_cycle);
-            }
-            XhciRingAddress::Busy => {}
-        }
+        XhciRingAddress::Busy => {}
     }
     usb_ctrl_no_data(guard, 0x02, 1, 0, ep_addr);
 }
@@ -932,22 +897,11 @@ fn xhci_setup_rings_and_start(guard: borrow BlockDeviceGuard[&block_device_lock]
     // wrong slot and timed out. Every buffer is re-zeroed as well --
     // stale Cycle bits in a No-Op-padded or wrapped ring would be read
     // as live TRBs by a freshly reset controller.
+    // That state is the protocol owners' own (GitHub issue #1395):
+    // xhci_events_start below publishes the event ring afresh at index 0,
+    // Cycle=1, and xhci_rings_restart restarts every producer cursor
+    // (xhci_ring_cursor_restart; the Command Ring's at 3).
     atomic_word_store(&xhci_ready, 0);
-    xhci_evt_idx = 0;
-    xhci_evt_cycle = 1;
-    // 3, not 0: bring-up writes Enable Slot / Address Device / Configure
-    // Endpoint into the fixed slots TRB[0..2] below, so the tracked
-    // producer index for every LATER command starts after them.
-    let mut t: XhciTransport = xhci_transport(guard);
-    t.cmd_enq = 3;
-    t.cmd_cycle = 1;
-    t.ep0_enq = 0;
-    t.ep0_cycle = 1;
-    t.bulk_in_enq = 0;
-    t.bulk_in_cycle = 1;
-    t.bulk_out_enq = 0;
-    t.bulk_out_cycle = 1;
-    xhci_transport_store(guard, t);
 
     // The event ring: back from the controller only on a confirmed reset,
     // zeroed and published again.
@@ -1075,10 +1029,7 @@ fn xhci_address_device(guard: borrow BlockDeviceGuard[&block_device_lock]) -> Xh
         XhciRingAddress::Known(dma) => { ep0_ring_dma = dma; }
         XhciRingAddress::Busy => { return XhciAddressOutcome::Completion(0); }
     }
-    let mut t: XhciTransport = xhci_transport(guard);
-    t.ep0_enq = 0;
-    t.ep0_cycle = 1;
-    xhci_transport_store(guard, t);
+    xhci_ring_set_cursor(XHCI_RING_EP0, 0, 1);
 
 
     // Slot Context: Route String=0 (root-port-attached), Speed = the

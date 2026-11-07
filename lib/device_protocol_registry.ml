@@ -31,7 +31,16 @@ let span_functions : (string, unit) Hashtbl.t = Hashtbl.create 8
    offset, call site) that reaches its P_init (Line_owner.solve). *)
 let reaching : (string, string * int * Ast.loc) Hashtbl.t = Hashtbl.create 8
 
+(* GitHub issue #1395: each protocol state field's setter, with the file
+   that declared the protocol. The setter is generated into `<protocol P>`
+   (so its body may write the private field) but is private to the
+   DECLARING file: Type_inf records this file, not the def_loc's, for it.
+   Any protocol, device or not. *)
+let field_setters : (string, string) Hashtbl.t = Hashtbl.create 8
+let private_file_of_setter name = Hashtbl.find_opt field_setters name
+
 let reset () =
+  Hashtbl.reset field_setters;
   Hashtbl.reset table;
   Hashtbl.reset span_functions;
   Hashtbl.reset reaching

@@ -4499,6 +4499,15 @@ position; `protocol` itself is the one contextual keyword.
 - `state Name[params] attrs;` -- `access write` grants the CPU authority over
   the retained span, `device` makes the span device-accessible once entered
   from a non-device state (publication). A state may not have both.
+- `state Name[params] attrs { f: T = k; ... }` (GitHub issue #1395) -- the
+  state's owner also carries data fields: a scalar type each and an integer
+  literal initial value. An edge into a state carries each field the input
+  state declares with the same name and type and gives every other field its
+  initial value (`P_init` initialises them all). So a ring's cursor travels
+  with the owner across publish and completion, and exclusivity over it is
+  the linear owner's, not a lock's. Fields are not part of the generated
+  TLA+ model: it checks region authority only, and says nothing about the
+  data.
 - `init Name;` -- exactly one parameterless initial state, holding the whole
   region as CPU-available authority.
 - `transition name(Input[args], Witness[args]) mods -> Alt | Label(Alt);` --
@@ -4528,6 +4537,14 @@ construct a state owner, read its region or mint a witness. For `protocol P
   p: usize] { private memory: region(T)[b, n]; }`. Every state retains the
   whole region; in a non-`access write` state nothing outside the generated
   code can reach it;
+- a state with fields puts them, private, before `memory` (an owner literal
+  reads them before the region moves out of the consumed input). Each field
+  `f` gets `inline fn P_S_f(s: borrow P_S[...]) -> T`, callable anywhere,
+  and `inline fn P_S_set_f(s: borrow mut P_S[...], value: T)`, a private
+  function of the file that declares the protocol: only its lowerings and
+  helpers change the data. A snapshot observation's `_release` on a state
+  with fields takes `borrow mut`, and so does its lowering, so the consumer
+  can advance its cursor;
 - `P_init(memory: region(T)[b, n]) -> P_<init>[b, b__off, n]` and
   `P_release(P_<init>[...]) -> region(T)[b, n]` move the region in and out;
 - each `access write` state gets `P_S_write(s: borrow P_S[...], i: usize @

@@ -29659,9 +29659,66 @@ let expect_sealed_error ?(in_proto = false) ~sub ~by fragment () =
       then Alcotest.failf "no entry contains %S: %s" fragment
           (String.concat " | " (List.map snd errors))
 
+(* GitHub issue #1395: a state's data fields, reached only through the
+   generated accessors and initialised on entry. *)
+let fielded_protocol =
+  replace_once ~sub:"state InFlight[req] device;"
+    ~by:"state InFlight[req] device { sent: usize = 0; }" sealed_protocol
+
 let sealed_protocol_tests = [
   Alcotest.test_case "sealed owners: the declared graph is accepted" `Quick
     (fun () -> ignore (infer_sealed ()));
+  Alcotest.test_case "state fields: the declaring file writes, any file reads" `Quick
+    (fun () -> ignore (infer_sealed
+      ~proto:(fielded_protocol ^ "\nfn ring_bump(s: borrow mut Ring_InFlight[b, o, n, r]) {\n\
+                let k: usize = Ring_InFlight_sent(s) + 1;\n\
+                Ring_InFlight_set_sent(s, k);\n}\n")
+      ~use:(replace_once ~sub:"let flight = Ring_submit(r);"
+              ~by:"let mut flight = Ring_submit(r); ring_bump(flight); \
+                   let k: usize = Ring_InFlight_sent(flight);"
+              sealed_consumer) ()));
+  Alcotest.test_case "state fields: a setter is refused from another file" `Quick
+    (fun () ->
+      match infer_sealed ~proto:fielded_protocol
+          ~use:(replace_once ~sub:"let flight = Ring_submit(r);"
+                  ~by:"let mut flight = Ring_submit(r); Ring_InFlight_set_sent(flight, 7);"
+                  sealed_consumer) () with
+      | _ -> Alcotest.fail "expected a private-function error"
+      | exception Types.TypeError (_, msg) ->
+          Alcotest.(check bool) msg true
+            (contains_substring msg "'Ring_InFlight_set_sent' is a private function"));
+  Alcotest.test_case "state fields: carried along an edge, else initialised" `Quick
+    (fun () ->
+      let proto = replace_once ~sub:"state Unconfirmed[req] device;"
+          ~by:"state Unconfirmed[req] device { sent: usize = 9; }" fielded_protocol in
+      let d = List.find_map (function Ast.ProtocolDef d -> Some d | _ -> None)
+          (let lb = Lexing.from_string proto in
+           Lexing.set_filename lb "ring.tkb"; Parser.program Lexer.read lb) in
+      let src = Protocol_decl.source_of (Option.get d)
+          (Protocol_decl.validate (Option.get d)) in
+      Alcotest.(check bool) "submit initialises" true
+        (contains_substring src "= { 0, s.memory };");
+      Alcotest.(check bool) "expire carries" true
+        (contains_substring src "= { s.sent, s.memory };");
+      Alcotest.(check bool) "the initial value 9 is never used" false
+        (contains_substring src "= { 9, s.memory };"));
+  Alcotest.test_case "state fields: private outside the generated code" `Quick
+    (fun () ->
+      match infer_sealed ~proto:fielded_protocol
+          ~use:(replace_once ~sub:"let flight = Ring_submit(r);"
+                  ~by:"let flight = Ring_submit(r); let k = flight.sent;"
+                  sealed_consumer) () with
+      | _ -> Alcotest.fail "expected a private-field error"
+      | exception Types.TypeError (_, msg) ->
+          Alcotest.(check bool) msg true
+            (contains_substring msg "field 'Ring_InFlight.sent' is private"));
+  Alcotest.test_case "state fields: only a state carries fields" `Quick
+    (fun () ->
+      match infer_sealed ~proto:(replace_once ~sub:"init Ready;"
+                                   ~by:"init Ready { x: usize = 0; }" sealed_protocol) () with
+      | _ -> Alcotest.fail "expected a parse-time refusal"
+      | exception Types.TypeError (_, msg) ->
+          Alcotest.(check bool) msg true (contains_substring msg "only a protocol state"));
   Alcotest.test_case "sealed owners: a witness cannot be minted outside" `Quick
     (expect_sealed_error ~sub:"let back = Ring_resume(flight, w);"
        ~by:"let back = Ring_resume(flight, view Ring_Matching[0]); Ring_Matching_spend(w);"

@@ -35,8 +35,11 @@ const XHCI_RING_BULK_IN: usize = 2;
 const XHCI_RING_BULK_OUT: usize = 3;
 
 protocol XhciRing[inst: usize] retains region(Trb)[b, XHCI_RING_TRBS] tx {
-    state Ready access write addressed;
-    state InFlight[req] device;
+    // The producer's enqueue index and cycle state travel with the owner
+    // (GitHub issue #1395): carried across publish and completion, set
+    // only by this file (xhci_ring_set_cursor, xhci_ring_restart).
+    state Ready access write addressed { enq: usize = 0; cycle: u32 = 1; }
+    state InFlight[req] device { enq: usize = 0; cycle: u32 = 1; }
     init Ready;
     transition xhci_ring_publish(Ready) -> InFlight[fresh req];
     observe xhci_ring_event(InFlight[req]) -> Completed[req] completes | Silent;
@@ -190,21 +193,101 @@ private fn xhci_rings_claim() -> bool {
 // One ring back to Ready and formatted for a new controller session. An
 // InFlight ring comes back only on a confirmed reset; otherwise it stays
 // with the device and the session cannot start.
-private fn xhci_ring_restart(i: usize) -> bool !{unsafe} {
+// HCRST restarts the controller's view of every ring at index 0 with
+// Cycle=1, so the producer cursor restarts with it. The Command Ring's is 3,
+// not 0: bring-up writes Enable Slot / Address Device / Configure Endpoint
+// into the fixed slots TRB[0..2], so every LATER command starts after them.
+private fn xhci_ring_cursor_restart(r: borrow mut XhciRing_Ready[b, o, 16], i: usize) {
+    let mut start: usize = 0;
+    if (i == XHCI_RING_CMD) { start = 3; }
+    XhciRing_Ready_set_enq(r, start);
+    XhciRing_Ready_set_cycle(r, 1);
+}
+
+variant XhciRingCursor {
+    Known(XhciRingCursorValue);
+    Busy;
+}
+
+struct XhciRingCursorValue {
+    enq: usize;
+    cycle: u32;
+}
+
+// Ring i's producer cursor (GitHub issue #1395), read from its Ready owner
+// under the slot lock. Busy while the ring is not parked Ready: a ring left
+// InFlight by an unobserved request takes no TD until a confirmed reset
+// (xhci_ring_submit refuses it), and the reset restarts its cursor. The
+// InFlight state still carries the cursor, so a completed request returns
+// it unchanged.
+fn xhci_ring_cursor(i: usize) -> XhciRingCursor {
+    match xhci_ring_take(i) {
+        Place::Empty => { return XhciRingCursor::Busy; }
+        Place::Full(held) => {
+            match held {
+                XhciRingHeld::Ready(ready) => {
+                    let mut c: XhciRingCursorValue = {
+                        XhciRing_Ready_enq(ready), XhciRing_Ready_cycle(ready)
+                    };
+                    xhci_ring_park(i, XhciRingHeld::Ready(ready));
+                    return XhciRingCursor::Known(c);
+                }
+                XhciRingHeld::InFlight(flight) => {
+                    xhci_ring_park(i, XhciRingHeld::InFlight(flight));
+                    return XhciRingCursor::Busy;
+                }
+            }
+        }
+    }
+}
+
+// A call of its own, not inlined: merged with the InFlight arm's park, the
+// two arms' owners became one aggregate select (#893's csel shape).
+private noinline fn xhci_ring_store_cursor(i: usize, held: XhciRing_Ready[b, o, 16],
+                                           enq: usize, cycle: u32) {
+    let mut ready = held;
+    XhciRing_Ready_set_enq(ready, enq);
+    XhciRing_Ready_set_cycle(ready, cycle);
+    xhci_ring_park(i, XhciRingHeld::Ready(ready));
+}
+
+// Store ring i's producer cursor in its Ready owner; false otherwise.
+fn xhci_ring_set_cursor(i: usize, enq: usize, cycle: u32) -> bool {
     match xhci_ring_take(i) {
         Place::Empty => { return false; }
         Place::Full(held) => {
             match held {
                 XhciRingHeld::Ready(ready) => {
+                    xhci_ring_store_cursor(i, ready, enq, cycle);
+                    return true;
+                }
+                XhciRingHeld::InFlight(flight) => {
+                    xhci_ring_park(i, XhciRingHeld::InFlight(flight));
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+private fn xhci_ring_restart(i: usize) -> bool !{unsafe} {
+    match xhci_ring_take(i) {
+        Place::Empty => { return false; }
+        Place::Full(held) => {
+            match held {
+                XhciRingHeld::Ready(held_ready) => {
+                    let mut ready = held_ready;
                     xhci_ring_format(ready);
+                    xhci_ring_cursor_restart(ready, i);
                     xhci_ring_park(i, XhciRingHeld::Ready(ready));
                     return true;
                 }
                 XhciRingHeld::InFlight(flight) => {
                     match XhciRing_xhci_ring_reset_seen(flight) {
                         XhciRing_xhci_ring_reset_seen_Outcome::Quiet(quiet) => {
-                            let ready = XhciRing_xhci_ring_reclaim(flight, quiet);
+                            let mut ready = XhciRing_xhci_ring_reclaim(flight, quiet);
                             xhci_ring_format(ready);
+                            xhci_ring_cursor_restart(ready, i);
                             xhci_ring_park(i, XhciRingHeld::Ready(ready));
                             return true;
                         }
@@ -841,7 +924,10 @@ const XHCI_OUTPUT_WORDS: usize = 512;
 
 protocol XhciEvents[inst: usize] retains region(Trb)[b, XHCI_RING_TRBS] rx {
     state Ready access write addressed;
-    state Live[req] device;
+    // The consumer's dequeue index and cycle state (xHCI 1.2, 4.9.4) live
+    // in the Live owner: every publish starts them at 0 and 1, the state a
+    // freshly reset controller's producer starts in (GitHub issue #1395).
+    state Live[req] device { idx: usize = 0; cycle: u32 = 1; }
     init Ready;
     transition xhci_evt_publish(Ready) -> Live[fresh req];
     observe xhci_evt_poll(Live[req]) -> Event snapshot | NoEvent;
@@ -869,21 +955,23 @@ private region let mut xhci_device_ctx: [CtxWord; 512] align(64);
 fn xhci_evt_publish(s: borrow XhciEvents_Live[b, o, 16, r]) {}
 fn xhci_evt_poll(s: borrow XhciEvents_Live[b, o, 16, r], value: Trb)
         -> XhciEvents_xhci_evt_poll_Raw {
-    if ((value.dw3 & 1) == xhci_evt_cycle) {
+    if ((value.dw3 & 1) == XhciEvents_Live_cycle(s)) {
         return XhciEvents_xhci_evt_poll_Raw::Event;
     }
     return XhciEvents_xhci_evt_poll_Raw::NoEvent;
 }
 // Past the entry just copied: the next index (with the cycle toggled at the
 // wrap), and ERDP with EHB written 1 to clear it (GitHub issue #187).
-fn xhci_evt_poll_release(s: borrow XhciEvents_Live[b, o, 16, r]) !{unsafe} {
-    xhci_evt_idx = xhci_evt_idx + 1;
-    if (xhci_evt_idx >= XHCI_RING_TRBS) {
-        xhci_evt_idx = 0;
-        xhci_evt_cycle = 1 - xhci_evt_cycle;
+fn xhci_evt_poll_release(s: borrow mut XhciEvents_Live[b, o, 16, r]) !{unsafe} {
+    let mut idx: usize = XhciEvents_Live_idx(s) + 1;
+    if (idx >= XHCI_RING_TRBS) {
+        idx = 0;
+        let cycle: u32 = 1 - XhciEvents_Live_cycle(s);
+        XhciEvents_Live_set_cycle(s, cycle);
     }
+    XhciEvents_Live_set_idx(s, idx);
     let mut span: DmaDeviceSpan = XhciEvents_Live_span(s);
-    xhci_event_dequeue_release(rp1_span_bus_address(span) + xhci_evt_idx * 16);
+    xhci_event_dequeue_release(rp1_span_bus_address(span) + idx * 16);
 }
 fn xhci_evt_reset(s: borrow XhciEvents_Live[b, o, 16, r]) -> XhciEvents_xhci_evt_reset_Raw {
     if (xhci_rings_quiesced) { return XhciEvents_xhci_evt_reset_Raw::EvtQuiet; }
@@ -1002,8 +1090,9 @@ fn xhci_event_next() -> XhciEventPoll {
     xhci_ring_unlock(guard, &xhci_events_slot.mutex);
     match taken {
         Place::Empty => { return XhciEventPoll::NoEvent; }
-        Place::Full(live) => {
-            let index: usize = xhci_evt_idx;
+        Place::Full(held) => {
+            let mut live = held;
+            let index: usize = XhciEvents_Live_idx(live);
             if (index >= 16) {
                 xhci_events_park(live);
                 return XhciEventPoll::NoEvent;

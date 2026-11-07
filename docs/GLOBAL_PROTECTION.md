@@ -337,3 +337,15 @@ file's comment lines are not rows.
   foreign-event count stay listed: they are written inside the `XhciEvents` and
   `XhciRing` protocols' generated operations, whose signatures cannot carry the
   guard. RPi5 only; compiled, not yet run on the board. 242 -> 233 unprotected.
+- 2026-11-07: the xHCI ring cursors move into their protocol owners (GitHub
+  issue #1395). A protocol state may now carry data fields (SPEC.md, Protocol
+  Declarations), carried along its edges and set only by the declaring file.
+  XhciEvents' `Live` owner holds the event-ring dequeue index and cycle
+  (`xhci_evt_idx`, `xhci_evt_cycle`, off this list); each XhciRing owner holds
+  its producer enqueue index and cycle, which leave `XhciTransportState` (now
+  the BOT tag alone), read and set through `xhci_ring_cursor` and
+  `xhci_ring_set_cursor` under the slot lock and restarted with the ring on a
+  confirmed reset. The hand-written resets in `xhci_setup_rings_and_start` are
+  gone. The last event DWORD3, the foreign-event count and the await words stay
+  listed: no protocol owner holds them (#1395's lock-guard parameters).
+  233 -> 231 unprotected.

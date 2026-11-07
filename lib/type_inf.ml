@@ -9345,7 +9345,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   Hashtbl.reset private_functions;
   List.iter (function
     | Ast.FuncDef { name; is_private = true; def_loc; _ } ->
-        Hashtbl.replace private_functions name (Ast.source_file_of_loc def_loc)
+        let file = match Device_protocol_registry.private_file_of_setter name with
+          | Some declaring -> declaring
+          | None -> Ast.source_file_of_loc def_loc in
+        Hashtbl.replace private_functions name file
     | _ -> ()
   ) prog;
   let_match_binder_entries := [];

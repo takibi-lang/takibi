@@ -621,8 +621,10 @@ type proto_alt = {
 [@@deriving show]
 
 type proto_item =
-  | PState of proto_ref * string list
-  (* state Name[params] attributes; -- attributes are contextual words *)
+  | PState of proto_ref * string list * (string * type_expr * int64) list
+  (* state Name[params] attributes; -- attributes are contextual words.
+     GitHub issue #1395: `state Name[params] attrs { f: T = k; ... }` adds
+     data fields the state owner carries, each with its initial value. *)
   | PInit of proto_ref
   | PTransition of string * proto_ref * proto_ref option * proto_alt list
       * string list * loc
