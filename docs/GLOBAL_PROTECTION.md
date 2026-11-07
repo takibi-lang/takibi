@@ -63,6 +63,7 @@ Tried in this order; an array `[T; N]` takes the class of `T`.
 | `place` | `Place(T)` |
 | `atomic` (enum) | `Atomic(E)`: one AtomicWord holding a u8 enum's code, through `atomic_enum_store` / `atomic_enum_load` (#1159) |
 | `boot_once` | `BootOnce(T)`: written under one `BootPhase`, read after by `boot_once_get` |
+| `set_once` | `SetOnce(T)` (kernel/lib/set_once.tkb, #1159): published once with the linear claim `set_once_claim`'s compare-exchange hands out, read by `set_once_get`, at any time and with no lock |
 | `per_cpu` | a `struct per_cpu` store |
 | `dma_fixed` | a `struct dma_fixed` record |
 | `protocol` | a struct a `protocol` declaration generated |
@@ -460,3 +461,12 @@ entries below that date are history, left as written.
   `scheduled_process_missing_site` (`Atomic(KernelActivity)`) and
   `kernel_process_exec_failure_reason` (`Atomic(KernelExecFailureReason)`)
   move to it; no debugger script reads the three symbols.
+- 2026-11-07: write-once cells not tied to the boot phase (GitHub issue
+  #1159, rule 3 of the 2026-11-07 decision). `SetOnce(T)` is a value and a
+  state word: `set_once_claim` hands the one winner of a compare-exchange a
+  linear claim indexed by the cell, `set_once_publish` consumes it.
+  `syscall_filesystem` (`SetOnce(Ext2Mount)`, set by
+  `kernel_syscall_ext2_configure`) and `process_image_root0_record`
+  (`SetOnce(ProcessPoolHandleWords)`, set by the first ensure of root 0) move
+  to it; a second set stops the kernel instead of overwriting silently.
+  InitOnce, a gate with no value, stays #1418's.

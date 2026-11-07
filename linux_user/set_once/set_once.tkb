@@ -1,0 +1,55 @@
+// GitHub issue #1159 rule 3: kernel/lib/set_once.tkb, the same source the
+// kernel links. A claim is won once, a second claim is refused, the value
+// publishes and reads back, and a read of a cell never set reaches the
+// refusal (stubbed below: the kernel's stops the CPU).
+//
+// A publish without a claim, or with a claim twice, does not compile; that
+// half is test/test_takibi.ml's.
+//
+// Expected output (linux_user/set_once/set_once.expected):
+//   0x00000000   a fresh cell is unset
+//   0x00000001   the first claim wins
+//   0x00000001   a second claim is refused
+//   0x00000000   a claimed, unpublished cell is still unset
+//   0x00000001   publish sets it
+//   0x00001159   the value reads back
+//   refused      an unset cell is refused
+
+use "kernel/lib/set_once.tkb";
+
+let mut cell_root: SetOnce(usize);
+let mut cell_never: SetOnce(usize);
+
+// The kernel's stops the CPU (kernel/init/boot_prologue.tkb).
+fn set_once_unset_stop() {
+    uart_puts("refused\r\n");
+    linux_exit(0);
+}
+
+fn report(flag: bool) {
+    if (flag) { uart_println_hex(1); } else { uart_println_hex(0); }
+}
+
+fn app_main() -> i32 !{unsafe} {
+    report(set_once_is_set(&cell_root));
+    match set_once_claim(&cell_root) {
+        SetOnceBegin::Taken => { report(false); }
+        SetOnceBegin::Claimed(claim) => {
+            report(true);
+            match set_once_claim(&cell_root) {
+                SetOnceBegin::Taken => { report(true); }
+                SetOnceBegin::Claimed(second) => {
+                    report(false);
+                    set_once_publish(&cell_root, second, 0);
+                }
+            }
+            report(set_once_is_set(&cell_root));
+            set_once_publish(&cell_root, claim, 0x1159);
+        }
+    }
+    report(set_once_is_set(&cell_root));
+    uart_println_hex(set_once_get(&cell_root) as i32);
+    let never: usize = set_once_get(&cell_never);
+    uart_println_hex(never as i32);
+    return 1;
+}

@@ -2961,6 +2961,59 @@ let atomic_enum_base = "
   enum Site1159: u8 { None; Syscall; Idle; }
 "
 
+(* GitHub issue #1159 rule 3: kernel/lib/set_once.tkb, inlined. *)
+let set_once_base = "
+  struct no_copy AtomicWord { private value: usize; }
+  fn set_once_unset_stop() {}
+
+const SET_ONCE_EMPTY: usize = 0;
+const SET_ONCE_CLAIMED: usize = 1;
+const SET_ONCE_SET: usize = 2;
+
+generic struct SetOnce(T: type) {
+    private value: T;
+    private state: AtomicWord;
+}
+
+linear struct SetOnceClaim[cell: addr] {
+    private held: usize;
+}
+
+must_use variant SetOnceBegin[cell: addr] {
+    Taken;
+    Claimed(SetOnceClaim[cell]);
+}
+
+fn set_once_claim(T: type, cell: &mut SetOnce(T) @ id) -> SetOnceBegin[id] {
+    if (atomic_word_compare_exchange(&(*cell).state, SET_ONCE_EMPTY, SET_ONCE_CLAIMED)) {
+        let mut claim: SetOnceClaim[id] = { 1 };
+        return SetOnceBegin::Claimed(claim);
+    }
+    return SetOnceBegin::Taken;
+}
+
+fn set_once_publish(T: type, cell: &mut SetOnce(T) @ id,
+                    claim: sink SetOnceClaim[id], value: T) {
+    let held: usize = claim.held;
+    (*cell).value = value;
+    atomic_word_store(&(*cell).state, SET_ONCE_SET);
+}
+
+fn set_once_is_set(T: type, cell: &mut SetOnce(T)) -> bool {
+    return atomic_word_load(&(*cell).state) == SET_ONCE_SET;
+}
+
+fn set_once_get(T: type, cell: &mut SetOnce(T)) -> T {
+    if (atomic_word_load(&(*cell).state) != SET_ONCE_SET) {
+        set_once_unset_stop();
+    }
+    return (*cell).value;
+}
+
+  private let mut root1159: SetOnce(usize);
+  private let mut other1159: SetOnce(usize);
+"
+
 let issue370_cell_fixture = {|
   linear struct CellOwner[p: addr] { private value: usize; }
   struct BrandCell[p: addr] {
@@ -12319,6 +12372,35 @@ linear struct Owner746b[page: usize] {
        (atomic_enum_base ^ "
       enum Wide1159: u32 { A; B; }
       private let mut wide1159: Atomic(Wide1159);"));
+  Alcotest.test_case "SetOnce publishes once through its claim" `Quick
+    (expect_ok (set_once_base ^ "
+      fn set1159(v: usize) {
+        match set_once_claim(&root1159) {
+          SetOnceBegin::Taken => {}
+          SetOnceBegin::Claimed(c) => { set_once_publish(&root1159, c, v); }
+        }
+      }"));
+  Alcotest.test_case "SetOnce claim cannot publish twice" `Quick
+    (expect_type_error "already consumed"
+       (set_once_base ^ "
+      fn twice1159(v: usize) {
+        match set_once_claim(&root1159) {
+          SetOnceBegin::Taken => {}
+          SetOnceBegin::Claimed(c) => {
+            set_once_publish(&root1159, c, v);
+            set_once_publish(&root1159, c, v);
+          }
+        }
+      }"));
+  Alcotest.test_case "SetOnce claim publishes only its own cell" `Quick
+    (expect_type_error "static value mismatch"
+       (set_once_base ^ "
+      fn cross1159(v: usize) {
+        match set_once_claim(&root1159) {
+          SetOnceBegin::Taken => {}
+          SetOnceBegin::Claimed(c) => { set_once_publish(&other1159, c, v); }
+        }
+      }"));
   Alcotest.test_case "CPU authority needs one private bounded index field" `Quick
     (expect_type_error "must have exactly one private field"
        "struct cpu_authority Loose704 { id: usize; }");

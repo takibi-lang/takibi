@@ -1,0 +1,62 @@
+// GitHub issue #1159 rule 3: a value written once, at any time, and read
+// freely after. Unlike BootOnce it needs no boot phase, and unlike InitOnce
+// it holds the value and takes no lock (no may_block).
+//
+//   - set_once_claim is one compare-exchange of the state word, 0 -> 1. The
+//     one caller that wins gets the linear SetOnceClaim, indexed by the
+//     cell's address, so a claim on one cell cannot publish another.
+//   - set_once_publish consumes the claim: it writes the value, then
+//     release-stores the state 2. The value field is private to this file,
+//     so this is the only write.
+//   - set_once_is_set and set_once_get acquire-load the state; get stops the
+//     CPU on a cell that was never set, as boot_once_get does.
+//
+// Current limitations (2026-11-07):
+// - A claim that is never published leaves the cell claimed forever; there
+//   is no cancel (no user needs one).
+// - The value is copied out whole on each get, so T should be small.
+use "kernel/lib/atomic_word.tkb";
+
+const SET_ONCE_EMPTY: usize = 0;
+const SET_ONCE_CLAIMED: usize = 1;
+const SET_ONCE_SET: usize = 2;
+
+generic struct SetOnce(T: type) {
+    private value: T;
+    private state: AtomicWord;
+}
+
+linear struct SetOnceClaim[cell: addr] {
+    private held: usize;
+}
+
+must_use variant SetOnceBegin[cell: addr] {
+    Taken;
+    Claimed(SetOnceClaim[cell]);
+}
+
+fn set_once_claim(T: type, cell: &mut SetOnce(T) @ id) -> SetOnceBegin[id] {
+    if (atomic_word_compare_exchange(&(*cell).state, SET_ONCE_EMPTY, SET_ONCE_CLAIMED)) {
+        let mut claim: SetOnceClaim[id] = { 1 };
+        return SetOnceBegin::Claimed(claim);
+    }
+    return SetOnceBegin::Taken;
+}
+
+fn set_once_publish(T: type, cell: &mut SetOnce(T) @ id,
+                    claim: sink SetOnceClaim[id], value: T) {
+    let held: usize = claim.held;
+    (*cell).value = value;
+    atomic_word_store(&(*cell).state, SET_ONCE_SET);
+}
+
+fn set_once_is_set(T: type, cell: &mut SetOnce(T)) -> bool {
+    return atomic_word_load(&(*cell).state) == SET_ONCE_SET;
+}
+
+fn set_once_get(T: type, cell: &mut SetOnce(T)) -> T {
+    if (atomic_word_load(&(*cell).state) != SET_ONCE_SET) {
+        set_once_unset_stop();
+    }
+    return (*cell).value;
+}

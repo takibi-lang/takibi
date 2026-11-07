@@ -7,6 +7,7 @@ use "kernel/fs/elf64.tkb";
 use "kernel/fs/ext2/ext2.tkb";
 use "kernel/lib/mutex.tkb";
 use "kernel/lib/atomic_word.tkb";
+use "kernel/lib/set_once.tkb";
 use "kernel/lib/slot_pool_wait.tkb";
 use "kernel/kernel/cpu_authority.tkb";
 
@@ -329,14 +330,22 @@ private fn process_image_record_pin(
 // own address space, and no process record names it any more (the boot
 // thread runs on it the way Linux's kernel threads run on init_mm), so its
 // handle is kept here, as its backing is kept in address_space.tkb. Written
-// once, by the first ensure during boot, and never released.
-private let mut process_image_root0_record: ProcessPoolHandleWords;
+// once, by the first ensure during boot, and never released: a SetOnce
+// (#1159), so a second publish cannot compile without a second claim, and
+// a second claim is refused.
+private let mut process_image_root0_record: SetOnce(ProcessPoolHandleWords);
 
 // The handle of a root's image record: root 0's own, or the one the record
 // of the process whose root it is holds.
 private fn process_image_record_handle_of_root(root: usize)
         -> ProcessPoolHandleWords !{unsafe} {
-    if (root == 0) { return process_image_root0_record; }
+    if (root == 0) {
+        if (set_once_is_set(&process_image_root0_record)) {
+            return set_once_get(&process_image_root0_record);
+        }
+        let mut none: ProcessPoolHandleWords = { 0, 0 };
+        return none;
+    }
     return scheduled_process_image_record_handle(root);
 }
 
@@ -731,8 +740,15 @@ private fn process_image_record_publish(
     let mut handle: RegionHandle(ProcessImageRecord) = region_give(guard, fresh);
     process_image_pool_unlock(guard);
     if (root == 0) {
-        process_image_root0_record.address = region_handle_address(handle);
-        process_image_root0_record.generation = region_handle_generation(handle);
+        let mut words: ProcessPoolHandleWords = {
+            region_handle_address(handle), region_handle_generation(handle) };
+        match set_once_claim(&process_image_root0_record) {
+            SetOnceBegin::Claimed(claim) => {
+                set_once_publish(&process_image_root0_record, claim, words);
+            }
+            // Root 0's record is published once; a second is a defect.
+            SetOnceBegin::Taken => { kernel_invariant_stop(); }
+        }
     } else {
         match scheduled_process_set_image_record(
                 root, region_handle_address(handle), region_handle_generation(handle)) {

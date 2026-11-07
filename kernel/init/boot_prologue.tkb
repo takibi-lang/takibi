@@ -96,6 +96,13 @@ fn kernel_cache_geometry_require(core: usize) !{logs, unsafe} {
 // the boot write. A boot ordering bug, named so the console says which.
 // Reached from interrupt handlers too, so it writes through DDB's spinning
 // FIFO path rather than the logging queue.
+// GitHub issue #1159: kernel/lib/set_once.tkb's refusal of a read of a
+// cell never set, through the same spinning path.
+fn set_once_unset_stop() !{unsafe} {
+    ddb_puts("set once: read before it was set (#1159)\n" as *u8);
+    kernel_invariant_stop();
+}
+
 fn boot_once_unwritten_stop() !{unsafe} {
     ddb_puts("boot once: read before its boot write (#1013) phase=" as *u8);
     if (boot_phase_is_ended()) { ddb_puts("ended\n" as *u8); }

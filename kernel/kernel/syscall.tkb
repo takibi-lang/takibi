@@ -1,3 +1,4 @@
+use "kernel/lib/set_once.tkb";
 use "kernel/mm/page.tkb";
 use "kernel/mm/address_space.tkb";
 use "kernel/mm/user_memory.tkb";
@@ -282,22 +283,16 @@ const POLL_MAX: usize = 1024;
 // Boot configures this context before EL0 dispatch is enabled. The zero tag
 // is Unconfigured; a mount can only be extracted from the Configured case.
 // This combines readiness and its descriptor, not filesystem mutation locking.
-variant SyscallFilesystemState { Unconfigured; Configured(Ext2Mount); }
-struct SyscallFilesystemContext {
-    private state: SyscallFilesystemState;
-}
-private let mut syscall_filesystem: SyscallFilesystemContext;
+// A SetOnce (#1159): set once by kernel_syscall_ext2_configure, read by
+// every path syscall with no lock.
+private let mut syscall_filesystem: SetOnce(Ext2Mount);
 must_use variant SyscallFilesystemReady { Unconfigured; Configured(Ext2Mount); }
 
 private fn syscall_filesystem_lookup() -> SyscallFilesystemReady {
-    match syscall_filesystem.state {
-        SyscallFilesystemState::Unconfigured => {
-            return SyscallFilesystemReady::Unconfigured;
-        }
-        SyscallFilesystemState::Configured(mount) => {
-            return SyscallFilesystemReady::Configured(mount);
-        }
+    if (set_once_is_set(&syscall_filesystem) == false) {
+        return SyscallFilesystemReady::Unconfigured;
     }
+    return SyscallFilesystemReady::Configured(set_once_get(&syscall_filesystem));
 }
 const SYSCALL_SCRIPT_LINE_MAX: usize = 256;
 // Scratch that lives only for one section of one syscall. The file buffer is a bounded one-block staging
@@ -2361,7 +2356,13 @@ fn kernel_syscall_filesystem_configured_probe() -> bool !{unsafe} {
 }
 
 fn kernel_syscall_ext2_configure(mount: Ext2Mount) {
-    syscall_filesystem.state = SyscallFilesystemState::Configured(mount);
+    match set_once_claim(&syscall_filesystem) {
+        SetOnceBegin::Claimed(claim) => {
+            set_once_publish(&syscall_filesystem, claim, mount);
+        }
+        // Configured once at boot; a second configure is a defect.
+        SetOnceBegin::Taken => { kernel_invariant_stop(); }
+    }
 }
 
 // GitHub issue #257 step 5: this used to assert on connection slots 0 and
