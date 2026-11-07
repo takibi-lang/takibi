@@ -355,9 +355,10 @@ kernel_views_normalize "$UART_LOG"
 # GitHub issue #1209: name init.sh's own failure first; the verdicts that
 # follow are about steps it never reached. Prints only; decides nothing.
 python3 "$REPO_ROOT/scripts/kernel_init_failure.py" "$UART_LOG"
-# GitHub issue #1024: user_payload's failing check as file:line. Prints only.
+# GitHub issues #1024, #1412: an EL0 image's failing check as file:line,
+# each against its own object's table. Prints only.
 python3 "$REPO_ROOT/scripts/decode_srcloc.py" \
-    "$REPO_ROOT/kernel/build/rpi5/user_payload_tkb.o.facts/srcloc.tsv" \
+    --facts-dir "$REPO_ROOT/kernel/build/rpi5" --default user_payload_tkb \
     --log "$UART_LOG"
 python3 "$REPO_ROOT/scripts/validate_kernel_dmesg_timestamps.py" "$UART_LOG" \
     --timing-log "$UART_TIMING_LOG" \

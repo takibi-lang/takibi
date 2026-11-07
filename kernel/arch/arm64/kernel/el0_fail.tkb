@@ -1,0 +1,31 @@
+/* GitHub issue #1412: an EL0 probe's failing check, by its own src_loc().
+ * Writes "<message> srcloc[<image>]=0x<8 hex digits>\n" to fd 1 and exits
+ * with status 1. <image> names the probe's object, whose --facts
+ * srcloc.tsv decodes the value (scripts/decode_srcloc.py --facts-dir), since
+ * a SrcLoc means something only against the table of the compile that made
+ * it. */
+
+fn el0_fail_at(message: borrow []const u8, image: borrow []const u8,
+               loc: SrcLoc) !{unsafe} {
+    // Raw ABI input only: these syscalls read the readonly bytes.
+    // The bridge exposes no writable slice or checked mutation.
+    svc5(64, 1, (unsafe { message as *u8 }) as usize, message.len, 0, 0);
+    let open: []const u8 = bs" srcloc[";
+    svc5(64, 1, (unsafe { open as *u8 }) as usize, open.len, 0, 0);
+    svc5(64, 1, (unsafe { image as *u8 }) as usize, image.len, 0, 0);
+    let close: []const u8 = bs"]=0x";
+    svc5(64, 1, (unsafe { close as *u8 }) as usize, close.len, 0, 0);
+    let bits: u32 = loc as u32;
+    let mut digits: [u8; 9];
+    for i: usize in 0..<8 {
+        let nibble: u32 = (bits >> (((7 - i) * 4) as u32)) & 0xF;
+        if (nibble < 10) {
+            digits[i] = (nibble + 48) as u8;
+        } else {
+            digits[i] = (nibble + 87) as u8;
+        }
+    }
+    digits[8] = 10;
+    svc5(64, 1, digits as *u8 as usize, 9, 0, 0);
+    svc5(93, 1, 0, 0, 0, 0);
+}

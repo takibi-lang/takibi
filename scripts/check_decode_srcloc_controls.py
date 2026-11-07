@@ -29,7 +29,15 @@ LOGS = [
      ["boot", "userspace syscall fixture: failed srcloc=0x00100007", "exit"],
      ["srcloc: 0x00100007 = lib/other.tkb:7"]),
     ("a clean capture", ["userspace syscall fixture: ok"], []),
+    # GitHub issue #1412: a probe names its own object's table.
+    ("a tagged probe line",
+     ["nested: FAIL refused exec result srcloc[probe]=0x00100003"],
+     ["srcloc[probe]: 0x00100003 = probe.tkb:3"]),
+    ("a tag with no table is skipped",
+     ["termios: FAIL srcloc[absent]=0x00000001"], []),
 ]
+
+PROBE = {0: "el0_fail.tkb", 1: "probe.tkb"}
 
 
 def main():
@@ -42,7 +50,7 @@ def main():
             failures.append(f"{label}: got {got!r}, expected {expected!r}")
     for label, lines, expected in LOGS:
         ran += 1
-        got = d.decode_log(TABLE, lines)
+        got = d.decode_log({None: TABLE, "probe": PROBE}, lines)
         if got != expected:
             failures.append(f"{label}: got {got!r}, expected {expected!r}")
     if failures:
@@ -52,7 +60,8 @@ def main():
     report_pass("decode-srcloc controls",
                 f"{ran} cases: a SrcLoc splits at bit 20 into a named file and "
                 "a line, an unknown index says so, and a capture yields each "
-                "srcloc= and nothing else",
+                "srcloc= (a tagged one against its object's table) and "
+                "nothing else",
                 cases=ran)
     return 0
 
