@@ -16790,6 +16790,16 @@ let codegen_tests = [
         "fn e1024(l: SrcLoc) -> u32 { return l + 1; }" ();
       expect_type_error "SrcLoc"
         "fn f1024() -> SrcLoc { return 5; }" ());
+  (* GitHub issue #1420: the aligned spelling of an affine/linear handle
+     pointer is checked like the plain one. *)
+  Alcotest.test_case "aligned handle pointers are minted and cast like plain ones" `Quick
+    (fun () ->
+      expect_type_error "asserts it is valid with no evidence"
+        "affine opaque struct L1420;\n\
+         fn a1420() -> *align(8) L1420 { return 64 as *align(8) L1420; }" ();
+      expect_type_error "cannot cast an affine/linear value"
+        "linear opaque struct M1420;\n\
+         fn b1420(p: *align(8) M1420) -> usize { return p as usize; }" ());
 
   Alcotest.test_case "explicit wrapping multiply lowers to fixed-width arithmetic" `Quick
     (fun () ->

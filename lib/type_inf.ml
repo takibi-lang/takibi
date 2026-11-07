@@ -2952,8 +2952,11 @@ let rec is_addr_derived (e : Ast.expr) : bool =
    neither should skip this check. *)
 let check_kinded_ptr_cast_needs_unsafe loc (src_expr : Ast.expr) (tgt : ty) =
   match tgt with
-  | TPtr (TStruct sname) when StringSet.mem sname !affine_opaque_names
-                           || StringSet.mem sname !linear_opaque_names ->
+  (* GitHub issue #1420: an aligned handle pointer is the same handle; it
+     used to skip this check, so `64 as *align(8) L` minted one. *)
+  | TPtr (TStruct sname) | TAlignedPtr (_, TStruct sname)
+    when StringSet.mem sname !affine_opaque_names
+         || StringSet.mem sname !linear_opaque_names ->
       if not (is_addr_derived src_expr) then begin
         if !unsafe_depth = 0 then
           raise (TypeError (loc,
@@ -3165,7 +3168,7 @@ let check_raw_claim_needs_unsafe senv eenv loc (src_ty : ty) (tgt : ty) =
 let check_nonliteral_ptr_cast_needs_unsafe loc (src_expr : Ast.expr) (tgt : ty) =
   if not (is_literal_derived src_expr) then
     match tgt with
-    | TPtr (TStruct sname)
+    | TPtr (TStruct sname) | TAlignedPtr (_, TStruct sname)
       when StringSet.mem sname !affine_opaque_names
         || StringSet.mem sname !linear_opaque_names -> ()
     | TPtr elem | TAlignedPtr (_, elem) when not (is_io_pointee elem) ->
@@ -3199,8 +3202,10 @@ let check_resource_cast_away loc (src_ty : ty) =
   | TVariant (name, _, _) ->
       raise (TypeError (loc, Printf.sprintf
         "cannot cast variant '%s': inspect it with match" name))
-  | TPtr (TStruct sname) when StringSet.mem sname !linear_opaque_names
-                            || StringSet.mem sname !affine_opaque_names ->
+  (* GitHub issue #1420: the aligned spelling of the handle, too. *)
+  | TPtr (TStruct sname) | TAlignedPtr (_, TStruct sname)
+    when StringSet.mem sname !linear_opaque_names
+         || StringSet.mem sname !affine_opaque_names ->
       raise (TypeError (loc, Printf.sprintf
         "cannot cast an affine/linear value (*%s) to anything: use a variant for fallible ownership"
         sname))
