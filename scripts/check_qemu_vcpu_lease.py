@@ -20,9 +20,11 @@ from pass_line import report_pass
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 # The shim itself, its helpers, and the lease control, which writes a fake
-# qemu-system-aarch64 to prove the shim refuses an unleased guest.
+# qemu-system-aarch64 to prove the shim refuses an unleased guest; and the
+# lane-owner control, which only greps the shim for its gate (#1433).
 EXEMPT = {"scripts/qemu.sh", "scripts/check_qemu_vcpu_lease.py",
-          "scripts/qemu_vcpu_lease.py", "scripts/slowcheck_resource_lease.sh"}
+          "scripts/qemu_vcpu_lease.py", "scripts/slowcheck_resource_lease.sh",
+          "scripts/slowcheck_qemu_lane_owner.sh"}
 DIRECT = re.compile(r"qemu-system-aarch64")
 MATCHER = re.compile(r"\b(pgrep|pkill)\b")
 SHIM = re.compile(r"^[^#]*scripts/qemu\.sh|^from qemu_vcpu_lease import", re.M)
