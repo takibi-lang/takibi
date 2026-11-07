@@ -649,11 +649,24 @@ fn msc_recover_transport(guard: borrow BlockDeviceGuard[&block_device_lock]) -> 
     return true;
 }
 
+// A Command Block Wrapper whose header is written (GitHub issue #752): the
+// order header -> CDB bytes -> run is a type. msc_cbw_header mints it, the
+// CDB setters borrow it, and msc_run_command consumes it, so a CDB byte
+// cannot be set before the header that zeroes the CDB region, a command
+// cannot run without a fresh header, and one header runs once. It carries
+// the transfer length and direction the header wrote, so the data stage
+// cannot disagree with them.
+linear struct MscCbw[unit: usize] {
+    private data_len: {0..<65537 as u32};
+    private dir_in: bool;
+}
+
 // Fills the fixed 15-byte CBW header and zeroes the 16-byte CDB region;
-// callers fill in the CDB's own opcode/fields with msc_cbw_set(15.., ...)
+// callers fill in the CDB's own opcode/fields with msc_cbw_set(cbw, 15.., ...)
 // afterward. bCBWLUN is always 0 -- single-drive scope, same as the RPi3
 // side.
-fn msc_cbw_header(guard: borrow BlockDeviceGuard[&block_device_lock], data_len: u32, dir_in: bool, cb_len: u32) {
+fn msc_cbw_header(guard: borrow BlockDeviceGuard[&block_device_lock],
+                  data_len: {0..<65537 as u32}, dir_in: bool, cb_len: u32) -> MscCbw[0] {
     let mut t: XhciTransport = xhci_transport(guard);
     t.msc_tag = t.msc_tag + 1;
     xhci_transport_store(guard, t);
@@ -683,10 +696,12 @@ fn msc_cbw_header(guard: borrow BlockDeviceGuard[&block_device_lock], data_len: 
             msc_cbw_fail_device(stale);
         }
     }
+    let mut cbw: MscCbw[0] = { data_len, dir_in };
+    return cbw;
 }
 
 // One CDB byte; the CDB occupies bytes 15..<31 of the CBW.
-fn msc_cbw_set(index: {15..<31 as usize}, value: u8) {
+fn msc_cbw_set(cbw_token: borrow MscCbw[0], index: {15..<31 as usize}, value: u8) {
     match msc_cbw_take() {
         MscCbwTransmitAuthority::Cpu(cpu) => {
             let cbw = dma_cpu_slice(cpu, MscCbwTransmit);
@@ -790,8 +805,10 @@ private fn msc_read_csw(guard: borrow BlockDeviceGuard[&block_device_lock]) -> M
     return msc_csw_receive_attempt(guard, 8);
 }
 
-fn msc_run_command(guard: borrow BlockDeviceGuard[&block_device_lock], data_len: {0..<65537 as u32}, dir_in: bool)
+fn msc_run_command(guard: borrow BlockDeviceGuard[&block_device_lock], cbw: sink MscCbw[0])
         -> MscCommandResult {
+    let data_len: {0..<65537 as u32} = cbw.data_len;
+    let dir_in: bool = cbw.dir_in;
     atomic_word_fetch_add(&msc_command_count, 1);
     // An outbound payload is already in the protected transmit allocation;
     // an inbound one lands in the protected receive allocation.
@@ -1376,9 +1393,9 @@ fn usb_disk_initialize_stages(guard: borrow BlockDeviceGuard[&block_device_lock]
     // the regression #339 was filed from.
     let mut readiness: UsbRetryRecord = usb_retry_record_start();
     for i: usize in 0..<50 {
-        msc_cbw_header(guard, 0, false, 6);
-        msc_cbw_set(15, 0x00);
-        match msc_run_command(guard, 0, false) {
+        let cbw: MscCbw[0] = msc_cbw_header(guard, 0, false, 6);
+        msc_cbw_set(cbw, 15, 0x00);
+        match msc_run_command(guard, cbw) {
             MscCommandResult::Ok => {
                 readiness = usb_retry_record_attempt(readiness, 0);
             }
@@ -1405,9 +1422,9 @@ fn usb_disk_initialize_stages(guard: borrow BlockDeviceGuard[&block_device_lock]
 
     // READ CAPACITY(10): confirm 512-byte blocks, this project's whole
     // storage stack's own fixed assumption.
-    msc_cbw_header(guard, 8, true, 10);
-    msc_cbw_set(15, 0x25);
-    match msc_run_command(guard, 8, true) {
+    let cbw: MscCbw[0] = msc_cbw_header(guard, 8, true, 10);
+    msc_cbw_set(cbw, 15, 0x25);
+    match msc_run_command(guard, cbw) {
         MscCommandResult::Ok => { }
         MscCommandResult::CompletedError(status) => {
             return UsbInitOutcome::ReadCapacity(status);
@@ -1499,16 +1516,16 @@ fn disk_timeout_count() -> usize { return atomic_word_load(&msc_command_timeouts
 
 // READ(10)/WRITE(10) share the same CDB shape: opcode | flags(0) |
 // LBA(4, big-endian) | group number(0) | transfer length(2, big-endian,
-// bounded by MSC_MAX_TRANSFER_SECTORS) | control(0). msc_cbw_header() must already have
-// been called to build the CBW header and zero this CDB region.
-fn msc_scsi_lba_cdb(op: u8, sector: u32, sectors: usize) {
-    msc_cbw_set(15, op);
-    msc_cbw_set(17, ((sector >> 24) & 0xFF) as u8);
-    msc_cbw_set(18, ((sector >> 16) & 0xFF) as u8);
-    msc_cbw_set(19, ((sector >> 8) & 0xFF) as u8);
-    msc_cbw_set(20, (sector & 0xFF) as u8);
-    msc_cbw_set(22, ((sectors >> 8) & 0xFF) as u8);
-    msc_cbw_set(23, (sectors & 0xFF) as u8);
+// bounded by MSC_MAX_TRANSFER_SECTORS) | control(0). the header in `cbw` (msc_cbw_header) has
+// zeroed this CDB region.
+fn msc_scsi_lba_cdb(cbw: borrow MscCbw[0], op: u8, sector: u32, sectors: usize) {
+    msc_cbw_set(cbw, 15, op);
+    msc_cbw_set(cbw, 17, ((sector >> 24) & 0xFF) as u8);
+    msc_cbw_set(cbw, 18, ((sector >> 16) & 0xFF) as u8);
+    msc_cbw_set(cbw, 19, ((sector >> 8) & 0xFF) as u8);
+    msc_cbw_set(cbw, 20, (sector & 0xFF) as u8);
+    msc_cbw_set(cbw, 22, ((sectors >> 8) & 0xFF) as u8);
+    msc_cbw_set(cbw, 23, (sectors & 0xFF) as u8);
 }
 
 // Same retry policy as RPi3's own disk_read/disk_write for completed errors:
@@ -1532,10 +1549,10 @@ fn disk_read_sectors(guard: borrow BlockDeviceGuard[&block_device_lock], sector:
     let length_u32: u32 = length as u32;
     if (length_u32 >= 65537) { return DiskIoResult::Err(-1); }
     let transfer_len: {0..<65537 as u32} = length_u32;
-    msc_cbw_header(guard, transfer_len, true, 10);
-    msc_scsi_lba_cdb(0x28, sector, sectors);
+    let cbw: MscCbw[0] = msc_cbw_header(guard, transfer_len, true, 10);
+    msc_scsi_lba_cdb(cbw, 0x28, sector, sectors);
     let mut retry: bool = false;
-    match msc_run_command(guard, transfer_len, true) {
+    match msc_run_command(guard, cbw) {
         MscCommandResult::Ok => { }
         MscCommandResult::CompletedError(_) => { retry = true; }
         MscCommandResult::RestartRequired => { return DiskIoResult::Err(-1); }
@@ -1543,9 +1560,9 @@ fn disk_read_sectors(guard: borrow BlockDeviceGuard[&block_device_lock], sector:
     }
     if (retry) {
         msc_recover_transport(guard);
-        msc_cbw_header(guard, transfer_len, true, 10);
-        msc_scsi_lba_cdb(0x28, sector, sectors);
-        match msc_run_command(guard, transfer_len, true) {
+        let cbw: MscCbw[0] = msc_cbw_header(guard, transfer_len, true, 10);
+        msc_scsi_lba_cdb(cbw, 0x28, sector, sectors);
+        match msc_run_command(guard, cbw) {
             MscCommandResult::Ok => { }
             MscCommandResult::CompletedError(_) => {
                 return DiskIoResult::Err(-1);
@@ -1618,10 +1635,10 @@ fn disk_write_sectors(guard: borrow BlockDeviceGuard[&block_device_lock], sector
             msc_data_out_fail_device(stale);
         }
     }
-    msc_cbw_header(guard, transfer_len, false, 10);
-    msc_scsi_lba_cdb(0x2A, sector, sectors);
+    let cbw: MscCbw[0] = msc_cbw_header(guard, transfer_len, false, 10);
+    msc_scsi_lba_cdb(cbw, 0x2A, sector, sectors);
     atomic_word_fetch_add(&msc_write10_command_count, 1);
-    match msc_run_command(guard, transfer_len, false) {
+    match msc_run_command(guard, cbw) {
         MscCommandResult::Ok => { return DiskIoResult::Ok; }
         MscCommandResult::CompletedError(_) => { }
         MscCommandResult::RestartRequired => { return DiskIoResult::Err(-1); }
@@ -1633,10 +1650,10 @@ fn disk_write_sectors(guard: borrow BlockDeviceGuard[&block_device_lock], sector
     // its CSW was lost, repeating identical bytes to the identical LBA
     // is content-idempotent; no general write-command retry policy is
     // implied.
-    msc_cbw_header(guard, transfer_len, false, 10);
-    msc_scsi_lba_cdb(0x2A, sector, sectors);
+    let cbw: MscCbw[0] = msc_cbw_header(guard, transfer_len, false, 10);
+    msc_scsi_lba_cdb(cbw, 0x2A, sector, sectors);
     atomic_word_fetch_add(&msc_write10_command_count, 1);
-    match msc_run_command(guard, transfer_len, false) {
+    match msc_run_command(guard, cbw) {
         MscCommandResult::Ok => { return DiskIoResult::Ok; }
         MscCommandResult::CompletedError(_) => {
             return DiskIoResult::Err(-1);

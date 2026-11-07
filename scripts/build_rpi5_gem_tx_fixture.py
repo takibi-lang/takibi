@@ -237,11 +237,17 @@ fn gem_fixture_xhci_bus(address: usize) -> usize {
     return address + boot_once_get(&rp1_dma_pci_offset);
 }
 
+// The fixture sends the CBW by hand instead of through msc_run_command, so
+// it gives the header's MscCbw back itself (GitHub issue #752).
+fn gem_fixture_xhci_cbw_sent(cbw: sink MscCbw[0]) {}
+
 fn gem_fixture_xhci_cbw_out(guard: borrow BlockDeviceGuard[&block_device_lock]) -> u32 !{unsafe} {
-    msc_cbw_header(guard, 512, true, 10);
-    msc_scsi_lba_cdb(0x28, 0, 1);
+    let cbw: MscCbw[0] = msc_cbw_header(guard, 512, true, 10);
+    msc_scsi_lba_cdb(cbw, 0x28, 0, 1);
     let bus: usize = gem_fixture_xhci_cbw_bus();
-    return usb_bulk_xfer(guard, false, bus, 31);
+    let sent: u32 = usb_bulk_xfer(guard, false, bus, 31);
+    gem_fixture_xhci_cbw_sent(cbw);
+    return sent;
 }
 
 fn gem_fixture_xhci_stage(guard: borrow BlockDeviceGuard[&block_device_lock], name: *u8, buffer: usize) !{unsafe} {

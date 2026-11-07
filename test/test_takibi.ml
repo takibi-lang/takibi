@@ -2808,6 +2808,25 @@ let owned_by_ok =
    }
    fn main() {}"
 
+(* GitHub issue #752: the shape of usb_xhci.tkb's Bulk-Only command order,
+   header -> CDB bytes -> run, as a linear token the header mints. *)
+let msc_cbw_typestate_fixture =
+  "linear struct MscCbw[unit: usize] { private data_len: usize; private dir_in: bool; }
+   let mut cbw_bytes: [u8; 31];
+   fn msc_cbw_header(data_len: usize, dir_in: bool) -> MscCbw[0] {
+     for i: usize in 0..<31 { cbw_bytes[i] = 0; }
+     let mut cbw: MscCbw[0] = { data_len, dir_in };
+     return cbw;
+   }
+   fn msc_cbw_set(cbw_token: borrow MscCbw[0], index: {15..<31 as usize}, value: u8) {
+     cbw_bytes[index] = value;
+   }
+   fn msc_run_command(cbw: sink MscCbw[0]) -> usize {
+     if (cbw.dir_in) { return cbw.data_len; }
+     return 0;
+   }
+   "
+
 let atomic_word_fixture =
   "struct no_copy AtomicWord { private value: usize; }
    "
@@ -3380,6 +3399,43 @@ let infer_tests = [
           "lock", "composite"; "mixed", "none"; "empty", "none";
           "guarded", "lock";
           "fixed", "absent"; "owned", "slot_owned" ]);
+
+  (* GitHub issue #752: an out-of-order Bulk-Only command does not compile. *)
+  Alcotest.test_case "msc cbw typestate: header, CDB bytes, then one run" `Quick
+    (expect_ok (msc_cbw_typestate_fixture ^
+       "fn main() -> usize {
+          let cbw: MscCbw[0] = msc_cbw_header(8, true);
+          msc_cbw_set(cbw, 15, 0x25);
+          return msc_run_command(cbw);
+        }"));
+  Alcotest.test_case "msc cbw typestate: a CDB byte after the run is refused" `Quick
+    (expect_type_error "already consumed"
+       (msc_cbw_typestate_fixture ^
+        "fn main() -> usize {
+           let cbw: MscCbw[0] = msc_cbw_header(8, true);
+           let n: usize = msc_run_command(cbw);
+           msc_cbw_set(cbw, 15, 0x25);
+           return n;
+         }"));
+  Alcotest.test_case "msc cbw typestate: one header runs once" `Quick
+    (expect_type_error "already consumed"
+       (msc_cbw_typestate_fixture ^
+        "fn main() -> usize {
+           let cbw: MscCbw[0] = msc_cbw_header(8, true);
+           let a: usize = msc_run_command(cbw);
+           return a + msc_run_command(cbw);
+         }"));
+  Alcotest.test_case "msc cbw typestate: a header that never runs is refused" `Quick
+    (expect_type_error "never consumed"
+       (msc_cbw_typestate_fixture ^
+        "fn main() {
+           let cbw: MscCbw[0] = msc_cbw_header(8, true);
+           msc_cbw_set(cbw, 15, 0x25);
+         }"));
+  Alcotest.test_case "msc cbw typestate: no header, no token to run" `Quick
+    (expect_type_error "Unbound variable"
+       (msc_cbw_typestate_fixture ^
+        "fn main() -> usize { msc_cbw_set(cbw, 15, 0x25); return msc_run_command(cbw); }"));
 
   (* GitHub issue #1159 (option B1): an owned_by(T.f, S) global is reached
      only as g[t.f * S + k], t a T and k proven below S. *)
