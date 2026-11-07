@@ -5440,8 +5440,8 @@ fail_if(src_loc(), fd != 3);
 - `SrcLoc` is opaque. Only `src_loc()` makes one: an integer literal or a
   cast to `SrcLoc` is rejected. `loc as u32` is the one way to read the
   bits; a cast to any other type, arithmetic, and comparison are rejected.
-  A `SrcLoc` may be passed, returned, and stored in a struct field. A
-  global initializer cannot call `src_loc()`.
+  A `SrcLoc` may be passed, returned, and stored in a struct field or a
+  global; a global initializer's `src_loc()` is its own line (#1414).
 
 ## Trap sites
 

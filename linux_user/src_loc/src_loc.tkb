@@ -16,6 +16,9 @@ struct Site {
     loc: SrcLoc;
 }
 
+// GitHub issue #1414: a global initializer may call src_loc().
+let HERE: SrcLoc = src_loc();
+
 fn app_main() {
     print_loc(check(src_loc()));
     print_loc(check(builtin::src_loc()));
@@ -26,4 +29,5 @@ fn app_main() {
     if (b - a == 1) {
         uart_puts("next line\r\n");
     }
+    print_loc(HERE as u32);
 }

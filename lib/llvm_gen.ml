@@ -7781,6 +7781,12 @@ let gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable decl_loc =
             "embed_file(\"%s\"): file size changed between type-checking \
              (%d bytes) and codegen (%d bytes)" path n (String.length bytes)));
         const_string context bytes
+    (* GitHub issue #1414: src_loc() is a constant, so a global may hold
+       one; type_inf checked that it packs. *)
+    | Call ("src_loc", []), TypeSrcLoc ->
+        (match Src_loc.pack e.loc with
+         | Some bits -> const_of_int64 (i32_type context) bits false
+         | None -> raise (Error "BUG: src_loc() reached codegen unpackable"))
     | _ -> raise (Error "global initializer: unsupported constant expression")
   in
   let init = match expr_opt with
