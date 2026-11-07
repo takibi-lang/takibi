@@ -18,10 +18,26 @@ from await_timing import AwaitTiming  # noqa: E402
 from buildcheck_kernel_memory_map import fdt_expected_pages_for  # noqa: E402
 from qemu_vcpu_lease import QEMU, lease  # noqa: E402
 
-# Each boot's wait for its memory line: a fixed budget from QEMU launch, or
-# from release after the DTB is patched. GitHub issue #666 records how much
-# of it was used, without changing it or the verdict.
+# Each boot's wait for its line is a no-progress budget (GitHub issue #1365):
+# it ends only after OBSERVE_TIMEOUT_SECONDS with no output at all, so a guest
+# that is still printing under host load is late, not stopped. A cap bounds a
+# guest that prints forever without the line. GitHub issue #666 records the
+# arrival against the quiet budget, measured from QEMU launch (or release
+# after the DTB is patched), without changing the verdict.
 OBSERVE_TIMEOUT_SECONDS = 10.0
+OBSERVE_CAP_SECONDS = 180.0
+# Why the last observe_process ended, for the failure line: "arrived",
+# "quiet" (no output for the budget), "cap" or "exited".
+last_end = "arrived"
+
+
+def wait_note() -> str:
+    """The failure line's account of a wait that ended without its line."""
+    return {
+        "quiet": f"no output for {OBSERVE_TIMEOUT_SECONDS:g} s",
+        "cap": f"still printing at the {OBSERVE_CAP_SECONDS:g} s cap",
+        "exited": "QEMU's output ended",
+    }.get(last_end, last_end)
 LABEL = "kernel/qemu fdt-multibank"
 
 
@@ -120,28 +136,43 @@ def make_discontiguous(blob: bytes) -> bytes:
 def observe_process(process: subprocess.Popen[bytes], expected: bytes,
                     timing_path: str | None = None, name: str = "memory line",
                     clock=time.monotonic) -> tuple[bool, bytearray]:
+    global last_end
     assert process.stdout is not None
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ)
     started = clock()
-    deadline = started + OBSERVE_TIMEOUT_SECONDS
+    cap = started + OBSERVE_CAP_SECONDS
+    quiet_until = started + OBSERVE_TIMEOUT_SECONDS
     timing = AwaitTiming(timing_path, started, OBSERVE_TIMEOUT_SECONDS, (), (),
                          label=LABEL, origin="QEMU start of this boot",
                          milestones=(name,))
     transcript = bytearray()
     found = False
+    last_end = "cap"
     try:
-        while clock() < deadline:
-            events = selector.select(max(0.0, deadline - clock()))
+        while True:
+            now = clock()
+            if now >= cap:
+                last_end = "cap"
+                break
+            if now >= quiet_until:
+                last_end = "quiet"
+                break
+            events = selector.select(max(0.0, min(quiet_until, cap) - now))
             if not events:
+                last_end = "quiet"
                 break
             chunk = process.stdout.read1(4096)
             if not chunk:
+                last_end = "exited"
                 break
             transcript.extend(chunk)
+            # Progress: any output restarts the quiet budget.
+            quiet_until = clock() + OBSERVE_TIMEOUT_SECONDS
             if expected in transcript:
                 timing.record(name, True, clock())
                 found = True
+                last_end = "arrived"
                 break
     finally:
         timing.finish(clock())
@@ -231,7 +262,7 @@ def main() -> int:
     if not found:
         sys.stderr.buffer.write(transcript)
         print("FAIL kernel/qemu FDT multi-bank: expected memory line absent: "
-              f"{lines['MULTIBANK_EXPECTED']!r}", file=sys.stderr)
+              f"{lines['MULTIBANK_EXPECTED']!r} ({wait_note()})", file=sys.stderr)
         return 1
     print("PASS kernel/qemu FDT multi-bank: two adjacent NUMA nodes normalized to one 1024 MiB region")
 
@@ -283,7 +314,7 @@ def main() -> int:
         if not found or lines["DISCONTIGUOUS_MEMORY_EXPECTED"] not in transcript:
             sys.stderr.buffer.write(transcript)
             print("FAIL kernel/qemu FDT physical-hole allocator probe; expected: "
-                  f"{lines['DISCONTIGUOUS_MEMORY_EXPECTED']!r}", file=sys.stderr)
+                  f"{lines['DISCONTIGUOUS_MEMORY_EXPECTED']!r} ({wait_note()})", file=sys.stderr)
             return 1
     print("PASS kernel/qemu FDT physical hole: two extents, excluded hole, and boundary round-trips")
 
@@ -303,7 +334,7 @@ def main() -> int:
     if not found:
         sys.stderr.buffer.write(transcript)
         print("FAIL kernel/qemu FDT allocator sizing: expected memory line absent: "
-              f"{lines['LOW_MEMORY_EXPECTED']!r}", file=sys.stderr)
+              f"{lines['LOW_MEMORY_EXPECTED']!r} ({wait_note()})", file=sys.stderr)
         return 1
     print("PASS kernel/qemu FDT allocator sizing: 128 MiB DTB supplies the rendered page count")
 
@@ -347,14 +378,20 @@ def main() -> int:
             timing("missing-memory"), "missing-memory halt")
         if not found:
             sys.stderr.buffer.write(transcript)
-            print("FAIL kernel/qemu FDT negative control: kernel did not reject the modified tree",
-                  file=sys.stderr)
+            print("FAIL kernel/qemu FDT negative control: kernel did not reject the "
+                  f"modified tree ({wait_note()})", file=sys.stderr)
             return 1
     print("PASS kernel/qemu FDT negative control: patched tree reached the kernel and missing memory halted")
 
     found, transcript = observe(low_memory_command, SEED_LIST_LINE,
                                 timing("seed"), "security list, seeded")
-    if not found or SEED_KEY_LINE not in transcript:
+    if not found:
+        sys.stderr.buffer.write(transcript)
+        print("FAIL kernel/qemu ISN key: the seeded boot's security list line "
+              f"did not arrive ({wait_note()}); the seed was not judged",
+              file=sys.stderr)
+        return 1
+    if SEED_KEY_LINE not in transcript:
         sys.stderr.buffer.write(transcript)
         print("FAIL kernel/qemu ISN key: QEMU's /chosen seed not used",
               file=sys.stderr)
@@ -384,8 +421,12 @@ def main() -> int:
         found, transcript = observe_patched_dtb(
             low_memory_command, dtb, NO_SEED_LIST_LINE,
             timing("no-seed"), "security list, no seed")
-        if (not found or NO_SEED_WARNING not in transcript or
-                SEED_KEY_LINE in transcript):
+        if not found:
+            sys.stderr.buffer.write(transcript)
+            print("FAIL kernel/qemu ISN key: the unseeded boot's security list "
+                  f"line did not arrive ({wait_note()})", file=sys.stderr)
+            return 1
+        if NO_SEED_WARNING not in transcript or SEED_KEY_LINE in transcript:
             sys.stderr.buffer.write(transcript)
             print("FAIL kernel/qemu ISN key: no degraded path without a seed",
                   file=sys.stderr)

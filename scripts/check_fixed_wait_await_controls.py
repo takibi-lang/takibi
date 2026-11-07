@@ -9,7 +9,10 @@ the real observe_process with a short-lived child instead of QEMU, and the
 real command line, so they check the recording, not a second copy of it: an arrival is recorded with its fraction
 of the budget, a late arrival prints the RECORDED margin line without
 changing the verdict, and a boot that ends without the line is recorded as
-not arrived. The aggregate destination inherited from an enclosing allcheck
+not arrived. GitHub issue #1365: the FDT wait is a no-progress budget, so a
+slow guest that keeps printing past 10 s still arrives (the old absolute
+deadline cut it off and blamed the seed), silence for the budget ends the wait
+as "quiet", and endless output stops at the cap. The aggregate destination inherited from an enclosing allcheck
 is removed first, so these synthetic waits never join a real summary.
 
 Exit code only (0 = pass, 1 = fail).
@@ -90,6 +93,63 @@ def main() -> int:
         if found or len(row) != 1 or row[0]["status"] != "not-arrived" \
                 or row[0]["fraction"] is not None:
             problems.append(f"a missing line was not recorded as not arrived: {row}")
+
+        # GitHub issue #1365: a slow guest that keeps printing arrives past
+        # the 10 s mark; each output restarts the quiet budget, so this is an
+        # arrival, where the old absolute deadline cut it off. The fake clock
+        # moves 3 s per reading, so the arrival lands far past 10 s.
+        ticks = [0.0]
+        def slow_clock():
+            ticks[0] += 3.0
+            return ticks[0]
+        slow = base / "slow.jsonl"
+        with contextlib.redirect_stdout(io.StringIO()):
+            found, _ = driver.observe_process(
+                subprocess.Popen(
+                    [sys.executable, "-c",
+                     "import sys, time\n"
+                     "for _ in range(6):\n"
+                     "    sys.stdout.write('tick\\n'); sys.stdout.flush(); time.sleep(0.1)\n"
+                     "sys.stdout.write('SYNTHETIC-ARRIVAL\\n')"],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT),
+                b"SYNTHETIC-ARRIVAL", str(slow), "line", clock=slow_clock)
+        row = rows(slow)
+        cases += 1
+        if not found or driver.last_end != "arrived" or not row[0]["fraction"] > 1.0:
+            problems.append("a guest still printing past the quiet budget was cut "
+                            f"off (the #1365 shape): found={found} "
+                            f"end={driver.last_end} {row}")
+
+        # Silence for the budget ends the wait, and the failure line says so
+        # instead of blaming what the missing line would have shown.
+        times = iter([0.0, 0.0, 0.0])
+        quiet = base / "quiet.jsonl"
+        found, _ = driver.observe_process(
+            subprocess.Popen([sys.executable, "-c",
+                              "import sys, time; sys.stdout.write('boot\\n'); "
+                              "sys.stdout.flush(); time.sleep(2)"],
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT),
+            b"SYNTHETIC-ARRIVAL", str(quiet), "line",
+            clock=lambda: next(times, 11.0))
+        cases += 1
+        if found or driver.last_end != "quiet" or "no output" not in driver.wait_note():
+            problems.append(f"a silent guest did not end as quiet: {driver.last_end} "
+                            f"{driver.wait_note()!r}")
+
+        # A guest printing forever stops at the cap.
+        times = iter([0.0, 0.0, 0.0])
+        capped = base / "capped.jsonl"
+        found, _ = driver.observe_process(
+            subprocess.Popen([sys.executable, "-c",
+                              "import sys, time\n"
+                              "while True:\n"
+                              "    sys.stdout.write('tick\\n'); sys.stdout.flush(); time.sleep(0.05)"],
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT),
+            b"SYNTHETIC-ARRIVAL", str(capped), "line",
+            clock=lambda: next(times, driver.OBSERVE_CAP_SECONDS + 1.0))
+        cases += 1
+        if found or driver.last_end != "cap" or "cap" not in driver.wait_note():
+            problems.append(f"an endless guest did not stop at the cap: {driver.last_end}")
 
         # The shell runner's command line: same rows, same margin line.
         for arrived_flag, ended, status, fraction in (
