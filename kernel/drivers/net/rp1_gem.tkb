@@ -274,12 +274,13 @@ fn gem_rearm_rx(r: borrow mut NetRxCanAcquire[net]) -> bool !{unsafe} {
         GemPktHeld::Unconfirmed(p) => { gem_pkt_park(index, GemPktHeld::Unconfirmed(p)); return false; }
         GemPktHeld::Kept(p) => { gem_pkt_park(index, GemPktHeld::Kept(p)); return false; }
     };
+    let mut address: usize = 0;
     match GemPkt_gem_pkt_post_rx(free) {
         GemPkt_gem_pkt_post_rx_Result::RxPosted(posted) => {
+            address = gem_pkt_rx_address(posted);
             gem_pkt_park(index, GemPktHeld::RxPosted(posted));
         }
     }
-    let address: usize = gem_pkt_published_address();
     let GemRxRingHeld::Ready(ready) = gem_rx_ring_ready() else {
         GemRxRingHeld::Armed(armed) => {
             gem_rx_ring_park(GemRxRingHeld::Armed(armed));
@@ -503,12 +504,15 @@ fn net_rx_acquire(ready: sink NetRxCanAcquire[net]) -> NetRxAcquire[net] !{unsaf
     let Place::Full(held) = gem_pkt_take(index) else {
         Place::Empty => { kernel_invariant_stop(); return NetRxAcquire::None(r); }
     };
-    let GemPktHeld::RxPosted(posted) = held else {
+    let GemPktHeld::RxPosted(held_posted) = held else {
         GemPktHeld::Free(p) => { gem_pkt_lost(GemPktHeld::Free(p)); return NetRxAcquire::None(r); }
         GemPktHeld::TxPosted(p) => { gem_pkt_lost(GemPktHeld::TxPosted(p)); return NetRxAcquire::None(r); }
         GemPktHeld::Unconfirmed(p) => { gem_pkt_lost(GemPktHeld::Unconfirmed(p)); return NetRxAcquire::None(r); }
         GemPktHeld::Kept(p) => { gem_pkt_lost(GemPktHeld::Kept(p)); return NetRxAcquire::None(r); }
     };
+    // gem_rx_ring_finish answered a length: its RxFilled was this buffer's.
+    let mut posted = held_posted;
+    gem_pkt_note_received(posted);
     match GemPkt_gem_pkt_received(posted) {
         GemPkt_gem_pkt_received_Outcome::PktEmpty => {
             gem_pkt_park(index, GemPktHeld::RxPosted(posted));
@@ -632,12 +636,14 @@ fn net_packet_kept_resend(ready: sink NetRxCanAcquire[net], kept: sink NetPacket
         GemTxClaim::Ready => {}
     }
     let slot: {0..<2 as usize} = gem_tx_next_slot(r);
+    let mut tx_dma: usize = 0;
     match GemPkt_gem_pkt_post_tx(kept.pkt) {
         GemPkt_gem_pkt_post_tx_Result::TxPosted(posted) => {
+            tx_dma = gem_pkt_tx_address(posted);
             gem_pkt_park(index, GemPktHeld::TxPosted(posted));
         }
     }
-    gem_tx_describe(r, slot, len);
+    gem_tx_describe(r, slot, len, tx_dma);
     gem_tx_start();
     gem_tx_finish(r, slot, index, true, len);
     return r;
@@ -662,9 +668,8 @@ private fn gem_tx_next_slot(r: borrow NetRxCanAcquire[net]) -> {0..<2 as usize} 
 }
 
 private fn gem_tx_describe(r: borrow mut NetRxCanAcquire[net], slot: {0..<2 as usize},
-                           safe_len: {0..<1515 as i32}) {
+                           safe_len: {0..<1515 as i32}, tx_dma: usize) {
     workload_profile_note_network_tx(safe_len as usize);
-    let tx_dma: usize = gem_pkt_published_address();
     let mut ctrl: u32 = (safe_len as u32) | (1 << 15); // LAST
     if (slot == 0) {
         r.tx_next = 1;
@@ -797,12 +802,15 @@ private fn gem_tx_finish(r: borrow mut NetRxCanAcquire[net], slot: {0..<2 as usi
                          index: usize, keep: bool,
                          len: {0..<1515 as i32}) -> bool !{may_block, unsafe} {
     if (gem_tx_wait(slot) && gem_tx_ring_settle(true)) {
-        let GemPktHeld::TxPosted(posted) = gem_tx_pkt(index) else {
+        let GemPktHeld::TxPosted(held_posted) = gem_tx_pkt(index) else {
             GemPktHeld::Free(p) => { gem_pkt_lost(GemPktHeld::Free(p)); return false; }
             GemPktHeld::RxPosted(p) => { gem_pkt_lost(GemPktHeld::RxPosted(p)); return false; }
             GemPktHeld::Unconfirmed(p) => { gem_pkt_lost(GemPktHeld::Unconfirmed(p)); return false; }
             GemPktHeld::Kept(p) => { gem_pkt_lost(GemPktHeld::Kept(p)); return false; }
         };
+        // gem_tx_ring_settle(true) answered TxUsed: it was this buffer's.
+        let mut posted = held_posted;
+        gem_pkt_note_sent(posted);
         match GemPkt_gem_pkt_sent(posted) {
             GemPkt_gem_pkt_sent_Outcome::PktSent(witness) => {
                 if (keep && index < GEM_PKTS) {
@@ -842,12 +850,14 @@ fn net_transmit(reply: sink NetRxReplyReady[pb, po, net])
     let pkt = field_take(reply.pkt);
     let mut r = field_take(reply.ready);
     let slot: {0..<2 as usize} = gem_tx_next_slot(r);
+    let mut tx_dma: usize = 0;
     match GemPkt_gem_pkt_post_tx(pkt) {
         GemPkt_gem_pkt_post_tx_Result::TxPosted(posted) => {
+            tx_dma = gem_pkt_tx_address(posted);
             gem_pkt_park(index, GemPktHeld::TxPosted(posted));
         }
     }
-    gem_tx_describe(r, slot, len);
+    gem_tx_describe(r, slot, len, tx_dma);
     gem_rearm_rx(r);
     gem_tx_start();
     let mut in_flight: NetTxInFlight[pb, po, net] = { slot, index, r };
@@ -931,12 +941,14 @@ private fn gem_send_built(r: borrow mut NetRxCanAcquire[net], index: usize, keep
     let out = GemPkt_Free_bytes(free, 0);
     slice_copy(out[0..<safe_len as usize], bytes[0..<safe_len as usize]);
     let slot: {0..<2 as usize} = gem_tx_next_slot(r);
+    let mut tx_dma: usize = 0;
     match GemPkt_gem_pkt_send(free) {
         GemPkt_gem_pkt_send_Result::TxPosted(posted) => {
+            tx_dma = gem_pkt_tx_address(posted);
             gem_pkt_park(index, GemPktHeld::TxPosted(posted));
         }
     }
-    gem_tx_describe(r, slot, safe_len);
+    gem_tx_describe(r, slot, safe_len, tx_dma);
     gem_tx_start();
     return gem_tx_finish(r, slot, index, keep, safe_len) && keep;
 }

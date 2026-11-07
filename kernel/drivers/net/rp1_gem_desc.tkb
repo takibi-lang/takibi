@@ -110,7 +110,6 @@ fn gem_rx_ring_peek_release(s: borrow mut GemRxRing_Armed[b, o, 4, r]) {
 fn gem_rx_ring_filled(s: borrow GemRxRing_Armed[b, o, 4, r])
         -> GemRxRing_gem_rx_ring_filled_Raw {
     if (GemRxRing_Armed_seen_filled(s) != 0) {
-        gem_pkt_rx_seen = true;
         return GemRxRing_gem_rx_ring_filled_Raw::RxFilled;
     }
     return GemRxRing_gem_rx_ring_filled_Raw::RxPending;
@@ -135,7 +134,6 @@ fn gem_tx_ring_peek_release(s: borrow mut GemTxRing_Sending[b, o, 4, r]) {
 fn gem_tx_ring_used(s: borrow GemTxRing_Sending[b, o, 4, r])
         -> GemTxRing_gem_tx_ring_used_Raw {
     if (GemTxRing_Sending_seen_used(s) != 0) {
-        gem_pkt_tx_seen = true;
         return GemTxRing_gem_tx_ring_used_Raw::TxUsed;
     }
     return GemTxRing_gem_tx_ring_used_Raw::TxNotUsed;
@@ -301,9 +299,11 @@ struct GemPacket {
 
 protocol GemPkt[inst: usize] retains region(GemPacket)[b, GEM_PKT_ONE] txrx {
     state Free access write;
-    state RxPosted[req] device;
+    // GitHub issue #1416: whether the ring's completes observation saw this
+    // buffer's descriptor done, noted on the owner by the driver (state data).
+    state RxPosted[req] device { seen: u8 = 0; }
     state Filled access write;
-    state TxPosted[req] device access read;
+    state TxPosted[req] device access read { seen: u8 = 0; }
     state Unconfirmed[req] device;
     init Free;
     transition gem_pkt_post_rx(Free) rx -> RxPosted[fresh req];
@@ -324,35 +324,22 @@ protocol GemPkt[inst: usize] retains region(GemPacket)[b, GEM_PKT_ONE] txrx {
 
 private region let mut gem_pkt_pool: [GemPacket; 4] align(64);
 
-// The bus address the latest publication handed out, for the descriptor.
-private let mut gem_pkt_addr: usize = 0;
-// Set by the rings' completes observations above, read once here.
-private let mut gem_pkt_rx_seen: bool = false;
-private let mut gem_pkt_tx_seen: bool = false;
+// GitHub issue #1416: the descriptor address comes from the posted owner
+// (gem_pkt_rx_address/gem_pkt_tx_address), and the rings' completes
+// observations reach the buffer as its owner's `seen` field, not globals.
 
-fn gem_pkt_post_rx(s: borrow GemPkt_RxPosted[b, o, 1, r]) !{unsafe} {
-    let mut span: DmaDeviceSpan = GemPkt_RxPosted_span(s);
-    gem_pkt_addr = rp1_span_bus_address(span);
-    gem_pkt_rx_seen = false;
-}
+fn gem_pkt_post_rx(s: borrow GemPkt_RxPosted[b, o, 1, r]) {}
 fn gem_pkt_received(s: borrow GemPkt_RxPosted[b, o, 1, r]) -> GemPkt_gem_pkt_received_Raw {
-    if (gem_pkt_rx_seen) {
-        gem_pkt_rx_seen = false;
+    if (GemPkt_RxPosted_seen(s) != 0) {
         return GemPkt_gem_pkt_received_Raw::PktReceived;
     }
     return GemPkt_gem_pkt_received_Raw::PktEmpty;
 }
 fn gem_pkt_fill(s: borrow GemPkt_RxPosted[b, o, 1, r]) {}
-fn gem_pkt_post_tx(s: borrow GemPkt_TxPosted[b, o, 1, r]) !{unsafe} { gem_pkt_tx_posted(s); }
-fn gem_pkt_send(s: borrow GemPkt_TxPosted[b, o, 1, r]) !{unsafe} { gem_pkt_tx_posted(s); }
-private fn gem_pkt_tx_posted(s: borrow GemPkt_TxPosted[b, o, 1, r]) !{unsafe} {
-    let mut span: DmaDeviceSpan = GemPkt_TxPosted_span(s);
-    gem_pkt_addr = rp1_span_bus_address(span);
-    gem_pkt_tx_seen = false;
-}
+fn gem_pkt_post_tx(s: borrow GemPkt_TxPosted[b, o, 1, r]) {}
+fn gem_pkt_send(s: borrow GemPkt_TxPosted[b, o, 1, r]) {}
 fn gem_pkt_sent(s: borrow GemPkt_TxPosted[b, o, 1, r]) -> GemPkt_gem_pkt_sent_Raw {
-    if (gem_pkt_tx_seen) {
-        gem_pkt_tx_seen = false;
+    if (GemPkt_TxPosted_seen(s) != 0) {
         return GemPkt_gem_pkt_sent_Raw::PktSent;
     }
     return GemPkt_gem_pkt_sent_Raw::PktPending;
@@ -367,8 +354,23 @@ fn gem_pkt_reclaim(s: borrow GemPkt_TxPosted[b, o, 1, r]) {}
 fn gem_pkt_expire(s: borrow GemPkt_TxPosted[b, o, 1, r]) {}
 fn gem_pkt_recycle(s: borrow GemPkt_Filled[b, o, 1]) {}
 
-// The address of the latest publication.
-fn gem_pkt_published_address() -> usize { return gem_pkt_addr; }
+// The bus address a posted buffer gives its descriptor, from its owner.
+fn gem_pkt_rx_address(s: borrow GemPkt_RxPosted[b, o, 1, r]) -> usize !{unsafe} {
+    let mut span: DmaDeviceSpan = GemPkt_RxPosted_span(s);
+    return rp1_span_bus_address(span);
+}
+fn gem_pkt_tx_address(s: borrow GemPkt_TxPosted[b, o, 1, r]) -> usize !{unsafe} {
+    let mut span: DmaDeviceSpan = GemPkt_TxPosted_span(s);
+    return rp1_span_bus_address(span);
+}
+// The RX ring's completes observation (RxFilled) was this buffer's.
+fn gem_pkt_note_received(s: borrow mut GemPkt_RxPosted[b, o, 1, r]) {
+    GemPkt_RxPosted_set_seen(s, 1);
+}
+// The TX ring's completes observation (TxUsed) was this buffer's.
+fn gem_pkt_note_sent(s: borrow mut GemPkt_TxPosted[b, o, 1, r]) {
+    GemPkt_TxPosted_set_seen(s, 1);
+}
 
 // A buffer between operations: Free, or with the device. A Filled buffer
 // is never parked here; the stack holds it.

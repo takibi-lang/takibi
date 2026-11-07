@@ -490,3 +490,12 @@ entries below that date are history, left as written.
   `Sending` states (#1395), set by the snapshot's release and read by the
   completes observation; a fresh owner starts at 0, which the TSTART reset
   did by hand.
+  did by hand.
+- 2026-11-07: GEM's packet relays (#1416, slice 3). As on virtio
+  (`issue-1159-virtio-pkt`): the descriptor address comes from the posted
+  `GemPkt` owner before it is parked (`gem_pkt_rx_address`,
+  `gem_pkt_tx_address`, now the reviewed `rp1_span_bus_address` writers), not
+  `gem_pkt_addr`; the rings' completes observations reach the buffer as a
+  `seen` field of its `RxPosted`/`TxPosted` owner, noted by the driver once
+  the ring answered (`gem_pkt_note_received`, `gem_pkt_note_sent`), not as
+  `gem_pkt_rx_seen`/`gem_pkt_tx_seen`.

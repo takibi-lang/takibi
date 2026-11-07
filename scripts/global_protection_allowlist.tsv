@@ -44,9 +44,6 @@ kernel/drivers/net/rp1_gem.tkb	rp1_clocks	read-by net_init: 2026-10-31 handle: o
 kernel/drivers/net/rp1_gem.tkb	rp1_gpio_ctrl	read-by gem_phy_reset: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
 kernel/drivers/net/rp1_gem.tkb	rp1_gpio_pads	read-by gem_phy_reset: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
 kernel/drivers/net/rp1_gem.tkb	rp1_gpio_rio	read-by rpi5_gem_attach_bootstrap: 2026-10-31 handle: attach is the one non-write use; gem_phy_reset writes through it at boot; one handle word attached once at boot before its interrupt or first use; only registers change after
-kernel/drivers/net/rp1_gem_desc.tkb	gem_pkt_addr	read-by gem_pkt_published_address: 2026-10-31 token: address handed from a post to its descriptor write, under the one NetRxCanAcquire token
-kernel/drivers/net/rp1_gem_desc.tkb	gem_pkt_rx_seen	read-by gem_pkt_received: 2026-10-31 token: observation handed to the generated transition, under the one NetRxCanAcquire token
-kernel/drivers/net/rp1_gem_desc.tkb	gem_pkt_tx_seen	read-by gem_pkt_sent: 2026-10-31 token: as gem_pkt_rx_seen, for transmit
 kernel/drivers/net/virtio_net.tkb	virtio_net_queues	read-by virtio_queue_setup: 2026-10-31 token: descriptor and avail writes under the one NetRxCanAcquire token; the device reads them; the setup address is boot only
 kernel/drivers/net/virtio_net.tkb	virtio_net_regs	read-by net_init,virtio_net_irq_handler,net_read_mac: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
 kernel/drivers/net/virtio_net.tkb	virtio_net_used_addr	read-by kernel_net_rx_frame_pending: 2026-10-31 boot: written by virtio_queue_setup; DDB reads it stopped
