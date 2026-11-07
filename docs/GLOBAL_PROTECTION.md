@@ -439,3 +439,17 @@ entries below that date are history, left as written.
   `owned_by(ProcessImageSlot.index, 1)`; every use already indexed by
   `slot.index`, and the acquire resets the staging sources through the slot
   it has just minted rather than the bare index.
+- 2026-11-07: stopped-world reads of a per_cpu element (GitHub issue #1159,
+  rule 1 of the 2026-11-07 decision; SPEC.md, Stopped-world reads).
+  `stopped_read(stopped, g[i].f)` copies a scalar out of any CPU's element
+  when `stopped` is a `borrow MachineStopped` parameter. `kernel_activity`
+  becomes the per_cpu store `KernelActivityCell`: every own-CPU access is one
+  preempt_off region (`kernel_activity_here`, `_set`, `_enter`, `_leave`), and
+  DDB's `current` reads the others through `kernel_activity_of(stopped, core)`,
+  so its `FLIP BREAKS` note above no longer applies. The other targets stay
+  listed: `kernel_crash_trace` is copied live from a crashing core and from
+  boot probes with peers running (a sequence protocol, not a stop) and
+  `kernel_process_crash_trace_reset` clears every core's slots live, and
+  `execution_state` has readers outside a stop (the protocol observation
+  under the run lock, the logger's stack owner), so a stop authority alone
+  does not cover them.

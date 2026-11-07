@@ -142,6 +142,7 @@ RULES = {
     "typed protection": "#1012",
     "BootOnce": "#1013",
     "owned_by": "#1159",
+    "stopped_read": "#1159",
     "code removed": "dead code deleted with no replacement",
     "category split": "the sites moved to another category; none left the base",
     "counted again": "#1311: the same files, a count that ignores layout",

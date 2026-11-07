@@ -532,6 +532,13 @@ let locally_bound_names : StringSet.t ref = ref StringSet.empty
    tyenv's scoping decides which of them a use means (#1281). *)
 let let_match_binder_entries : (string * (ty * bool)) list ref = ref []
 let active_readonly_borrows : StringSet.t ref = ref StringSet.empty
+(* GitHub issue #1159 rule 1: the current function's parameters of type
+   `borrow MachineStopped[...]`, the authorities stopped_read accepts. *)
+let active_stop_borrows : StringSet.t ref = ref StringSet.empty
+let stop_authority_name = "MachineStopped"
+(* The root `g[i]` of each stopped_read place, keyed by the index's loc: the
+   one per_cpu index the CpuHere rule lets through. *)
+let stopped_read_indices : (string * int, unit) Hashtbl.t = Hashtbl.create 8
 let function_param_modes : Ast.type_expr option list StringMap.t ref =
   ref StringMap.empty
 
@@ -4793,6 +4800,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   | Index ({ desc = Var global; _ }, idx)
     when Hashtbl.mem Per_cpu_registry.globals global
          && Per_cpu_registry.rewritten_global idx.loc = None
+         && not (Hashtbl.mem stopped_read_indices
+                   (Per_cpu_registry.loc_key idx.loc))
          && (match StringMap.find_opt global tyenv with
              | Some (t, _) ->
                  (match repr t with
@@ -6048,6 +6057,53 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            TVoid
        | _ -> raise (TypeError (e.loc, Printf.sprintf
            "%s expects two arguments: %s(ptr, len)" fname fname)))
+
+  | Call ("stopped_read" as fname, args) ->
+      (* GitHub issue #1159 rule 1: a stopped-world read of any CPU's
+         per_cpu element. The authority is a `borrow MachineStopped`
+         parameter, which the body cannot consume, so the world stays
+         stopped for the read; the result is a copy of a scalar, so the
+         read cannot be written through. *)
+      (match args with
+       | [ { desc = Var authority; loc = aloc }; place ] ->
+           if not (StringSet.mem authority !active_stop_borrows) then
+             raise (TypeError (aloc, Printf.sprintf
+               "%s: '%s' is not a parameter of type `borrow %s[...]`; only a \
+                borrowed stop authority keeps every other CPU stopped for \
+                the whole read" fname authority stop_authority_name));
+           (match repr (infer_expr senv eenv tyenv fenv
+                          (List.hd args)) with
+            | TStruct n | TIndexedStruct (n, _) when n = stop_authority_name -> ()
+            | t -> raise (TypeError (aloc, Printf.sprintf
+                "%s: '%s' here is %s, not the borrowed %s parameter"
+                fname authority (Types.to_string t) stop_authority_name)));
+           let rec root (p : Ast.expr) = match p.desc with
+             | FieldGet (b, _) -> root b
+             | Index ({ desc = Var g; _ }, idx)
+               when Hashtbl.mem Per_cpu_registry.globals g -> Some idx
+             | Index (b, _) -> root b
+             | _ -> None in
+           (match root place with
+            | Some idx ->
+                Hashtbl.replace stopped_read_indices
+                  (Per_cpu_registry.loc_key idx.loc) ()
+            | None ->
+                raise (TypeError (place.loc, Printf.sprintf
+                  "%s reads `store[i]` or a field path below it, with store \
+                   a per_cpu global" fname)));
+           let t = infer_expr senv eenv tyenv fenv place in
+           let is_enum n = StringMap.mem n eenv in
+           (match repr t, non_scalar_kind ~is_enum t with
+            | (TRef _ | TRefMut _), _ | _, Some _ ->
+                raise (TypeError (place.loc, Printf.sprintf
+                  "%s copies a scalar or enum out of the element; this \
+                   place is %s, read a scalar field below it"
+                  fname (Types.to_string t)))
+            | _ -> ());
+           t
+       | _ -> raise (TypeError (e.loc, Printf.sprintf
+           "%s expects a bare stop authority and a place: \
+            %s(stopped, store[i].field)" fname fname)))
 
   | Call ("src_loc" as fname, args) ->
       (* GitHub issue #1024: the call site's own location, explicit at the
@@ -8793,13 +8849,20 @@ let infer_func ~key senv eenv fenv genv (fdef : Ast.func) : func_info =
     match ty with
     | Some (Ast.TypeBorrow _) -> StringSet.add name names
     | _ -> names) StringSet.empty fdef.params;
+  let previous_stop = !active_stop_borrows in
+  active_stop_borrows := List.fold_left (fun names (name, ty) ->
+    match ty with
+    | Some (Ast.TypeBorrow (Ast.TypeNamed n | Ast.TypeIndexed (n, _)))
+      when n = stop_authority_name -> StringSet.add name names
+    | _ -> names) StringSet.empty fdef.params;
   Fun.protect ~finally:(fun () ->
     active_audit_function := "<global>";
     active_runtime_bounds_key := previous_bounds_key;
     runtime_bounds := previous_bounds;
     runtime_bounds_address_taken := previous_bounds_address_taken;
     active_static_scope := previous_scope;
-    active_readonly_borrows := previous_readonly) (fun () ->
+    active_readonly_borrows := previous_readonly;
+    active_stop_borrows := previous_stop) (fun () ->
     check_const_shadowing fdef;
     active_runtime_bounds_key := key;
     runtime_bounds := Runtime_bounds.empty;
@@ -9029,6 +9092,24 @@ let validate_owned_by (prog : Ast.toplevel list) =
       | _ -> ()) prog
   end
 
+(* GitHub issue #1159 rule 1: stopped_read trusts MachineStopped by name, so
+   the type must be one no other file can make: linear, every field private. *)
+let validate_stop_authority (prog : Ast.toplevel list) =
+  List.iter (function
+    | Ast.OwnedStructDef (name, kind, _, fields, _, _, privates, _, loc)
+      when name = stop_authority_name ->
+        if kind <> Ast.KindLinear || fields = []
+           || List.exists (fun (f, _) -> not (List.mem f privates)) fields then
+          raise (TypeError (loc, Printf.sprintf
+            "%s is the stop authority stopped_read accepts: it must be a \
+             linear struct with at least one field, every field private"
+            name))
+    | Ast.StructDef (name, _, _, _, _, loc) when name = stop_authority_name ->
+        raise (TypeError (loc, Printf.sprintf
+          "%s is the stop authority stopped_read accepts: it must be a \
+           linear struct with every field private" name))
+    | _ -> ()) prog
+
 let validate_per_cpu (prog : Ast.toplevel list) =
   let stores = Hashtbl.fold (fun name () acc -> name :: acc)
       Per_cpu_registry.stores [] in
@@ -9145,6 +9226,7 @@ let validate_per_cpu (prog : Ast.toplevel list) =
    without type-checking first never sees an earlier compilation's. *)
 let reset_compilation_state () =
   Line_owner.reset ();
+  Hashtbl.reset stopped_read_indices;
   runtime_bounds_regions := StringSet.empty;
   active_runtime_bounds_key := "";
   runtime_bounds := Runtime_bounds.empty;
@@ -9252,6 +9334,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   Declared_type_resolver.validate prog;
   validate_per_cpu prog;
   validate_owned_by prog;
+  validate_stop_authority prog;
   (* GitHub issue #79 follow-up: ONE flat namespace for every top-level
      name, not just functions and globals (the two kinds fixed earlier in
      this same follow-up) -- struct, opaque struct, and enum names now

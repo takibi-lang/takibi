@@ -109,6 +109,17 @@ let rec resolve_expr names expr =
   let desc = match expr.desc with
     | IntLit _ | BoolLit _ | StringLit _ | ByteSliceLit _ | Var _ | EnumVariant _
     | EmbedFile _ | ViewLit _ as desc -> desc
+    | Call ("stopped_read", [authority; place]) ->
+        (* GitHub issue #1159 rule 1: the place's per_cpu root `g[i]` keeps
+           its index; the checker requires the stop authority instead. *)
+        let rec keep (p : expr) = match p.desc with
+          | FieldGet (b, f) -> { p with desc = FieldGet (keep b, f) }
+          | Index (({ desc = Var g; _ } as b), i)
+            when Hashtbl.mem Per_cpu_registry.globals g ->
+              { p with desc = Index (b, ex i) }
+          | Index (b, i) -> { p with desc = Index (keep b, ex i) }
+          | _ -> ex p in
+        Call ("stopped_read", [ex authority; keep place])
     | Call (name, args) -> Call (name, List.map ex args)
     | VariantCtor (variant, case, payload) ->
         VariantCtor (variant, case, ex payload)

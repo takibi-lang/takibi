@@ -1838,7 +1838,7 @@ private fn ddb_render_oops() !{unsafe} {
     ddb_puts("\n");
 }
 
-private fn ddb_render_current() !{unsafe} {
+private fn ddb_render_current(stopped: borrow MachineStopped[&kernel_world_stop]) !{unsafe} {
     ddb_puts("ddb: current pid="); ddb_put_udec(ddb_snapshot.process_pid);
     ddb_puts(" parent="); ddb_put_udec(ddb_snapshot.parent_pid);
     ddb_puts(" state="); ddb_put_udec(ddb_snapshot.process_state);
@@ -1851,7 +1851,7 @@ private fn ddb_render_current() !{unsafe} {
             let core: {0..<KERNEL_MAX_CORES as usize} = raw;
             ddb_puts("ddb: activity cpu="); ddb_put_udec(raw);
             ddb_puts(" ");
-            ddb_puts(kernel_activity_name(kernel_activity_of(core)));
+            ddb_puts(kernel_activity_name(kernel_activity_of(stopped, core)));
             // GitHub issue #609: and whose stack it stands on, which is not
             // always the process it runs.
             ddb_puts(" current="); ddb_put_udec(kernel_process_cpu_current_pid(core));
@@ -2925,7 +2925,7 @@ private fn kernel_ddb_enter_stopped(
         } else if (ddb_command_is(line as []u8, length, bs"regs")) {
             ddb_render_regs();
         } else if (ddb_command_is(line as []u8, length, bs"current")) {
-            ddb_render_current();
+            ddb_render_current(stopped_world);
         } else if (ddb_command_is(line as []u8, length, bs"intr")) {
             ddb_render_intr();
         } else if (ddb_command_is(line as []u8, length, bs"sched")) {

@@ -2939,6 +2939,15 @@ let per_cpu_take index = "
     match held { Place::Empty => {} Place::Full(t) => { token_drop704(t); } }
   }"
 
+(* GitHub issue #1159 rule 1: a stopped-world read of any CPU's element. *)
+let stopped_read_base = "
+  struct cpu_authority CpuIndex1159 { private id: {0..<4 as usize}; }
+  linear struct MachineStopped[stop: addr] { private mask: usize; }
+  struct per_cpu Word1159 { private word: usize; private on: bool; }
+  private let mut words1159: [Word1159; 4];
+  private let mut stop1159: usize;
+"
+
 let issue370_cell_fixture = {|
   linear struct CellOwner[p: addr] { private value: usize; }
   struct BrandCell[p: addr] {
@@ -12218,6 +12227,69 @@ linear struct Owner746b[page: usize] {
   Alcotest.test_case "CPU authority cannot be parked in a place" `Quick
     (expect_type_error "cannot pass the CPU authority inside a variant"
        (per_cpu_base ^ "fn park704(p: Place(CpuIndex704)) {}"));
+  Alcotest.test_case "stopped_read reads any CPU's element under a borrowed stop" `Quick
+    (expect_ok (stopped_read_base ^ "
+      fn peek1159(stopped: borrow MachineStopped[&stop1159],
+                  core: {0..<4 as usize}) -> usize {
+        if (stopped_read(stopped, words1159[core].on)) {
+          return stopped_read(stopped, words1159[core].word);
+        }
+        return 0;
+      }"));
+  Alcotest.test_case "per-CPU element by integer index still needs the authority" `Quick
+    (expect_type_error "is indexed only by a CpuIndex1159 value"
+       (stopped_read_base ^ "
+      fn peek1159(stopped: borrow MachineStopped[&stop1159],
+                  core: {0..<4 as usize}) -> usize {
+        return words1159[core + 0].word;
+      }"));
+  Alcotest.test_case "stopped_read rejects an owned stop authority" `Quick
+    (expect_type_error "is not a parameter of type `borrow MachineStopped"
+       (stopped_read_base ^ "
+      fn peek1159(stopped: sink MachineStopped[&stop1159],
+                  core: {0..<4 as usize}) -> usize {
+        return stopped_read(stopped, words1159[core].word);
+      }"));
+  Alcotest.test_case "stopped_read rejects a non-authority variable" `Quick
+    (expect_type_error "is not a parameter of type `borrow MachineStopped"
+       (stopped_read_base ^ "
+      fn peek1159(stopped: usize, core: {0..<4 as usize}) -> usize {
+        return stopped_read(stopped, words1159[core].word);
+      }"));
+  Alcotest.test_case "stopped_read copies a scalar, not the element" `Quick
+    (expect_type_error "copies a scalar or enum out of the element"
+       (stopped_read_base ^ "
+      fn peek1159(stopped: borrow MachineStopped[&stop1159],
+                  core: {0..<4 as usize}) {
+        let w: Word1159 = stopped_read(stopped, words1159[core]);
+      }"));
+  Alcotest.test_case "stopped_read is not a place to write" `Quick
+    (expect_type_error "not an assignable expression"
+       (stopped_read_base ^ "
+      fn poke1159(stopped: borrow MachineStopped[&stop1159],
+                  core: {0..<4 as usize}) {
+        stopped_read(stopped, words1159[core].word) = 1;
+      }"));
+  Alcotest.test_case "stopped_read rejects a local shadowing the authority" `Quick
+    (expect_type_error "not the borrowed MachineStopped"
+       (stopped_read_base ^ "
+      fn peek1159(stopped: borrow MachineStopped[&stop1159],
+                  core: {0..<4 as usize}) -> usize {
+        if (core == 0) {
+          let stopped: usize = 0;
+          return stopped_read(stopped, words1159[core].word);
+        }
+        return 0;
+      }"));
+  Alcotest.test_case "stopped_read needs a per_cpu root" `Quick
+    (expect_type_error "with store a per_cpu global"
+       (stopped_read_base ^ "
+      fn peek1159(stopped: borrow MachineStopped[&stop1159]) -> usize {
+        return stopped_read(stopped, stop1159);
+      }"));
+  Alcotest.test_case "MachineStopped must keep its fields private" `Quick
+    (expect_type_error "every field private"
+       "linear struct MachineStopped[stop: addr] { mask: usize; }");
   Alcotest.test_case "CPU authority needs one private bounded index field" `Quick
     (expect_type_error "must have exactly one private field"
        "struct cpu_authority Loose704 { id: usize; }");

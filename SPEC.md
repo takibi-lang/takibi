@@ -2175,6 +2175,33 @@ fn handoff_take(cpu: CpuHere) -> Place(exists page: usize. PageOwner[page]) {
   or a place cannot hold one. It lives in locals, parameters and returns
   only, so it ends with the kernel action that minted it.
 
+#### Stopped-world reads (GitHub issue #1159)
+
+```takibi
+fn kernel_activity_of(stopped: borrow MachineStopped[&kernel_world_stop],
+        core: {0..<KERNEL_MAX_CORES as usize}) -> KernelActivity {
+    return stopped_read(stopped, kernel_activity[core].activity);
+}
+```
+
+`stopped_read(stopped, g[i].f...)` is the one way to reach another CPU's
+element of a `per_cpu` global: with every other CPU stopped, no owner can
+be writing it.
+
+- `stopped` is a bare variable naming a parameter of type
+  `borrow MachineStopped[...]`; a local of that name that shadows the
+  parameter is rejected. A borrowed parameter cannot be consumed in the
+  body, so the stop holds for every read in it. The compiler knows the
+  authority by its name, `MachineStopped`, and requires that type to be a
+  linear struct whose fields are all private, so only its defining file
+  makes one.
+- The second argument is `g[i]` or a field and index path below it, with
+  `g` a `per_cpu` global; `i` is any index the ordinary array rule accepts.
+  Only that root index is exempt from the authority rule above.
+- The result is a copy, and its type is a scalar or an enum (not a
+  reference): `stopped_read(...)` is not a place, so the read cannot be
+  assigned through or borrowed.
+
 ### Preemption-disabled regions (GitHub issue #638)
 
 ```takibi

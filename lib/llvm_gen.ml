@@ -5405,6 +5405,11 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       if is_volatile then set_volatile true store;
       (value_ty, old_value)
 
+  | Call ("stopped_read", [_; place]) ->
+      (* GitHub issue #1159 rule 1: the authority is erased; the read is the
+         place's own value. *)
+      gen_expr ?expected_ty locals place
+
   | Call ("src_loc", []) ->
       (* GitHub issue #1024: an immediate; type_inf checked it packs. *)
       let bits = match Src_loc.pack e.loc with
