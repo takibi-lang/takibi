@@ -16846,6 +16846,19 @@ let codegen_tests = [
       expect_type_error_at 2 1 "is an opaque struct"
         "linear opaque struct L1422;\nextern fn g1422(p: *align(8) L1422);" ());
 
+  (* GitHub issue #1419: each non-integer, non-pointer target refuses a
+     literal at type checking (two used to reach codegen as a BUG). *)
+  Alcotest.test_case "integer literal refused for variant, fn, view, ref" `Quick
+    (fun () ->
+      expect_type_error "where variant V1419 is expected"
+        "variant V1419 { A; B; }\nfn a1419() -> V1419 { return 5; }" ();
+      expect_type_error "integer literal 5 where"
+        "fn g1419() {}\nfn b1419() -> fn() { return 5; }" ();
+      expect_type_error "where view W1419 is expected"
+        "linear view W1419;\nfn c1419() -> W1419 { return 5; }" ();
+      expect_type_error "integer literal 3 where &"
+        "struct S1419 { a: u32; }\nfn h1419(r: &S1419) {}\nfn d1419() { h1419(3); }" ());
+
   Alcotest.test_case "explicit wrapping multiply lowers to fixed-width arithmetic" `Quick
     (fun () ->
       ignore (gen_codegen

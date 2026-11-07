@@ -1211,7 +1211,25 @@ let check_integer_literal_target_shape loc (e : Ast.expr) (target : ty) =
              "cannot use integer literal %d where SrcLoc is expected; only \
               src_loc() makes one" k))
        | None -> ())
-  | _ -> ()
+  (* GitHub issue #1419: every constructor is named, so a new type has to
+     decide here whether an integer literal may inhabit it (lib/AGENTS.md).
+     Naming them found literals accepted where none belongs: a variant and
+     a function pointer reached codegen as an internal "abi slot" BUG, and
+     an erased view compiled. *)
+  | TVariant _ | TView _ | TExists _ | TFun _ | TRef _ | TRefMut _ | TVoid ->
+      (* fold-not-proof: a rejection; the value only names the literal. *)
+      (match Const_env.bound_value e with
+       | Some k ->
+           raise (TypeError (loc, Printf.sprintf
+             "cannot use integer literal %d where %s is expected" k
+             (to_string target)))
+       | None -> ())
+  (* Integers and their refinements take a literal; a pointer takes one (a
+     null or MMIO base, see above); a type variable is still open. *)
+  | TI8 | TI16 | TI32 | TI64 | TU8 | TU16 | TU32 | TU64
+  | TU16Be | TU32Be | TIsize | TUsize
+  | TRefinedInt _ | TMultiple _ | TSingleton _
+  | TPtr _ | TAlignedPtr _ | TIo _ | TVar _ -> ()
 
 let rec static_place_key (e : Ast.expr) =
   match e.desc with
