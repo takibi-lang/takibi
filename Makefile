@@ -1470,8 +1470,9 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	# The 6 MiB extent is the content rounded up to a MiB (#742). /pad holds
 	# the rounding, so the boot fixture that fills the free blocks before its
 	# ENOSPC checks does the same work as on the 2816-block image; shrink it
-	# when a program is added.
-	head -c 282624 /dev/zero >$@.$(MAKE_PID).pad.tmp
+	# when a program is added. #1413 shrank it from 276 to 148 blocks after
+	# #1024 left the image one block above check_ext2_image_free_blocks' floor.
+	head -c 151552 /dev/zero >$@.$(MAKE_PID).pad.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.$(MAKE_PID).pad.tmp $@.$(MAKE_PID).tmp:/pad
 	rm -f $@.$(MAKE_PID).pad.tmp
 	# Execute-only file for the maintained access/faccessat R_OK and W_OK checks.
