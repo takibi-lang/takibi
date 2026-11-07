@@ -56,7 +56,9 @@ CONSTANT
     \* @type: Bool;
     IRQSKIPSVC,
     \* @type: Bool;
-    PIDGUARD
+    PIDGUARD,
+    \* @type: Bool;
+    PREEMPTIBLE
 
 \* Two cores, and four processes: the waiting parent, its two children, and
 \* one other runnable process. The other one matters: wait4 only takes the
@@ -97,9 +99,12 @@ RunsOn(p, c) == current[c] = p
 Targets == IF target = Any THEN Kids ELSE {target}
 
 \* The parent is in the middle of its wait4 syscall once it has decided;
-\* the kernel is not preemptible there (KERNEL_PREEMPTIBLE = 0).
+\* the kernel is not preemptible there while KERNEL_PREEMPTIBLE = 0. With
+\* PREEMPTIBLE (the #638 flip, stage 9) the tick may take it between the
+\* decision and the Blocked publication too, two critical sections with no
+\* lock held between them; the fixed design must pass either way.
 \* @type: (Str) => Bool;
-Preemptible(p) == p # "parent" \/ wait \in {"call", "done"}
+Preemptible(p) == PREEMPTIBLE \/ p # "parent" \/ wait \in {"call", "done"}
 
 ----------------------------------------------------------------------------
 (* Initial state: the parent and k1 running, k2 and the other Ready. *)
@@ -329,16 +334,18 @@ SignalRuns == sig ~> ~sig
 (* Constant initializers for Apalache (TLC reads the .cfg files instead). *)
 
 CInitFixed == RECHECK = TRUE /\ SIGRECHECK = TRUE /\
-    IRQDELIVER = TRUE /\ IRQSKIPSVC = TRUE /\ PIDGUARD = TRUE
+    IRQDELIVER = TRUE /\ IRQSKIPSVC = TRUE /\ PIDGUARD = TRUE /\ PREEMPTIBLE = FALSE
 CInitUnfixed == RECHECK = FALSE /\ SIGRECHECK = TRUE /\
-    IRQDELIVER = TRUE /\ IRQSKIPSVC = TRUE /\ PIDGUARD = TRUE
+    IRQDELIVER = TRUE /\ IRQSKIPSVC = TRUE /\ PIDGUARD = TRUE /\ PREEMPTIBLE = FALSE
 CInitSigUnfixed == RECHECK = TRUE /\ SIGRECHECK = FALSE /\
-    IRQDELIVER = TRUE /\ IRQSKIPSVC = TRUE /\ PIDGUARD = TRUE
+    IRQDELIVER = TRUE /\ IRQSKIPSVC = TRUE /\ PIDGUARD = TRUE /\ PREEMPTIBLE = FALSE
 CInitIrqUnfixed == RECHECK = TRUE /\ SIGRECHECK = TRUE /\
-    IRQDELIVER = FALSE /\ IRQSKIPSVC = TRUE /\ PIDGUARD = TRUE
+    IRQDELIVER = FALSE /\ IRQSKIPSVC = TRUE /\ PIDGUARD = TRUE /\ PREEMPTIBLE = FALSE
 CInitSvcUnfixed == RECHECK = TRUE /\ SIGRECHECK = TRUE /\
-    IRQDELIVER = TRUE /\ IRQSKIPSVC = FALSE /\ PIDGUARD = TRUE
+    IRQDELIVER = TRUE /\ IRQSKIPSVC = FALSE /\ PIDGUARD = TRUE /\ PREEMPTIBLE = FALSE
 CInitPidUnfixed == RECHECK = TRUE /\ SIGRECHECK = TRUE /\
-    IRQDELIVER = TRUE /\ IRQSKIPSVC = TRUE /\ PIDGUARD = FALSE
+    IRQDELIVER = TRUE /\ IRQSKIPSVC = TRUE /\ PIDGUARD = FALSE /\ PREEMPTIBLE = FALSE
+CInitPreemptible == RECHECK = TRUE /\ SIGRECHECK = TRUE /\
+    IRQDELIVER = TRUE /\ IRQSKIPSVC = TRUE /\ PIDGUARD = TRUE /\ PREEMPTIBLE = TRUE
 
 =============================================================================

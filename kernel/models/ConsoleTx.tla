@@ -47,6 +47,10 @@ EXTENDS Integers, Sequences
 (* chunk are not modelled: a chunk is one indivisible append, as a whole    *)
 (* user-output chunk is admitted under the run guard.                       *)
 (*                                                                         *)
+(* PREEMPTIBLE = TRUE is the #638 flip (stage 9): a tick may also move the *)
+(* writer between its decision and its sleep, two critical sections with no *)
+(* lock held between them. The fixed design must pass either way.          *)
+(*                                                                         *)
 (* kernel/models/README.md maps each action to the functions it abstracts.  *)
 (***************************************************************************)
 
@@ -58,7 +62,9 @@ CONSTANTS
     \* @type: Bool;
     NESTED,
     \* @type: Bool;
-    POLLWAKE
+    POLLWAKE,
+    \* @type: Bool;
+    PREEMPTIBLE
 
 CHUNKS == 3
 QCAP == 1
@@ -194,10 +200,11 @@ Drain ==
     /\ ring' = Tail(ring)
     /\ UNCHANGED <<nextChunk, loc, pc, runLock, conLock, wakePending, wire>>
 
-\* The scheduler moves the process between writes (never inside one: the
-\* kernel is not preemptible in a syscall).
+\* The scheduler moves the process between writes; with PREEMPTIBLE (the #638
+\* flip) also between a write's decision and its sleep, where it holds no
+\* lock. Never inside a critical section: those hold a masking lock.
 Migrate ==
-    /\ pc = "idle"
+    /\ pc \in (IF PREEMPTIBLE THEN {"idle", "decided"} ELSE {"idle"})
     /\ loc' = 1 - loc
     /\ UNCHANGED <<nextChunk, pc, runLock, conLock, wakePending, queue, ring, wire>>
 
@@ -264,10 +271,11 @@ AllSent == <>(nextChunk = CHUNKS + 1 /\ queue = <<>> /\ ring = <<>>)
 ----------------------------------------------------------------------------
 (* Constant initializers for Apalache (TLC reads the .cfg files instead). *)
 
-CInitFixed == LOCKED = TRUE /\ RECHECK = TRUE /\ NESTED = FALSE /\ POLLWAKE = TRUE
-CInitRing == LOCKED = FALSE /\ RECHECK = TRUE /\ NESTED = FALSE /\ POLLWAKE = TRUE
-CInitNoRecheck == LOCKED = TRUE /\ RECHECK = FALSE /\ NESTED = FALSE /\ POLLWAKE = TRUE
-CInitNested == LOCKED = TRUE /\ RECHECK = TRUE /\ NESTED = TRUE /\ POLLWAKE = TRUE
-CInitNoPollWake == LOCKED = TRUE /\ RECHECK = TRUE /\ NESTED = FALSE /\ POLLWAKE = FALSE
+CInitFixed == LOCKED = TRUE /\ RECHECK = TRUE /\ NESTED = FALSE /\ POLLWAKE = TRUE /\ PREEMPTIBLE = FALSE
+CInitRing == LOCKED = FALSE /\ RECHECK = TRUE /\ NESTED = FALSE /\ POLLWAKE = TRUE /\ PREEMPTIBLE = FALSE
+CInitNoRecheck == LOCKED = TRUE /\ RECHECK = FALSE /\ NESTED = FALSE /\ POLLWAKE = TRUE /\ PREEMPTIBLE = FALSE
+CInitNested == LOCKED = TRUE /\ RECHECK = TRUE /\ NESTED = TRUE /\ POLLWAKE = TRUE /\ PREEMPTIBLE = FALSE
+CInitPreemptible == LOCKED = TRUE /\ RECHECK = TRUE /\ NESTED = FALSE /\ POLLWAKE = TRUE /\ PREEMPTIBLE = TRUE
+CInitNoPollWake == LOCKED = TRUE /\ RECHECK = TRUE /\ NESTED = FALSE /\ POLLWAKE = FALSE /\ PREEMPTIBLE = FALSE
 
 =============================================================================

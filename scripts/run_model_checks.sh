@@ -97,7 +97,8 @@ check_model Wait4Block Safety 4 \
     sigunfixed:CInitSigUnfixed:NoSleepWithSignal:violated \
     irqunfixed:CInitIrqUnfixed:temporal:ok \
     svcunfixed:CInitSvcUnfixed:SignalWakeEndsWait:violated:8 \
-    pidunfixed:CInitPidUnfixed:WakeAnswersTarget:violated:8
+    pidunfixed:CInitPidUnfixed:WakeAnswersTarget:violated:8 \
+    preemptible:CInitPreemptible:pass:ok
 
 check_model StackOwnership CoreInvariants 6 \
     fixed:CInitFixed:pass:ok \
@@ -188,7 +189,8 @@ check_model ConsoleTx Safety 10 \
     ring:CInitRing:ProgramOrder:violated \
     norecheck:CInitNoRecheck:NoLostWakeup:violated \
     nested:CInitNested:deadlock:ok \
-    nopollwake:CInitNoPollWake:NoLostWakeup:violated
+    nopollwake:CInitNoPollWake:NoLostWakeup:violated \
+    preemptible:CInitPreemptible:pass:ok
 
 check_model ConsoleOwner Safety 8 \
     fixed:CInitFixed:pass:ok \
