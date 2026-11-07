@@ -290,6 +290,9 @@ parameter value, or top-level declaration name.
   touch(some_plain_ptr);             // compile error: unproven
   touch(unsafe { some_plain_ptr as *align(32) u8 });  // OK: marked unsafe
   ```
+  - **Not on an opaque struct** (GitHub issue #1421): `*align(N) H` for an
+    `opaque struct H` (plain, affine or linear) is a compile error. H has no
+    layout to align, and a handle's ownership is tracked as `*H`.
   - **Proof sources**: `&x` or an array's own bare name, when `x`/the array
     was declared `align(N)` (or a stricter multiple of N); a literal
     address cast (`LITERAL as *align(N) T`, checked against N directly);

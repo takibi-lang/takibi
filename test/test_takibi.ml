@@ -16794,12 +16794,28 @@ let codegen_tests = [
      pointer is checked like the plain one. *)
   Alcotest.test_case "aligned handle pointers are minted and cast like plain ones" `Quick
     (fun () ->
-      expect_type_error "asserts it is valid with no evidence"
+      (* Since #1421 the type itself is refused first. *)
+      expect_type_error "is an opaque struct, which has no layout"
         "affine opaque struct L1420;\n\
          fn a1420() -> *align(8) L1420 { return 64 as *align(8) L1420; }" ();
-      expect_type_error "cannot cast an affine/linear value"
+      expect_type_error "is an opaque struct, which has no layout"
         "linear opaque struct M1420;\n\
          fn b1420(p: *align(8) M1420) -> usize { return p as usize; }" ());
+
+  (* GitHub issue #1421: *align(N) on an opaque struct is refused, so an
+     aligned handle cannot escape the ownership rules keyed on *H. *)
+  Alcotest.test_case "an aligned pointer to an opaque struct is refused" `Quick
+    (fun () ->
+      expect_type_error "is an opaque struct, which has no layout"
+        "linear opaque struct L1421;\nfn a1421(p: *align(8) L1421) { }" ();
+      expect_type_error "is an opaque struct, which has no layout"
+        "affine opaque struct A1421;\n\
+         fn g1421(p: *A1421) {}\n\
+         fn b1421(p: *A1421) { let q: *align(8) A1421 = p; }" ();
+      expect_type_error "is an opaque struct, which has no layout"
+        "linear opaque struct M1421;\nvariant V1421 { Some(*align(8) M1421); None; }" ();
+      expect_type_error "is an opaque struct, which has no layout"
+        "opaque struct O1421;\nfn c1421(p: *align(16) O1421) { }" ());
 
   Alcotest.test_case "explicit wrapping multiply lowers to fixed-width arithmetic" `Quick
     (fun () ->

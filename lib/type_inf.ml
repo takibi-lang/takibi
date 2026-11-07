@@ -9707,6 +9707,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeSingleton (base, arg) ->
         validate_static_type loc base;
         check_static_arg loc (static_sort_of_value loc base) arg
+    (* GitHub issue #1421: an opaque struct has no layout, so an alignment
+       claims nothing about it; and the ownership rules key on *H, so an
+       aligned affine/linear handle escaped them (dropped, or used twice). *)
+    | Ast.TypeAlignedPtr (_, Ast.TypeNamed name)
+      when StringSet.mem name !opaque_struct_names_all ->
+        raise (TypeError (loc, Printf.sprintf
+          "*align(N) %s: '%s' is an opaque struct, which has no layout to \
+           align; write *%s" name name name))
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
     | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeAlignedPtr (_, t)
