@@ -2345,13 +2345,13 @@
       }
     },
     {
-      "date": "2026-11-06",
-      "head": "fff71dcd",
+      "date": "2026-11-07",
+      "head": "0c228403",
       "counts": {
         "raw_mint_files": 14,
-        "frame_lines": 12030,
+        "frame_lines": 12048,
         "device_semantics_files": 4,
-        "raw_deref_plain": 197,
+        "raw_deref_plain": 200,
         "raw_deref_io": 7,
         "raw_deref_builtin_region": 113,
         "raw_deref_generated": 0,
