@@ -331,7 +331,7 @@ let promote_be_field_type = function
 %token VOID_TYPE BOOL_TYPE
 %token I8_TYPE I16_TYPE I32_TYPE I64_TYPE
 %token U8_TYPE U16_TYPE U32_TYPE U64_TYPE ISIZE_TYPE USIZE_TYPE
-%token U16BE_TYPE U32BE_TYPE
+%token U16BE_TYPE U32BE_TYPE SRCLOC_TYPE
 %token TRUE FALSE
 %token COLON ARROW
 
@@ -1349,6 +1349,7 @@ base_type_expr:
   | U8_TYPE   { TypeU8  } | U16_TYPE { TypeU16 } | U32_TYPE { TypeU32 } | U64_TYPE { TypeU64 }
   | U16BE_TYPE { TypeU16Be }
   | U32BE_TYPE { TypeU32Be }
+  | SRCLOC_TYPE { TypeSrcLoc }
   | ISIZE_TYPE { TypeIsize }
   | USIZE_TYPE { TypeUsize }
   | TYPE       { TypeKind }
@@ -1634,6 +1635,7 @@ int_base_type_expr:
   | U16BE_TYPE { TypeU16Be }
   | U32_TYPE   { TypeU32 }
   | U32BE_TYPE { TypeU32Be }
+  | SRCLOC_TYPE { TypeSrcLoc }
   | U64_TYPE   { TypeU64 }
   | ISIZE_TYPE { TypeIsize }
   | USIZE_TYPE { TypeUsize }

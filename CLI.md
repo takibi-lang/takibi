@@ -57,7 +57,7 @@
 | `--internal-range-obligation-fault-control` | - | plant known-unsound range rules (z3 check's failing control) |
 | `--internal-allow-unused` | - | accept a function nothing reachable uses (rejected by default) |
 
-## Fact files (13)
+## Fact files (14)
 
 `--facts DIR` writes every one of these, under these names.
 
@@ -75,4 +75,5 @@
 | `structs.tsv` | every struct's LLVM field offsets, then its .size and .members |
 | `frame-offsets.inc` | each exception frame's offsets as GAS .equ constants |
 | `debug-metadata.json` | debugger metadata: discriminant names and variant layout |
+| `srcloc.tsv` | the file index -> path table a SrcLoc names (#1024; scripts/decode_srcloc.py) |
 | `allocwords` | the OCaml words this compile allocated, written at exit (#923) |

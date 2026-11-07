@@ -57,6 +57,7 @@ let hard_keyword_token = function
   | "i8" -> I8_TYPE | "i16" -> I16_TYPE | "i32" -> I32_TYPE | "i64" -> I64_TYPE
   | "u8" -> U8_TYPE | "u16" -> U16_TYPE | "u32" -> U32_TYPE | "u64" -> U64_TYPE
   | "u16be" -> U16BE_TYPE | "u32be" -> U32BE_TYPE
+  | "SrcLoc" -> SRCLOC_TYPE
   | "isize" -> ISIZE_TYPE | "usize" -> USIZE_TYPE
   | word -> failwith ("hard keyword has no lexer token: " ^ word)
 }

@@ -995,7 +995,7 @@ let rec const_type_size (senv : senv) (ty : Ast.type_expr) : int option =
   match ty with
   | Ast.TypeBool | Ast.TypeU8 | Ast.TypeI8 -> Some 1
   | Ast.TypeU16 | Ast.TypeI16 | Ast.TypeU16Be -> Some 2
-  | Ast.TypeU32 | Ast.TypeI32 | Ast.TypeU32Be -> Some 4
+  | Ast.TypeU32 | Ast.TypeI32 | Ast.TypeU32Be | Ast.TypeSrcLoc -> Some 4
   | Ast.TypeU64 | Ast.TypeI64 -> Some 8
   | Ast.TypeArray (elem, n) ->
       (match const_type_size senv elem with
@@ -1027,7 +1027,7 @@ let rec type_size_proven_nonzero senv eenv ty =
   | Ast.TypeBool
   | Ast.TypeI8 | Ast.TypeI16 | Ast.TypeI32 | Ast.TypeI64
   | Ast.TypeU8 | Ast.TypeU16 | Ast.TypeU32 | Ast.TypeU64
-  | Ast.TypeU16Be | Ast.TypeU32Be | Ast.TypeIsize | Ast.TypeUsize
+  | Ast.TypeU16Be | Ast.TypeU32Be | Ast.TypeSrcLoc | Ast.TypeIsize | Ast.TypeUsize
   | Ast.TypePtr _ | Ast.TypeAlignedPtr _ | Ast.TypeRef _ | Ast.TypeRefMut _
   | Ast.TypeFn _ | Ast.TypeSlice _ -> true
   | Ast.TypeArray (elem, count) ->
@@ -1201,6 +1201,14 @@ let check_integer_literal_target_shape loc (e : Ast.expr) (target : ty) =
              "cannot use integer literal %d where %s is expected: it would \
               store the literal's own width, not the target's"
              k (to_string target)))
+       | None -> ())
+  (* GitHub issue #1024: SrcLoc is opaque; only src_loc() makes one. *)
+  | TSrcLoc ->
+      (match Const_env.bound_value e with
+       | Some k ->
+           raise (TypeError (loc, Printf.sprintf
+             "cannot use integer literal %d where SrcLoc is expected; only \
+              src_loc() makes one" k))
        | None -> ())
   | _ -> ()
 
@@ -3084,6 +3092,7 @@ let rec non_scalar_kind ~is_enum t =
   | TExists _ -> Some "existential package"
   | TView _ -> Some "view"
   | TVoid -> Some "void"
+  | TSrcLoc -> Some "SrcLoc"
 
 let binop_symbol : Ast.binop -> string = function
   | Add -> "+" | Sub -> "-" | Mul -> "*" | Div -> "/" | Mod -> "%"
@@ -4107,6 +4116,17 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       (match repr src_ty with
        | TTuple _ ->
            raise (TypeError (e.loc, "cannot cast a tuple to anything"))
+       | _ -> ());
+      (* GitHub issue #1024: SrcLoc is opaque. Only src_loc() makes one,
+         and `as u32` is the one way to read its bits. *)
+      (match repr (strip_singleton src_ty), target_ty with
+       | TSrcLoc, Ast.TypeU32 -> ()
+       | TSrcLoc, _ ->
+           raise (TypeError (e.loc,
+             "a SrcLoc casts only to u32 (`loc as u32`)"))
+       | _, Ast.TypeSrcLoc ->
+           raise (TypeError (e.loc,
+             "cannot cast to SrcLoc; only src_loc() makes one"))
        | _ -> ());
       let tgt_ty = of_ast target_ty in
       (* Reinterpreting a branded container pointer is a raw mint boundary,
@@ -5910,6 +5930,20 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            TVoid
        | _ -> raise (TypeError (e.loc, Printf.sprintf
            "%s expects two arguments: %s(ptr, len)" fname fname)))
+
+  | Call ("src_loc" as fname, args) ->
+      (* GitHub issue #1024: the call site's own location, explicit at the
+         call site; no hidden argument reaches a callee. *)
+      if args <> [] then
+        raise (TypeError (e.loc, Printf.sprintf
+          "%s expects no arguments: %s()" fname fname));
+      if Src_loc.pack e.loc = None then
+        raise (TypeError (e.loc, Printf.sprintf
+          "src_loc(): line %d or file index %d does not fit a SrcLoc \
+           (at most %d lines, %d files)"
+          e.loc.pos_lnum (Src_loc.index_of e.loc.pos_fname)
+          Src_loc.max_line (Src_loc.max_file + 1)));
+      TSrcLoc
 
   | Call ("i32_min" as fname, args) ->
       if args <> [] then

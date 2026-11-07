@@ -86,7 +86,7 @@ let rec resolve_type names = function
   | TypeSliceSym (t, size) ->
       TypeSliceSym (resolve_type names t, resolve_array_size names size)
   | (TypeBool | TypeI8 | TypeI16 | TypeI32 | TypeI64
-    | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeU16Be | TypeU32Be
+    | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeU16Be | TypeU32Be | TypeSrcLoc
     | TypeIsize | TypeUsize | TypeVoid | TypeNamed _ | TypeIndexed _
     | TypeView _ | TypeVariant _ | TypeKind | TypeIntLit _) as t -> t
 
@@ -297,7 +297,7 @@ let validate prog =
     | TypeArraySym (t, size) | TypeSliceSym (t, size) ->
         check_type t; check_array_size size
     | TypeBool | TypeI8 | TypeI16 | TypeI32 | TypeI64
-    | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeU16Be | TypeU32Be
+    | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeU16Be | TypeU32Be | TypeSrcLoc
     | TypeIsize | TypeUsize | TypeVoid | TypeNamed _ | TypeIndexed _
     | TypeView _ | TypeVariant _ | TypeKind | TypeIntLit _ -> ()
   and check_array_size = function

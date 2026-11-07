@@ -134,7 +134,7 @@ let rec transform ~(subst : string -> type_expr option)
      TypeKind have no sub-type_expr at all. *)
   | TypeIndexed _ | TypeBool
   | TypeI8 | TypeI16 | TypeI32 | TypeI64
-  | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeU16Be | TypeU32Be
+  | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeU16Be | TypeU32Be | TypeSrcLoc
   | TypeIsize | TypeUsize | TypeVoid
   | TypeView _ | TypeVariant _ | TypeKind -> t
 
@@ -522,7 +522,7 @@ let rec mangle_arg (t : type_expr) : string =
   | TypeBool -> "bool"
   | TypeI8 -> "i8" | TypeI16 -> "i16" | TypeI32 -> "i32" | TypeI64 -> "i64"
   | TypeU8 -> "u8" | TypeU16 -> "u16" | TypeU32 -> "u32" | TypeU64 -> "u64"
-  | TypeU16Be -> "u16be" | TypeU32Be -> "u32be"
+  | TypeU16Be -> "u16be" | TypeU32Be -> "u32be" | TypeSrcLoc -> "SrcLoc"
   | TypeIsize -> "isize" | TypeUsize -> "usize"
   | TypePtr t -> "ptr_" ^ mangle_arg t
   | _ -> raise (Types.TypeError (Lexing.dummy_pos,
@@ -695,7 +695,7 @@ let discover_value_generic_params
     | TypeRefined (_, _, base) | TypeMultiple (_, base) -> scan_ty base
     | TypeNamed _ | TypeIndexed _ | TypeBool | TypeIntLit _
     | TypeI8 | TypeI16 | TypeI32 | TypeI64
-    | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeU16Be | TypeU32Be
+    | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeU16Be | TypeU32Be | TypeSrcLoc
     | TypeIsize | TypeUsize | TypeVoid
     | TypeView _ | TypeVariant _ | TypeKind -> ()
   in
@@ -749,7 +749,7 @@ let type_expr_constructor = function
   | TypeI8 -> "TypeI8" | TypeI16 -> "TypeI16" | TypeI32 -> "TypeI32"
   | TypeI64 -> "TypeI64" | TypeU8 -> "TypeU8" | TypeU16 -> "TypeU16"
   | TypeU32 -> "TypeU32" | TypeU64 -> "TypeU64"
-  | TypeU16Be -> "TypeU16Be" | TypeU32Be -> "TypeU32Be"
+  | TypeU16Be -> "TypeU16Be" | TypeU32Be -> "TypeU32Be" | TypeSrcLoc -> "TypeSrcLoc"
   | TypeIsize -> "TypeIsize" | TypeUsize -> "TypeUsize"
   | TypeVoid -> "TypeVoid" | TypeView _ -> "TypeView"
   | TypeVariant _ -> "TypeVariant" | TypeKind -> "TypeKind"
@@ -858,7 +858,7 @@ let rec unify_arg ?(trace = fun _ -> ())
   | TypeFn _ | TypeTuple _ | TypeExists _ | TypeRefined _ | TypeMultiple _
   | TypeIndexed _ | TypeBool
   | TypeI8 | TypeI16 | TypeI32 | TypeI64
-  | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeU16Be | TypeU32Be
+  | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeU16Be | TypeU32Be | TypeSrcLoc
   | TypeIsize | TypeUsize | TypeVoid
   | TypeView _ | TypeVariant _ | TypeKind ->
       if type_expr_constructor template_ty = type_expr_constructor concrete_ty then
@@ -1050,7 +1050,7 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
               it, rather than silently taking this no-contribution path. *)
            | Some (TypeBool | TypeI8 | TypeI16 | TypeI32 | TypeI64
                   | TypeU8 | TypeU16 | TypeU32 | TypeU64
-                  | TypeU16Be | TypeU32Be | TypeIsize | TypeUsize | TypeVoid
+                  | TypeU16Be | TypeU32Be | TypeSrcLoc | TypeIsize | TypeUsize | TypeVoid
                   | TypePtr _ | TypeIo _ | TypeArray _ | TypeFn _ | TypeView _
                   | TypeVariant _ | TypeExists _ | TypeIndexed _ | TypeKind
                   | TypeIntLit _ | TypeArraySym _ | TypeSliceSym _
@@ -1431,7 +1431,7 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
       | TypeTuple ts | TypeGenericInst (_, ts) -> List.exists type_needs_layout ts
       | TypeExists (_, _, t) -> type_needs_layout t
       | TypeBool | TypeI8 | TypeI16 | TypeI32 | TypeI64
-      | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeU16Be | TypeU32Be
+      | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeU16Be | TypeU32Be | TypeSrcLoc
       | TypeIsize | TypeUsize | TypeVoid | TypeNamed _ | TypeView _
       | TypeVariant _ | TypeIndexed _ | TypeKind | TypeIntLit _ -> false
     in

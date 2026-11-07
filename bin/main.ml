@@ -55,6 +55,7 @@ let fact_files = [
   ("structs.tsv", "every struct's LLVM field offsets, then its .size and .members");
   ("frame-offsets.inc", "each exception frame's offsets as GAS .equ constants");
   ("debug-metadata.json", "debugger metadata: discriminant names and variant layout");
+  ("srcloc.tsv", "the file index -> path table a SrcLoc names (#1024; scripts/decode_srcloc.py)");
   ("allocwords", "the OCaml words this compile allocated, written at exit (#923)");
 ]
 
@@ -291,6 +292,11 @@ let () =
         (fact "deps.d") !output_file (List.map fst resolved);
 
     let compiled_files = List.map fst resolved in
+    (* GitHub issue #1024: a SrcLoc's file index is the file's position in
+       the `use` closure. *)
+    List.iter Takibi.Src_loc.register compiled_files;
+    if facts_on then
+      at_exit (fun () -> Takibi.Src_loc.write_table (fact "srcloc.tsv"));
     let prog = List.concat_map snd resolved in
     (* GitHub issue #720: protocol declarations are validated once here and
        removed before every later pass; --generate tla writes each one's

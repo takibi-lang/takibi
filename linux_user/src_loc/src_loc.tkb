@@ -1,0 +1,29 @@
+// GitHub issue #1024: src_loc() is the call site's own location, an opaque
+// SrcLoc that reads back only through `as u32` (file index << 20 | line).
+
+fn check(loc: SrcLoc) -> u32 {
+    return loc as u32;
+}
+
+fn print_loc(bits: u32) {
+    uart_print((bits & 0xfffff) as i32);
+    uart_puts(" ");
+    uart_print((bits >> 20) as i32);
+    uart_puts("\r\n");
+}
+
+struct Site {
+    loc: SrcLoc;
+}
+
+fn app_main() {
+    print_loc(check(src_loc()));
+    print_loc(check(builtin::src_loc()));
+    let mut site: Site = { src_loc() };
+    print_loc(site.loc as u32);
+    let a: u32 = src_loc() as u32;
+    let b: u32 = src_loc() as u32;
+    if (b - a == 1) {
+        uart_puts("next line\r\n");
+    }
+}

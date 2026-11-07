@@ -6,6 +6,7 @@ type ty =
   | TU8  | TU16 | TU32 | TU64
   | TU16Be  (* u16be: 16-bit value stored in big-endian (wire) byte order.
                Does not unify with TU16 -- GitHub issue #186, see Ast.TypeU16Be. *)
+  | TSrcLoc (* SrcLoc, GitHub issue #1024; see Ast.TypeSrcLoc. *)
   | TU32Be  (* u32be: 32-bit big-endian; same rules as TU16Be, see Ast.TypeU32Be. *)
   | TIsize  (* pointer-sized signed integer *)
   | TUsize  (* pointer-sized unsigned integer; maps to i64 on 64-bit targets *)
@@ -229,6 +230,7 @@ let rec to_string t =
   | TU8   -> "u8"  | TU16 -> "u16" | TU32 -> "u32" | TU64 -> "u64"
   | TU16Be -> "u16be"
   | TU32Be -> "u32be"
+  | TSrcLoc -> "SrcLoc"
   | TIsize -> "isize"
   | TUsize -> "usize"
   | TVoid -> "void"
@@ -417,6 +419,7 @@ let rec unify t1 t2 =
   | TU8,  TU8  | TU16, TU16 | TU32, TU32 | TU64, TU64 -> ()
   | TU16Be, TU16Be -> ()
   | TU32Be, TU32Be -> ()
+  | TSrcLoc, TSrcLoc -> ()
   | TIsize, TIsize -> ()
   | TUsize, TUsize -> ()
   | TPtr t1, TPtr t2 ->
@@ -915,6 +918,7 @@ let rec of_ast_in_scope scope = function
   | Ast.TypeU8       -> TU8  | Ast.TypeU16 -> TU16 | Ast.TypeU32 -> TU32 | Ast.TypeU64 -> TU64
   | Ast.TypeU16Be    -> TU16Be
   | Ast.TypeU32Be    -> TU32Be
+  | Ast.TypeSrcLoc   -> TSrcLoc
   | Ast.TypeIsize    -> TIsize
   | Ast.TypeUsize    -> TUsize
   | Ast.TypeVoid     -> TVoid
@@ -1046,6 +1050,7 @@ let rec to_ast t =
   | TU8   -> Ast.TypeU8  | TU16 -> Ast.TypeU16 | TU32 -> Ast.TypeU32 | TU64 -> Ast.TypeU64
   | TU16Be -> Ast.TypeU16Be
   | TU32Be -> Ast.TypeU32Be
+  | TSrcLoc -> Ast.TypeSrcLoc
   | TIsize -> Ast.TypeIsize
   | TUsize -> Ast.TypeUsize
   | TVoid -> Ast.TypeVoid

@@ -324,6 +324,7 @@ let rec show_type = function
   | Ast.TypeI8          -> "i8"  | Ast.TypeI16 -> "i16" | Ast.TypeI32 -> "i32" | Ast.TypeI64 -> "i64"
   | Ast.TypeU8          -> "u8"  | Ast.TypeU16 -> "u16" | Ast.TypeU32 -> "u32" | Ast.TypeU64 -> "u64"
   | Ast.TypeU16Be       -> "u16be"
+  | Ast.TypeSrcLoc      -> "SrcLoc"
   | Ast.TypeU32Be       -> "u32be"
   | Ast.TypeIsize       -> "isize"
   | Ast.TypeUsize       -> "usize"
@@ -16759,6 +16760,36 @@ let codegen_tests = [
         (contains_substring ir "ret i32 -2147483648");
       expect_type_error "expects no arguments"
         "fn bad_limit65() -> i32 { return builtin::i32_min(0); }" ());
+
+  (* GitHub issue #1024: src_loc() is an immediate, index << 20 | line. *)
+  Alcotest.test_case "src_loc lowers to its call site as an immediate" `Quick
+    (fun () ->
+      ignore (gen_codegen
+        "fn here1024() -> u32 {\n  return src_loc() as u32;\n}");
+      let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+      Alcotest.(check bool) "file 0, line 2" true
+        (contains_substring ir "ret i32 2");
+      ignore (gen_codegen
+        "fn take1024(l: SrcLoc) -> u32 { return l as u32; }\n\
+         fn there1024() -> u32 {\n\n  return take1024(builtin::src_loc());\n}");
+      let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+      Alcotest.(check bool) "an argument, line 4" true
+        (contains_substring ir "i32 4)"));
+
+  Alcotest.test_case "SrcLoc is opaque" `Quick
+    (fun () ->
+      expect_type_error "expects no arguments"
+        "fn a1024() -> u32 { return src_loc(1) as u32; }" ();
+      expect_type_error "casts only to u32"
+        "fn b1024() -> u64 { return src_loc() as u64; }" ();
+      expect_type_error "only src_loc() makes one"
+        "fn c1024() -> SrcLoc { return 5 as SrcLoc; }" ();
+      expect_type_error "SrcLoc"
+        "fn d1024() -> bool { return src_loc() == src_loc(); }" ();
+      expect_type_error "SrcLoc"
+        "fn e1024(l: SrcLoc) -> u32 { return l + 1; }" ();
+      expect_type_error "SrcLoc"
+        "fn f1024() -> SrcLoc { return 5; }" ());
 
   Alcotest.test_case "explicit wrapping multiply lowers to fixed-width arithmetic" `Quick
     (fun () ->

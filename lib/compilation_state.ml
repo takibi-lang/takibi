@@ -23,4 +23,5 @@ let reset () =
   Device_protocol_registry.reset ();
   Generic_scope.reset ();
   Ast.reset_precedence_errors ();
+  Src_loc.reset ();
   Type_inf.reset_compilation_state ()

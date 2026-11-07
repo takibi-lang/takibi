@@ -4,7 +4,7 @@
 
 The complete inventory of source words the compiler gives a meaning, generated from `lib/language_words.ml`. SPEC.md "Compiler-Owned Words and Names" defines the classes.
 
-## Hard keywords (74)
+## Hard keywords (75)
 
 | Keyword | Class |
 | --- | --- |
@@ -80,6 +80,7 @@ The complete inventory of source words the compiler gives a meaning, generated f
 | `u64` | core |
 | `u16be` | layout |
 | `u32be` | layout |
+| `SrcLoc` | core |
 | `isize` | core |
 | `usize` | core |
 
@@ -89,7 +90,7 @@ The complete inventory of source words the compiler gives a meaning, generated f
 | --- |
 | `protocol` |
 
-## Compiler builtins (80)
+## Compiler builtins (81)
 
 | Builtin | Kind |
 | --- | --- |
@@ -103,6 +104,7 @@ The complete inventory of source words the compiler gives a meaning, generated f
 | `place_is_full` | general |
 | `min` | general |
 | `max` | general |
+| `src_loc` | general |
 | `i32_min` | general |
 | `wrapping_mul_u32` | general |
 | `dma_publish` | general |

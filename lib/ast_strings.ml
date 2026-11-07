@@ -41,7 +41,7 @@ let item (top : Ast.toplevel) : item =
   let rec ty = function
     | Ast.TypeBool | Ast.TypeI8 | Ast.TypeI16 | Ast.TypeI32 | Ast.TypeI64
     | Ast.TypeU8 | Ast.TypeU16 | Ast.TypeU32 | Ast.TypeU64 | Ast.TypeU16Be
-    | Ast.TypeU32Be | Ast.TypeIsize | Ast.TypeUsize | Ast.TypeVoid
+    | Ast.TypeU32Be | Ast.TypeSrcLoc | Ast.TypeIsize | Ast.TypeUsize | Ast.TypeVoid
     | Ast.TypeKind | Ast.TypeIntLit _ -> ()
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeArray (t, _)
     | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t)

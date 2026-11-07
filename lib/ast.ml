@@ -82,6 +82,10 @@ type type_expr =
   | TypeU8  | TypeU16 | TypeU32 | TypeU64
   | TypeU16Be
   | TypeU32Be
+  | TypeSrcLoc
+    (* SrcLoc -- the opaque source location src_loc() returns (GitHub
+       issue #1024): file index << 20 | line in a u32. No arithmetic, no
+       literal; only `as u32` reads its bits. *)
     (* u16be/u32be -- 16-/32-bit values stored in big-endian (wire) byte
        order. Deliberately does NOT unify with TypeU16/TypeU32: crossing
        between wire and host order requires an explicit `as` cast (GitHub

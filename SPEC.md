@@ -140,8 +140,9 @@ turn as many potential traps as possible into compile-time errors instead:
 `usize`, `void`, `*T`, `io T`, `*io T`, `[T; N]`, `[]T` / `[T; N..]`
 (slice), `fn(T...) -> R`, `Name` (struct or enum), `{lo..<hi as base}`
 (refined integer subtype), `multiple(N) usize` (divisible value),
-`T @ n` (runtime integer or pointer singleton), and
-`Name[n]` (indexed affine/linear runtime struct or erased view).
+`T @ n` (runtime integer or pointer singleton),
+`Name[n]` (indexed affine/linear runtime struct or erased view), and
+`SrcLoc` (an opaque source location; see "Source Locations").
 
 `addr` is a reserved checker-only static sort, not a runtime type. It may
 appear as a static parameter sort (`lock: addr`) but not as a variable, field,
@@ -5408,6 +5409,36 @@ entry whose file does not exist, or a compiled entry that declares no
 mutable global, is an error; an existing file this compilation does not
 read is skipped. A duplicate or empty-reason entry is an error. The rule
 does not check that an assertion is correct.
+
+## Source Locations: `src_loc()` and `SrcLoc` (GitHub issue #1024)
+
+`src_loc()` is a compiler builtin with no arguments. It evaluates to the
+location of its own call site as a `SrcLoc`, an opaque 32-bit value:
+
+```
+fn fail_if(loc: SrcLoc, bad: bool) {
+    if (bad) { report(loc as u32); }
+}
+fail_if(src_loc(), fd != 3);
+```
+
+- The location is explicit at the call site. A callee never receives its
+  caller's location implicitly; a helper that reports one takes a `SrcLoc`
+  parameter, and each caller passes `src_loc()`. (A shared helper's dynamic
+  caller is a different question, #811.)
+- The bits are the file's index << 20 | the line (lines 1..1048575, at
+  most 4096 files); a site that does not fit is a compile error. Code
+  generation emits an immediate: no string, no table in the image.
+- The file index is the file's position in the compile's `use` closure.
+  `--facts DIR` writes the table as `srcloc.tsv`, and
+  `scripts/decode_srcloc.py TABLE VALUE` (or `--log CAPTURE`, for every
+  `srcloc=0x...` in it) prints `file:line`. A SrcLoc is meaningful only
+  against the table of the compile that made it.
+- `SrcLoc` is opaque. Only `src_loc()` makes one: an integer literal or a
+  cast to `SrcLoc` is rejected. `loc as u32` is the one way to read the
+  bits; a cast to any other type, arithmetic, and comparison are rejected.
+  A `SrcLoc` may be passed, returned, and stored in a struct field. A
+  global initializer cannot call `src_loc()`.
 
 ## Trap sites
 

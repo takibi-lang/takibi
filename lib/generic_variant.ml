@@ -40,7 +40,7 @@ let rec erased_key (t : type_expr) : string =
   | TypeBool -> "bool"
   | TypeI8 -> "i8" | TypeI16 -> "i16" | TypeI32 -> "i32" | TypeI64 -> "i64"
   | TypeU8 -> "u8" | TypeU16 -> "u16" | TypeU32 -> "u32" | TypeU64 -> "u64"
-  | TypeU16Be -> "u16be" | TypeU32Be -> "u32be"
+  | TypeU16Be -> "u16be" | TypeU32Be -> "u32be" | TypeSrcLoc -> "SrcLoc"
   | TypeIsize -> "isize" | TypeUsize -> "usize"
   | TypeVoid -> "void"
   | TypeGenericInst _ | TypeKind | TypeIntLit _ | TypeArraySym _

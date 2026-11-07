@@ -162,7 +162,7 @@ let rec const_type_size (ty : Ast.type_expr) : int option =
   match ty with
   | Ast.TypeBool | Ast.TypeU8 | Ast.TypeI8 -> Some 1
   | Ast.TypeU16 | Ast.TypeI16 | Ast.TypeU16Be -> Some 2
-  | Ast.TypeU32 | Ast.TypeI32 | Ast.TypeU32Be -> Some 4
+  | Ast.TypeU32 | Ast.TypeI32 | Ast.TypeU32Be | Ast.TypeSrcLoc -> Some 4
   | Ast.TypeU64 | Ast.TypeI64 -> Some 8
   | Ast.TypeArray (elem, n) ->
       (match const_type_size elem with
@@ -357,6 +357,7 @@ let rec ty_str = function
   | TypeU8 -> "u8" | TypeU16 -> "u16" | TypeU32 -> "u32" | TypeU64 -> "u64"
   | TypeU16Be -> "u16be"
   | TypeU32Be -> "u32be"
+  | TypeSrcLoc -> "SrcLoc"
   | TypeIsize -> "isize"
   | TypeUsize -> "usize"
   | TypeVoid  -> "void"
@@ -1439,7 +1440,7 @@ let rec ltype_of_ast = function
   | TypeBool        -> i1_type  context
   | TypeI8  | TypeU8  -> i8_type  context
   | TypeI16 | TypeU16 | TypeU16Be -> i16_type context
-  | TypeI32 | TypeU32 | TypeU32Be -> i32_type context
+  | TypeI32 | TypeU32 | TypeU32Be | TypeSrcLoc -> i32_type context
   | TypeI64 | TypeU64 -> i64_type context
   | TypeIsize       -> isize_lltype ()
   | TypeUsize       -> usize_lltype ()
@@ -1600,6 +1601,7 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
   | TypeU16Be -> basic_int "u16be" 16 dw_ate_unsigned
   | TypeU32   -> basic_int "u32"   32 dw_ate_unsigned
   | TypeU32Be -> basic_int "u32be" 32 dw_ate_unsigned
+  | TypeSrcLoc -> basic_int "SrcLoc" 32 dw_ate_unsigned
   | TypeU64   -> basic_int "u64"   64 dw_ate_unsigned
   | TypeIsize -> basic_int "isize" (integer_bitwidth (isize_lltype ())) dw_ate_signed
   | TypeUsize -> basic_int "usize" (integer_bitwidth (usize_lltype ())) dw_ate_unsigned
@@ -2632,7 +2634,7 @@ let rec coerce v (dst : Ast.type_expr) =
       if vty = i32_type context || vty = i64_type context
       then build_trunc v (i16_type context) "trunc" builder
       else v
-  | TypeI32 | TypeU32 | TypeU32Be ->
+  | TypeI32 | TypeU32 | TypeU32Be | TypeSrcLoc ->
       if vty = i64_type context then build_trunc v (i32_type context) "trunc" builder
       else if vty = i1_type  context then build_zext  v (i32_type context) "zext"  builder
       else if vty = pointer_type context then
@@ -5403,6 +5405,13 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       if is_volatile then set_volatile true store;
       (value_ty, old_value)
 
+  | Call ("src_loc", []) ->
+      (* GitHub issue #1024: an immediate; type_inf checked it packs. *)
+      let bits = match Src_loc.pack e.loc with
+        | Some b -> b
+        | None -> raise (Error "BUG: src_loc() reached codegen unpackable") in
+      (TypeSrcLoc, const_of_int64 (i32_type context) bits false)
+
   | Call ("i32_min", []) ->
       let value = -2147483648L in
       (TypeRefined
@@ -6391,7 +6400,7 @@ let gen_func ?prog_types fdef =
     | TypeSink base
     | TypeIo base -> is_debug_aggregate_ty base
     | TypeView _ | TypeAlignedPtr _ | TypePtr _ | TypeFn _ | TypeRef _ | TypeRefMut _
-    | TypeI8 | TypeU8 | TypeI16 | TypeU16 | TypeU16Be | TypeI32 | TypeU32 | TypeU32Be
+    | TypeI8 | TypeU8 | TypeI16 | TypeU16 | TypeU16Be | TypeI32 | TypeU32 | TypeU32Be | TypeSrcLoc
     | TypeI64 | TypeU64 | TypeUsize | TypeIsize | TypeBool | TypeVoid -> false
     | TypeKind | TypeGenericInst _ | TypeIntLit _ | TypeArraySym _ | TypeSliceSym _ ->
         (* Unreachable in practice -- ltype_of_ast already rejects these
