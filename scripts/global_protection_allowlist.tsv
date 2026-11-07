@@ -80,11 +80,9 @@ kernel/init/test_driver.tkb	init_boot_fixture_status	read-by kernel_init_script_
 kernel/init/test_driver.tkb	kernel_test_init_script	read-by kernel_test_driver_run: 2026-10-31 retain-fixture: main's choice of init script, one read on the boot path
 kernel/init/test_driver.tkb	rootfs_metadata	read-by kernel_test_driver_run: 2026-10-31 retain-boot: the boot read of the image's metadata; the exec plan borrows this permanent buffer afterward
 kernel/kernel/fd_table.tkb	fd_refcount_probe_handle	read-by fd_refcount_probe_cycle,fd_refcount_contention_probe: 2026-10-31 retain-fixture: the contention probe's two cores; published before the rendezvous, an order the probe keeps by hand
-kernel/kernel/fd_table.tkb	fd_refcount_probe_ready	read-by fd_refcount_contention_probe: 2026-10-31 retain-fixture: first-run guard of the probe, core 0
 kernel/kernel/freelist_contention_evidence.tkb	freelist_probe	read-by freelist_probe_cycle,freelist_contention_phase: 2026-10-31 retain-fixture: the probe's two cores; the core's own operations are the protocol under test
 kernel/kernel/init_once_contention_evidence.tkb	init_once_probe_naive_complete	read-by init_once_contention_probe,init_once_contention_secondary_run: 2026-10-31 retain-fixture: the deliberately unlocked phase: racing on it is what the probe measures
 kernel/kernel/log_storm_evidence.tkb	log_storm_last_round	read-by log_storm_is_armed,log_storm_secondary_run: 2026-10-31 retain-fixture: each secondary's own element, in its idle loop
-kernel/kernel/nic_irq_affinity.tkb	nic_irq_evidence_intid	read-by nic_irq_evidence_pin_end,nic_irq_evidence_unpin: 2026-10-31 retain-fixture: the pinned SPI of the boot fixture, core 0
 kernel/kernel/nic_irq_affinity.tkb	nic_irq_phase_start	read-by nic_irq_phase_taken: 2026-10-31 retain-fixture: core 0's snapshot of the atomic counts at a phase
 kernel/kernel/occupancy_drain_evidence.tkb	world_stop_stale_probe_controller	read-by world_stop_probe: 2026-10-31 retain-fixture: a second controller, for the stale-token case; WorldStop's own operations reach it
 kernel/kernel/pool_walk_contention_evidence.tkb	pool_walk_floor	read-by pool_walk_init,pool_walk_once: 2026-10-31 retain-fixture: set by core 0 before the rendezvous words publish the round; the walker compares only
@@ -109,15 +107,9 @@ kernel/kernel/profile_timeline.tkb	profile_timeline_active	read-by profile_timel
 kernel/kernel/profile_timeline.tkb	profile_timeline_cores	read-by profile_timeline_note,profile_timeline_report: 2026-10-31 partition: own element with IRQs masked, so no preemption between cpu_id and the store; the report reads after the interval
 kernel/kernel/profile_timeline.tkb	profile_timeline_pid_a	read-by profile_timeline_pid_relevant: 2026-10-31 stop: set by the start under the stop, before the flag
 kernel/kernel/profile_timeline.tkb	profile_timeline_pid_b	read-by profile_timeline_pid_relevant: 2026-10-31 stop: as profile_timeline_pid_a
-kernel/kernel/protocol_trace.tkb	protocol_trace_active	read-by protocol_trace_is_active: 2026-10-31 retain-protocol: the observers' gate; opened and closed under the run lock
 kernel/kernel/protocol_trace.tkb	protocol_trace_cores	read-by protocol_trace_observe_core,protocol_trace_commit_open: 2026-10-31 retain-protocol: the observation's diff of each core's current and stack, under the run lock
 kernel/kernel/protocol_trace.tkb	protocol_trace_events	read-by protocol_trace_report: 2026-10-31 retain-protocol: the closed window's report, consumed by scripts/validate_protocol_trace.py
-kernel/kernel/protocol_trace.tkb	protocol_trace_lost	read-by protocol_trace_report,protocol_trace_record: 2026-10-31 retain-protocol: the report's lost count; a nonzero count refuses the window
-kernel/kernel/protocol_trace.tkb	protocol_trace_process_count	read-by protocol_trace_observe_process,protocol_trace_pass_end: 2026-10-31 retain-protocol: the observation pass, under the run lock
 kernel/kernel/protocol_trace.tkb	protocol_trace_processes	read-by protocol_trace_observe_process,protocol_trace_pass_end: 2026-10-31 retain-protocol: the observation pass's previous state of each process, under the run lock
-kernel/kernel/protocol_trace.tkb	protocol_trace_sequence	read-by protocol_trace_record,protocol_trace_report: 2026-10-31 retain-protocol: the event sequence the report prints, under the run lock
-kernel/kernel/protocol_trace.tkb	protocol_trace_stored	read-by protocol_trace_report,protocol_trace_record: 2026-10-31 retain-protocol: the stored count the report walks, under the run lock
-kernel/kernel/protocol_trace.tkb	protocol_trace_unlocked_pass	read-by protocol_trace_record: 2026-10-31 retain-protocol: marks events observed outside a lock hold; a single flag the pass writes
 kernel/kernel/schedule_contention_evidence.tkb	schedule_probe_handle	read-by schedule_probe_claim,schedule_probe_teardown: 2026-10-31 retain-fixture: the probe's two cores; set by the primary before the rendezvous
 kernel/kernel/signal_contention_evidence.tkb	signal_probe_record	read-by signal_probe_round,signal_contention_secondary_run: 2026-10-31 retain-fixture: both cores of the probe, on a record of its own rather than the pool's
 kernel/kernel/syscall.tkb	syscall_filesystem	read-by syscall_filesystem_lookup: 2026-10-31 retain-context: every path syscall; written once by kernel_syscall_ext2_configure at boot, an order nothing checks
@@ -128,7 +120,6 @@ kernel/kernel/tcp_connection_contention_evidence.tkb	tcp_pool_cost_samples	read-
 kernel/kernel/workload_evidence.tkb	move_cost_records	read-by workload_move_cost_report: 2026-10-31 retain-fixture: the /bin/movecost summary, reached by its progress syscall
 kernel/kernel/workload_evidence.tkb	workload_busy_pair	read-by workload_busy_pair_report,workload_busy_record_progress,scripts/kernel_peer_exit_check.py: 2026-10-31 retain-fixture: the busy-pair verdict, printed under a stop and a run guard, and the peer-exit check by name
 kernel/kernel/workload_evidence.tkb	workload_busy_waits	read-by workload_busy_waits_report,workload_busy_wait_pick: 2026-10-31 retain-fixture: the busy pair's wait report, and the next-ready pick
-kernel/kernel/workload_evidence.tkb	workload_ddb_hold_park_since	read-by workload_peer_console_progress: 2026-10-31 lock: under the run lock, by its one function
 kernel/kernel/workload_evidence.tkb	workload_profile_active	read-by workload_profile_transition,workload_profile_irq_enter,workload_profile_current_cpu: 2026-10-31 retain-fixture: the profile hooks' gate, on the hottest paths; start and finish write it, and a hook that read true just before finish is what the finish's stop excludes
 kernel/kernel/workload_evidence.tkb	workload_profile_cores	read-by workload_busy_pair_report,workload_profile_charge: 2026-10-31 retain-fixture: the busy-pair report on a stopped machine, and each core's own charge with IRQs masked
 kernel/kernel/workload_evidence.tkb	workload_settings_wake	read-by workload_settings_wake_progress,workload_settings_wake_ioctl_served: 2026-10-31 retain-fixture: the settings-wake fixture's phases, through its syscall tag
@@ -185,4 +176,3 @@ kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_rings_quiesced	read-by xhci_ring_re
 kernel/platform/rpi5/usb_xhci_rings.tkb	xhci_tables_claimed	read-by xhci_tables_start: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after
 kernel/printk/log.tkb	kernel_log_core_state	read-by kernel_log_raw_staged_length,scripts/kernel_console.gdb: 2026-11-01 partition: own element in a preempt_off region (or where no task can switch), an owner word keeps two writers' text apart; other CPUs read it only under the world stop
 kernel/printk/log.tkb	kernel_log_storm_found	read-by kernel_log_storm_check,kernel_log_storm_found_mask: 2026-10-31 retain-fixture: core 0 verifier after every writer of the round finished
-kernel/printk/log_ring_trace.tkb	log_ring_trace_from	read-by log_ring_trace_reader,log_ring_trace_report: 2026-10-31 retain-fixture: written by core 0 before the window opens, read-only inside it

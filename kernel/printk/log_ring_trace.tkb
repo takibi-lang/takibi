@@ -96,7 +96,7 @@ struct LogRingTraceReader {
 private let mut log_ring_trace_active: AtomicWord;
 private let mut log_ring_trace_cpus: [LogRingTraceCpu; KERNEL_MAX_CORES];
 // The head the window opened at; the reader records from there.
-private let mut log_ring_trace_from: usize;
+private let mut log_ring_trace_from: AtomicWord;
 
 // The system counter, after every earlier memory access has completed and
 // before any later one starts. Never 0, which means "not recording".
@@ -147,7 +147,7 @@ fn log_ring_trace_writer(t0: usize, kind: usize, first: usize, k: usize,
 fn log_ring_trace_reader(reader: borrow &mut LogRingTraceReader, t0: usize, kind: usize,
                          seq: usize, word: usize, out: usize, end: usize) {
     if (t0 == 0) { return; }
-    if (reader.traced == false || seq < log_ring_trace_from) { return; }
+    if (reader.traced == false || seq < atomic_word_load(&log_ring_trace_from)) { return; }
     if (reader.begun == false) {
         reader.begun = true;
         log_ring_trace_store(t0, LOG_RING_TRACE_BEGIN, seq, 0, 0, 0, end);
@@ -161,7 +161,7 @@ fn log_ring_trace_open(head: usize) {
     for cpu: usize in 0..<KERNEL_MAX_CORES {
         atomic_word_store(&log_ring_trace_cpus[cpu].claimed, 0);
     }
-    log_ring_trace_from = head;
+    atomic_word_store(&log_ring_trace_from, head);
     atomic_word_store(&log_ring_trace_active, 1);
 }
 
@@ -260,7 +260,7 @@ fn log_ring_trace_report() {
     kernel_boot_log(" slots=");
     uart_put_udec(kernel_log_raw_slot_count());
     kernel_boot_log(" head=");
-    uart_put_udec(log_ring_trace_from);
+    uart_put_udec(atomic_word_load(&log_ring_trace_from));
     kernel_boot_log(" stored=");
     uart_put_udec(stored);
     kernel_boot_log(" lost=");

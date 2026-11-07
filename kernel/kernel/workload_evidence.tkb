@@ -50,6 +50,7 @@
 //   not effort; the effort is in kernel/arch/arm64/kernel/busy_loop.tkb
 //   and is the fixture's own business.
 
+use "kernel/lib/atomic_word.tkb";
 use "kernel/arch/arm64/kernel/timer.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/kernel/cpu_authority.tkb";
@@ -1498,7 +1499,7 @@ const PEER_CONSOLE_ABANDONED: usize = 0xDEAD;
 // counter reading at its first refusal (0 before one). Written under the
 // run lock.
 const DDB_HOLD_PARK_SECONDS: usize = 5;
-private let mut workload_ddb_hold_park_since: usize = 0;
+private let mut workload_ddb_hold_park_since: AtomicWord;
 
 fn workload_peer_console_progress(first: usize, total: usize) -> usize {
     let guard = process_run_lock();
@@ -1628,10 +1629,10 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
     // lane; the RPi5 driver now fails unless `wait` shows init parked.
     if (kernel_process_pid_parked_on_signal(guard, 1) == false) {
         let now: usize = read_cntpct() as usize;
-        if (workload_ddb_hold_park_since == 0) {
-            workload_ddb_hold_park_since = now;
+        if (atomic_word_load(&workload_ddb_hold_park_since) == 0) {
+            atomic_word_store(&workload_ddb_hold_park_since, now);
         }
-        if (now - workload_ddb_hold_park_since <
+        if (now - atomic_word_load(&workload_ddb_hold_park_since) <
                 (read_cntfrq() as usize) * DDB_HOLD_PARK_SECONDS) {
             process_run_unlock(guard);
             return 4;

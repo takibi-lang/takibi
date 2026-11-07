@@ -1,3 +1,4 @@
+use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/peer_tick_window.tkb";
 use "kernel/kernel/pool_lock_wait.tkb";
 use "kernel/lib/peer_round.tkb";
@@ -3479,7 +3480,7 @@ const FD_REFCOUNT_PROBE_FD: usize = 9;
 const FD_REFCOUNT_CONTENTION_OUTSIDE_WORK: usize = 64;
 
 private let mut fd_refcount_probe_handle: UnifiedObjectHandle;
-private let mut fd_refcount_probe_ready: bool = false;
+private let mut fd_refcount_probe_ready: AtomicWord;
 private let mut fd_refcount_probe_armed: AtomicWord;
 // Completed cycles and the inside-the-run level, one word per core
 // (GitHub issue #756: every online peer, index 0 is core 0's).
@@ -3589,7 +3590,7 @@ private fn fd_refcount_contention_report(stage: *u8, refs: usize,
 
 fn fd_refcount_contention_probe() -> bool !{unsafe} {
     unified_fd_table_init();
-    if (fd_refcount_probe_ready == false) {
+    if (atomic_word_load(&fd_refcount_probe_ready) == 0) {
         // GitHub issue #831: the descriptor goes into a private probe
         // process's table. It went into slot 0's, which every boot had
         // whether or not any process did; this probe runs before the boot
@@ -3617,7 +3618,7 @@ fn fd_refcount_contention_probe() -> bool !{unsafe} {
             }
             UnifiedObjectResult::Allocated(handle) => {
                 fd_refcount_probe_handle = handle;
-                fd_refcount_probe_ready = true;
+                atomic_word_store(&fd_refcount_probe_ready, 1);
             }
         }
         // The object needs a real descriptor holding it before any

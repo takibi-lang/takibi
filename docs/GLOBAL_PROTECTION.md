@@ -425,4 +425,12 @@ entries below that date are history, left as written.
   `pool_walk_ready` and `log_storm_evidence.tkb`'s `log_storm_trace_rounds`.
   `init_once_contention_evidence.tkb`'s naive flag stays: it is the control's
   unprotected word on purpose.
+- 2026-11-07 (#1159): `protocol_trace.tkb`'s six trace words (active,
+  sequence, stored, lost, process count, unlocked-pass) and four single rows
+  to `AtomicWord`: `log_ring_trace.tkb`'s `log_ring_trace_from`,
+  `fd_table.tkb`'s `fd_refcount_probe_ready`, `nic_irq_affinity.tkb`'s
+  `nic_irq_evidence_intid` (stored as a word, read back as the u32 INTID) and
+  `workload_evidence.tkb`'s `workload_ddb_hold_park_since`. The protocol
+  trace's writers keep their run-lock discipline; the type now says each
+  word is one atomic cell.
 

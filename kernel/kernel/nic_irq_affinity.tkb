@@ -44,7 +44,7 @@ private let mut nic_irq_taken: [AtomicWord; KERNEL_MAX_CORES];
 // The fixture's snapshot of nic_irq_taken at the start of a phase.
 private let mut nic_irq_phase_start: [usize; KERNEL_MAX_CORES];
 // The NIC SPI the fixture pinned, so unpinning can route it again.
-private let mut nic_irq_evidence_intid: u32 = 0;
+private let mut nic_irq_evidence_intid: AtomicWord;
 
 // The core a rotating device interrupt goes to on `turn`: the online cores
 // in index order. The xHCI route (kernel/platform/rpi5/xhci_irq_affinity.tkb)
@@ -95,7 +95,7 @@ private fn nic_irq_phase_taken(core: {0..<KERNEL_MAX_CORES as usize}) -> usize !
 // core, so the view can name it. Called before net_init enables the SPI.
 fn nic_irq_evidence_pin_begin(intid: u32) !{unsafe} {
     if (kernel_online_core_count() <= SECONDARY_CORE_ID) { return; }
-    nic_irq_evidence_intid = intid;
+    atomic_word_store(&nic_irq_evidence_intid, intid as usize);
     atomic_word_store(&nic_irq_pin, NIC_IRQ_EVIDENCE_CORE + 1);
     nic_irq_route(intid);
     nic_irq_phase_mark();
@@ -106,7 +106,7 @@ fn nic_irq_evidence_pin_begin(intid: u32) !{unsafe} {
 fn nic_irq_evidence_unpin() !{unsafe} {
     if (atomic_word_load(&nic_irq_pin) == 0) { return; }
     atomic_word_store(&nic_irq_pin, 0);
-    nic_irq_route(nic_irq_evidence_intid);
+    nic_irq_route(atomic_word_load(&nic_irq_evidence_intid) as u32);
 }
 
 // The core the pinned phase targets. scripts/build_qemu_race_window.py's
@@ -147,7 +147,7 @@ fn nic_irq_evidence_pin_end() !{logs, unsafe} {
         nic_irq_log_counts();
     }
     atomic_word_store(&nic_irq_pin, 0);
-    nic_irq_route(nic_irq_evidence_intid);
+    nic_irq_route(atomic_word_load(&nic_irq_evidence_intid) as u32);
     nic_irq_phase_mark();
 }
 
