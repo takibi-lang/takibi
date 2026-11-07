@@ -132,7 +132,7 @@ def find_unread(globs: dict, uses: dict, root: pathlib.Path) -> list[str]:
 def load_fields(path: pathlib.Path, fields: dict) -> None:
     """Sum (reads, writes) per (file, struct, field) across the kernels."""
     for line in path.read_text(encoding="utf-8").splitlines()[1:]:
-        file, _, struct, field, hardware, reads, writes = line.split("\t")
+        file, _, struct, field, hardware, reads, writes, _ = line.split("\t")
         if hardware == "true":
             continue
         old = fields.get((file, struct, field), (0, 0))

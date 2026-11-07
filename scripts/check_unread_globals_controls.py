@@ -83,11 +83,11 @@ SETTER_SHAPES = {
 }
 
 
-FIELDS = ("file\tline\tstruct\tfield\thardware\treads\twrites\n"
-          "a\t1\tS\twrite_only\tfalse\t0\t2\n"
-          "a\t1\tS\tread_too\tfalse\t1\t2\n"
-          "a\t1\tS\tliteral_only\tfalse\t0\t0\n"
-          "a\t1\tRegs\tdoorbell\ttrue\t0\t2\n")
+FIELDS = ("file\tline\tstruct\tfield\thardware\treads\twrites\tqualifier\n"
+          "a\t1\tS\twrite_only\tfalse\t0\t2\t-\n"
+          "a\t1\tS\tread_too\tfalse\t1\t2\t-\n"
+          "a\t1\tS\tliteral_only\tfalse\t0\t0\t-\n"
+          "a\t1\tRegs\tdoorbell\ttrue\t0\t2\t-\n")
 
 
 def main() -> int:

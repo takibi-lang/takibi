@@ -96,9 +96,10 @@ named script has no assignment of the symbol, when the name is not a global, and
 when the program also writes it.
 
 The check refuses a struct field too, from `--facts fields.tsv`: one row per
-declared field (`file`, `line`, `struct`, `field`, `hardware`, `reads`, `writes`)
+declared field (`file`, `line`, `struct`, `field`, `hardware`, `reads`, `writes`,
+`qualifier`)
 with the expressions in the program that read and assign a field of that name. A
-field with writes and no reads is refused. The source tree has no receiver types
+field with writes and no reads is refused. `qualifier` is the struct's tracked kind (`dma_fixed`, `per_cpu`, or `-`), which `scripts/buildcheck_dma_mint_files.py` reads (#567). The source tree has no receiver types
 at that stage, so same-named fields share their counts: it can miss a field, never
 refuse a read one. A `hardware` field (of an `io struct`, `io` typed, or in a packed struct) has its
 reader outside the program and is skipped. A field only ever set by a struct

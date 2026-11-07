@@ -319,7 +319,11 @@ let write_uses (out : out_channel) (prog : toplevel list) =
    included, is a read. The match below names every expression form so that a new
    one cannot silently hide a reader. *)
 
-let fields_columns = [ "file"; "line"; "struct"; "field"; "hardware"; "reads"; "writes" ]
+(* `qualifier` (#567) is the declaring struct's compiler-tracked kind --
+   `dma_fixed`, `per_cpu`, or `-` -- so a build check can ask which file
+   declares a kind of struct without reading .tkb text. *)
+let fields_columns =
+  [ "file"; "line"; "struct"; "field"; "hardware"; "reads"; "writes"; "qualifier" ]
 
 let write_fields (out : out_channel) (prog : toplevel list) =
   let reads = Hashtbl.create 256 and writes = Hashtbl.create 256 in
@@ -362,9 +366,12 @@ let write_fields (out : out_channel) (prog : toplevel list) =
       let count table = Option.value (Hashtbl.find_opt table f) ~default:0 in
       let hardware = packed || Io_struct_registry.is_io name
                      || (match ty with TypeIo _ -> true | _ -> false) in
-      Printf.fprintf out "%s\t%d\t%s\t%s\t%b\t%d\t%d\n"
+      let qualifier =
+        if Dma_fixed_registry.is_fixed name then "dma_fixed"
+        else if Per_cpu_registry.is_store name then "per_cpu" else "-" in
+      Printf.fprintf out "%s\t%d\t%s\t%s\t%b\t%d\t%d\t%s\n"
         (Call_graph.relative (source_file_of_loc loc)) loc.Lexing.pos_lnum
-        name f hardware (count reads) (count writes)) fs in
+        name f hardware (count reads) (count writes) qualifier) fs in
   List.iter (function
     | StructDef (name, fs, packed, _, _, loc)
     | OwnedStructDef (name, _, _, fs, packed, _, _, _, loc)
