@@ -45,7 +45,7 @@
 //   builtin, DECISIONS 2026-10-25), and preempt_slot_index() is its one
 //   caller (scripts/buildcheck_allowed_callers.py). With
 //   KERNEL_PREEMPT_ASSERTS, every region entry checks it agrees with MPIDR.
-//   No public function mints one (scripts/check_cpu_authority_mints.py);
+//   No public function mints one (scripts/buildcheck_cpu_authority_mints.py);
 //   the boot probe's any-CPU mint went with the exec argv slot (#1080).
 //
 // Current limitations (2026-11-06):

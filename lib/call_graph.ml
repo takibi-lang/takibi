@@ -107,11 +107,11 @@ let iter_references (visit : string option -> reference -> string -> unit)
 
 (* ---- The table ---------------------------------------------------------- *)
 
-let format_version = 2
+let format_version = 3
 
 let columns = [
   "file"; "line"; "end_line"; "name"; "qualifiers"; "declared"; "effects";
-  "params"; "callees"; "callers"; "values"; "body_hash" ]
+  "params"; "returns"; "callees"; "callers"; "values"; "body_hash" ]
 
 (* One token of a definition: where it ends, how it is spelled, and whether
    it is word-like (an identifier, keyword, number or string) for the
@@ -203,6 +203,36 @@ let params_of (tokens : token list) =
     | name :: colon :: ty when colon.text = ":" -> name.text ^ ": " ^ canonical ty
     | other -> canonical other)
 
+(* GitHub issue #567: the declared return type, spelled as `params` is, or
+   `-` for none. It follows the parameters' closing paren and `->`, and ends
+   at the effects (`!{`), a contract word, or the body's `{` -- a `{` that
+   opens the type itself (a refined `{lo..<hi as T}`) does not end it. *)
+let returns_of (tokens : token list) =
+  let rec after_params depth = function
+    | [] -> []
+    | tok :: rest ->
+        (match tok.text with
+         | "(" -> after_params (depth + 1) rest
+         | ")" when depth = 1 -> rest
+         | ")" -> after_params (depth - 1) rest
+         | _ -> after_params depth rest) in
+  let rec collect depth acc = function
+    | [] -> List.rev acc
+    | tok :: rest ->
+        if depth = 0 && acc <> []
+           && List.mem tok.text [ "{"; "!"; "where"; "requires"; "ensures" ]
+        then List.rev acc
+        else
+          let depth = match tok.text with
+            | "(" | "[" | "{" -> depth + 1
+            | ")" | "]" | "}" -> depth - 1
+            | _ -> depth in
+          collect depth (tok :: acc) rest in
+  match after_params 0 tokens with
+  | arrow :: rest when arrow.text = "->" ->
+      (match collect 0 [] rest with [] -> "-" | ty -> canonical ty)
+  | _ -> "-"
+
 let relative file =
   let cwd = Sys.getcwd () ^ Filename.dir_sep in
   if String.starts_with ~prefix:cwd file then
@@ -292,6 +322,7 @@ let write_table (out : out_channel) (prog : toplevel list) (types : program_type
        | Some tokens -> (match params_of tokens with
            | [] -> "-" | ps -> String.concat ", " ps)
        | None -> "-");
+      (match span with Some tokens -> returns_of tokens | None -> "-");
       set callees;
       set callers;
       set values;

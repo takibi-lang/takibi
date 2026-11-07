@@ -107,7 +107,7 @@ let call_graph_rows src =
   match lines with
   | version :: header :: rows ->
       Alcotest.(check bool) "format line" true
-        (String.starts_with ~prefix:"# takibi call graph, format 2" version);
+        (String.starts_with ~prefix:"# takibi call graph, format 3" version);
       let columns = String.split_on_char '\t' header in
       List.map (fun row ->
         let cells = List.combine columns (String.split_on_char '\t' row) in
@@ -3302,10 +3302,11 @@ let infer_tests = [
          fn callback() {}
          fn take(f: fn() -> void) { f(); }
          fn smaller(x: usize) -> usize { return min(x, secret()); }
+         fn bounded() -> {0..<4 as usize} !{} { return 1; }
          fn main() -> usize {
            let mut a: A = { 1 }; let mut b: B = { 2 };
            take(callback);
-           return g(&a) + g(&b) + smaller(3);
+           return g(&a) + g(&b) + smaller(3) + bounded();
          }" in
       let field name column = List.assoc column (List.assoc name rows) in
       Alcotest.(check string) "private qualifier" "private" (field "secret" "qualifiers");
@@ -3327,6 +3328,12 @@ let infer_tests = [
        | cells ->
            Alcotest.failf "callees of smaller: %s" (String.concat "," cells));
       Alcotest.(check string) "params" "f: fn()->void" (field "take" "params");
+      (* GitHub issue #567: the declared return type; a refined one keeps
+         its braces, and the effects after it are not part of it. *)
+      Alcotest.(check string) "returns" "usize" (field "secret" "returns");
+      Alcotest.(check string) "no return type" "-" (field "take" "returns");
+      Alcotest.(check string) "refined return" "{0..<4 as usize}"
+        (field "bounded" "returns");
       Alcotest.(check bool) "function value" true
         (String.starts_with ~prefix:"callback@" (field "main" "values")));
 

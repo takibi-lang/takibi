@@ -20,14 +20,14 @@ import buildcheck_kernel_asm_invariants as asm  # noqa: E402
 from pass_line import report_pass  # noqa: E402
 
 HEADER = ("file\tline\tend_line\tname\tqualifiers\tdeclared\teffects\tparams"
-          "\tcallees\tcallers\tvalues\tbody_hash\n")
+          "\treturns\tcallees\tcallers\tvalues\tbody_hash\n")
 
 
 def graph(rows):
     handle = tempfile.NamedTemporaryFile("w", suffix=".tsv", delete=False)
-    handle.write("# takibi call graph, format 2\n" + HEADER)
+    handle.write("# takibi call graph, format 3\n" + HEADER)
     for name, declared, callees in rows:
-        handle.write(f"f.tkb\t1\t2\t{name}\t-\t{declared}\t-\t-\t{callees}\t-\t-\t-\n")
+        handle.write(f"f.tkb\t1\t2\t{name}\t-\t{declared}\t-\t-\t-\t{callees}\t-\t-\t-\n")
     handle.close()
     return handle.name
 

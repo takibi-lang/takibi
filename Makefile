@@ -1935,6 +1935,7 @@ $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(
 	python3 scripts/buildcheck_ext2_reader_self_wait.py $@.facts/callgraph.tsv
 	python3 scripts/buildcheck_ext2_release_log.py $@.facts/callgraph.tsv
 	python3 scripts/buildcheck_allowed_callers.py $@.facts/callgraph.tsv
+	python3 scripts/buildcheck_cpu_authority_mints.py $@.facts/callgraph.tsv
 	python3 scripts/buildcheck_world_stop_rank.py $@.facts/callgraph.tsv
 	python3 scripts/buildcheck_frame_size.py $@
 	$(NICE_HEAVY) python3 scripts/buildcheck_range_obligations.py $@.facts/rangeobl
@@ -2089,6 +2090,7 @@ $(KERNEL_QEMU_MAIN_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(
 	python3 scripts/buildcheck_ext2_reader_self_wait.py $@.facts/callgraph.tsv
 	python3 scripts/buildcheck_ext2_release_log.py $@.facts/callgraph.tsv
 	python3 scripts/buildcheck_allowed_callers.py $@.facts/callgraph.tsv
+	python3 scripts/buildcheck_cpu_authority_mints.py $@.facts/callgraph.tsv
 	python3 scripts/buildcheck_world_stop_rank.py $@.facts/callgraph.tsv
 	python3 scripts/buildcheck_frame_size.py $@
 	$(NICE_HEAVY) python3 scripts/buildcheck_range_obligations.py $@.facts/rangeobl

@@ -12,10 +12,10 @@ misread table would otherwise report PASS about nothing.
 
 import pathlib
 
-FORMAT = 2
+FORMAT = 3
 HEADER = "# takibi call graph, format "
 COLUMNS = ("file", "line", "end_line", "name", "qualifiers", "declared",
-           "effects", "params", "callees", "callers", "values", "body_hash")
+           "effects", "params", "returns", "callees", "callers", "values", "body_hash")
 LIST_COLUMNS = ("qualifiers", "effects", "callees", "callers", "values")
 
 

@@ -16,11 +16,11 @@ refuses another format version, a changed column set and an empty table.
 Without the flag the compiler does no work for it: the parser records
 definition ends only while the flag is set.
 
-## Format, version 2
+## Format, version 3
 
 The first line is
 
-    # takibi call graph, format 2; see docs/CALL_GRAPH.md
+    # takibi call graph, format 3; see docs/CALL_GRAPH.md
 
 and the second names the columns. Each later line is one function
 definition. A cell that holds a list separates its items with `,`; an
@@ -36,6 +36,7 @@ empty cell or empty list is `-`.
 | `declared` | the declared effect contract: `-` when there is none, `{}` for an explicit empty one, else its effects as written |
 | `effects` | the effects the checker inferred, with declared roles, sorted (the effect names of `EFFECTS.md`); the union over a generic function's instances |
 | `params` | `name: type` per parameter, separated by `, `. The type is spelled from the compiler's tokens with a blank only between two word-like tokens (`borrow Ext2MutationGuard[ext2_mutation]`, `&mut T`, `[u8;4]`), so `, ` never occurs inside one |
+| `returns` | the declared return type, spelled as `params` spells a type (`usize`, `{0..<4 as usize}`, `BlockSlot[0]`), or `-` when the function declares none; the effects after it are not part of it (#567) |
 | `callees` | the resolved direct callees, deduplicated and sorted, each `name@file:line` naming the callee's own row, or `name@-` for a callee with no definition here (an `extern`, or a compiler builtin such as `dma_finish_owned_rx`, which the checker types from its name); `*` when the function also calls through a function value, whose target is not known |
 | `callers` | the rows whose `callees` name this one, spelled the same way |
 | `values` | the functions this one names as a value (passes, stores or returns a function pointer to), spelled the same way |

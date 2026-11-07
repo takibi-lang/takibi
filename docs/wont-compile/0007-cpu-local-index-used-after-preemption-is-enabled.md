@@ -97,6 +97,6 @@ authority.
 ## Limits of this entry
 
 The authority file is trusted, and it may publish mints that bypass a block;
-`scripts/check_cpu_authority_mints.py` fixes their callers. Many per-CPU
+`scripts/buildcheck_cpu_authority_mints.py` fixes their callers. Many per-CPU
 arrays are still indexed by the raw `cpu_id()` integer; they move to
 `struct per_cpu` file by file (#638).

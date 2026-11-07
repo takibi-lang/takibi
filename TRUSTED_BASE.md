@@ -469,7 +469,7 @@ rules globally.
   assembly helper `kernel_cpu_offset`, whose one caller
   `scripts/buildcheck_allowed_callers.py` fixes; each region entry
   checks it against `cpu_id()` at run time). Nothing mints one outside a
-  block: `scripts/check_cpu_authority_mints.py` refuses a public function
+  block: `scripts/buildcheck_cpu_authority_mints.py` refuses a public function
   of that file returning the authority (the boot probe's any-CPU mint was
   retired with execve's per-CPU argv slot, #1080).
 - DDB's lock-free GEM RX look (`kernel_net_rx_frame_pending` in

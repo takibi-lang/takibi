@@ -2268,7 +2268,7 @@ that register. While
 `KERNEL_PREEMPTIBLE == 0` nothing consults the count to decide a switch, and
 the mint file asserts the constant; that dependency is trusted, not checked. The mint
 file may also publish mints that bypass a block; their callers are fixed by
-`scripts/check_cpu_authority_mints.py`. Reading another CPU's element (a debugger walking every CPU's
+`scripts/buildcheck_cpu_authority_mints.py`. Reading another CPU's element (a debugger walking every CPU's
 diagnostics) is not expressible; such diagnostic arrays stay ordinary
 arrays.
 
