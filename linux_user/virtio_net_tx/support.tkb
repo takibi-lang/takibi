@@ -37,46 +37,75 @@ fn tx_used() -> *VirtqUsedRing !{unsafe} {
     return unsafe { virtio_net_used_addr[1] as *VirtqUsedRing };
 }
 
+// GitHub issue #1416: the shadows are the capability's; the fixture reads
+// them through the driver copy's readers, and its fake device completes
+// against the TX used shadow the test last handed reset_clock.
+let mut fixture_tx_seen: VirtioRingIndex = VirtioRingIndex::Zero;
+
+fn shadows(r: borrow NetRxCanAcquire[net]) -> VirtioNetShadows {
+    return virtio_net_shadows(r);
+}
+fn rx_avail(r: borrow NetRxCanAcquire[net]) -> VirtioRingIndex {
+    let mut v: VirtioNetShadows = virtio_net_shadows(r); return v.rx_avail_idx;
+}
+fn tx_avail(r: borrow NetRxCanAcquire[net]) -> VirtioRingIndex {
+    let mut v: VirtioNetShadows = virtio_net_shadows(r); return v.tx_avail_idx;
+}
+fn rx_used(r: borrow NetRxCanAcquire[net]) -> VirtioRingIndex {
+    let mut v: VirtioNetShadows = virtio_net_shadows(r); return v.rx_used_seen;
+}
+fn tx_used_shadow(r: borrow NetRxCanAcquire[net]) -> VirtioRingIndex {
+    let mut v: VirtioNetShadows = virtio_net_shadows(r); return v.tx_used_seen;
+}
+fn packet_rx_avail(p: borrow NetPacket[pb, po, net]) -> VirtioRingIndex {
+    let mut v: VirtioNetShadows = virtio_net_packet_shadows(p); return v.rx_avail_idx;
+}
+fn packet_tx_used(p: borrow NetPacket[pb, po, net]) -> VirtioRingIndex {
+    let mut v: VirtioNetShadows = virtio_net_packet_shadows(p); return v.tx_used_seen;
+}
+
 fn workload_profile_interrupt_wait() !{may_block} {
     waits = waits + 1;
     // An old unbounded wait fails quickly rather than hanging the host suite.
     check(waits < 40000, "wait did not return after the elapsed deadline");
     fake_now = fake_now + wake_ticks;
     if (done_at >= 0 && fake_now >= done_at) {
-        (*tx_used()).idx = virtio_ring_index_next(tx_used_seen);
+        (*tx_used()).idx = virtio_ring_index_next(fixture_tx_seen);
     }
 }
 
-fn reset_clock(completion: i64, step: i64) {
+fn reset_clock(completion: i64, step: i64, seen: VirtioRingIndex) {
     fake_now = 0; done_at = completion; wake_ticks = step; waits = 0;
-    (*tx_used()).idx = tx_used_seen;
+    fixture_tx_seen = seen;
+    (*tx_used()).idx = seen;
 }
 
-fn expect_completed() !{may_block} {
-    match virtio_net_tx_wait() {
+fn expect_completed(seen: VirtioRingIndex) !{may_block} {
+    match virtio_net_tx_wait(seen) {
         VirtioNetTxCompletion::Completed => {}
         VirtioNetTxCompletion::Unconfirmed => { check(false, "completion not observed"); }
     }
 }
 
-fn expect_unconfirmed() !{may_block} {
-    match virtio_net_tx_wait() {
+fn expect_unconfirmed(seen: VirtioRingIndex) !{may_block} {
+    match virtio_net_tx_wait(seen) {
         VirtioNetTxCompletion::Completed => { check(false, "wake falsely proves completion"); }
         VirtioNetTxCompletion::Unconfirmed => {}
     }
 }
 
-fn receive(ready: sink NetRxCanAcquire) -> NetRxAcquire !{unsafe} {
+fn receive(ready: sink NetRxCanAcquire[net]) -> NetRxAcquire[net] !{unsafe} {
     return receive_id(ready, 0);
 }
 
 // The device's used entry naming RX descriptor `id`.
-fn receive_id(ready: sink NetRxCanAcquire, id: u32) -> NetRxAcquire !{unsafe} {
+fn receive_id(ready: sink NetRxCanAcquire[net], id: u32) -> NetRxAcquire[net] !{unsafe} {
     let used: *VirtqUsedRing = unsafe { virtio_net_used_addr[0] as *VirtqUsedRing };
-    let slot: {0..<8 as usize} = (((rx_used_seen as u16) as usize) % 8) as {0..<8 as usize};
+    let seen: VirtioRingIndex = rx_used(ready);
+    let slot: {0..<8 as usize} = (((seen as u16) as usize) % 8) as {0..<8 as usize};
     used.ring[slot].id = id;
     used.ring[slot].len = 74;
-    used.idx = virtio_ring_index_next(rx_used_seen);
+    used.idx = virtio_ring_index_next(seen);
     atomic_word_store(&virtio_rx_irq_flag, 1);
     return net_rx_acquire(ready);
 }
@@ -84,7 +113,7 @@ fn receive_id(ready: sink NetRxCanAcquire, id: u32) -> NetRxAcquire !{unsafe} {
 // #740: the boundary where the pool is empty at acquire. The fixture takes
 // every Free buffer out of the pool, so the acquire's refill finds none and
 // descriptor 0 stays empty; the release of the packet refills it.
-fn drain_pool_case(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{unsafe} {
+fn drain_pool_case(ready: sink NetRxCanAcquire[net]) -> NetRxCanAcquire[net] !{unsafe} {
     let a: usize = virtio_pkt_free_index();
     let Place::Full(held_a) = virtio_pkt_take(a) else {
         Place::Empty => { check(false, "no first Free buffer"); return ready; }
@@ -94,7 +123,7 @@ fn drain_pool_case(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{unsafe} {
         Place::Empty => { check(false, "no second Free buffer"); virtio_pkt_park(a, held_a); return ready; }
     };
     check(virtio_pkt_free_index() == VIRTIO_PKT_NONE, "the fixture emptied the pool");
-    let before: VirtioRingIndex = rx_avail_idx;
+    let before: VirtioRingIndex = rx_avail(ready);
     let NetRxAcquire::Acquired(packet) = receive(ready) else {
         NetRxAcquire::None(cap) => {
             check(false, "oracle RX frame was refused");
@@ -103,9 +132,9 @@ fn drain_pool_case(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{unsafe} {
             return cap;
         }
     };
-    check(rx_avail_idx == before, "an empty pool leaves the RX descriptor empty");
+    check(packet_rx_avail(packet) == before, "an empty pool leaves the RX descriptor empty");
     let again = net_rx_release(packet);
-    check(rx_avail_idx == virtio_ring_index_next(before),
+    check(rx_avail(again) == virtio_ring_index_next(before),
           "the next release refills the empty RX descriptor");
     virtio_pkt_park(a, held_a);
     virtio_pkt_park(b, held_b);
@@ -116,7 +145,7 @@ fn drain_pool_case(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{unsafe} {
 // release: the reply's completion (net_tx_complete). net_transmit_ready's
 // refill cannot meet an empty descriptor today: the one RX capability it
 // needs comes back only by a release or reply, and either refills first.
-fn drain_pool_tx_case(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{unsafe, may_block} {
+fn drain_pool_tx_case(ready: sink NetRxCanAcquire[net]) -> NetRxCanAcquire[net] !{unsafe, may_block} {
     let a: usize = virtio_pkt_free_index();
     let Place::Full(held_a) = virtio_pkt_take(a) else {
         Place::Empty => { check(false, "no first Free buffer"); return ready; }
@@ -125,7 +154,7 @@ fn drain_pool_tx_case(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{unsafe, 
     let Place::Full(held_b) = virtio_pkt_take(b) else {
         Place::Empty => { check(false, "no second Free buffer"); virtio_pkt_park(a, held_a); return ready; }
     };
-    let before: VirtioRingIndex = rx_avail_idx;
+    let before: VirtioRingIndex = rx_avail(ready);
     let NetRxAcquire::Acquired(packet) = receive(ready) else {
         NetRxAcquire::None(cap) => {
             check(false, "oracle RX frame was refused");
@@ -134,10 +163,10 @@ fn drain_pool_tx_case(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{unsafe, 
             return cap;
         }
     };
-    check(rx_avail_idx == before, "an empty pool leaves the RX descriptor empty before a reply");
-    reset_clock(500, 100);
+    check(packet_rx_avail(packet) == before, "an empty pool leaves the RX descriptor empty before a reply");
+    reset_clock(500, 100, packet_tx_used(packet));
     let ready = net_rx_send_reply(net_rx_reply_ready(packet, 64));
-    check(rx_avail_idx == virtio_ring_index_next(before),
+    check(rx_avail(ready) == virtio_ring_index_next(before),
           "the reply's TX completion refills the empty RX descriptor");
     virtio_pkt_park(a, held_a);
     virtio_pkt_park(b, held_b);
@@ -150,27 +179,27 @@ fn drain_pool_tx_case(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{unsafe, 
 // kept and a second keep is refused at the reserve and sent as a plain
 // transmit. The kept buffer is resent from its slot and stays Kept; its
 // off-turn free touches no descriptor.
-fn tx_keep_case(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{unsafe, may_block} {
+fn tx_keep_case(ready: sink NetRxCanAcquire[net]) -> NetRxCanAcquire[net] !{unsafe, may_block} {
     check(virtio_pkt_out_count() == 0, "nothing kept before the keep case");
     let slot: usize = net_tx_keep_slot();
     check(slot != NET_KEPT_NONE, "the first keep passes the reserve");
     packet[0] = 7;
-    reset_clock(500, 100);
-    let tx_before: VirtioRingIndex = tx_avail_idx;
+    reset_clock(500, 100, tx_used_shadow(ready));
+    let tx_before: VirtioRingIndex = tx_avail(ready);
     let ready = match net_transmit_keep(ready, slot, packet as []u8, 60) {
         NetTxKeep::Kept(cap) => { cap }
         NetTxKeep::Sent(cap) => { check(false, "a keep below the reserve was refused"); cap }
     };
-    check(tx_avail_idx == virtio_ring_index_next(tx_before), "the kept frame was transmitted");
+    check(tx_avail(ready) == virtio_ring_index_next(tx_before), "the kept frame was transmitted");
     check(virtio_pkt_out_count() == 1, "the kept buffer counts as out");
     // At the reserve: refused, and a stale slot is sent, not kept.
     check(net_tx_keep_slot() == NET_KEPT_NONE, "a second keep is refused at the reserve");
-    reset_clock(500, 100);
+    reset_clock(500, 100, tx_used_shadow(ready));
     let ready = match net_transmit_keep(ready, slot, packet as []u8, 60) {
         NetTxKeep::Kept(cap) => { check(false, "a keep past the reserve was accepted"); cap }
         NetTxKeep::Sent(cap) => { cap }
     };
-    check(tx_avail_idx == virtio_ring_index_next(virtio_ring_index_next(tx_before)),
+    check(tx_avail(ready) == virtio_ring_index_next(virtio_ring_index_next(tx_before)),
           "a refused keep still transmits the frame");
     check(virtio_pkt_out_count() == 1, "a refused keep keeps nothing");
     // Resent in place: transmitted again, Kept again in the same slot.
@@ -178,14 +207,14 @@ fn tx_keep_case(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{unsafe, may_bl
     match net_packet_kept_claim(slot) {
         NetKeptClaim::None => { check(false, "the kept frame is not claimable"); }
         NetKeptClaim::Claimed(kept) => {
-            reset_clock(500, 100);
+            reset_clock(500, 100, tx_used_shadow(resent));
             resent = net_packet_kept_resend(resent, kept);
         }
     }
-    check(tx_avail_idx == virtio_ring_index_next(virtio_ring_index_next(
+    check(tx_avail(resent) == virtio_ring_index_next(virtio_ring_index_next(
               virtio_ring_index_next(tx_before))), "the resend transmits");
     check(virtio_pkt_out_count() == 1, "the resent buffer is Kept again");
-    let rx_before: VirtioRingIndex = rx_avail_idx;
+    let rx_before: VirtioRingIndex = rx_avail(resent);
     match net_packet_kept_claim(slot) {
         NetKeptClaim::None => { check(false, "the resent frame is not claimable"); }
         NetKeptClaim::Claimed(kept) => {
@@ -193,13 +222,13 @@ fn tx_keep_case(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{unsafe, may_bl
             net_packet_free(kept);
         }
     }
-    check(rx_avail_idx == rx_before, "an off-turn free touches no descriptor");
+    check(rx_avail(resent) == rx_before, "an off-turn free touches no descriptor");
     check(virtio_pkt_out_count() == 0, "the freed buffer is back");
     check(net_tx_keep_slot() != NET_KEPT_NONE, "after the free a keep passes again");
     return resent;
 }
 
-fn send_reply(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{may_block} {
+fn send_reply(ready: sink NetRxCanAcquire[net]) -> NetRxCanAcquire[net] !{may_block} {
     match receive(ready) {
         NetRxAcquire::Acquired(frame) => {
             return net_rx_send_reply(net_rx_reply_ready(frame, 64));
@@ -211,8 +240,8 @@ fn send_reply(ready: sink NetRxCanAcquire) -> NetRxCanAcquire !{may_block} {
     }
 }
 
-fn send_timeout_case(ready: sink NetRxCanAcquire, reply_timeout: bool)
-        -> NetRxCanAcquire !{may_block} {
+fn send_timeout_case(ready: sink NetRxCanAcquire[net], reply_timeout: bool)
+        -> NetRxCanAcquire[net] !{may_block} {
     if (reply_timeout) {
         return send_reply(ready);
     }
@@ -242,76 +271,78 @@ fn run_driver_case(reply_timeout: bool) !{may_block} {
     }
 }
 
-fn run_initialized_case(ready: sink NetRxCanAcquire, reply_timeout: bool) !{may_block, unsafe} {
+fn run_initialized_case(ready: sink NetRxCanAcquire[net], reply_timeout: bool) !{may_block, unsafe} {
 
-    reset_clock(-1, 100000);
-    (*tx_used()).idx = virtio_ring_index_next(tx_used_seen);
-    expect_completed();
+    let seen0: VirtioRingIndex = tx_used_shadow(ready);
+    reset_clock(-1, 100000, seen0);
+    (*tx_used()).idx = virtio_ring_index_next(seen0);
+    expect_completed(seen0);
     check(waits == 0, "already-complete needs no wake");
-    reset_clock(12000, 1);
-    expect_completed();
+    reset_clock(12000, 1, seen0);
+    expect_completed(seen0);
     check(waits > 1000 && fake_now < 1000001, "frequent wakes cannot exhaust the time budget");
-    reset_clock(-1, 100000);
-    expect_unconfirmed();
+    reset_clock(-1, 100000, seen0);
+    expect_unconfirmed(seen0);
     check(waits == 10 && fake_now >= 1000001 && fake_now < 1100000, "absent completion expires at 1 second");
-    reset_clock(1000001, 1000000);
-    expect_completed();
+    reset_clock(1000001, 1000000, seen0);
+    expect_completed(seen0);
     check(waits == 1, "completion at the boundary wins");
-    reset_clock(-1, 1100000);
-    expect_unconfirmed();
+    reset_clock(-1, 1100000, seen0);
+    expect_unconfirmed(seen0);
     check(waits == 1, "late unrelated wake reports expiry");
 
     packet[0] = 42;
-    reset_clock(500, 100);
+    reset_clock(500, 100, seen0);
     let ready = net_transmit_ready(ready, packet as []u8, 64);
     check(waits > 1 && timeout_logs == 0, "normal standalone send completes after unrelated wakes");
     // #740: the packet the stack holds names no descriptor; acquire has
     // already given descriptor 0 a fresh buffer, so release posts nothing.
-    let rx_avail_held: VirtioRingIndex = rx_avail_idx;
+    let rx_avail_held: VirtioRingIndex = rx_avail(ready);
     let ready = match receive(ready) {
         NetRxAcquire::None(cap) => { check(false, "oracle RX frame was refused"); cap }
         NetRxAcquire::Acquired(frame) => {
-            check(rx_avail_idx == virtio_ring_index_next(rx_avail_held),
+            check(packet_rx_avail(frame) == virtio_ring_index_next(rx_avail_held),
                   "acquire refills the RX descriptor while the stack holds the packet");
             net_rx_release(frame)
         }
     };
-    check(rx_avail_idx == virtio_ring_index_next(rx_avail_held),
+    check(rx_avail(ready) == virtio_ring_index_next(rx_avail_held),
           "release of a held packet reposts no descriptor twice");
     let ready = drain_pool_case(ready);
     let ready = drain_pool_tx_case(ready);
     let ready = tx_keep_case(ready);
-    reset_clock(500, 100);
+    reset_clock(500, 100, tx_used_shadow(ready));
     let ready = send_reply(ready);
     check(waits > 1 && timeout_logs == 0, "normal reply completes and reposts RX");
 
-    reset_clock(-1, 100000);
-    let used_before: VirtioRingIndex = tx_used_seen;
+    reset_clock(-1, 100000, tx_used_shadow(ready));
+    let used_before: VirtioRingIndex = tx_used_shadow(ready);
     // A reply's acquire refills its RX descriptor before the transmit
     // (#740: the stack's packet names no descriptor); the unconfirmed
     // completion itself reposts nothing more.
-    let mut rx_avail_expected: VirtioRingIndex = rx_avail_idx;
-    if (reply_timeout) { rx_avail_expected = virtio_ring_index_next(rx_avail_idx); }
+    let mut rx_avail_expected: VirtioRingIndex = rx_avail(ready);
+    if (reply_timeout) { rx_avail_expected = virtio_ring_index_next(rx_avail(ready)); }
     let ready = send_timeout_case(ready, reply_timeout);
     check(waits == 10 && timeout_logs == 1, "driver returns and logs once on expiry");
-    check(tx_used_seen == used_before && rx_avail_idx == rx_avail_expected,
+    check(tx_used_shadow(ready) == used_before && rx_avail(ready) == rx_avail_expected,
           "unconfirmed completion neither consumes TX nor reposts RX");
-    let tx_avail_before: VirtioRingIndex = tx_avail_idx;
+    let tx_avail_before: VirtioRingIndex = tx_avail(ready);
     let notify_before: i32 = fake_regs[20];
     // The unconfirmed buffer is parked Unconfirmed, which has no write
     // access, so its payload is unchanged by construction (#740).
     packet[0] = 99;
     let ready = net_transmit_ready(ready, packet as []u8, 64);
-    check(tx_avail_idx == tx_avail_before &&
+    check(tx_avail(ready) == tx_avail_before &&
           fake_regs[20] == notify_before && timeout_logs == 1,
           "later standalone sends leave descriptor, payload and notification unchanged");
     // Even a late used entry and IRQ cannot revive the disabled queues.
-    (*tx_used()).idx = virtio_ring_index_next(tx_used_seen);
+    (*tx_used()).idx = virtio_ring_index_next(tx_used_shadow(ready));
     let late_rx: *VirtqUsedRing = unsafe { virtio_net_used_addr[0] as *VirtqUsedRing };
-    let late_slot: {0..<8 as usize} = (((rx_used_seen as u16) as usize) % 8) as {0..<8 as usize};
+    let late_seen: VirtioRingIndex = rx_used(ready);
+    let late_slot: {0..<8 as usize} = (((late_seen as u16) as usize) % 8) as {0..<8 as usize};
     late_rx.ring[late_slot].id = 0;
     late_rx.ring[late_slot].len = 74;
-    late_rx.idx = virtio_ring_index_next(rx_used_seen);
+    late_rx.idx = virtio_ring_index_next(late_seen);
     atomic_word_store(&virtio_rx_irq_flag, 1);
     let ready = match net_rx_acquire(ready) {
         NetRxAcquire::None(cap) => { cap }

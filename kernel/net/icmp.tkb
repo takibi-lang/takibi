@@ -32,9 +32,9 @@ struct packed be IcmpHdr {
 let IPV4_SRC: usize = offsetof(Ipv4Hdr, src);
 let IPV4_DST: usize = offsetof(Ipv4Hdr, dst);
 
-must_use variant KernelIcmpResult {
-    TimedOut(NetRxCanAcquire);
-    Replied(NetRxCanAcquire);
+must_use variant KernelIcmpResult[net: addr] {
+    TimedOut(NetRxCanAcquire[net]);
+    Replied(NetRxCanAcquire[net]);
 }
 
 fn icmp_build_echo_reply(ethernet: borrow [u8; 42..],
@@ -142,8 +142,8 @@ fn icmp_try_build_reply(frame: borrow [u8; 1514..], len: i32) -> i32 {
     return 14 + header.total_length as i32;
 }
 
-fn kernel_icmp_reply_once(ready_in: sink NetRxCanAcquire)
-        -> KernelIcmpResult !{may_block} {
+fn kernel_icmp_reply_once(ready_in: sink NetRxCanAcquire[net])
+        -> KernelIcmpResult[net] !{may_block} {
     let mut ready = ready_in;
     let start: i64 = read_cntpct();
     let deadline_ticks: i64 = read_cntfrq() * 15;

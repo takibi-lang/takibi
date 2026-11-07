@@ -16,6 +16,27 @@ from pathlib import Path
 from layout_text import AnchorCountError, layout_replace_once
 
 
+SHADOW_READERS = """
+// The shadows, read-only, for the native fixture's checks
+// (linux_user/virtio_net_tx).
+struct VirtioNetShadows {
+    rx_used_seen: VirtioRingIndex;
+    tx_used_seen: VirtioRingIndex;
+    rx_avail_idx: VirtioRingIndex;
+    tx_avail_idx: VirtioRingIndex;
+}
+fn virtio_net_shadows(r: borrow NetRxCanAcquire[net]) -> VirtioNetShadows {
+    let mut v: VirtioNetShadows = {
+        r.rx_used_seen, r.tx_used_seen, r.rx_avail_idx, r.tx_avail_idx
+    };
+    return v;
+}
+fn virtio_net_packet_shadows(p: borrow NetPacket[pb, po, net]) -> VirtioNetShadows {
+    return virtio_net_shadows(p.ready);
+}
+"""
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
@@ -30,6 +51,10 @@ def main():
         source = layout_replace_once(source, 'use "kernel/lib/occupancy.tkb";\n', "")
     except AnchorCountError:
         raise SystemExit("virtio-net native fixture: expected exactly one occupancy import") from None
+    # GitHub issue #1416: the ring shadows are the capability's private
+    # fields; the fixture's checks read them through these, which only the
+    # driver's own file (this copy) can define.
+    source += SHADOW_READERS
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(source)
 

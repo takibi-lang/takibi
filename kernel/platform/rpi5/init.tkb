@@ -83,7 +83,7 @@ fn kernel_platform_net_link_up(phase: borrow BootPhase[boot]) {
 // capability down here; since #837 it was installed at link-up and a
 // holder must put it back, or every later waiter (a free, a drain) would
 // wait for good on a store that records an install.
-fn kernel_platform_net_capability_return(ready: sink NetRxCanAcquire) {
+fn kernel_platform_net_capability_return(ready: sink NetRxCanAcquire[net]) {
     match network_capability_install(ready) {
         NetworkCapabilityInstallResult::Installed => {}
         NetworkCapabilityInstallResult::AlreadyInstalled(incoming) => {

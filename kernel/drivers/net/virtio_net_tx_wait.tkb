@@ -5,16 +5,16 @@
 // to a descriptor or packet buffer. A final real used-index observation wins.
 must_use variant VirtioNetTxCompletion { Completed; Unconfirmed; }
 
-fn virtio_net_tx_wait() -> VirtioNetTxCompletion !{may_block} {
+fn virtio_net_tx_wait(seen: VirtioRingIndex) -> VirtioNetTxCompletion !{may_block} {
     let started: i64 = read_cntpct();
     let deadline_ticks: i64 = read_cntfrq() * 1;
     while (read_cntpct() - started < deadline_ticks) {
-        if (virtio_net_tx_used_pending() == false) {
+        if (virtio_net_tx_used_pending(seen) == false) {
             return VirtioNetTxCompletion::Completed;
         }
         workload_profile_interrupt_wait();
     }
-    if (virtio_net_tx_used_pending() == false) {
+    if (virtio_net_tx_used_pending(seen) == false) {
         return VirtioNetTxCompletion::Completed;
     }
     return VirtioNetTxCompletion::Unconfirmed;

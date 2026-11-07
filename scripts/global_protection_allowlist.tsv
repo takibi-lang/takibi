@@ -51,11 +51,6 @@ kernel/drivers/net/rp1_gem_desc.tkb	gem_pkt_rx_seen	read-by gem_pkt_received: 20
 kernel/drivers/net/rp1_gem_desc.tkb	gem_pkt_tx_seen	read-by gem_pkt_sent: 2026-10-31 token: as gem_pkt_rx_seen, for transmit
 kernel/drivers/net/rp1_gem_desc.tkb	gem_rx_seen_filled	read-by gem_rx_ring_filled: 2026-10-31 token: what the latest ring snapshot showed, under the one NetRxCanAcquire token
 kernel/drivers/net/rp1_gem_desc.tkb	gem_tx_seen_used	read-by gem_tx_ring_used: 2026-10-31 token: as gem_rx_seen_filled, for transmit
-kernel/drivers/net/virtio_net.tkb	rx_avail_idx	read-by net_init,virtio_net_rx_refill: 2026-10-31 token: RX avail shadow, under the one NetRxCanAcquire token; net_init at boot
-kernel/drivers/net/virtio_net.tkb	rx_desc_pkt	read-by net_rx_acquire,virtio_net_rx_refill: 2026-10-31 token: buffer per RX descriptor, under the one NetRxCanAcquire token
-kernel/drivers/net/virtio_net.tkb	rx_used_seen	read-by net_rx_acquire,kernel_net_rx_frame_pending: 2026-10-31 token: RX used shadow, under the one NetRxCanAcquire token; DDB reads it with the world stopped
-kernel/drivers/net/virtio_net.tkb	tx_avail_idx	read-by virtio_net_tx_ring: 2026-10-31 token: TX avail shadow, under the one NetRxCanAcquire token
-kernel/drivers/net/virtio_net.tkb	tx_used_seen	read-by virtio_net_tx_finish,virtio_net_tx_used_pending: 2026-10-31 token: TX used shadow, under the one NetRxCanAcquire token
 kernel/drivers/net/virtio_net.tkb	virtio_net_queues	read-by virtio_queue_setup: 2026-10-31 token: descriptor and avail writes under the one NetRxCanAcquire token; the device reads them; the setup address is boot only
 kernel/drivers/net/virtio_net.tkb	virtio_net_regs	read-by net_init,virtio_net_irq_handler,net_read_mac: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
 kernel/drivers/net/virtio_net.tkb	virtio_net_used_addr	read-by kernel_net_rx_frame_pending: 2026-10-31 boot: written by virtio_queue_setup; DDB reads it stopped

@@ -49,7 +49,9 @@ protocol VirtioPkt[inst: usize] retains region(VirtioPacket)[b, VIRTIO_PKT_ONE] 
     // from the read to the observation that consumes it.
     state RxPosted[req] device { seen: u8 = 0; }
     state Filled access write;
-    state TxPosted[req] device access read;
+    // GitHub issue #1416: the TX used shadow its observation compares
+    // with, copied from the capability by virtio_pkt_note_tx_shadow.
+    state TxPosted[req] device access read { used_seen: u16 = 0; }
     state Unconfirmed[req] device;
     init Free;
     transition virtio_pkt_post_rx(Free) rx -> RxPosted[fresh req];
@@ -83,7 +85,8 @@ fn virtio_pkt_fill(s: borrow VirtioPkt_RxPosted[b, o, 1, r]) {}
 fn virtio_pkt_post_tx(s: borrow VirtioPkt_TxPosted[b, o, 1, r]) {}
 fn virtio_pkt_send(s: borrow VirtioPkt_TxPosted[b, o, 1, r]) {}
 fn virtio_pkt_sent(s: borrow VirtioPkt_TxPosted[b, o, 1, r]) -> VirtioPkt_virtio_pkt_sent_Raw {
-    if (virtio_net_tx_used_pending()) {
+    if (virtio_net_tx_used_pending(
+            (VirtioPkt_TxPosted_used_seen(s) as u16) as VirtioRingIndex)) {
         return VirtioPkt_virtio_pkt_sent_Raw::PktPending;
     }
     return VirtioPkt_virtio_pkt_sent_Raw::PktSent;
@@ -112,6 +115,12 @@ fn virtio_pkt_rx_address(s: borrow VirtioPkt_RxPosted[b, o, 1, r]) -> usize !{un
 fn virtio_pkt_tx_address(s: borrow VirtioPkt_TxPosted[b, o, 1, r]) -> usize !{unsafe} {
     let mut span: DmaDeviceSpan = VirtioPkt_TxPosted_span(s);
     return virtio_span_address(span);
+}
+
+// The capability's TX used shadow, for the observation of this buffer.
+fn virtio_pkt_note_tx_shadow(s: borrow mut VirtioPkt_TxPosted[b, o, 1, r],
+                             seen: VirtioRingIndex) {
+    VirtioPkt_TxPosted_set_used_seen(s, seen as u16);
 }
 
 // A buffer between operations: Free, with the device, or Kept. A Filled

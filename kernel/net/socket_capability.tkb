@@ -22,7 +22,7 @@ use "kernel/lib/mutex.tkb";
 
 struct NetworkCapabilityStore {
     private mutex: Mutex;
-    private value: Place(NetRxCanAcquire);
+    private value: Place(exists net: addr. NetRxCanAcquire[net]);
     // GitHub issue #828: set, under `mutex`, the first time a capability is
     // installed, and never cleared. Once set, an empty store means a holder
     // is between take and put, which network_capability_take_waiting waits
@@ -31,6 +31,8 @@ struct NetworkCapabilityStore {
 }
 
 private let mut network_capability_store: NetworkCapabilityStore;
+// GitHub issue #1416: the capability is indexed by its device; the store
+// holds whichever device's one capability was installed.
 // GitHub issue #451: a linear STRUCT, not an erased view any more.
 // A view emits nothing, so it could not carry the interrupt state a
 // release must restore -- and it did not need to while the lock itself
@@ -46,12 +48,12 @@ private linear struct NetworkCapabilityGuard[lock: addr] {
 
 must_use variant NetworkCapabilityInstallResult {
     Installed;
-    AlreadyInstalled(NetRxCanAcquire);
+    AlreadyInstalled(exists net: addr. NetRxCanAcquire[net]);
 }
 
 must_use variant NetworkCapabilityTakeResult {
     Empty;
-    Ready(NetRxCanAcquire);
+    Ready(exists net: addr. NetRxCanAcquire[net]);
 }
 
 must_use variant NetworkCapabilityPutResult { Stored; Conflict; }
@@ -93,10 +95,10 @@ private fn network_capability_try_unlock(
     mutex_try_release(lock, guard.flags);
 }
 
-fn network_capability_install(ready: sink NetRxCanAcquire)
+fn network_capability_install(ready: sink NetRxCanAcquire[net])
         -> NetworkCapabilityInstallResult {
     let guard = network_capability_lock(&network_capability_store.mutex);
-    let previous: Place(NetRxCanAcquire) = place_put(
+    let previous: Place(exists net: addr. NetRxCanAcquire[net]) = place_put(
         guard, &network_capability_store.mutex,
         network_capability_store.value, ready);
     match previous {
@@ -107,7 +109,7 @@ fn network_capability_install(ready: sink NetRxCanAcquire)
             return NetworkCapabilityInstallResult::Installed;
         }
         Place::Full(stale) => {
-            let displaced: Place(NetRxCanAcquire) = place_put(
+            let displaced: Place(exists net: addr. NetRxCanAcquire[net]) = place_put(
                 guard, &network_capability_store.mutex,
                 network_capability_store.value, stale);
             network_capability_unlock(
@@ -127,7 +129,7 @@ fn network_capability_install(ready: sink NetRxCanAcquire)
 
 fn network_capability_take() -> NetworkCapabilityTakeResult {
     let guard = network_capability_lock(&network_capability_store.mutex);
-    let previous: Place(NetRxCanAcquire) = place_take(
+    let previous: Place(exists net: addr. NetRxCanAcquire[net]) = place_take(
         guard, &network_capability_store.mutex,
         network_capability_store.value);
     network_capability_unlock(guard, &network_capability_store.mutex);
@@ -143,7 +145,7 @@ fn network_capability_take() -> NetworkCapabilityTakeResult {
 
 must_use variant NetworkCapabilityWaitResult {
     NeverInstalled;
-    Ready(NetRxCanAcquire);
+    Ready(exists net: addr. NetRxCanAcquire[net]);
 }
 
 // GitHub issue #828: the capability, waiting for a holder to put it back.
@@ -161,7 +163,7 @@ fn network_capability_take_waiting() -> NetworkCapabilityWaitResult {
     while (true) {
         let guard = network_capability_lock(&network_capability_store.mutex);
         let installed: bool = network_capability_store.installed_once;
-        let previous: Place(NetRxCanAcquire) = place_take(
+        let previous: Place(exists net: addr. NetRxCanAcquire[net]) = place_take(
             guard, &network_capability_store.mutex,
             network_capability_store.value);
         network_capability_unlock(guard, &network_capability_store.mutex);
@@ -179,7 +181,7 @@ fn network_capability_take_waiting() -> NetworkCapabilityWaitResult {
     return NetworkCapabilityWaitResult::NeverInstalled;
 }
 
-fn network_capability_put(ready: sink NetRxCanAcquire)
+fn network_capability_put(ready: sink NetRxCanAcquire[net])
         -> NetworkCapabilityPutResult {
     match network_capability_install(ready) {
         NetworkCapabilityInstallResult::Installed => {
@@ -209,7 +211,7 @@ fn network_capability_ddb_stored() -> NetPendingState !{unsafe} {
         network_capability_try_lock(&network_capability_store.mutex) else {
         NetworkCapabilityTry::Busy => { return NetPendingState::Unknown; }
     };
-    let previous: Place(NetRxCanAcquire) = place_take(
+    let previous: Place(exists net: addr. NetRxCanAcquire[net]) = place_take(
         guard, &network_capability_store.mutex,
         network_capability_store.value);
     match previous {
@@ -218,7 +220,7 @@ fn network_capability_ddb_stored() -> NetPendingState !{unsafe} {
             return NetPendingState::No;
         }
         Place::Full(ready) => {
-            let displaced: Place(NetRxCanAcquire) = place_put(
+            let displaced: Place(exists net: addr. NetRxCanAcquire[net]) = place_put(
                 guard, &network_capability_store.mutex,
                 network_capability_store.value, ready);
             network_capability_try_unlock(guard, &network_capability_store.mutex);

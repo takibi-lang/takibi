@@ -620,29 +620,29 @@ let mut tcp_drop_next_fin: AtomicWord;
 // The window every segment advertises: the largest an unscaled header carries.
 const TCP_ADVERTISED_WINDOW: u16 = 65535;
 
-must_use variant KernelTcpResult {
-    TimedOut(NetRxCanAcquire);
-    Verified(NetRxCanAcquire);
+must_use variant KernelTcpResult[net: addr] {
+    TimedOut(NetRxCanAcquire[net]);
+    Verified(NetRxCanAcquire[net]);
 }
 
-must_use variant KernelTcpAcceptResult {
-    TimedOut(NetRxCanAcquire);
-    Accepted(NetRxCanAcquire);
+must_use variant KernelTcpAcceptResult[net: addr] {
+    TimedOut(NetRxCanAcquire[net]);
+    Accepted(NetRxCanAcquire[net]);
 }
 
-must_use variant KernelTcpReceiveResult {
-    Pending(NetRxCanAcquire);
-    Routed(NetRxCanAcquire);
-    TimedOut(NetRxCanAcquire);
-    Received(NetRxCanAcquire);
+must_use variant KernelTcpReceiveResult[net: addr] {
+    Pending(NetRxCanAcquire[net]);
+    Routed(NetRxCanAcquire[net]);
+    TimedOut(NetRxCanAcquire[net]);
+    Received(NetRxCanAcquire[net]);
     // GitHub issue #1121: the peer's FIN or RST was taken; the flags on
     // the connection say which, and the read re-decides from them.
-    PeerClosed(NetRxCanAcquire);
+    PeerClosed(NetRxCanAcquire[net]);
 }
 
-must_use variant KernelTcpSendResult {
-    Invalid(NetRxCanAcquire);
-    Sent(NetRxCanAcquire);
+must_use variant KernelTcpSendResult[net: addr] {
+    Invalid(NetRxCanAcquire[net]);
+    Sent(NetRxCanAcquire[net]);
 }
 
 variant TcpReceiveDisposition {
@@ -660,8 +660,8 @@ variant TcpRxPlan {
     Send(i32);
 }
 
-must_use variant KernelTcpCloseResult {
-    Closed(NetRxCanAcquire);
+must_use variant KernelTcpCloseResult[net: addr] {
+    Closed(NetRxCanAcquire[net]);
 }
 
 // GitHub issue #257, step 4a: the transmit frame a connection builds its
@@ -1090,7 +1090,7 @@ private fn tcp_connection_pin(pool: *RegionPool(TcpConnection) @ conns,
 // operation that actually wanted doing anyway: a daemon restarting has no
 // use for the previous one's unacknowledged segments, and
 // pending_tcp_reset_all returns their pages properly.
-fn tcp_connection_pool_init(ready: borrow NetRxCanAcquire) !{unsafe} {
+fn tcp_connection_pool_init(ready: borrow NetRxCanAcquire[net]) !{unsafe} {
     // Neither pool needs construction: a built-in region_pool starts empty
     // from .bss, and tcp_retx_chain's mutex is already free (no mutex_init:
     // it FORCE-FREES, GitHub issue #479). Both retain no empty chunk: the
@@ -1107,7 +1107,7 @@ fn tcp_connection_pool_init(ready: borrow NetRxCanAcquire) !{unsafe} {
 // walk restarts on every free rather than carrying a cursor across it: an
 // emptied chunk goes straight back to the page allocator. O(live^2) over a
 // handful of connections, once per reset.
-fn tcp_connection_free_first_live(ready: borrow NetRxCanAcquire) -> bool !{unsafe} {
+fn tcp_connection_free_first_live(ready: borrow NetRxCanAcquire[net]) -> bool !{unsafe} {
     let guard = tcp_connection_pool_lock(&tcp_connection_pool);
     let first = region_pool_next(guard, region_handle_from(guard, 0, 0));
     tcp_connection_pool_unlock(guard);
@@ -1195,7 +1195,7 @@ fn tcp_any_connection_open() -> bool !{unsafe} {
     return open;
 }
 
-fn tcp_connection_drain_all(ready: borrow NetRxCanAcquire) !{unsafe} {
+fn tcp_connection_drain_all(ready: borrow NetRxCanAcquire[net]) !{unsafe} {
     let mut draining: bool = true;
     while (draining) {
         draining = tcp_connection_free_first_live(ready);
@@ -1635,7 +1635,7 @@ fn pin_sharing_cleanup() -> PinSharingCleanupResult !{unsafe} {
 // released so a taker waiting for it wakes and gives up, and its pin is
 // retired: no new pin is granted from here on, and whoever gives up the
 // last pin (this owner, or a waiter) returns the slot to the pool.
-fn tcp_connection_free(ready: borrow NetRxCanAcquire, owner: sink TcpConnectionOwner[p, connection]) !{unsafe} {
+fn tcp_connection_free(ready: borrow NetRxCanAcquire[net], owner: sink TcpConnectionOwner[p, connection]) !{unsafe} {
     let conn: &mut TcpConnection = tcp_connection_of(owner);
     pending_tcp_reset_all(ready, conn);
     conn.state = ConnState::Listen;
@@ -1670,7 +1670,7 @@ fn tcp_connection_live_count() -> usize !{unsafe} {
     return live;
 }
 
-fn tcp_connection_pool_probe(ready: borrow NetRxCanAcquire) -> bool !{unsafe} {
+fn tcp_connection_pool_probe(ready: borrow NetRxCanAcquire[net]) -> bool !{unsafe} {
     tcp_connection_pool_init(ready);
     let pages_before: usize = page_allocator_live_count();
 
@@ -1915,11 +1915,11 @@ private fn retx_retry_write(guard: borrow RetxGuard[address],
 // writes `view RetxChainTurn`.
 private affine view RetxChainTurn;
 
-private fn retx_chain_turn(ready: borrow NetRxCanAcquire) -> RetxChainTurn {
+private fn retx_chain_turn(ready: borrow NetRxCanAcquire[net]) -> RetxChainTurn {
     return view RetxChainTurn;
 }
 
-private fn retx_chain_turn_rx(held: borrow NetPacket[pb, po]) -> RetxChainTurn {
+private fn retx_chain_turn_rx(held: borrow NetPacket[pb, po, net]) -> RetxChainTurn {
     return view RetxChainTurn;
 }
 
@@ -2131,7 +2131,7 @@ fn retx_chain_reverse(link_in: Place(exists p: addr. exists k: usize. RegionSlot
 // the queue alone. Called once per connection from kernel_tcp_accept_begin
 // (alongside its own state = Listen reset), so a new connection never
 // inherits a previous one's outstanding segments.
-fn pending_tcp_reset_all(ready: borrow NetRxCanAcquire, conn: borrow &mut TcpConnection) !{unsafe} {
+fn pending_tcp_reset_all(ready: borrow NetRxCanAcquire[net], conn: borrow &mut TcpConnection) !{unsafe} {
     let connection_address: usize = conn.self_address;
     let mut link: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = retx_chain_take(retx_chain_turn(ready));
     let mut kept: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = Place::Empty;
@@ -2184,7 +2184,7 @@ fn pending_tcp_reset_all(ready: borrow NetRxCanAcquire, conn: borrow &mut TcpCon
 // kept_slot (#740 step 2): the driver slot the transmit kept the packet in,
 // or NET_KEPT_NONE, and then the frame is copied into the entry. A kept
 // packet that cannot be queued is freed here.
-fn pending_tcp_record(ready: borrow NetRxCanAcquire, connection_owner: borrow TcpConnectionOwner[connection_pool, connection],
+fn pending_tcp_record(ready: borrow NetRxCanAcquire[net], connection_owner: borrow TcpConnectionOwner[connection_pool, connection],
                       kind: PendingTcpKind, frame: borrow [u8; 1514..],
                       frame_length: usize, kept_slot: usize)
         -> usize !{unsafe} {
@@ -2272,7 +2272,7 @@ fn pending_tcp_record(ready: borrow NetRxCanAcquire, connection_owner: borrow Tc
 // exactly as accept() does, and given back on every exit; the body is a
 // separate function purely so that its eight failure returns cannot each
 // forget to.
-fn pending_tcp_chain_probe(ready: borrow NetRxCanAcquire) -> bool !{unsafe} {
+fn pending_tcp_chain_probe(ready: borrow NetRxCanAcquire[net]) -> bool !{unsafe} {
     let owner_a: exists a_pool: addr. exists a: usize. TcpConnectionOwner[a_pool, a] =
             match tcp_connection_alloc() {
         TcpConnectionAllocResult::Full => { return false; }
@@ -2298,7 +2298,7 @@ fn pending_tcp_chain_probe(ready: borrow NetRxCanAcquire) -> bool !{unsafe} {
 // segments copy this rather than a connection's transmit frame.
 private let mut pending_tcp_probe_frame: [u8; 1514];
 
-fn pending_tcp_chain_probe_body(ready: borrow NetRxCanAcquire, owner_a: borrow TcpConnectionOwner[first_pool, first],
+fn pending_tcp_chain_probe_body(ready: borrow NetRxCanAcquire[net], owner_a: borrow TcpConnectionOwner[first_pool, first],
                                  owner_b: borrow TcpConnectionOwner[second_pool, second])
         -> bool !{unsafe} {
     let conn: &mut TcpConnection = tcp_connection_of(owner_a);
@@ -2439,7 +2439,7 @@ fn pending_tcp_ack_matches(frame: borrow [u8; 1514..], len: i32,
 // against every entry this connection still has outstanding, and each one
 // it acknowledges released. The caller holds the network capability, which
 // is what keeps a second walker off the stack-wide chain (#838).
-fn pending_tcp_ack_frame(held: borrow NetPacket[pb, po], conn: borrow &mut TcpConnection,
+fn pending_tcp_ack_frame(held: borrow NetPacket[pb, po, net], conn: borrow &mut TcpConnection,
                          frame: borrow [u8; 1514..], len: i32) !{unsafe} {
     let mut link: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = retx_chain_take(retx_chain_turn_rx(held));
     let mut kept: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = Place::Empty;
@@ -2496,17 +2496,17 @@ fn pending_tcp_ack_frame(held: borrow NetPacket[pb, po], conn: borrow &mut TcpCo
 // it), Waiting otherwise. The deadline is read and written under the
 // entry's own guard, so a second pass that reaches the same entry later
 // finds it no longer due: the handler is idempotent (GitHub issue #846).
-must_use variant RetxEntryService {
-    Waiting(NetRxCanAcquire);
-    Sent(NetRxCanAcquire);
-    Expired(NetRxCanAcquire);
+must_use variant RetxEntryService[net: addr] {
+    Waiting(NetRxCanAcquire[net]);
+    Sent(NetRxCanAcquire[net]);
+    Expired(NetRxCanAcquire[net]);
 }
 
 fn retx_entry_service(conn: borrow &mut TcpConnection,
                       parked: borrow RegionSlot(RetxEntry)[p, k],
-                      ready_in: sink NetRxCanAcquire,
+                      ready_in: sink NetRxCanAcquire[net],
                       now: i64, retry_ticks: i64)
-        -> RetxEntryService !{may_block, unsafe} {
+        -> RetxEntryService[net] !{may_block, unsafe} {
     let mut ready = ready_in;
     let entry: &mut RetxEntry = region_slot_record(parked);
     // GitHub issue #452: decide and mutate under the guard, TRANSMIT
@@ -2570,9 +2570,9 @@ fn retx_entry_service(conn: borrow &mut TcpConnection,
 // every tick its NetRx wait retries, so a peer waiting for the read's own
 // dropped segment gets it without close() or write() having to come first.
 fn pending_tcp_retransmit_due(conn: borrow &mut TcpConnection,
-                              ready_in: sink NetRxCanAcquire,
+                              ready_in: sink NetRxCanAcquire[net],
                               retry_ticks: i64)
-        -> NetRxCanAcquire !{may_block, unsafe} {
+        -> NetRxCanAcquire[net] !{may_block, unsafe} {
     let mut ready = ready_in;
     let now: i64 = read_cntpct();
     let mut link: Place(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]) = retx_chain_take(retx_chain_turn(ready));
@@ -2660,7 +2660,7 @@ fn tcp_retx_retry_ticks() -> i64 {
     return read_cntfrq() / 5;
 }
 
-fn tcp_retx_due_lower(ready: borrow NetRxCanAcquire, due: i64) {
+fn tcp_retx_due_lower(ready: borrow NetRxCanAcquire[net], due: i64) {
     if (due <= 0) { return; }
     let earliest: usize = atomic_word_load(&tcp_retx_due_at);
     if (earliest == 0 || (due as usize) < earliest) {
@@ -2668,7 +2668,7 @@ fn tcp_retx_due_lower(ready: borrow NetRxCanAcquire, due: i64) {
     }
 }
 
-private fn tcp_retx_due_set(ready: borrow NetRxCanAcquire, due: i64) {
+private fn tcp_retx_due_set(ready: borrow NetRxCanAcquire[net], due: i64) {
     if (due <= 0) {
         atomic_word_store(&tcp_retx_due_at, 0);
         return;
@@ -2713,8 +2713,8 @@ private fn retx_pass_try_take(attempt: bool, entry: borrow &mut RetxEntry)
 // A connection is taken without waiting (tcp_connection_try_take): one a
 // syscall holds is skipped and retried by the next pass, so this never
 // waits on a lock while it holds the capability and masks interrupts.
-fn tcp_retx_service_all(ready_in: sink NetRxCanAcquire)
-        -> NetRxCanAcquire !{may_block, unsafe} {
+fn tcp_retx_service_all(ready_in: sink NetRxCanAcquire[net])
+        -> NetRxCanAcquire[net] !{may_block, unsafe} {
     let mut ready = ready_in;
     let retry_ticks: i64 = tcp_retx_retry_ticks();
     let started: i64 = read_cntpct();
@@ -2814,9 +2814,9 @@ fn tcp_retx_service_all(ready_in: sink NetRxCanAcquire)
 // deadlines from whichever one happens to be running would be a timing
 // change on a path with a history of them.
 fn pending_tcp_service_once(conn: borrow &mut TcpConnection,
-                            ready_in: sink NetRxCanAcquire,
+                            ready_in: sink NetRxCanAcquire[net],
                              retry_ticks: i64)
-        -> NetRxCanAcquire !{may_block, unsafe} {
+        -> NetRxCanAcquire[net] !{may_block, unsafe} {
     let mut ready = ready_in;
     match net_rx_acquire(ready) {
         NetRxAcquire::None(next) => { ready = next; }
@@ -3145,8 +3145,8 @@ fn tcp_parse_segment(frame: borrow [u8; 1514..], len: i32) -> TcpSegmentParseRes
 // A connection is an allocation now, so it takes one out and gives it back
 // -- the same thing accept() does, and the reason the pool needs no
 // special case for "the connection nobody asked for".
-fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
-        -> KernelTcpResult !{may_block, unsafe} {
+fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire[net])
+        -> KernelTcpResult[net] !{may_block, unsafe} {
     let mut ready = ready_in;
     let echo_owner: exists e_pool: addr. exists e: usize. TcpConnectionOwner[e_pool, e] =
             match tcp_connection_alloc() {
@@ -3291,16 +3291,16 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
     return KernelTcpResult::TimedOut(ready);
 }
 
-must_use variant KernelTcpAcceptStep {
-    Pending(NetRxCanAcquire);
-    Accepted(NetRxCanAcquire);
-    GaveUp(NetRxCanAcquire);
+must_use variant KernelTcpAcceptStep[net: addr] {
+    Pending(NetRxCanAcquire[net]);
+    Accepted(NetRxCanAcquire[net]);
+    GaveUp(NetRxCanAcquire[net]);
 }
 
 // Start a handshake on this connection, on the requested listening port.
 // Everything the step below needs between calls is written here, so the
 // two together are what the old blocking accept loop used to be.
-fn kernel_tcp_accept_begin(ready: borrow NetRxCanAcquire,
+fn kernel_tcp_accept_begin(ready: borrow NetRxCanAcquire[net],
                            owner: borrow TcpConnectionOwner[connection_pool, connection],
                            port: u16) !{unsafe} {
     let conn: &mut TcpConnection = tcp_connection_of(owner);
@@ -3339,8 +3339,8 @@ fn kernel_tcp_accept_begin(ready: borrow NetRxCanAcquire,
 // the machine may loop over it; a caller that cannot returns to userspace
 // between calls and comes back.
 fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection_pool, connection],
-                          ready_in: sink NetRxCanAcquire)
-        -> KernelTcpAcceptStep !{unsafe} {
+                          ready_in: sink NetRxCanAcquire[net])
+        -> KernelTcpAcceptStep[net] !{unsafe} {
     let mut ready = ready_in;
     let conn: &mut TcpConnection = tcp_connection_of(owner);
     // Another receive waiter can acquire the final ACK first and complete
@@ -3567,7 +3567,7 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection_pool, conn
 // progress, or start a new one. The caller has only an address and a
 // generation to name it by -- the pool validates both, and a slot that no
 // longer holds that occupant simply starts over.
-fn kernel_tcp_accept_resume_or_begin(ready: borrow NetRxCanAcquire,
+fn kernel_tcp_accept_resume_or_begin(ready: borrow NetRxCanAcquire[net],
                                      slot_value: usize, generation: usize,
                                      port: u16)
         -> TcpConnectionAllocResult !{unsafe} {
@@ -3808,9 +3808,9 @@ fn tcp_route_received_segment(current_address: usize,
 }
 
 fn kernel_tcp_receive_once(owner: borrow TcpConnectionOwner[connection_pool, connection],
-                           ready_in: sink NetRxCanAcquire,
+                           ready_in: sink NetRxCanAcquire[net],
                            destination: borrow [u8; 1460..])
-        -> KernelTcpReceiveResult !{unsafe} {
+        -> KernelTcpReceiveResult[net] !{unsafe} {
     let mut ready = ready_in;
     let conn: &mut TcpConnection = tcp_connection_of(owner);
     if (conn.receive_waiting == false) {
@@ -3978,11 +3978,11 @@ fn kernel_tcp_received_length(owner: borrow TcpConnectionOwner[connection_pool, 
 }
 
 fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection_pool, connection],
-                            ready: sink NetRxCanAcquire,
+                            ready: sink NetRxCanAcquire[net],
                             source: borrow [u8; 1460..],
                             received_length: usize,
                             payload_length: usize)
-        -> KernelTcpSendResult !{may_block} {
+        -> KernelTcpSendResult[net] !{may_block} {
     let conn: &mut TcpConnection = tcp_connection_of(owner);
     let remote_ip_bytes =
         conn.remote_ip as []u8;
@@ -4091,9 +4091,9 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection_pool, co
 // allows, and the entry names that slot; otherwise the frame is copied
 // into the entry, as before. The segment is sent either way.
 fn tcp_send_and_record(owner: borrow TcpConnectionOwner[connection_pool, connection],
-                       ready: sink NetRxCanAcquire, kind: PendingTcpKind,
+                       ready: sink NetRxCanAcquire[net], kind: PendingTcpKind,
                        frame: borrow [u8; 1514..], frame_length: usize)
-        -> NetRxCanAcquire !{may_block, unsafe} {
+        -> NetRxCanAcquire[net] !{may_block, unsafe} {
     let slot: usize = net_tx_keep_slot();
     match net_transmit_keep(ready, slot, frame, frame_length as i32) {
         NetTxKeep::Kept(after) => {
@@ -4120,8 +4120,8 @@ fn tcp_send_and_record(owner: borrow TcpConnectionOwner[connection_pool, connect
 // call just queued -- to be acknowledged or give up, instead of
 // returning with unfinished business for some later caller to notice.
 fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection_pool, connection],
-                           ready_in: sink NetRxCanAcquire)
-        -> KernelTcpCloseResult !{may_block} {
+                           ready_in: sink NetRxCanAcquire[net])
+        -> KernelTcpCloseResult[net] !{may_block} {
     let mut ready = ready_in;
     let conn: &mut TcpConnection = tcp_connection_of(owner);
     let remote_ip_bytes =

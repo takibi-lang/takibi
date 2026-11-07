@@ -30046,6 +30046,61 @@ let fielded_protocol =
   replace_once ~sub:"state InFlight[req] device;"
     ~by:"state InFlight[req] device { sent: usize = 0; }" sealed_protocol
 
+(* GitHub issue #1416 (decision A): the net RX capability is an indexed
+   linear owner of its device's ring shadows, and every holder carries the
+   index, as kernel/drivers/net/virtio_net.tkb declares them. *)
+let net_capability_driver = {|private let mut dev_a: usize = 0;
+private let mut dev_b: usize = 0;
+private linear struct NetRxCanAcquire[net: addr] { private rx_used_seen: u16; }
+private linear struct NetPacket[pb: addr, po: usize, net: addr] {
+    private len: u16;
+    private ready: NetRxCanAcquire[net];
+}
+fn net_mint_a() -> NetRxCanAcquire[&dev_a] { let mut r: NetRxCanAcquire[&dev_a] = { 0 }; return r; }
+fn net_mint_b() -> NetRxCanAcquire[&dev_b] { let mut r: NetRxCanAcquire[&dev_b] = { 0 }; return r; }
+fn net_rx_acquire(ready: sink NetRxCanAcquire[net]) -> NetPacket[&dev_a, 0, net] {
+    let mut r = ready;
+    r.rx_used_seen = r.rx_used_seen + 1;
+    let mut p: NetPacket[&dev_a, 0, net] = { 60, r };
+    return p;
+}
+fn net_rx_release(packet: sink NetPacket[pb, po, net]) -> NetRxCanAcquire[net] {
+    let r = packet.ready;
+    return r;
+}
+fn net_shutdown(ready: sink NetRxCanAcquire[net]) { let s: u16 = ready.rx_used_seen; }
+fn net_shutdown_a(ready: sink NetRxCanAcquire[&dev_a]) { net_shutdown(ready); }
+|}
+
+let net_capability_refused files fragment =
+  match infer_files (("drv.tkb", net_capability_driver) :: files) with
+  | _ -> Alcotest.failf "expected an error containing %S" fragment
+  | exception Types.TypeError (_, msg) ->
+      Alcotest.(check bool) msg true (contains_substring msg fragment)
+  | exception Types.MultiTypeError errors ->
+      Alcotest.(check bool) fragment true (List.exists (fun (_, m) ->
+        contains_substring m fragment) errors)
+
+let net_capability_tests = [
+  Alcotest.test_case "net capability: a packet goes back to its own device" `Quick
+    (fun () -> ignore (infer_files [ ("drv.tkb", net_capability_driver);
+      ("stack.tkb", "fn main() -> i32 {\n  let p = net_rx_acquire(net_mint_a());\n\
+                     \  net_shutdown_a(net_rx_release(p));\n  net_shutdown(net_mint_b());\n\
+                     \  return 0;\n}\n") ]));
+  Alcotest.test_case "net capability: another device's packet is refused" `Quick
+    (fun () -> net_capability_refused
+      [ ("stack.tkb", "fn main() -> i32 {\n  let p = net_rx_acquire(net_mint_b());\n\
+                       \  net_shutdown_a(net_rx_release(p));\n  return 0;\n}\n") ]
+      "static value mismatch");
+  Alcotest.test_case "net capability: the stack cannot advance a shadow" `Quick
+    (fun () -> net_capability_refused
+      [ ("stack.tkb", "fn bump(r: borrow mut NetRxCanAcquire[net]) {\n\
+                       \  r.rx_used_seen = r.rx_used_seen + 1;\n}\n\
+                       fn main() -> i32 {\n  let mut r = net_mint_a();\n  bump(r);\n\
+                       \  net_shutdown(r);\n  return 0;\n}\n") ]
+      "is private to");
+]
+
 let sealed_protocol_tests = [
   Alcotest.test_case "sealed owners: the declared graph is accepted" `Quick
     (fun () -> ignore (infer_sealed ()));
@@ -31232,6 +31287,7 @@ let named_groups_unisolated = [
   "device-protocols", device_protocol_tests;
   "protocol-snapshots", snapshot_tests;
   "protocol-sealed-owners", sealed_protocol_tests;
+  "net-capability", net_capability_tests;
   "protocol-state-access", sealed_access_tests;
   "text-search", text_search_tests;
 ]

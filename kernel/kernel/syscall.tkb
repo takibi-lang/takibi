@@ -3434,7 +3434,7 @@ fn syscall_read_segment_with(slot: borrow SyscallSlot[0],
                    workload_peer_socket_served(false);
                    return SyscallIoResult::Transferred(buffered);
                }
-               let ready: NetRxCanAcquire = match network_capability_take() {
+               let ready = match network_capability_take() {
                  NetworkCapabilityTakeResult::Empty => {
                     tcp_connection_put(owner);
                     return SyscallIoResult::NetWait;
@@ -6893,7 +6893,7 @@ fn kernel_net_retransmit_pass() !{may_block, unsafe} {
     match network_capability_take() {
         NetworkCapabilityTakeResult::Empty => {}
         NetworkCapabilityTakeResult::Ready(ready) => {
-            let after: NetRxCanAcquire = tcp_retx_service_all(ready);
+            let after = tcp_retx_service_all(ready);
             match network_capability_put(after) {
                 NetworkCapabilityPutResult::Stored => {}
                 NetworkCapabilityPutResult::Conflict => {}

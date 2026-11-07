@@ -470,3 +470,13 @@ entries below that date are history, left as written.
   (`SetOnce(ProcessPoolHandleWords)`, set by the first ensure of root 0) move
   to it; a second set stops the kernel instead of overwriting silently.
   InitOnce, a gate with no value, stays #1418's.
+- 2026-11-07: virtio-net's ring shadows are the RX capability's (#1416 option
+  A, slice 1). `NetRxCanAcquire[net]` is a linear struct indexed by its device
+  (`&virtio_net_ready`) holding `rx_used_seen`, `tx_used_seen`, `rx_avail_idx`,
+  `tx_avail_idx` and the RX descriptors' pool slots (`rx_desc_pkt`, one byte
+  each so the frame budget holds); `NetPacket[pb, po, net]`, `NetRxReplyReady`
+  and `NetTxInFlight` carry it while the stack holds a packet, and every
+  shared holder (tcp, arp, icmp, the capability store as an existential) names
+  the index. The TX observation reads the shadow from a `TxPosted` state field
+  the capability fills; DDB reads the RX used shadow from an `AtomicWord` the
+  holder publishes. GEM's capability is an indexed view until slice 2.

@@ -47,8 +47,8 @@ fn gem_probe_note_irq(status: u32) {
     }
 }
 
-fn gem_probe_peer(ready_in: sink NetRxCanAcquire)
-        -> NetRxCanAcquire !{may_block} {
+fn gem_probe_peer(ready_in: sink NetRxCanAcquire[net])
+        -> NetRxCanAcquire[net] !{may_block} {
     let mut ready = ready_in;
     let started: i64 = read_cntpct();
     while (read_cntpct() - started < read_cntfrq() * 10) {
@@ -69,7 +69,7 @@ fn gem_probe_peer(ready_in: sink NetRxCanAcquire)
     return ready;
 }
 
-fn gem_probe_run(ready_in: sink NetRxCanAcquire) !{may_block} {
+fn gem_probe_run(ready_in: sink NetRxCanAcquire[net]) !{may_block} {
     static_assert(KERNEL_PREEMPTIBLE == 0,
                   "stands in for a boot-phase assumption (core 0, before any process exists); review at the preemption flip (GitHub issue #638)");
     let mut ready = ready_in;

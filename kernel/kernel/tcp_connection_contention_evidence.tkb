@@ -85,7 +85,7 @@ private fn tcp_owner_probe_put_seen(seen: usize, peers: usize) !{unsafe} {
     }
 }
 
-fn tcp_connection_contention_probe(ready: borrow NetRxCanAcquire) -> bool !{unsafe} {
+fn tcp_connection_contention_probe(ready: borrow NetRxCanAcquire[net]) -> bool !{unsafe} {
     static_assert(KERNEL_ACTIVE_CORES >= 2,
                   "TCP connection contention evidence requires one peer");
     let online: usize = kernel_online_core_count();
@@ -202,7 +202,7 @@ private fn irq_mask_cost_report(sample: usize) !{unsafe} {
 
 must_use variant TcpPinCostEvidence { Failed; Complete; }
 
-fn tcp_pin_cost_evidence(ready: borrow NetRxCanAcquire) -> TcpPinCostEvidence !{unsafe} {
+fn tcp_pin_cost_evidence(ready: borrow NetRxCanAcquire[net]) -> TcpPinCostEvidence !{unsafe} {
     let first = match tcp_connection_alloc() {
         TcpConnectionAllocResult::Full => { return TcpPinCostEvidence::Failed; }
         TcpConnectionAllocResult::Allocated(owner) => { owner }
@@ -416,7 +416,7 @@ struct TcpPoolCostSample {
 }
 private let mut tcp_pool_cost_samples: [TcpPoolCostSample; 3];
 
-fn tcp_pool_cost_evidence(ready: borrow NetRxCanAcquire) -> TcpPinCostEvidence !{unsafe} {
+fn tcp_pool_cost_evidence(ready: borrow NetRxCanAcquire[net]) -> TcpPinCostEvidence !{unsafe} {
     let online: usize = kernel_online_core_count();
     if (online < 2 || online > KERNEL_MAX_CORES) { return TcpPinCostEvidence::Failed; }
     for cpu: usize in 0..<KERNEL_MAX_CORES {

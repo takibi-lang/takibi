@@ -38,9 +38,9 @@ let ARP_SPA: usize = offsetof(ArpHdr, spa);
 let ARP_THA: usize = offsetof(ArpHdr, tha);
 let ARP_TPA: usize = offsetof(ArpHdr, tpa);
 
-must_use variant KernelArpResult {
-    TimedOut(NetRxCanAcquire);
-    Replied(NetRxCanAcquire);
+must_use variant KernelArpResult[net: addr] {
+    TimedOut(NetRxCanAcquire[net]);
+    Replied(NetRxCanAcquire[net]);
 }
 
 // Validate and rewrite one ARP request in place. The caller retains the RX
@@ -71,8 +71,8 @@ fn arp_prepare_reply(frame: borrow [u8; 42..]) -> bool {
 // Own the RX readiness capability until one valid request is replied to.
 // The bounded wait keeps a missing host-side integration peer from hanging
 // the remainder of the one-boot kernel test indefinitely.
-fn kernel_arp_reply_once(ready_in: sink NetRxCanAcquire)
-        -> KernelArpResult !{may_block} {
+fn kernel_arp_reply_once(ready_in: sink NetRxCanAcquire[net])
+        -> KernelArpResult[net] !{may_block} {
     let mut ready = ready_in;
     let start: i64 = read_cntpct();
     let deadline_ticks: i64 = read_cntfrq() * 15;
