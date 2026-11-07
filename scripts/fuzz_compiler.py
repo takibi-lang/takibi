@@ -203,6 +203,12 @@ def minimize(compiler: Path, source: str, harness: str, directory: Path,
     return result
 
 
+# GitHub issue #1432: a command timeout under host load is not a finding. A
+# timed-out case is run once more with this many times the timeout; only a
+# second timeout fails the campaign, so a real hang still does.
+TIMEOUT_RETRY_FACTOR = 4
+
+
 def campaign(compiler: Path, seed: int, cases: int, output: Path,
              seconds: float, timeout: float, *, reduce: bool = True) -> dict:
     rng = random.Random(seed)
@@ -217,6 +223,10 @@ def campaign(compiler: Path, seed: int, cases: int, output: Path,
         directory = output / f"{index:05d}-{family}"
         harness = driver(pairs)
         status, detail = evaluate(compiler, source, harness, directory, timeout)
+        if status == "timeout":
+            summary["timeout_retries"] = summary.get("timeout_retries", 0) + 1
+            status, detail = evaluate(compiler, source, harness, directory,
+                                      timeout * TIMEOUT_RETRY_FACTOR)
         summary["families"][family] = summary["families"].get(family, 0) + 1
         if status not in ("accepted", "rejected"):
             summary["failure"] = {"case": index, "family": family, "status": status,
@@ -292,6 +302,10 @@ def seeded_control(compiler: Path, seed: int, output: Path, timeout: float,
     result = campaign(scratch / "_build/default/bin/main.exe", seed, 14,
                       output / "mutant", 60, timeout)
     failure = result.get("failure", {})
+    if failure.get("status") == "timeout":
+        raise RuntimeError("seeded control: case " + str(failure.get("case")) + " timed out twice "
+                           f"(at {timeout}s and {timeout * TIMEOUT_RETRY_FACTOR}s): "
+                           + failure.get("detail", ""))
     if (failure.get("status") != "runtime-failure"
             or "refinement violated:" not in failure.get("detail", "")):
         raise RuntimeError("seeded control did not find the injected interval defect")

@@ -81,6 +81,21 @@ fn fuzz_entry(x: i32) -> i32 {
         self.assertIn("refinement violated:", detail)
         self.assertLess(len(reduced), len(source))
 
+    def test_one_timeout_is_retried(self):
+        # GitHub issue #1432: under host load the seeded control's first
+        # compile timed out at 5 s and the control reported a missed defect.
+        results = iter([("timeout", "command timed out: ['compiler']"), ("accepted", "")])
+        with patch.object(fuzz, "evaluate", side_effect=lambda *a: next(results)):
+            summary = fuzz.campaign(self.compiler, 646, 1, self.directory / "retry", 60, 5)
+        self.assertNotIn("failure", summary)
+        self.assertEqual(summary.get("timeout_retries"), 1)
+
+    def test_two_timeouts_fail(self):
+        with patch.object(fuzz, "evaluate",
+                          return_value=("timeout", "command timed out: ['compiler']")):
+            summary = fuzz.campaign(self.compiler, 646, 1, self.directory / "hang", 60, 5)
+        self.assertEqual(summary["failure"]["status"], "timeout")
+
     def test_zero_execution_cannot_pass(self):
         compiler = self.directory / "reject-all"
         compiler.write_text("#!/bin/sh\necho 'Error: rejects every input' >&2\nexit 1\n")
