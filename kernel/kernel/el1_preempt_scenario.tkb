@@ -22,7 +22,9 @@
 //   evidence is stage 9's to produce.
 // - Nothing resets the priority mask on an El1 resume (maintainer,
 //   2026-11-05): the scenario checks the shadow after its cross-CPU take,
-//   the flip asserts it on every El1 resume, and the typed form is #850.
+//   the consult refuses a tick that interrupted a masked shadow, and every
+//   El1 resume stops on a masked shadow (#638 stage 9); the typed form is
+//   #850.
 
 use "kernel/arch/arm64/kernel/user_entry_extern.tkb";
 use "kernel/lib/execution_model.tkb";

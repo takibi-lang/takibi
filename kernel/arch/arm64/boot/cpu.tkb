@@ -66,6 +66,9 @@ use "kernel/arch/arm64/kernel/gicv2.tkb";
 struct per_cpu IrqPmrShadow {
     private masked: usize;
     private ready: usize;
+    // GitHub issue #638 stage 9: the mask the latest irq_nest_open on this
+    // core found, for the IRQ-return consult (irq_nest_interrupted_masked_here).
+    private interrupted: usize;
 }
 
 private let mut irq_pmr: [IrqPmrShadow; KERNEL_MAX_CORES];
@@ -140,6 +143,7 @@ fn irq_nest_open() -> usize !{masks_irq} {
     let mut named: bool = false;
     preempt_off (cpu) {
         interrupted = irq_pmr[cpu].masked;
+        irq_pmr[cpu].interrupted = interrupted;
         irq_pmr[cpu].masked = 1;
         named = true;
     } else { }
@@ -165,6 +169,21 @@ fn irq_pmr_masked_here() -> bool {
     let mut masked: bool = false;
     preempt_off (cpu) {
         masked = irq_pmr[cpu].masked != 0;
+    } else { }
+    return masked;
+}
+
+// GitHub issue #638 stage 9: whether the handler running on this core
+// interrupted a masked priority mask. An IRQ is taken with the shadow at 1 in
+// the gap a posted PMR store leaves (see #1119 in gicv2.tkb), and a tick
+// switching away from that frame would freeze it masked, so the consult
+// refuses it. A handler that nests into this one (only the stop: ordinary
+// sources are masked) overwrites the word with 1, which can only refuse, not
+// admit. An unnamed CPU's handler found 1 (irq_nest_open), so true.
+fn irq_nest_interrupted_masked_here() -> bool {
+    let mut masked: bool = true;
+    preempt_off (cpu) {
+        masked = irq_pmr[cpu].interrupted != 0;
     } else { }
     return masked;
 }

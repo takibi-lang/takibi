@@ -5448,7 +5448,10 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
             // was frozen unmasked, and a path that chose it under a mask of
             // its own is a defect to report, not to paper over. The stage 8
             // scenario checks the shadow after its take; the flip asserts it
-            // on every El1 resume; the typed form is #850.
+            // on every El1 resume (option D, #638 stage 9); the typed form is
+            // #850. The #1194 boot probe's hand-made frame meets it too: the
+            // probe takes no mask of its own (option F, 2026-11-07).
+            if (irq_pmr_masked_here()) { kernel_invariant_stop(); }
         }
     }
 }
@@ -5772,9 +5775,12 @@ private fn kernel_process_el1_resume_probe_fill(frame: usize) {
 // is what the caller ran with.
 private fn kernel_process_el1_resume_probe_run(frame: usize) -> bool !{unsafe} {
     let mut results: [usize; 10];
-    let mask: IrqMaskGuard[0] = irq_mask_take();
+    // GitHub issue #638 stage 9, option F (maintainer, 2026-11-07): no mask of
+    // the probe's own. el0_context_resume masks DAIF.I before it moves SP, and
+    // the El1 resume asserts the priority mask is open, as for every El1 frame;
+    // an IRQ before that masks nothing it needs (the tick's El1 branch only
+    // charges and requests a reschedule outside the stage 8 window).
     el1_resume_probe_run(frame, results as *usize);
-    irq_mask_give(mask);
     return results[0] == frame + EXC_CONTEXT_SIZE &&
         results[1] == KERNEL_PROCESS_EL1_RESUME_X0 &&
         results[2] == KERNEL_PROCESS_EL1_RESUME_X30 &&
@@ -8745,6 +8751,12 @@ fn kernel_process_el1_preempt_consult(
     }
     if (preempt_count_zero_at(frame_ref_address(frame)) == false) {
         el1_preempt_count_refused();
+        return false;
+    }
+    // GitHub issue #638 stage 9 (b): a tick that came through the posted-PMR
+    // gap interrupted a masked path; switching away would freeze it masked,
+    // which the El1 resume below stops on.
+    if (irq_nest_interrupted_masked_here()) {
         return false;
     }
     execution_state[execution_cpu_index()].reschedule_pending = false;
