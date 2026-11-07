@@ -28,7 +28,7 @@
 // syscall that reaches the filesystem may run on either core. What one core
 // writes reaches the others through write epochs, one per bucket of block
 // numbers: a bucket's epoch is the sum of every core's write count for that
-// bucket, each count written only by its own core. A slot records its
+// bucket, each count added to atomically by its slot. A slot records its
 // block's bucket epoch and is valid only while that is still the epoch, so a
 // write retires every core's copies of the blocks in its bucket and leaves
 // the rest (GitHub issue #553: one machine-wide epoch made each of a boot's
@@ -52,9 +52,10 @@
 //
 // Current limitations (2026-11-07):
 // - The write counts and hit counts are AtomicWord rows indexed by the
-//   slot's number (block_slot_number), not owned_by: a count is read by
-//   every core's epoch sum, and its one writer is the slot holder by the
-//   same token, not by a rule the compiler checks for these rows.
+//   slot's number (block_slot_number), not owned_by, because every core's
+//   epoch sum reads them. Both are added to by atomic read-modify-writes
+//   (the write count by an acq_rel compare-swap loop), so neither depends
+//   on having one writer.
 //
 // Kept free of device access and logging, so linux_user/block_cache can
 // compile this file itself and drive two real slots against it.
@@ -125,8 +126,18 @@ private fn block_cache_count_write(slot: borrow BlockSlot[0],
         !{unsafe} {
     let index: {0..<KERNEL_MAX_CORES * BLOCK_CACHE_BUCKETS as usize} =
         block_slot_number(slot) * BLOCK_CACHE_BUCKETS + bucket;
-    let published: usize = atomic_word_load(&block_cache_writes[index]) + 1;
-    atomic_word_store(&block_cache_writes[index], published);
+    // A compare-swap loop, not a load and a store: the count stays right
+    // whoever else adds to the same row, and acq_rel keeps the release that
+    // publishes this core's copy before the count that retires it (#533).
+    let mut expected: usize = atomic_word_load(&block_cache_writes[index]);
+    let mut counted: bool = false;
+    while (counted == false) {
+        match atomic_word_compare_swap_acq_rel(&block_cache_writes[index],
+                                               expected, expected + 1) {
+            CasResult::Swapped => { counted = true; }
+            CasResult::Observed(seen) => { expected = seen; }
+        }
+    }
 }
 
 private fn block_cache_touch(slot: borrow BlockSlot[0],
