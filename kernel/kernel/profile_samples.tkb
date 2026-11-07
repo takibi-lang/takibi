@@ -87,8 +87,9 @@ private let mut profile_sample_active: bool = false;
 // Set once, at the first profile_sample_start, from ID_AA64DFR0_EL1. A CPU
 // with no PMUv3 reports an empty profile instead of executing an msr that
 // would fault.
-private let mut profile_sample_available: bool = false;
-private let mut profile_sample_checked: bool = false;
+// AtomicWord (GitHub issue #1159): 1 for true.
+private let mut profile_sample_available: AtomicWord;
+private let mut profile_sample_checked: AtomicWord;
 // Captured at the interval's end, printed only when the interval collected
 // nothing. A counter still holding its own reload value never counted; a
 // counter past it with the overflow status set counted and overflowed into
@@ -132,11 +133,13 @@ fn profile_sample_start() {
     for cpu: usize in 0..<KERNEL_MAX_CORES {
         profile_sample_core_reset(cpu);
     }
-    if (profile_sample_checked == false) {
-        profile_sample_checked = true;
-        profile_sample_available = pmu_sample_supported() == 1;
+    if (atomic_word_load(&profile_sample_checked) == 0) {
+        atomic_word_store(&profile_sample_checked, 1);
+        if (pmu_sample_supported() == 1) {
+            atomic_word_store(&profile_sample_available, 1);
+        }
     }
-    if (profile_sample_available == false) { return; }
+    if (atomic_word_load(&profile_sample_available) == 0) { return; }
     profile_sample_active = true;
     pmu_sample_start(PROFILE_SAMPLE_PERIOD_CYCLES);
 }
@@ -209,7 +212,7 @@ fn profile_sample_report() {
     // counts below are load-dependent and belong to the artifact, not to a
     // fixture's expected output.
     kernel_boot_log("profile: sample-source name=busy-pair source=");
-    if (profile_sample_available) {
+    if (atomic_word_load(&profile_sample_available) != 0) {
         kernel_boot_log("pmuv3-cycles");
     } else {
         kernel_boot_log("none");

@@ -3246,6 +3246,8 @@ let infer_tests = [
          struct no_copy Lock { private word: AtomicWord; }
          struct Mixed { a: AtomicWord; b: usize; }
          struct Empty { }
+         generic struct GuardedField(T: type) { private value: T; }
+         let mut guarded: GuardedField(usize);
          let mut plain: usize = 0;
          let mut flag: bool = false;
          let mut word: AtomicWord;
@@ -3275,6 +3277,7 @@ let infer_tests = [
         Alcotest.(check string) name want (protection name))
         [ "plain", "none"; "flag", "none"; "word", "atomic"; "words", "atomic";
           "lock", "composite"; "mixed", "none"; "empty", "none";
+          "guarded", "lock";
           "fixed", "absent"; "owned", "slot_owned" ]);
 
   (* GitHub issue #1159 (option B1): an owned_by(T.f, S) global is reached

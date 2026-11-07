@@ -17,6 +17,10 @@
      init_once_begin/commit/cancel touch them, and they write `complete`
      only between acquiring and releasing the struct's own TaskMutex. A
      struct of that name defined anywhere else is not this one;
+   - `GuardedField(T)` -> lock (GitHub issue #1159): every access takes a
+     GuardedFieldGuard, minted only by guarded_field_take. Weaker than
+     LockedCell: the guard proves that the guarded-field lock is held, not
+     which cell's (kernel/lib/locked_cell.tkb says so; one adopter today);
    - `Place(T)` -> place;  `BootOnce(T)` -> boot_once (#1013);
    - a `struct per_cpu` store -> per_cpu;
    - a `struct dma_fixed` record -> dma_fixed;
@@ -82,7 +86,7 @@ let write_table (out : out_channel) (prog : toplevel list) =
   let rec protection seen = function
     | TypeArray (t, _) | TypeArraySym (t, _) | TypeMultiple (_, t)
     | TypeExists (_, _, t) -> protection seen t
-    | TypeGenericInst (("LockedCell" | "RegionPool"), _) -> "lock"
+    | TypeGenericInst (("LockedCell" | "RegionPool" | "GuardedField"), _) -> "lock"
     | TypeGenericInst ("Place", _) | TypeVariant ("Place", _, _) -> "place"
     | TypeGenericInst ("BootOnce", _) -> "boot_once"
     | TypeNamed n | TypeIndexed (n, _) -> named seen n

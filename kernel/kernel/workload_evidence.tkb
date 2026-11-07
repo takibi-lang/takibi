@@ -315,17 +315,20 @@ const WORKLOAD_BUSY_WAIT_EXCESS_BOUND: usize = 4;
 // N makes the next-ready walks pass over the first worker to begin a wait in
 // the window for N ticks of that wait: a scheduler that stopped covering one
 // of the pair, which is the defect the verdict exists to catch.
-private let mut workload_busy_starve_injection_ticks: usize;
-private let mut workload_busy_starve_armed: bool;
-private let mut workload_busy_starve_worker: usize;
-private let mut workload_busy_starve_remaining: usize;
+// AtomicWord (GitHub issue #1159); armed is 1 for true. The debugger writes
+// the injection's word through its address: the value is the struct's only
+// field, at offset 0.
+private let mut workload_busy_starve_injection_ticks: AtomicWord;
+private let mut workload_busy_starve_armed: AtomicWord;
+private let mut workload_busy_starve_worker: AtomicWord;
+private let mut workload_busy_starve_remaining: AtomicWord;
 
 // Asked by the next-ready walks for every Ready candidate, under the
 // process run lock. False on every boot the debugger did not arm.
 fn workload_busy_starve_skips(pid: usize) -> bool {
-    if (workload_busy_starve_armed == false) { return false; }
-    if (workload_busy_starve_remaining == 0) { return false; }
-    let worker: usize = workload_busy_starve_worker;
+    if (atomic_word_load(&workload_busy_starve_armed) == 0) { return false; }
+    if (atomic_word_load(&workload_busy_starve_remaining) == 0) { return false; }
+    let worker: usize = atomic_word_load(&workload_busy_starve_worker);
     if (worker >= 2) { return false; }
     return pid != 0 && pid == workload_busy_worker_pid(worker);
 }
@@ -350,12 +353,12 @@ private fn workload_busy_waits_reset() {
 }
 
 private fn workload_busy_wait_begin(worker: {0..<2 as usize}, core: usize) {
-    if (workload_busy_starve_injection_ticks != 0 &&
-        workload_busy_starve_armed == false) {
-        workload_busy_starve_armed = true;
-        workload_busy_starve_worker = worker;
-        workload_busy_starve_remaining = workload_busy_starve_injection_ticks;
-        workload_busy_starve_injection_ticks = 0;
+    let injection: usize = atomic_word_load(&workload_busy_starve_injection_ticks);
+    if (injection != 0 && atomic_word_load(&workload_busy_starve_armed) == 0) {
+        atomic_word_store(&workload_busy_starve_worker, worker);
+        atomic_word_store(&workload_busy_starve_remaining, injection);
+        atomic_word_store(&workload_busy_starve_injection_ticks, 0);
+        atomic_word_store(&workload_busy_starve_armed, 1);
     }
     workload_busy_waits[worker].waiting = true;
     workload_busy_waits[worker].core = core;
@@ -451,11 +454,13 @@ fn workload_busy_note_tick_locked(guard: borrow ProcessRunGuard[lock]) {
             workload_busy_waits[worker].core == core) {
             workload_busy_waits[worker].ticks =
                 workload_busy_waits[worker].ticks + 1;
-            if (workload_busy_starve_armed &&
-                workload_busy_starve_worker == worker &&
-                workload_busy_starve_remaining != 0) {
-                workload_busy_starve_remaining =
-                    workload_busy_starve_remaining - 1;
+            let remaining: usize =
+                atomic_word_load(&workload_busy_starve_remaining);
+            if (atomic_word_load(&workload_busy_starve_armed) != 0 &&
+                atomic_word_load(&workload_busy_starve_worker) == worker &&
+                remaining != 0) {
+                atomic_word_store(&workload_busy_starve_remaining,
+                                  remaining - 1);
             }
         }
     }
@@ -586,9 +591,12 @@ struct MoveCostRecord {
 
 private let mut move_cost_open: [MoveCostOpen; KERNEL_MAX_CORES];
 private let mut move_cost_records: [MoveCostRecord; MOVE_COST_MAX];
-private let mut move_cost_stored: usize;
-private let mut move_cost_lost: usize;
-private let mut move_cost_reported: bool;
+// AtomicWord (GitHub issue #1159). stored and lost change under the run lock;
+// reported is claimed once by compare-and-swap, so two cores asking at once
+// print one summary.
+private let mut move_cost_stored: AtomicWord;
+private let mut move_cost_lost: AtomicWord;
+private let mut move_cost_reported: AtomicWord;
 
 // GitHub issue #597: /bin/peer-mutate's evidence that the three ext2
 // mutations completed on a peer. The syscall arms note each success made
@@ -2256,12 +2264,12 @@ fn workload_move_cost_progress(phase: usize, round: usize, cold: usize)
         let opened: bool = move_cost_open[cpu].live &&
             move_cost_open[cpu].pid == kernel_process_current_pid();
         move_cost_open[cpu].live = false;
-        if (opened == false || move_cost_stored >= MOVE_COST_MAX) {
-            move_cost_lost = move_cost_lost + 1;
+        if (opened == false || atomic_word_load(&move_cost_stored) >= MOVE_COST_MAX) {
+            atomic_word_fetch_add(&move_cost_lost, 1);
             process_run_unlock(guard);
             return 1;
         }
-        let index: usize = move_cost_stored;
+        let index: usize = atomic_word_load(&move_cost_stored);
         if (index < MOVE_COST_MAX) {
             move_cost_records[index].round = round;
             move_cost_records[index].cold = cold != 0;
@@ -2273,7 +2281,7 @@ fn workload_move_cost_progress(phase: usize, round: usize, cold: usize)
             move_cost_records[index].instructions =
                 (end_instructions - move_cost_open[cpu].instructions) &
                 MOVE_COST_WRAP;
-            move_cost_stored = index + 1;
+            atomic_word_store(&move_cost_stored, index + 1);
         }
         process_run_unlock(guard);
         return 1;
@@ -2285,13 +2293,12 @@ fn workload_move_cost_progress(phase: usize, round: usize, cold: usize)
 private fn workload_move_cost_report() -> usize {
     if (cpu_id() != 0) { return 0; }
     let guard = process_run_lock();
-    if (move_cost_reported) {
+    if (atomic_word_compare_exchange(&move_cost_reported, 0, 1) == false) {
         process_run_unlock(guard);
         return 0;
     }
-    move_cost_reported = true;
-    let stored: usize = move_cost_stored;
-    let lost: usize = move_cost_lost;
+    let stored: usize = atomic_word_load(&move_cost_stored);
+    let lost: usize = atomic_word_load(&move_cost_lost);
     process_run_unlock(guard);
     for index: usize in 0..<MOVE_COST_MAX {
         if (index < stored) {

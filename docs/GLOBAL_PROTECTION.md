@@ -59,7 +59,7 @@ Tried in this order; an array `[T; N]` takes the class of `T`.
 | `region` | a `region let mut` backing, reached only through its claim |
 | `slot_owned` | an `owned_by(T.f, S)` global: each element reached as `g[t.f * S + k]` with a linear slot token `t` (SPEC.md, Slot-Owned Globals) |
 | `atomic` | `AtomicWord` |
-| `lock` | `LockedCell(T)`, `RegionPool(T)`, `InitOnce` as kernel/lib/init_once.tkb defines it (#1418: its private `complete` is written only under its own `TaskMutex`, by that file) |
+| `lock` | `LockedCell(T)`, `RegionPool(T)`, `InitOnce` as kernel/lib/init_once.tkb defines it (#1418: its private `complete` is written only under its own `TaskMutex`, by that file), `GuardedField(T)` (#1159: its guard proves the guarded-field lock is held, not which cell's; one adopter, fd_table.tkb's `fd_slot_total`) |
 | `place` | `Place(T)` |
 | `boot_once` | `BootOnce(T)`: written under one `BootPhase`, read after by `boot_once_get` |
 | `per_cpu` | a `struct per_cpu` store |
@@ -387,3 +387,13 @@ entries below that date are history, left as written.
   each entry is reached as `g[slot.index * BLOCK_CACHE_SLOTS + k]`. The four
   `allowed_callers.tsv` rows that held the cache to memory.tkb go with the
   plain index. 224 -> 217 unprotected.
+- 2026-11-07 (#1159): nine one-word flags and counts in evidence files to
+  `AtomicWord` -- `profile_samples.tkb`'s `profile_sample_available` and
+  `profile_sample_checked`; `workload_evidence.tkb`'s four starve-injection
+  words (the debugger still writes `workload_busy_starve_injection_ticks`
+  through its address, the value at offset 0) and `move_cost_stored`,
+  `move_cost_lost` and `move_cost_reported` (now claimed by compare-and-swap,
+  so two cores asking at once print one summary). And `GuardedField(T)` is
+  classed `lock` (lib/global_protection.ml), which counts `fd_table.tkb`'s
+  `fd_slot_total`; its guard proves the guarded-field lock is held, not which
+  cell's (kernel/lib/locked_cell.tkb).
