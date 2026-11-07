@@ -1717,8 +1717,10 @@ are deliberate, not gaps to silently close:
   provisioning and hardware-specific storage checks remain RPi5-only.
   Each request carries one whole 1 KiB block and is waited for synchronously
   by polling, bounded at 1 s of counter time; the boot prints
-  `virtio-blk wait: completions= total_ticks= max_ticks=` after `block io:`,
-  the sum being what a loaded host turns into minutes of UART silence.
+  `virtio-blk wait: completions= total_ticks= max_ticks= timeouts=` after
+  `block io:`, the sum being what a loaded host turns into minutes of UART
+  silence; a timed-out request is counted as a read or write but not as a
+  completion, and the dmesg check names it (issue #1435).
 - **RAM discovery uses the boot DTB on both platforms.** RPi5 firmware passes
   its resolved FDT to the resident SD stub, which preserves it across SWD
   injection. QEMU's direct-kernel loader generates an FDT from the selected

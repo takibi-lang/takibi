@@ -591,6 +591,11 @@ fn kernel_init_boot_fixture_poll(current_authority: borrow ProcessCurrent[curren
     uart_put_udec(virtio_blk_completion_total());
     kernel_boot_log(" max_ticks=");
     uart_put_udec(virtio_blk_completion_max());
+    // GitHub issue #1435: a timed-out request is counted by the caller as a
+    // read or write but never as a completion; naming it here lets the dmesg
+    // check tell a timeout from a request-per-sector reversion.
+    kernel_boot_log(" timeouts=");
+    uart_put_udec(virtio_blk_timeout_count());
     kernel_boot_log("\n");
     if (address_space_backing_missing_uses() != 0) {
         kernel_boot_log("address space: backings MISSING uses=");

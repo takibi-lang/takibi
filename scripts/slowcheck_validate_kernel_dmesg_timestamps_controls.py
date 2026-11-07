@@ -70,7 +70,8 @@ HEALTHY_UART_TX = (b"uart tx: queue=512 low_water=256 writers_waited=5 "
                    b"writers_slept=3\r\n")
 # One virtio request per block: completions equal reads + writes above.
 HEALTHY_VIRTIO_WAIT = (b"virtio-blk wait: completions=31055 "
-                       b"total_ticks=50000000 max_ticks=300000\r\n")
+                       b"total_ticks=50000000 max_ticks=300000 "
+                       b"timeouts=0\r\n")
 HEALTHY_TAIL = (HEALTHY_SPIN + HEALTHY_BLOCK_IO + HEALTHY_VIRTIO_WAIT +
                 HEALTHY_UART_TX)
 
@@ -218,7 +219,15 @@ def main() -> int:
              HEALTHY_SPIN + HEALTHY_BLOCK_IO +
              HEALTHY_VIRTIO_WAIT.replace(b"=31055", b"=62110") +
              HEALTHY_UART_TX,
-             "a request per sector again")):
+             "a request per sector again"),
+            # GitHub issue #1435: one timed-out request (2026-11-07 land) is
+            # named, not reported as a bare calls-vs-completions mismatch.
+            ("one virtio-blk request timed out",
+             HEALTHY_SPIN + HEALTHY_BLOCK_IO +
+             HEALTHY_VIRTIO_WAIT.replace(b"=31055", b"=31054")
+             .replace(b"timeouts=0", b"timeouts=1") +
+             HEALTHY_UART_TX,
+             "1 virtio-blk requests timed out")):
         CASES.note()
         status, output = run(HEALTHY, extra=extra)
         if status == 0 or needle not in output:

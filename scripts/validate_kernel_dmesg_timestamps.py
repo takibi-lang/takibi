@@ -54,7 +54,8 @@ def ring_slots_used(records: list[tuple[int, bytes]], slot_bytes: int) -> int:
 # reason the total is: a field this is the only reader of, dropped from the
 # kernel's line, would retire the measurement with every lane green.
 VIRTIO_WAIT = re.compile(
-    rb"virtio-blk wait: completions=(\d+) total_ticks=(\d+) max_ticks=(\d+)")
+    rb"virtio-blk wait: completions=(\d+) total_ticks=(\d+) max_ticks=(\d+) "
+    rb"timeouts=(\d+)")
 BLOCK_IO = re.compile(
     rb"block io: reads=(\d+) writes=(\d+) block_bytes=(\d+) "
     rb"cache_hits=(\d+) runs=(\d+) run_hits=(\d+) single_reads=(\d+)")
@@ -316,11 +317,20 @@ def main() -> None:
         if not wait:
             fail("the boot reached its last milestone without printing "
                  "`virtio-blk wait: completions=... total_ticks=... "
-                 "max_ticks=...`")
+                 "max_ticks=... timeouts=...`")
         completions = int(wait.group(1))
-        if completions != reads + writes:
-            fail(f"virtio-blk completed {completions} requests for "
-                 f"{reads} block reads and {writes} block writes; one "
+        timeouts = int(wait.group(4))
+        # GitHub issue #1435: a request that timed out was counted as a read
+        # or write but not as a completion, so name it rather than report a
+        # bare sum mismatch that reads as a counter race.
+        if timeouts != 0 and completions + timeouts == reads + writes:
+            fail(f"{timeouts} virtio-blk requests timed out "
+                 f"(completions={completions} for {reads} block reads and "
+                 f"{writes} block writes); the boot's I/O did not all "
+                 f"complete, see the ddb virtio-blk timeout snapshot")
+        if completions + timeouts != reads + writes:
+            fail(f"virtio-blk completed {completions} requests "
+                 f"(timeouts={timeouts}) for {reads} block reads and {writes} block writes; one "
                  f"request per block makes them equal, and twice the sum is "
                  f"a request per sector again")
     uart_tx = UART_TX.search(data)
