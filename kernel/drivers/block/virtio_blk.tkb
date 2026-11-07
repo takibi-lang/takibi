@@ -236,10 +236,21 @@ private fn virtio_blk_desc_link(index: {0..<8 as usize}, flags: i32,
     virtio_blk_queue.desc[index].next = next;
 }
 
+// A request's descriptor chain is built in order (GitHub issue #752): the
+// header (descriptor 0), then the data (descriptor 1), then the status
+// (descriptor 2) with the links between them, and only then is it made
+// available and the device notified. Each stage hands the next a linear
+// token, so the device cannot be notified of a chain with an unwritten
+// descriptor, a stage cannot be repeated, and a started chain cannot be
+// abandoned unpublished.
+private linear struct VirtioBlkChainHead[unit: usize] { private stage: usize; }
+private linear struct VirtioBlkChainBody[unit: usize] { private stage: usize; }
+private linear struct VirtioBlkChainReady[unit: usize] { private stage: usize; }
+
 // The header's three little-endian fields (virtio 1.x, 5.2.6). The device
 // token stays in the owner slot until the request settles.
 private fn virtio_blk_submit_header(request_type: u32,
-                                    sector: u32) !{unsafe} {
+                                    sector: u32) -> VirtioBlkChainHead[0] !{unsafe} {
     match virtio_blk_request_take() {
         VirtioBlkRequestTransmitAuthority::Cpu(cpu) => {
             let header = dma_cpu_slice(cpu, VirtioBlkRequestTransmit);
@@ -262,9 +273,13 @@ private fn virtio_blk_submit_header(request_type: u32,
             virtio_blk_request_fail_device(stale);
         }
     }
+    let mut head: VirtioBlkChainHead[0] = { 0 };
+    return head;
 }
 
-private fn virtio_blk_submit_write_data(source: borrow [u8; 1024..]) !{unsafe} {
+private fn virtio_blk_submit_write_data(head: sink VirtioBlkChainHead[0],
+                                        source: borrow [u8; 1024..])
+        -> VirtioBlkChainBody[0] !{unsafe} {
     match virtio_blk_data_take() {
         VirtioBlkDataTransmitAuthority::Cpu(cpu) => {
             slice_copy(dma_cpu_slice(cpu, VirtioBlkDataTransmit),
@@ -279,6 +294,48 @@ private fn virtio_blk_submit_write_data(source: borrow [u8; 1024..]) !{unsafe} {
             virtio_blk_data_fail_device(stale);
         }
     }
+    let mut body: VirtioBlkChainBody[0] = { head.stage + 1 };
+    return body;
+}
+
+// A read's data descriptor: the receive range the device writes.
+private fn virtio_blk_submit_read_data(head: sink VirtioBlkChainHead[0],
+                                       data_span: borrow DmaDeviceSpan)
+        -> VirtioBlkChainBody[0] {
+    virtio_blk_desc_span(1, data_span);
+    let mut body: VirtioBlkChainBody[0] = { head.stage + 1 };
+    return body;
+}
+
+private fn virtio_blk_submit_data(head: sink VirtioBlkChainHead[0], write: bool,
+                                  source: borrow [u8; 1024..],
+                                  data_span: borrow DmaDeviceSpan)
+        -> VirtioBlkChainBody[0] !{unsafe} {
+    if (write) { return virtio_blk_submit_write_data(head, source); }
+    return virtio_blk_submit_read_data(head, data_span);
+}
+
+// The data descriptor's link and the status descriptor end the chain.
+private fn virtio_blk_submit_status(body: sink VirtioBlkChainBody[0],
+                                    data_flags: i32,
+                                    status_span: borrow DmaDeviceSpan)
+        -> VirtioBlkChainReady[0] {
+    virtio_blk_desc_link(1, data_flags | VIRTIO_BLK_DESC_F_NEXT, 2);
+    virtio_blk_desc_span(2, status_span);
+    virtio_blk_desc_link(2, VIRTIO_BLK_DESC_F_WRITE, 0);
+    let mut ready: VirtioBlkChainReady[0] = { body.stage + 1 };
+    return ready;
+}
+
+// The whole chain is written: make it available, publish, and notify.
+private fn virtio_blk_submit_notify(ready: sink VirtioBlkChainReady[0]) {
+    let stage: usize = ready.stage;
+    let avail_idx: VirtioRingIndex = virtio_blk_queue.avail.idx;
+    let slot: {0..<8 as usize} = ((avail_idx as u16) as usize) % 8;
+    virtio_blk_queue.avail.ring[slot] = 0;
+    virtio_blk_queue.avail.idx = virtio_ring_index_next(avail_idx);
+    dma_publish();
+    virtio_blk_regs.queue_notify = 0;
 }
 
 private fn virtio_blk_submit_owned(guard: borrow BlockDeviceGuard[&block_device_lock],
@@ -295,27 +352,18 @@ private fn virtio_blk_submit_owned(guard: borrow BlockDeviceGuard[&block_device_
     let mut data_flags: i32 = 0;
     if (write == false) { data_flags = VIRTIO_BLK_DESC_F_WRITE; }
 
-    virtio_blk_submit_header(request_type, sector);
+    let head: VirtioBlkChainHead[0] = virtio_blk_submit_header(request_type, sector);
 
     let receive_device = dma_begin_rx(receive_cpu, VirtioBlkReceive);
     let mut data_span = dma_device_span(receive_device, VirtioBlkReceive,
                                         0, VIRTIO_BLK_TRANSFER_BYTES);
     let mut status_span = dma_device_span(receive_device, VirtioBlkReceive,
                                           VIRTIO_BLK_TRANSFER_BYTES, 1);
-    if (write) {
-        virtio_blk_submit_write_data(sector_buffer);
-    } else {
-        virtio_blk_desc_span(1, data_span);
-    }
-    virtio_blk_desc_link(1, data_flags | VIRTIO_BLK_DESC_F_NEXT, 2);
-    virtio_blk_desc_span(2, status_span);
-    virtio_blk_desc_link(2, VIRTIO_BLK_DESC_F_WRITE, 0);
-    let avail_idx: VirtioRingIndex = virtio_blk_queue.avail.idx;
-    let slot: {0..<8 as usize} = ((avail_idx as u16) as usize) % 8;
-    virtio_blk_queue.avail.ring[slot] = 0;
-    virtio_blk_queue.avail.idx = virtio_ring_index_next(avail_idx);
-    dma_publish();
-    virtio_blk_regs.queue_notify = 0;
+    let body: VirtioBlkChainBody[0] =
+        virtio_blk_submit_data(head, write, sector_buffer, data_span);
+    let ready: VirtioBlkChainReady[0] =
+        virtio_blk_submit_status(body, data_flags, status_span);
+    virtio_blk_submit_notify(ready);
 
     let completion_start: i64 = read_cntpct();
     let completion_ticks: i64 =

@@ -2827,6 +2827,24 @@ let msc_cbw_typestate_fixture =
    }
    "
 
+(* GitHub issue #752: the shape of virtio_blk.tkb's request chain, header ->
+   data -> status -> notify, as per-stage linear tokens. *)
+let virtio_chain_typestate_fixture =
+  "linear struct Head[unit: usize] { private stage: usize; }
+   linear struct Body[unit: usize] { private stage: usize; }
+   linear struct Ready[unit: usize] { private stage: usize; }
+   let mut desc: [usize; 3];
+   let mut notified: usize;
+   fn submit_header() -> Head[0] { desc[0] = 1; let mut h: Head[0] = { 0 }; return h; }
+   fn submit_data(head: sink Head[0]) -> Body[0] {
+     desc[1] = 1; let mut b: Body[0] = { head.stage + 1 }; return b;
+   }
+   fn submit_status(body: sink Body[0]) -> Ready[0] {
+     desc[2] = 1; let mut r: Ready[0] = { body.stage + 1 }; return r;
+   }
+   fn submit_notify(ready: sink Ready[0]) { notified = ready.stage; }
+   "
+
 let atomic_word_fixture =
   "struct no_copy AtomicWord { private value: usize; }
    "
@@ -3436,6 +3454,41 @@ let infer_tests = [
     (expect_type_error "Unbound variable"
        (msc_cbw_typestate_fixture ^
         "fn main() -> usize { msc_cbw_set(cbw, 15, 0x25); return msc_run_command(cbw); }"));
+
+  (* GitHub issue #752: a virtio request chain notified out of order does not
+     compile. *)
+  Alcotest.test_case "virtio chain typestate: header, data, status, notify" `Quick
+    (expect_ok (virtio_chain_typestate_fixture ^
+       "fn main() {
+          let h: Head[0] = submit_header();
+          let b: Body[0] = submit_data(h);
+          let r: Ready[0] = submit_status(b);
+          submit_notify(r);
+        }"));
+  Alcotest.test_case "virtio chain typestate: notify before the status is refused" `Quick
+    (expect_type_error "Ready"
+       (virtio_chain_typestate_fixture ^
+        "fn main() {
+           let h: Head[0] = submit_header();
+           let b: Body[0] = submit_data(h);
+           submit_notify(b);
+         }"));
+  Alcotest.test_case "virtio chain typestate: a header without its data is refused" `Quick
+    (expect_type_error "Body"
+       (virtio_chain_typestate_fixture ^
+        "fn main() {
+           let h: Head[0] = submit_header();
+           let r: Ready[0] = submit_status(h);
+           submit_notify(r);
+         }"));
+  Alcotest.test_case "virtio chain typestate: a chain left unpublished is refused" `Quick
+    (expect_type_error "never consumed"
+       (virtio_chain_typestate_fixture ^
+        "fn main() {
+           let h: Head[0] = submit_header();
+           let b: Body[0] = submit_data(h);
+           let r: Ready[0] = submit_status(b);
+         }"));
 
   (* GitHub issue #1159 (option B1): an owned_by(T.f, S) global is reached
      only as g[t.f * S + k], t a T and k proven below S. *)
