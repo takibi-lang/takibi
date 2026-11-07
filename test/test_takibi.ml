@@ -16858,6 +16858,15 @@ let codegen_tests = [
         "linear view W1419;\nfn c1419() -> W1419 { return 5; }" ();
       expect_type_error "integer literal 3 where &"
         "struct S1419 { a: u32; }\nfn h1419(r: &S1419) {}\nfn d1419() { h1419(3); }" ());
+  (* GitHub issue #1423: top-level definition errors name the definition. *)
+  Alcotest.test_case "duplicate, overload and uninitialized-global errors carry a location" `Quick
+    (fun () ->
+      expect_type_error_at 3 1 "is already defined as a function"
+        "fn a1423() {}\n\nlet a1423: u32 = 1;" ();
+      expect_type_error_at 3 1 "requires explicit parameter types"
+        "fn f1423(x: u32) {}\n\nfn f1423(y) {}" ();
+      expect_type_error_at 2 1 "must have an initializer"
+        "fn g1423() {}\nlet G1423: u32;" ());
 
   Alcotest.test_case "explicit wrapping multiply lowers to fixed-width arithmetic" `Quick
     (fun () ->

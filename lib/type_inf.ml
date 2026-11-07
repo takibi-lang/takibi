@@ -9124,32 +9124,35 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               decl_kind decl_name frame rname))
         ) aarch64_exception_frame_register_set
   in
-  let claim_toplevel_name name kind =
+  (* GitHub issue #1423: the second definition's own position. EnumDef,
+     ExceptionEntry/RestoreDef and the generic struct carry none usable here
+     (EnumDef has no loc), so those keep dummy_pos. *)
+  let claim_toplevel_name ?(loc = Lexing.dummy_pos) name kind =
     if name = "addr" then
-      raise (TypeError (Lexing.dummy_pos,
+      raise (TypeError (loc,
         "'addr' is reserved for the checker-only static address sort"));
     match Hashtbl.find_opt toplevel_names name with
     | Some "function" when kind = "function" -> ()
     | Some existing ->
-        raise (TypeError (Lexing.dummy_pos,
+        raise (TypeError (loc,
           Printf.sprintf "'%s' is already defined as %s %s"
             name (article_for existing) existing))
     | None -> Hashtbl.add toplevel_names name kind
   in
   List.iter (function
-    | Ast.FuncDef fdef          -> claim_toplevel_name fdef.name "function"
-    | Ast.ExternFuncDef (n, _, _, _, _) -> claim_toplevel_name n "function"
-    | Ast.ExternSymbolDef (n, _) -> claim_toplevel_name n "symbol"
-    | Ast.ConstDef (n, _, _, _) -> claim_toplevel_name n "constant"
-    | Ast.LetDef (n, _, _, _, _, _, _)  -> claim_toplevel_name n "global"
-    | Ast.StructDef (n, _, _, _, _, _)  -> claim_toplevel_name n "struct"
+    | Ast.FuncDef fdef          -> claim_toplevel_name ~loc:fdef.def_loc fdef.name "function"
+    | Ast.ExternFuncDef (n, _, _, _, loc) -> claim_toplevel_name ~loc n "function"
+    | Ast.ExternSymbolDef (n, loc) -> claim_toplevel_name ~loc n "symbol"
+    | Ast.ConstDef (n, _, _, loc) -> claim_toplevel_name ~loc n "constant"
+    | Ast.LetDef (n, _, _, _, _, _, loc)  -> claim_toplevel_name ~loc n "global"
+    | Ast.StructDef (n, _, _, _, _, loc)  -> claim_toplevel_name ~loc n "struct"
     | Ast.OwnedStructDef (n, _, _, _, _, _, _, _, _) ->
         claim_toplevel_name n "struct"
-    | Ast.OpaqueStructDef (n, _, _, _)  -> claim_toplevel_name n "struct"
-    | Ast.ViewDef (n, _, _, _, _)       -> claim_toplevel_name n "view"
+    | Ast.OpaqueStructDef (n, _, _, loc)  -> claim_toplevel_name ~loc n "struct"
+    | Ast.ViewDef (n, _, _, _, loc)       -> claim_toplevel_name ~loc n "view"
     | Ast.EnumDef (n, _, _, _)    -> claim_toplevel_name n "enum"
-    | Ast.VariantDef (n, _, _, _, _)  -> claim_toplevel_name n "variant"
-    | Ast.GenericVariantDef (n, _, _, _, _, _) -> claim_toplevel_name n "generic variant"
+    | Ast.VariantDef (n, _, _, _, loc)  -> claim_toplevel_name ~loc n "variant"
+    | Ast.GenericVariantDef (n, _, _, _, _, loc) -> claim_toplevel_name ~loc n "generic variant"
     | Ast.GenericStructDef (n, _, _, _, _, _, _) ->
         claim_toplevel_name n "generic struct"
     | Ast.UseDef _ | Ast.ProtocolDef _ -> ()
@@ -9347,9 +9350,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | _ -> ()
   ) prog;
   Hashtbl.iter (fun record fields ->
+    (* GitHub issue #1423: the record's declaration names each refusal. *)
+    let record_loc = List.fold_left (fun found -> function
+      | Ast.StructDef (name, _, _, _, _, loc) when name = record -> loc
+      | _ -> found) Lexing.dummy_pos prog in
     (match fields with
      | [(_, Ast.TypeArray (_, count))] when count > 0 -> ()
-     | _ -> raise (TypeError (Lexing.dummy_pos,
+     | _ -> raise (TypeError (record_loc,
          Printf.sprintf "struct dma_fixed '%s' requires one nonempty fixed array field"
            record)));
     (match List.find_opt (function
@@ -9374,7 +9381,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          raise (TypeError (loc, Printf.sprintf
            "struct dma_fixed '%s' requires one private mutable aligned global without an initializer"
            record))
-     | _ -> raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+     | _ -> raise (TypeError (record_loc, Printf.sprintf
          "struct dma_fixed '%s' requires exactly one fixed global allocation"
          record)));
     let slots = List.filter_map (function
@@ -9386,7 +9393,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      | [(name, Ast.TypeNamed ty, None, true, true, _)]
        when name = Dma_fixed_registry.slot_global record
             && ty = Dma_fixed_registry.slot_type record -> ()
-     | _ -> raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+     | _ -> raise (TypeError (record_loc, Printf.sprintf
          "fixed DMA record '%s' must have only its compiler-created owner slot"
          record))))
     Dma_fixed_registry.records;
@@ -11129,11 +11136,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         StringMap.add name (1 + Option.value (StringMap.find_opt name m) ~default:0) m
     | _ -> m
   ) StringMap.empty prog in
-  let overload_key name params =
+  let overload_key ?(loc = Lexing.dummy_pos) name params =
     if Option.value (StringMap.find_opt name fn_counts) ~default:0 <= 1 then name
     else begin
       if List.exists (fun (_, t) -> t = None) params then
-        raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+        raise (TypeError (loc, Printf.sprintf
           "overloaded function '%s' requires explicit parameter types" name));
       "_TK_" ^ name ^ "__" ^ String.concat "_" (List.map (fun (_, t) ->
         type_code (Option.get t)) params)
@@ -11183,7 +11190,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              guarded_by place, inside that field's type" fdef.name));
         let pts = List.map (fun (_, t) -> of_ast_opt_in_decl_scope scope t) fdef.params in
         let rt  = ret_of_ast_opt_in_decl_scope scope fdef.ret_type in
-        let key = overload_key fdef.name fdef.params in
+        let key = overload_key ~loc:fdef.def_loc fdef.name fdef.params in
         register_definition fdef.def_loc key fdef.name;
         (match Option.bind fdef.ret_type region_return_annotation with
          | Some (_, holder, _) ->
@@ -11213,7 +11220,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         let scope = create_static_scope () in
         let pts = List.map (fun (_, t) -> of_ast_opt_in_decl_scope scope t) params in
         let rt  = ret_of_ast_opt_in_decl_scope scope ret_ty in
-        let key = overload_key name params in
+        let key = overload_key ~loc:eloc name params in
         register_definition Lexing.dummy_pos key name;
         let old = Option.value (StringMap.find_opt name m) ~default:[] in
         let old = List.filter (fun (k, _) -> k <> key) old in
@@ -11361,7 +11368,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         (match expr_opt with
          | None ->
              if not is_mutable then
-               raise (TypeError (Lexing.dummy_pos,
+               raise (TypeError (loc,
                  Printf.sprintf "immutable global '%s' must have an initializer; use 'let mut' for uninitialized globals" name));
              check_private_default_construction ~zeroed:true senv loc ty;
              check_zero_admissible senv loc name ty;
