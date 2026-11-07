@@ -119,3 +119,6 @@ kernel/mm/process_image.tkb	process_image_record_read	ladder	1	-	#1308	as proces
 kernel/kernel/process.tkb	kernel_process_current_root	ladder	1	-	#1308	a ProcessCurrent witness on a CPU with no current process: its mints should exclude that
 kernel/kernel/cpu_authority.tkb	preempt_count_el1_resume_check	unmodelled	1	-	#638	an El1 frame resumes with its own stack count at zero: it was switched away only at zero, and the stack keeps its count while it is away
 kernel/kernel/process.tkb	kernel_process_stack_switch_complete	ladder	1	-	#850	an El1 frame resumes with the priority mask open (#638 stage 9, option D): it was frozen after irq_nest_close; the IrqState token on the switch could carry it statically
+kernel/init/boot_prologue.tkb	set_once_unset_stop	ladder	1	-	#732	a SetOnce cell read before it was set (#1159): as boot_once_unwritten_stop, a Sealed index on the cell would make it a compile error
+kernel/kernel/syscall.tkb	kernel_syscall_ext2_configure	ladder	1	-	#1159	a second configure of the syscall filesystem finds its SetOnce claimed: boot configures it once, an order no type states yet
+kernel/mm/process_image.tkb	process_image_record_publish	ladder	1	-	#1159	a second publish of root 0's image record finds its SetOnce claimed: only the first ensure publishes it, an order no type states yet
