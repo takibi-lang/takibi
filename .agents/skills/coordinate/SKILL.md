@@ -59,7 +59,18 @@ worktree), and every QEMU guest leases vCPUs from the host-wide budget
   its last commit and repeated failures in its logs; if one looks stuck for
   more than about an hour, tell the maintainer.
 
-## 3. Land, one branch at a time
+## 3. Land, in small batches
+
+Decided 2026-11-07 (maintainer): when several finished branches wait,
+stack them on origin/main in one temporary worktree and land them together
+(one `scripts/land.sh` run). Branches whose kernels stay byte-identical
+(scripts, docs, compiler-only) go four or five to a batch; branches that
+change kernel code go two or three at most, or alone. Append-only conflicts
+(ROADMAP, DECISIONS, table rows, test-list appends) are resolved by keeping
+both sides; the trust ledger and space checkpoint are re-recorded once at
+the top of the batch. On a red batch, decide intermittent vs real; for a
+real failure, bisect by landing halves. Every branch keeps its own commits
+and closing commit. Never run two lands at once.
 
 Only the coordinator lands, from the main checkout (`scripts/land.sh`
 refuses any branch but `main`).
