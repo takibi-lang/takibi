@@ -250,6 +250,11 @@ fn xhci_cmd_advance(enq: usize, cycle: u32) !{unsafe} {
 const MSC_MAX_TRANSFER_SECTORS: usize = 128;
 const MSC_SECTOR_SIZE: usize = 512;
 private let mut msc_write10_command_count: AtomicWord;
+// GitHub issue #1440: the Bulk-Only commands run and those that timed out
+// (no matching transfer event, so the controller was halted and reset), for
+// the boot log's `usb-msc wait:` line and the dmesg check that names them.
+private let mut msc_command_count: AtomicWord;
+private let mut msc_command_timeouts: AtomicWord;
 
 let mut xhci_ready: AtomicWord;
 private let mut xhci_controller_unusable: AtomicWord;
@@ -716,6 +721,7 @@ must_use variant MscTimeoutResult {
 // A failed halt/reset is conservatively treated as unproven quiescence, so
 // this boot must never reinitialize the controller.
 fn msc_abort_unobserved_transfer() -> MscTimeoutResult {
+    atomic_word_fetch_add(&msc_command_timeouts, 1);
     atomic_word_store(&xhci_ready, 0);
     if (xhci_halt_and_reset()) {
         return MscTimeoutResult::RestartRequired;
@@ -786,6 +792,7 @@ private fn msc_read_csw(guard: borrow BlockDeviceGuard[&block_device_lock]) -> M
 
 fn msc_run_command(guard: borrow BlockDeviceGuard[&block_device_lock], data_len: {0..<65537 as u32}, dir_in: bool)
         -> MscCommandResult {
+    atomic_word_fetch_add(&msc_command_count, 1);
     // An outbound payload is already in the protected transmit allocation;
     // an inbound one lands in the protected receive allocation.
     match msc_cbw_send_once(guard) {
@@ -1485,6 +1492,10 @@ fn disk_reset_write10_command_count() {
 fn disk_write10_command_count() -> usize {
     return atomic_word_load(&msc_write10_command_count);
 }
+
+// GitHub issue #1440: Bulk-Only commands run, and those that timed out.
+fn disk_command_count() -> usize { return atomic_word_load(&msc_command_count); }
+fn disk_timeout_count() -> usize { return atomic_word_load(&msc_command_timeouts); }
 
 // READ(10)/WRITE(10) share the same CDB shape: opcode | flags(0) |
 // LBA(4, big-endian) | group number(0) | transfer length(2, big-endian,

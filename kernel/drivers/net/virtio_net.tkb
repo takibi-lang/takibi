@@ -232,6 +232,13 @@ let mut virtio_net_used_addr: [usize; 2];
 // capability, reads the RX used shadow from this published copy, stored
 // each time the holder advances it.
 private let mut virtio_net_rx_used_published: AtomicWord;
+// GitHub issue #1440: transmits notified and completions that timed out,
+// for the boot log's `net tx wait:` line (the same names as rp1_gem.tkb).
+private let mut virtio_net_tx_submissions: AtomicWord;
+private let mut virtio_net_tx_timeouts: AtomicWord;
+
+fn net_tx_submission_count() -> usize { return atomic_word_load(&virtio_net_tx_submissions); }
+fn net_tx_timeout_count() -> usize { return atomic_word_load(&virtio_net_tx_timeouts); }
 
 fn virtio_net_find() -> bool !{unsafe} {
     return virtio_net_base() != 0 && virtio_net_intid() >= 0;
@@ -677,6 +684,7 @@ private fn virtio_net_tx_finish(r: borrow mut NetRxCanAcquire[net], slot: usize,
         virtio_pkt_park(slot, VirtioPktHeld::Unconfirmed(VirtioPkt_virtio_pkt_expire(posted)));
     }
     atomic_word_store(&virtio_net_ready, 0);
+    atomic_word_fetch_add(&virtio_net_tx_timeouts, 1);
     kernel_boot_log("virtio net: tx completion unconfirmed; queues disabled\n");
     return false;
 }
@@ -807,6 +815,7 @@ fn virtio_net_tx_ring(r: borrow mut NetRxCanAcquire[net], address: usize, length
     avail_ring_set(1, 0, 0);
     r.tx_avail_idx = virtio_ring_index_next(r.tx_avail_idx);
     avail_publish(1, r.tx_avail_idx);
+    atomic_word_fetch_add(&virtio_net_tx_submissions, 1);
     virtio_notify(1);
 }
 

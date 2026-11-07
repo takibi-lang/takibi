@@ -169,6 +169,13 @@ private let mut gem_rx_ring_cpu_address: usize = 0;
 // Set once a TX completion went unconfirmed: gem_halt() has stopped the MAC
 // (or failed to), so no later frame is submitted this boot.
 private let mut gem_tx_down: AtomicWord;
+// GitHub issue #1440: frames started (TSTART) and completions that timed out
+// (gem_tx_unconfirmed), for the boot log's `net tx wait:` line.
+private let mut gem_tx_submissions: AtomicWord;
+private let mut gem_tx_timeouts: AtomicWord;
+
+fn net_tx_submission_count() -> usize { return atomic_word_load(&gem_tx_submissions); }
+fn net_tx_timeout_count() -> usize { return atomic_word_load(&gem_tx_timeouts); }
 let mut rp1_gem_base: BootOnce(usize);
 let mut rp1_clocks_base: BootOnce(usize);
 let mut rp1_gpio_ctrl_base: BootOnce(usize);
@@ -697,6 +704,7 @@ private fn gem_tx_ring_write(slot: {0..<2 as usize}, desc: GemDesc) {
 
 // Publish the TX ring (the generated clean, then TSTART in its lowering).
 private fn gem_tx_start() {
+    atomic_word_fetch_add(&gem_tx_submissions, 1);
     let Place::Full(held) = gem_tx_ring_take_held() else {
         Place::Empty => { kernel_invariant_stop(); return; }
     };
@@ -768,6 +776,7 @@ private fn gem_tx_pkt(index: usize) -> GemPktHeld {
 // read. Halt GEM; only a confirmed halt returns the buffer to the CPU, and
 // either way no later frame is sent this boot.
 private fn gem_tx_unconfirmed(r: borrow mut NetRxCanAcquire[net], index: usize) !{unsafe} {
+    atomic_word_fetch_add(&gem_tx_timeouts, 1);
     kernel_boot_log("rp1 gem: tx completion unconfirmed; halting tx\n");
     atomic_word_store(&gem_tx_down, 1);
     let GemPktHeld::TxPosted(posted) = gem_tx_pkt(index) else {

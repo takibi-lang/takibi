@@ -600,6 +600,19 @@ fn kernel_init_boot_fixture_poll(current_authority: borrow ProcessCurrent[curren
     kernel_boot_log(" timeouts=");
     uart_put_udec(virtio_blk_timeout_count());
     kernel_boot_log("\n");
+    // GitHub issue #1440: the USB mass-storage and network transmit request
+    // paths in the same shape (both platforms print both; QEMU's USB disk is
+    // absent), so the dmesg check names a timeout instead of a later symptom.
+    kernel_boot_log("usb-msc wait: commands=");
+    uart_put_udec(disk_command_count());
+    kernel_boot_log(" timeouts=");
+    uart_put_udec(disk_timeout_count());
+    kernel_boot_log("\n");
+    kernel_boot_log("net tx wait: submissions=");
+    uart_put_udec(net_tx_submission_count());
+    kernel_boot_log(" timeouts=");
+    uart_put_udec(net_tx_timeout_count());
+    kernel_boot_log("\n");
     if (address_space_backing_missing_uses() != 0) {
         kernel_boot_log("address space: backings MISSING uses=");
         uart_put_udec(address_space_backing_missing_uses());

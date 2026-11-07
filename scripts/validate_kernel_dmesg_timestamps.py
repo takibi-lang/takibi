@@ -56,6 +56,11 @@ def ring_slots_used(records: list[tuple[int, bytes]], slot_bytes: int) -> int:
 VIRTIO_WAIT = re.compile(
     rb"virtio-blk wait: completions=(\d+) total_ticks=(\d+) max_ticks=(\d+) "
     rb"timeouts=(\d+)")
+# GitHub issue #1440: the USB mass-storage and network transmit request paths
+# print their requests and timeouts like virtio-blk (#1435), so a timeout is
+# named instead of showing up as a later symptom.
+USB_MSC_WAIT = re.compile(rb"usb-msc wait: commands=(\d+) timeouts=(\d+)")
+NET_TX_WAIT = re.compile(rb"net tx wait: submissions=(\d+) timeouts=(\d+)")
 BLOCK_IO = re.compile(
     rb"block io: reads=(\d+) writes=(\d+) block_bytes=(\d+) "
     rb"cache_hits=(\d+) runs=(\d+) run_hits=(\d+) single_reads=(\d+)")
@@ -333,6 +338,24 @@ def main() -> None:
                  f"(timeouts={timeouts}) for {reads} block reads and {writes} block writes; one "
                  f"request per block makes them equal, and twice the sum is "
                  f"a request per sector again")
+    usb_wait = USB_MSC_WAIT.search(data)
+    if not usb_wait:
+        fail("the boot reached its last milestone without printing "
+             "`usb-msc wait: commands=... timeouts=...`")
+    net_wait = NET_TX_WAIT.search(data)
+    if not net_wait:
+        fail("the boot reached its last milestone without printing "
+             "`net tx wait: submissions=... timeouts=...`")
+    if args.platform == "rpi5":
+        usb_commands, usb_timeouts = int(usb_wait.group(1)), int(usb_wait.group(2))
+        if usb_timeouts != 0:
+            fail(f"{usb_timeouts} usb-msc commands timed out (of {usb_commands}); "
+                 f"each one halted and reset the xHCI controller, so the "
+                 f"boot's later disk errors follow from it")
+        net_sent, net_timeouts = int(net_wait.group(1)), int(net_wait.group(2))
+        if net_timeouts != 0:
+            fail(f"{net_timeouts} gem tx requests timed out (of {net_sent}); "
+                 f"the first halted GEM and every later frame was dropped")
     uart_tx = UART_TX.search(data)
     if not uart_tx:
         fail("the boot reached its last milestone without printing "

@@ -1720,7 +1720,10 @@ are deliberate, not gaps to silently close:
   `virtio-blk wait: completions= total_ticks= max_ticks= timeouts=` after
   `block io:`, the sum being what a loaded host turns into minutes of UART
   silence; a timed-out request is counted as a read or write but not as a
-  completion, and the dmesg check names it (issue #1435).
+  completion, and the dmesg check names it (issue #1435). The USB mass-storage and network transmit paths
+  follow it on both platforms, `usb-msc wait: commands= timeouts=` and
+  `net tx wait: submissions= timeouts=`, and on the board the dmesg check
+  names a nonzero timeout count (issue #1440).
 - **RAM discovery uses the boot DTB on both platforms.** RPi5 firmware passes
   its resolved FDT to the resident SD stub, which preserves it across SWD
   injection. QEMU's direct-kernel loader generates an FDT from the selected

@@ -11,6 +11,10 @@ must_use variant DiskIoResult {
     Err(i32);
 }
 
+// GitHub issue #1440: no USB disk, so no commands and no timeouts.
+fn disk_command_count() -> usize { return 0; }
+fn disk_timeout_count() -> usize { return 0; }
+
 fn disk_status() -> DiskIoResult {
     return DiskIoResult::Err(-1);
 }

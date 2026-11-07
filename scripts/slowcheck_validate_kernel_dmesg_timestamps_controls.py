@@ -71,7 +71,11 @@ HEALTHY_UART_TX = (b"uart tx: queue=512 low_water=256 writers_waited=5 "
 # One virtio request per block: completions equal reads + writes above.
 HEALTHY_VIRTIO_WAIT = (b"virtio-blk wait: completions=31055 "
                        b"total_ticks=50000000 max_ticks=300000 "
-                       b"timeouts=0\r\n")
+                       b"timeouts=0\r\n" + b"")
+# GitHub issue #1440: printed after it on both platforms.
+HEALTHY_REQUEST_WAITS = (b"usb-msc wait: commands=900 timeouts=0\r\n"
+                         b"net tx wait: submissions=40 timeouts=0\r\n")
+HEALTHY_VIRTIO_WAIT = HEALTHY_VIRTIO_WAIT + HEALTHY_REQUEST_WAITS
 HEALTHY_TAIL = (HEALTHY_SPIN + HEALTHY_BLOCK_IO + HEALTHY_VIRTIO_WAIT +
                 HEALTHY_UART_TX)
 
@@ -234,6 +238,30 @@ def main() -> int:
             print(f"FAIL dmesg-timestamps control: {label} was not refused"
                   f"\n{output}")
             return 1
+    # GitHub issue #1440: a board boot names a USB MSC or GEM timeout; a
+    # boot without the lines is refused on either platform.
+    for label, platform, extra, needle in (
+            ("a boot with no usb-msc wait line", "qemu",
+             HEALTHY_TAIL.replace(b"usb-msc wait: commands=900 timeouts=0\r\n", b""),
+             "without printing `usb-msc wait"),
+            ("a boot with no net tx wait line", "rpi5",
+             HEALTHY_TAIL.replace(b"net tx wait: submissions=40 timeouts=0\r\n", b""),
+             "without printing `net tx wait"),
+            ("one usb-msc command timed out", "rpi5",
+             HEALTHY_TAIL.replace(b"commands=900 timeouts=0", b"commands=900 timeouts=1"),
+             "1 usb-msc commands timed out"),
+            ("one gem tx request timed out", "rpi5",
+             HEALTHY_TAIL.replace(b"submissions=40 timeouts=0", b"submissions=40 timeouts=1"),
+             "1 gem tx requests timed out")):
+        CASES.note()
+        records = HEALTHY if platform == "qemu" else [
+            (10.1 if "reconnect ok" in t else s, t.replace("virtio net", "rp1 gem"))
+            for s, t in HEALTHY]
+        status, output = run(records, platform=platform, extra=extra)
+        if status == 0 or needle not in output:
+            print(f"FAIL dmesg-timestamps control: {label} was not refused"
+                  f"\n{output}")
+            return 1
     status, output = run(HEALTHY, extra=b"", mode="report")
     if status == 0 or "without printing `console: tx spin" not in output:
         print("FAIL dmesg-timestamps control: report mode lost the resource "
@@ -334,7 +362,7 @@ def main() -> int:
         print("FAIL dmesg-timestamps control: a board boot where no UART "
               f"writer waited was accepted\n{output}")
         return 1
-    waited_not_slept = (HEALTHY_SPIN + HEALTHY_BLOCK_IO
+    waited_not_slept = (HEALTHY_SPIN + HEALTHY_BLOCK_IO + HEALTHY_REQUEST_WAITS
                         + b"uart tx: queue=512 low_water=256 writers_waited=4 "
                         b"writers_slept=0\r\n")
     status, output = run(rpi5_ok, "rpi5", waited_not_slept)
