@@ -6,7 +6,9 @@ dump becomes folded stacks: samples are parsed and ordered by time, a dump
 whose declared count disagrees or whose end line is missing is refused, a
 late (masked) sample weighs 1 + skid // period, return addresses are
 symbolized at address - 4 and the stack is root-first, EL0 samples are kept
-apart from EL1, and the summary's masked weight is what the skids say.
+apart from EL1, and the summary's masked weight is what the skids say. The Speedscope export
+(#502) keeps one profile per CPU, roots each stack at its level and pid,
+names a stopped chain's reason, and marks EL0 samples leaf-only.
 """
 
 import sys
@@ -78,6 +80,30 @@ def main():
                  summary["el0_weight"] == 1)
     ok &= expect("inclusive counts each function once per sample",
                  summary["inclusive"]["middle_fn"] == 4)
+    doc = tool.speedscope(samples, period, FakeSymbols())
+    names = [f["name"] for f in doc["shared"]["frames"]]
+    by_cpu = {p["name"]: p for p in doc["profiles"]}
+    ok &= expect("speedscope: one sampled profile per cpu",
+                 sorted(by_cpu) == ["cpu0", "cpu1"] and
+                 all(p["type"] == "sampled" for p in doc["profiles"]))
+    cpu0 = by_cpu["cpu0"]
+    first = [names[i] for i in cpu0["samples"][0]]
+    ok &= expect("speedscope: root is level and pid, then the chain root first",
+                 first == ["[el1 pid=7]", "root_fn", "middle_fn", "leaf_fn"])
+    el0 = [names[i] for i in cpu0["samples"][-1]]
+    ok &= expect("speedscope: EL0 says leaf only",
+                 el0[0] == "[el0 pid=9]" and tool.EL0_LEAF_ONLY in el0[1] and len(el0) == 2)
+    cpu1 = by_cpu["cpu1"]
+    ok &= expect("speedscope: masked weight under [masked], weights add up",
+                 [names[i] for i in cpu1["samples"][1]][-1] == "[masked]" and
+                 cpu1["weights"] == [1, 2] and cpu1["endValue"] == 3 and
+                 sum(cpu0["weights"]) == cpu0["endValue"] == 2)
+    stopped = [dict(samples[0], stop=1)]
+    sdoc = tool.speedscope(stopped, period, FakeSymbols())
+    snames = [f["name"] for f in sdoc["shared"]["frames"]]
+    ok &= expect("speedscope: a stopped chain names its stop below the root",
+                 [snames[i] for i in sdoc["profiles"][0]["samples"][0]][:2] ==
+                 ["[el1 pid=7]", "[stack stopped: depth]"])
     proc = ("cpu0 stored 2 lost 0 irqsoff_ticks 0 from 0x0 0x0 0x0 to 0x0 0x0 0x0\n"
             "cpu1 stored 1 lost 1 irqsoff_ticks 77 from 0x2008 0x3004 0x0 "
             "to 0x1010 0x0 0x0\n")

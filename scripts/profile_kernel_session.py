@@ -25,6 +25,9 @@ Subcommands:
            input of flamegraph.pl / speedscope), plus a summary: total and
            masked (late) weight, EL0 vs EL1, and the top functions by
            inclusive weight.
+           Also <out>.speedscope.json (#502): one sampled profile per CPU,
+           stacks rooted at level and pid, a stopped chain's reason named,
+           EL0 samples marked leaf-only.
 
 Usage:
   profile_kernel_session.py capture --target rpi5 [--root TREE]
@@ -198,6 +201,58 @@ def fold(samples, period: int, symbols) -> tuple[dict, dict]:
     return stacks, summary
 
 
+# GitHub issue #502: the same samples as Speedscope's file format
+# (https://www.speedscope.app/file-format-schema.json), one sampled profile
+# per CPU in time order. Each stack is rooted at the sample's level and pid,
+# so identity survives the export; a chain the walker stopped early carries
+# its stop reason as the frame below the root, so a broken or truncated
+# stack is never shown as a complete one. EL0 samples are leaf-only: the
+# kernel does not walk user stacks (profile_session.tkb), and the export
+# says so in the frame name rather than guessing a caller.
+EL0_LEAF_ONLY = "leaf only: user stacks are not walked"
+
+
+def speedscope(samples, period: int, symbols, name: str = "takibi kernel profile") -> dict:
+    frames: list[dict] = []
+    index: dict[str, int] = {}
+
+    def frame(label: str) -> int:
+        if label not in index:
+            index[label] = len(frames)
+            frames.append({"name": label})
+        return index[label]
+
+    profiles: dict[int, dict] = {}
+    for sample in samples:
+        weight = weight_of(sample, period)
+        if sample["el"] == 0:
+            pc = sample["pcs"][0] if sample["pcs"] else 0
+            stack = [f"[el0 pid={sample['pid']}]", f"0x{pc:x} ({EL0_LEAF_ONLY})"]
+        else:
+            stack = [f"[el1 pid={sample['pid']}]"]
+            stop = STOP_NAMES.get(sample["stop"], str(sample["stop"]))
+            if stop != "complete":
+                stack.append(f"[stack stopped: {stop}]")
+            chain = [symbols.name(pc if depth == 0 else pc - 4)
+                     for depth, pc in enumerate(sample["pcs"])]
+            stack.extend(reversed(chain))
+        profile = profiles.setdefault(sample["cpu"], {
+            "type": "sampled", "name": f"cpu{sample['cpu']}", "unit": "none",
+            "startValue": 0, "endValue": 0, "samples": [], "weights": []})
+        ids = [frame(label) for label in stack]
+        profile["samples"].append(ids)
+        profile["weights"].append(1)
+        if weight > 1:
+            # As in fold(): masked time hangs under a [masked] leaf.
+            profile["samples"].append(ids + [frame("[masked]")])
+            profile["weights"].append(weight - 1)
+        profile["endValue"] += weight
+    return {"$schema": "https://www.speedscope.app/file-format-schema.json",
+            "name": name, "exporter": "scripts/profile_kernel_session.py",
+            "activeProfileIndex": 0, "shared": {"frames": frames},
+            "profiles": [profiles[cpu] for cpu in sorted(profiles)]}
+
+
 def cmd_fold(args) -> int:
     text = Path(args.console).read_text(encoding="ascii", errors="replace")
     text = text.replace("\r", "")
@@ -232,7 +287,10 @@ def cmd_fold(args) -> int:
               + " <- ".join(irqsoff_sites(core["from"], symbols) or ["?"])
               + " to "
               + " <- ".join(irqsoff_sites(core["to"], symbols) or ["?"]))
+    speedscope_out = Path(str(out) + ".speedscope.json")
+    speedscope_out.write_text(json.dumps(speedscope(samples, period, symbols)) + "\n")
     print(f"[profile] folded stacks: {out}")
+    print(f"[profile] speedscope: {speedscope_out}")
     return 0
 
 
