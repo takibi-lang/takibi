@@ -480,3 +480,13 @@ entries below that date are history, left as written.
   the index. The TX observation reads the shadow from a `TxPosted` state field
   the capability fills; DDB reads the RX used shadow from an `AtomicWord` the
   holder publishes. GEM's capability is an indexed view until slice 2.
+  holder publishes. GEM's capability is an indexed view until slice 2.
+- 2026-11-07: GEM's ring shadows (#1416 option A, slice 2). GEM's
+  `NetRxCanAcquire[net]` (index `&net_init_once`) is now a linear struct owning
+  `gem_rx_pkt` (as `rx_pkt`) and `gem_tx_next` (as `tx_next`), carried by its
+  packets as on virtio; DDB reads the posted RX slot from an `AtomicWord` the
+  holder publishes. The snapshot relays `gem_rx_seen_filled` and
+  `gem_tx_seen_used` are fields of the `GemRxRing` `Armed` and `GemTxRing`
+  `Sending` states (#1395), set by the snapshot's release and read by the
+  completes observation; a fresh owner starts at 0, which the TSTART reset
+  did by hand.

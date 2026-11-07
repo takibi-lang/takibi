@@ -406,6 +406,11 @@ def main():
                     text[:start] + body + text[end:], encoding="ascii")
 
     driver = kernel / "drivers/net/rp1_gem.tkb"
+    # GitHub issue #1416: the next TX descriptor is the capability's private
+    # field; the fixture reads it through this, defined in the driver's copy.
+    driver.write_text(driver.read_text(encoding="ascii") +
+                      "\nfn gem_fixture_tx_next(r: borrow NetRxCanAcquire[net]) -> u8 {\n"
+                      "    return r.tx_next;\n}\n", encoding="ascii")
     replace_once(driver, "    workload_profile_note_network_tx(safe_len as usize);",
                  "    gem_fixture_submissions = gem_fixture_submissions + 1;\n"
                  "    workload_profile_note_network_tx(safe_len as usize);")

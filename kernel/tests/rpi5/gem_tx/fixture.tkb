@@ -129,12 +129,12 @@ fn gem_fixture_run(ready_in: sink NetRxCanAcquire[net]) !{may_block} {
     gem_fixture_authority(true);
     ready = net_transmit_ready(ready, packet as [u8; 1514..], 64);
     gem_fixture_authority(true);
-    gem_fixture_require(gem_fixture_submissions == 2 && gem_tx_next == 0,
+    gem_fixture_require(gem_fixture_submissions == 2 && gem_fixture_tx_next(ready) == 0,
                         "both descriptors completed");
     // #740 step 2: four more physical submissions (two kept, one refused
     // at the reserve, one resend), so the descriptor parity is unchanged.
     ready = gem_fixture_keep(ready, packet as [u8; 1514..]);
-    gem_fixture_require(gem_fixture_submissions == 6 && gem_tx_next == 0,
+    gem_fixture_require(gem_fixture_submissions == 6 && gem_fixture_tx_next(ready) == 0,
                         "kept, refused and resent frames completed");
 
     gem_fixture_observed_used = false;
@@ -144,7 +144,7 @@ fn gem_fixture_run(ready_in: sink NetRxCanAcquire[net]) !{may_block} {
     else { ready = net_transmit_ready(ready, packet as [u8; 1514..], 64); }
     gem_fixture_require(gem_fixture_observed_used,
                         "a real USED observation was hidden");
-    gem_fixture_require(gem_fixture_submissions == 7 && gem_tx_next == 1,
+    gem_fixture_require(gem_fixture_submissions == 7 && gem_fixture_tx_next(ready) == 1,
                         "one unconfirmed submission");
     gem_fixture_authority(gem_fixture_hide_halt == false);
     kernel_boot_log("gem-tx fixture: halt tsr=");
@@ -161,7 +161,7 @@ fn gem_fixture_run(ready_in: sink NetRxCanAcquire[net]) !{may_block} {
     // after halt, without minting an RX owner or re-enabling the MAC.
     ready = net_transmit_ready(ready, packet as [u8; 1514..], 64);
     ready = gem_fixture_reply(ready, true);
-    gem_fixture_require(gem_fixture_submissions == 7 && gem_tx_next == 1,
+    gem_fixture_require(gem_fixture_submissions == 7 && gem_fixture_tx_next(ready) == 1,
                         "later ready and reply sends were dropped");
     gem_fixture_authority(gem_fixture_hide_halt == false);
     net_shutdown(ready);

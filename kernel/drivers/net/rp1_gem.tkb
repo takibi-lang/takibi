@@ -88,22 +88,29 @@ private linear struct NetPacket[pb: addr, po: usize, net: addr] {
     private len: {0..<1515 as i32};
     private index: usize;
     private pkt: GemPkt_Filled[pb, po, 1];
+    private ready: NetRxCanAcquire[net];
 }
 private linear struct NetRxReplyReady[pb: addr, po: usize, net: addr] {
     private len: {0..<1515 as i32};
     private index: usize;
     private pkt: GemPkt_Filled[pb, po, 1];
+    private ready: NetRxCanAcquire[net];
 }
 // GitHub issue #707: a submitted frame's buffer stays TxPosted in its pool
 // slot until its completion is observed or GEM is halted.
 private linear struct NetTxInFlight[pb: addr, po: usize, net: addr] {
     private slot: {0..<2 as usize};
     private index: usize;
+    private ready: NetRxCanAcquire[net];
 }
 
-// GitHub issue #1416: indexed by the device (#1416 slice 2 gives it the
-// GEM ring shadows); for now still an erased view.
-private linear view NetRxCanAcquire[net: addr];
+// GitHub issue #1416 (decision A, slice 2): the one RX capability of this
+// device (index &net_init_once) owns GEM's ring shadows: the pool slot
+// posted for receive (GEM_PKTS when none is) and the next TX descriptor.
+private linear struct NetRxCanAcquire[net: addr] {
+    private rx_pkt: u8;
+    private tx_next: u8;
+}
 // A transmitted packet kept for retransmission (#740, step 2). Its
 // completion parks the buffer Kept in its pool slot instead of Free; the
 // stack names the packet by the slot it chose (net_tx_keep_slot) and takes
@@ -145,21 +152,22 @@ const NET_KEPT_NONE: usize = 4;
 private let mut gem_pkt_kept_len: [{0..<1515 as i32}; 4];
 
 fn net_rx_packet(len: {0..<1515 as i32}, index: usize,
-                 pkt: GemPkt_Filled[pb, po, 1]) -> NetPacket[pb, po, net] {
+                 pkt: GemPkt_Filled[pb, po, 1], ready: sink NetRxCanAcquire[net])
+        -> NetPacket[pb, po, net] {
     workload_profile_note_network_rx(len as usize);
-    let mut packet: NetPacket[pb, po, net] = { len, index, pkt };
+    let mut packet: NetPacket[pb, po, net] = { len, index, pkt, ready };
     return packet;
 }
 
-// The pool slot whose buffer is posted for receive; GEM_PKTS when none is.
-private let mut gem_rx_pkt: usize = 4;
+// The capability's rx_pkt as last published, for DDB, which has no
+// capability (#1416); GEM_PKTS (4) until the first arm.
+private let mut gem_rx_pkt_published: AtomicWord;
 
 // The descriptor rings are protocol owners in rp1_gem_desc.tkb (#740).
 private let mut net_init_once: InitOnce;
 private let mut rp1_gem_net_ready: AtomicWord;
 // The RX ring's CPU address, recorded when the ring is programmed (#959).
 private let mut gem_rx_ring_cpu_address: usize = 0;
-let mut gem_tx_next: i32 = 0;
 // Set once a TX completion went unconfirmed: gem_halt() has stopped the MAC
 // (or failed to), so no later frame is submitted this boot.
 private let mut gem_tx_down: AtomicWord;
@@ -254,8 +262,8 @@ private fn gem_rx_ring_ready() -> GemRxRingHeld {
 // (the buffer's rx edge, then the ring's arm). False when no buffer is
 // free: RX then waits until a buffer is recycled or sent, which calls this
 // again.
-fn gem_rearm_rx() -> bool !{unsafe} {
-    if (gem_rx_pkt < GEM_PKTS) { return true; }
+fn gem_rearm_rx(r: borrow mut NetRxCanAcquire[net]) -> bool !{unsafe} {
+    if ((r.rx_pkt as usize) < GEM_PKTS) { return true; }
     let index: usize = gem_pkt_free_index();
     let Place::Full(held) = gem_pkt_take(index) else {
         Place::Empty => { return false; }
@@ -290,15 +298,17 @@ fn gem_rearm_rx() -> bool !{unsafe} {
     // Set only once the new descriptor is written and armed: DDB's
     // lock-free look (kernel_net_rx_frame_pending) trusts the descriptor's
     // ownership bit only while this names a posted buffer (#959).
-    gem_rx_pkt = index;
+    r.rx_pkt = min(index, GEM_PKTS) as u8;
+    atomic_word_store(&gem_rx_pkt_published, r.rx_pkt as usize);
     return true;
 }
 
 // A received buffer the stack is done with: Free again, and RX rearmed if
 // it was waiting for one.
-private fn gem_pkt_recycle_at(index: usize, pkt: GemPkt_Filled[pb, po, 1]) !{unsafe} {
+private fn gem_pkt_recycle_at(r: borrow mut NetRxCanAcquire[net], index: usize,
+                              pkt: GemPkt_Filled[pb, po, 1]) !{unsafe} {
     gem_pkt_park(index, GemPktHeld::Free(GemPkt_gem_pkt_recycle(pkt)));
-    gem_rearm_rx();
+    gem_rearm_rx(r);
 }
 
 // A ring's bus address, from its Ready owner's span (`addressed`).
@@ -316,7 +326,7 @@ private fn gem_tx_ring_bus(r: borrow GemTxRing_Ready[b, o, 4]) -> usize !{unsafe
 // both TX descriptors are USED (CPU-owned). The RX descriptor is armed
 // around the first pool buffer; the TX ring stays Ready until the first
 // TSTART.
-private fn gem_rings_program() -> bool !{unsafe} {
+private fn gem_rings_program(r: borrow mut NetRxCanAcquire[net]) -> bool !{unsafe} {
     if (gem_rings_claim() == false || gem_pkts_claim() == false) { return false; }
     let GemRxRingHeld::Ready(rx) = gem_rx_ring_ready() else {
         GemRxRingHeld::Armed(armed) => {
@@ -348,7 +358,7 @@ private fn gem_rings_program() -> bool !{unsafe} {
     gem.tbqp = txd_dma as u32;
     gem.tbqph = (txd_dma >> 32) as u32;
     gem_tx_ring_park(GemTxRingHeld::Ready(tx));
-    return gem_rearm_rx();
+    return gem_rearm_rx(r);
 }
 
 fn gem_halt() -> bool {
@@ -411,8 +421,11 @@ fn net_init() -> NetInitResult !{unsafe} {
                   | ((OUR_MAC[2] as u32) << 16) | ((OUR_MAC[3] as u32) << 24);
     gem.sa1_top = (OUR_MAC[4] as u32) | ((OUR_MAC[5] as u32) << 8);
 
-    if (gem_rings_program() == false) {
+    atomic_word_store(&gem_rx_pkt_published, GEM_PKTS);
+    let mut r: NetRxCanAcquire[&net_init_once] = { GEM_PKTS as u8, 0 };
+    if (gem_rings_program(r) == false) {
         init_once_cancel(&net_init_once, init_guard);
+        net_rx_capability_drop(r);
         return NetInitResult::Failed;
     }
     // 64-bit addressing, 2048-byte RX buffers, full packet SRAMs.
@@ -429,7 +442,7 @@ fn net_init() -> NetInitResult !{unsafe} {
 
     atomic_word_store(&rp1_gem_net_ready, 1);
     init_once_commit(&net_init_once, init_guard);
-    return NetInitResult::Ready(view NetRxCanAcquire[&net_init_once]);
+    return NetInitResult::Ready(r);
 }
 
 // GitHub issue #959: DDB's lock-free reading of RX pending, under the
@@ -445,7 +458,7 @@ fn net_init() -> NetInitResult !{unsafe} {
 fn kernel_net_rx_frame_pending(stopped: borrow MachineStopped[&kernel_world_stop])
         -> NetPendingState !{unsafe} {
     if (atomic_word_load(&rp1_gem_net_ready) == 0) { return NetPendingState::No; }
-    if (gem_rx_pkt >= GEM_PKTS) { return NetPendingState::No; }
+    if (atomic_word_load(&gem_rx_pkt_published) >= GEM_PKTS) { return NetPendingState::No; }
     if (gem_rx_ring_cpu_address == 0) { return NetPendingState::Unknown; }
     kernel_ddb_dcache_clean_invalidate(gem_rx_ring_cpu_address);
     let word: usize = unsafe { atomic_load_acquire(gem_rx_ring_cpu_address) };
@@ -474,41 +487,43 @@ fn net_rx_wait() !{may_block} {
 }
 
 fn net_rx_acquire(ready: sink NetRxCanAcquire[net]) -> NetRxAcquire[net] !{unsafe} {
+    let mut r = ready;
     if (gem_rx_ring_poll() == false) {
         // No frame, but a buffer freed off-turn rearms RX here.
-        gem_rearm_rx();
-        return NetRxAcquire::None(view NetRxCanAcquire[net]);
+        gem_rearm_rx(r);
+        return NetRxAcquire::None(r);
     }
     let len: i32 = gem_rx_ring_finish();
-    if (len < 0) { return NetRxAcquire::None(view NetRxCanAcquire[net]); }
+    if (len < 0) { return NetRxAcquire::None(r); }
     // The ring's completes observation also says GEM has written the
     // buffer it held: that buffer comes back Filled.
-    let index: usize = gem_rx_pkt;
-    gem_rx_pkt = GEM_PKTS;
+    let index: usize = r.rx_pkt as usize;
+    r.rx_pkt = GEM_PKTS as u8;
+    atomic_word_store(&gem_rx_pkt_published, GEM_PKTS);
     let Place::Full(held) = gem_pkt_take(index) else {
-        Place::Empty => { kernel_invariant_stop(); return NetRxAcquire::None(view NetRxCanAcquire[net]); }
+        Place::Empty => { kernel_invariant_stop(); return NetRxAcquire::None(r); }
     };
     let GemPktHeld::RxPosted(posted) = held else {
-        GemPktHeld::Free(p) => { gem_pkt_lost(GemPktHeld::Free(p)); return NetRxAcquire::None(view NetRxCanAcquire[net]); }
-        GemPktHeld::TxPosted(p) => { gem_pkt_lost(GemPktHeld::TxPosted(p)); return NetRxAcquire::None(view NetRxCanAcquire[net]); }
-        GemPktHeld::Unconfirmed(p) => { gem_pkt_lost(GemPktHeld::Unconfirmed(p)); return NetRxAcquire::None(view NetRxCanAcquire[net]); }
-        GemPktHeld::Kept(p) => { gem_pkt_lost(GemPktHeld::Kept(p)); return NetRxAcquire::None(view NetRxCanAcquire[net]); }
+        GemPktHeld::Free(p) => { gem_pkt_lost(GemPktHeld::Free(p)); return NetRxAcquire::None(r); }
+        GemPktHeld::TxPosted(p) => { gem_pkt_lost(GemPktHeld::TxPosted(p)); return NetRxAcquire::None(r); }
+        GemPktHeld::Unconfirmed(p) => { gem_pkt_lost(GemPktHeld::Unconfirmed(p)); return NetRxAcquire::None(r); }
+        GemPktHeld::Kept(p) => { gem_pkt_lost(GemPktHeld::Kept(p)); return NetRxAcquire::None(r); }
     };
     match GemPkt_gem_pkt_received(posted) {
         GemPkt_gem_pkt_received_Outcome::PktEmpty => {
             gem_pkt_park(index, GemPktHeld::RxPosted(posted));
             kernel_invariant_stop();
-            return NetRxAcquire::None(view NetRxCanAcquire[net]);
+            return NetRxAcquire::None(r);
         }
         GemPkt_gem_pkt_received_Outcome::PktReceived(witness) => {
             let filled = GemPkt_gem_pkt_fill(posted, witness);
             if (len >= 0 && len <= 1514) {
                 let valid_len: {0..<1515 as i32} = len;
-                gem_rearm_rx();
-                return NetRxAcquire::Acquired(net_rx_packet(valid_len, index, filled));
+                gem_rearm_rx(r);
+                return NetRxAcquire::Acquired(net_rx_packet(valid_len, index, filled, r));
             }
-            gem_pkt_recycle_at(index, filled);
-            return NetRxAcquire::None(view NetRxCanAcquire[net]);
+            gem_pkt_recycle_at(r, index, filled);
+            return NetRxAcquire::None(r);
         }
     }
 }
@@ -550,8 +565,15 @@ fn net_rx_frame(packet: borrow NetPacket[pb, po, net]) -> [u8; 1514..] @ pb {
 
 fn net_rx_release(packet: sink NetPacket[pb, po, net]) -> NetRxCanAcquire[net] !{unsafe} {
     let index: usize = packet.index;
-    gem_pkt_recycle_at(index, packet.pkt);
-    return view NetRxCanAcquire[net];
+    let pkt = field_take(packet.pkt);
+    let mut r = field_take(packet.ready);
+    gem_pkt_recycle_at(r, index, pkt);
+    return r;
+}
+
+// A capability that will not be handed out (a failed init).
+private fn net_rx_capability_drop(r: sink NetRxCanAcquire[net]) {
+    let rx_pkt: u8 = r.rx_pkt;
 }
 
 // The Free slot a keeping transmit would use, or NET_KEPT_NONE when
@@ -599,25 +621,26 @@ fn net_packet_free(kept: sink NetPacketKept[pb, po]) {
 // the caller's eventual free.
 fn net_packet_kept_resend(ready: sink NetRxCanAcquire[net], kept: sink NetPacketKept[pb, po])
         -> NetRxCanAcquire[net] !{may_block, unsafe} {
+    let mut r = ready;
     let index: usize = kept.index;
     let len: {0..<1515 as i32} = kept.len;
     match gem_tx_claim() {
         GemTxClaim::Down => {
             gem_pkt_park(index, GemPktHeld::Kept(kept.pkt));
-            return ready;
+            return r;
         }
         GemTxClaim::Ready => {}
     }
-    let slot: {0..<2 as usize} = gem_tx_next_slot();
+    let slot: {0..<2 as usize} = gem_tx_next_slot(r);
     match GemPkt_gem_pkt_post_tx(kept.pkt) {
         GemPkt_gem_pkt_post_tx_Result::TxPosted(posted) => {
             gem_pkt_park(index, GemPktHeld::TxPosted(posted));
         }
     }
-    gem_tx_describe(slot, len);
+    gem_tx_describe(r, slot, len);
     gem_tx_start();
-    gem_tx_finish(slot, index, true, len);
-    return ready;
+    gem_tx_finish(r, slot, index, true, len);
+    return r;
 }
 
 fn net_rx_reply_ready(frame: sink NetPacket[pb, po, net], len: i32)
@@ -626,26 +649,28 @@ fn net_rx_reply_ready(frame: sink NetPacket[pb, po, net], len: i32)
     // send operation cannot be called with an unrelated bare integer.
     let safe_len: {0..<1515 as i32} = max(min(len, 1514), 0);
     let index: usize = frame.index;
-    let pkt = frame.pkt;
-    let mut reply: NetRxReplyReady[pb, po, net] = { safe_len, index, pkt };
+    let pkt = field_take(frame.pkt);
+    let ready = field_take(frame.ready);
+    let mut reply: NetRxReplyReady[pb, po, net] = { safe_len, index, pkt, ready };
     return reply;
 }
 
 // Point the next TX descriptor at the buffer just posted for transmit.
-private fn gem_tx_next_slot() -> {0..<2 as usize} {
-    if (gem_tx_next == 0) { return 0; }
+private fn gem_tx_next_slot(r: borrow NetRxCanAcquire[net]) -> {0..<2 as usize} {
+    if (r.tx_next == 0) { return 0; }
     return 1;
 }
 
-private fn gem_tx_describe(slot: {0..<2 as usize}, safe_len: {0..<1515 as i32}) {
+private fn gem_tx_describe(r: borrow mut NetRxCanAcquire[net], slot: {0..<2 as usize},
+                           safe_len: {0..<1515 as i32}) {
     workload_profile_note_network_tx(safe_len as usize);
     let tx_dma: usize = gem_pkt_published_address();
     let mut ctrl: u32 = (safe_len as u32) | (1 << 15); // LAST
     if (slot == 0) {
-        gem_tx_next = 1;
+        r.tx_next = 1;
     } else {
         ctrl = ctrl | (1 << 30); // WRAP
-        gem_tx_next = 0;
+        r.tx_next = 0;
     }
     let mut desc: GemDesc = { tx_dma as u32, ctrl, (tx_dma >> 32) as u32, 0 };
     gem_tx_ring_write(slot, desc);
@@ -739,7 +764,7 @@ private fn gem_tx_pkt(index: usize) -> GemPktHeld {
 // The deadline expired with the descriptor still GEM's: the frame may still be
 // read. Halt GEM; only a confirmed halt returns the buffer to the CPU, and
 // either way no later frame is sent this boot.
-private fn gem_tx_unconfirmed(index: usize) !{unsafe} {
+private fn gem_tx_unconfirmed(r: borrow mut NetRxCanAcquire[net], index: usize) !{unsafe} {
     kernel_boot_log("rp1 gem: tx completion unconfirmed; halting tx\n");
     atomic_word_store(&gem_tx_down, 1);
     let GemPktHeld::TxPosted(posted) = gem_tx_pkt(index) else {
@@ -754,7 +779,7 @@ private fn gem_tx_unconfirmed(index: usize) !{unsafe} {
         match GemPkt_gem_pkt_halted(posted) {
             GemPkt_gem_pkt_halted_Outcome::PktHalted(witness) => {
                 gem_pkt_park(index, GemPktHeld::Free(GemPkt_gem_pkt_reclaim(posted, witness)));
-                gem_rearm_rx();
+                gem_rearm_rx(r);
             }
             GemPkt_gem_pkt_halted_Outcome::PktRunning => {
                 gem_pkt_park(index, GemPktHeld::Unconfirmed(GemPkt_gem_pkt_expire(posted)));
@@ -768,7 +793,8 @@ private fn gem_tx_unconfirmed(index: usize) !{unsafe} {
 
 // keep (#740): a confirmed buffer is parked Kept, Filled again, for a
 // retransmission; true then. A halt's reclaim still returns it Free.
-private fn gem_tx_finish(slot: {0..<2 as usize}, index: usize, keep: bool,
+private fn gem_tx_finish(r: borrow mut NetRxCanAcquire[net], slot: {0..<2 as usize},
+                         index: usize, keep: bool,
                          len: {0..<1515 as i32}) -> bool !{may_block, unsafe} {
     if (gem_tx_wait(slot) && gem_tx_ring_settle(true)) {
         let GemPktHeld::TxPosted(posted) = gem_tx_pkt(index) else {
@@ -782,19 +808,19 @@ private fn gem_tx_finish(slot: {0..<2 as usize}, index: usize, keep: bool,
                 if (keep && index < GEM_PKTS) {
                     gem_pkt_kept_len[index] = len;
                     gem_pkt_park(index, GemPktHeld::Kept(GemPkt_gem_pkt_kept(posted, witness)));
-                    gem_rearm_rx();
+                    gem_rearm_rx(r);
                     return true;
                 }
                 gem_pkt_park(index, GemPktHeld::Free(GemPkt_gem_pkt_done(posted, witness)));
-                gem_rearm_rx();
+                gem_rearm_rx(r);
             }
             GemPkt_gem_pkt_sent_Outcome::PktPending => {
                 gem_pkt_park(index, GemPktHeld::TxPosted(posted));
-                gem_tx_unconfirmed(index);
+                gem_tx_unconfirmed(r, index);
             }
         }
     } else {
-        gem_tx_unconfirmed(index);
+        gem_tx_unconfirmed(r, index);
     }
     return false;
 }
@@ -811,18 +837,20 @@ private fn gem_tx_claim() -> GemTxClaim {
 // starts, and an immediate TCP ACK is not lost while this one completes.
 fn net_transmit(reply: sink NetRxReplyReady[pb, po, net])
         -> NetTxInFlight[pb, po, net] !{unsafe} {
-    let slot: {0..<2 as usize} = gem_tx_next_slot();
     let index: usize = reply.index;
     let len: {0..<1515 as i32} = reply.len;
-    match GemPkt_gem_pkt_post_tx(reply.pkt) {
+    let pkt = field_take(reply.pkt);
+    let mut r = field_take(reply.ready);
+    let slot: {0..<2 as usize} = gem_tx_next_slot(r);
+    match GemPkt_gem_pkt_post_tx(pkt) {
         GemPkt_gem_pkt_post_tx_Result::TxPosted(posted) => {
             gem_pkt_park(index, GemPktHeld::TxPosted(posted));
         }
     }
-    gem_tx_describe(slot, len);
-    gem_rearm_rx();
+    gem_tx_describe(r, slot, len);
+    gem_rearm_rx(r);
     gem_tx_start();
-    let mut in_flight: NetTxInFlight[pb, po, net] = { slot, index };
+    let mut in_flight: NetTxInFlight[pb, po, net] = { slot, index, r };
     return in_flight;
 }
 
@@ -832,8 +860,11 @@ fn gem_tx_slot_done(slot: {0..<2 as usize}) -> bool {
 
 fn net_tx_complete(in_flight: sink NetTxInFlight[pb, po, net]) -> NetRxCanAcquire[net]
         !{may_block, unsafe} {
-    gem_tx_finish(in_flight.slot, in_flight.index, false, 0);
-    return view NetRxCanAcquire[net];
+    let slot: {0..<2 as usize} = in_flight.slot;
+    let index: usize = in_flight.index;
+    let mut r = in_flight.ready;
+    gem_tx_finish(r, slot, index, false, 0);
+    return r;
 }
 
 fn net_rx_send_reply(reply: sink NetRxReplyReady[pb, po, net])
@@ -842,8 +873,10 @@ fn net_rx_send_reply(reply: sink NetRxReplyReady[pb, po, net])
         GemTxClaim::Ready => { return net_tx_complete(net_transmit(reply)); }
         GemTxClaim::Down => {
             let index: usize = reply.index;
-            gem_pkt_recycle_at(index, reply.pkt);
-            return view NetRxCanAcquire[net];
+            let pkt = field_take(reply.pkt);
+            let mut r = field_take(reply.ready);
+            gem_pkt_recycle_at(r, index, pkt);
+            return r;
         }
     }
 }
@@ -855,11 +888,12 @@ fn net_transmit_ready(ready: sink NetRxCanAcquire[net],
                       bytes: borrow [u8; 1514..], len: i32)
         -> NetRxCanAcquire[net] !{may_block} {
     let safe_len: {0..<1515 as i32} = max(min(len, 1514), 0);
+    let mut r = ready;
     match gem_tx_claim() {
-        GemTxClaim::Ready => { gem_send_built(gem_pkt_free_index(), false, bytes, safe_len); }
+        GemTxClaim::Ready => { gem_send_built(r, gem_pkt_free_index(), false, bytes, safe_len); }
         GemTxClaim::Down => {}
     }
-    return view NetRxCanAcquire[net];
+    return r;
 }
 
 // A kernel-built frame sent from `index`, which net_tx_keep_slot named,
@@ -872,16 +906,18 @@ fn net_transmit_keep(ready: sink NetRxCanAcquire[net], index: usize,
         return NetTxKeep::Sent(net_transmit_ready(ready, bytes, len));
     }
     let safe_len: {0..<1515 as i32} = max(min(len, 1514), 0);
-    if (gem_send_built(index, true, bytes, safe_len)) {
-        return NetTxKeep::Kept(ready);
+    let mut r = ready;
+    if (gem_send_built(r, index, true, bytes, safe_len)) {
+        return NetTxKeep::Kept(r);
     }
-    return NetTxKeep::Sent(ready);
+    return NetTxKeep::Sent(r);
 }
 
 // A kernel-built frame: written into a Free pool buffer, which is posted
 // for transmit from Free (its tx edge). Dropped when no buffer is free.
 // True when keep was asked and the completion parked it Kept.
-private fn gem_send_built(index: usize, keep: bool, bytes: borrow [u8; 1514..],
+private fn gem_send_built(r: borrow mut NetRxCanAcquire[net], index: usize, keep: bool,
+                          bytes: borrow [u8; 1514..],
                           safe_len: {0..<1515 as i32}) -> bool !{may_block, unsafe} {
     let Place::Full(held) = gem_pkt_take(index) else {
         Place::Empty => { return false; }
@@ -894,17 +930,19 @@ private fn gem_send_built(index: usize, keep: bool, bytes: borrow [u8; 1514..],
     };
     let out = GemPkt_Free_bytes(free, 0);
     slice_copy(out[0..<safe_len as usize], bytes[0..<safe_len as usize]);
-    let slot: {0..<2 as usize} = gem_tx_next_slot();
+    let slot: {0..<2 as usize} = gem_tx_next_slot(r);
     match GemPkt_gem_pkt_send(free) {
         GemPkt_gem_pkt_send_Result::TxPosted(posted) => {
             gem_pkt_park(index, GemPktHeld::TxPosted(posted));
         }
     }
-    gem_tx_describe(slot, safe_len);
+    gem_tx_describe(r, slot, safe_len);
     gem_tx_start();
-    return gem_tx_finish(slot, index, keep, safe_len) && keep;
+    return gem_tx_finish(r, slot, index, keep, safe_len) && keep;
 }
 
 fn net_read_mac(mac_out: borrow [u8; 6..]) { slice_copy(mac_out, OUR_MAC as []u8); }
 
-fn net_shutdown(ready: sink NetRxCanAcquire[net]) {}
+fn net_shutdown(ready: sink NetRxCanAcquire[net]) {
+    net_rx_capability_drop(ready);
+}

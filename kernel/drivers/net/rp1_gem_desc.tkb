@@ -60,7 +60,9 @@ struct GemDesc {
 
 protocol GemRxRing[inst: usize] retains region(GemDesc)[b, GEM_DESC_COUNT] rx {
     state Ready access write addressed;
-    state Armed[req] device;
+    // GitHub issue #1416: whether the latest snapshot showed the descriptor
+    // written, set by the snapshot's release and read by gem_rx_ring_filled.
+    state Armed[req] device { seen_filled: u8 = 0; }
     init Ready;
     transition gem_rx_ring_arm(Ready) -> Armed[fresh req];
     observe gem_rx_ring_peek(Armed[req]) -> RxDesc snapshot | RxEmpty;
@@ -72,7 +74,9 @@ protocol GemRxRing[inst: usize] retains region(GemDesc)[b, GEM_DESC_COUNT] rx {
 
 protocol GemTxRing[inst: usize] retains region(GemDesc)[b, GEM_DESC_COUNT] rx {
     state Ready access write addressed;
-    state Sending[req] device;
+    // GitHub issue #1416: whether a snapshot showed a descriptor USED since
+    // TSTART (a fresh Sending owner starts at 0).
+    state Sending[req] device { seen_used: u8 = 0; }
     init Ready;
     transition gem_tx_ring_start(Ready) -> Sending[fresh req];
     observe gem_tx_ring_peek(Sending[req]) -> TxDesc snapshot | TxBusy;
@@ -87,9 +91,7 @@ protocol GemTxRing[inst: usize] retains region(GemDesc)[b, GEM_DESC_COUNT] rx {
 private region let mut gem_rx_ring: [GemDesc; 4] align(64);
 private region let mut gem_tx_ring: [GemDesc; 4] align(64);
 
-// What the latest snapshots showed, read by the completes observations.
-private let mut gem_rx_seen_filled: bool = false;
-private let mut gem_tx_seen_used: bool = false;
+// What the latest snapshots showed is the ring owners' own state (#1416).
 // Set by gem_tx_ring_mark_halted after gem_halt() confirmed the halt.
 private let mut gem_tx_halt_confirmed: AtomicWord;
 
@@ -97,16 +99,17 @@ fn gem_rx_ring_arm(s: borrow GemRxRing_Armed[b, o, 4, r]) {}
 fn gem_rx_ring_peek(s: borrow GemRxRing_Armed[b, o, 4, r], value: GemDesc)
         -> GemRxRing_gem_rx_ring_peek_Raw {
     if ((value.addr_lo & 1) != 0) {
-        gem_rx_seen_filled = true;
         return GemRxRing_gem_rx_ring_peek_Raw::RxDesc;
     }
     return GemRxRing_gem_rx_ring_peek_Raw::RxEmpty;
 }
-fn gem_rx_ring_peek_release(s: borrow GemRxRing_Armed[b, o, 4, r]) {}
+// Released only for an RxDesc snapshot: the descriptor was seen written.
+fn gem_rx_ring_peek_release(s: borrow mut GemRxRing_Armed[b, o, 4, r]) {
+    GemRxRing_Armed_set_seen_filled(s, 1);
+}
 fn gem_rx_ring_filled(s: borrow GemRxRing_Armed[b, o, 4, r])
         -> GemRxRing_gem_rx_ring_filled_Raw {
-    if (gem_rx_seen_filled) {
-        gem_rx_seen_filled = false;
+    if (GemRxRing_Armed_seen_filled(s) != 0) {
         gem_pkt_rx_seen = true;
         return GemRxRing_gem_rx_ring_filled_Raw::RxFilled;
     }
@@ -116,21 +119,22 @@ fn gem_rx_ring_take(s: borrow GemRxRing_Armed[b, o, 4, r]) {}
 
 // TSTART: runs after the generated clean and the state change.
 fn gem_tx_ring_start(s: borrow GemTxRing_Sending[b, o, 4, r]) {
-    gem_tx_seen_used = false;
     gem.ncr = gem.ncr | (1 << 9);
 }
 fn gem_tx_ring_peek(s: borrow GemTxRing_Sending[b, o, 4, r], value: GemDesc)
         -> GemTxRing_gem_tx_ring_peek_Raw {
     if ((value.ctrl & (1 << 31)) != 0) {
-        gem_tx_seen_used = true;
         return GemTxRing_gem_tx_ring_peek_Raw::TxDesc;
     }
     return GemTxRing_gem_tx_ring_peek_Raw::TxBusy;
 }
-fn gem_tx_ring_peek_release(s: borrow GemTxRing_Sending[b, o, 4, r]) {}
+// Released only for a TxDesc snapshot: a descriptor was seen USED.
+fn gem_tx_ring_peek_release(s: borrow mut GemTxRing_Sending[b, o, 4, r]) {
+    GemTxRing_Sending_set_seen_used(s, 1);
+}
 fn gem_tx_ring_used(s: borrow GemTxRing_Sending[b, o, 4, r])
         -> GemTxRing_gem_tx_ring_used_Raw {
-    if (gem_tx_seen_used) {
+    if (GemTxRing_Sending_seen_used(s) != 0) {
         gem_pkt_tx_seen = true;
         return GemTxRing_gem_tx_ring_used_Raw::TxUsed;
     }
@@ -242,12 +246,13 @@ fn gem_rx_ring_poll() -> bool {
     let Place::Full(held) = gem_rx_ring_take_held() else {
         Place::Empty => { return false; }
     };
-    let GemRxRingHeld::Armed(armed) = held else {
+    let GemRxRingHeld::Armed(held_armed) = held else {
         GemRxRingHeld::Ready(ready) => {
             gem_rx_ring_park(GemRxRingHeld::Ready(ready));
             return false;
         }
     };
+    let mut armed = held_armed;
     let mut filled: bool = false;
     match GemRxRing_gem_rx_ring_peek(armed, 0) {
         GemRxRing_gem_rx_ring_peek_Outcome::RxDesc(entry) => {
@@ -265,12 +270,13 @@ fn gem_tx_ring_poll(slot: {0..<2 as usize}) -> bool {
     let Place::Full(held) = gem_tx_ring_take_held() else {
         Place::Empty => { return false; }
     };
-    let GemTxRingHeld::Sending(sending) = held else {
+    let GemTxRingHeld::Sending(held_sending) = held else {
         GemTxRingHeld::Ready(ready) => {
             gem_tx_ring_park(GemTxRingHeld::Ready(ready));
             return false;
         }
     };
+    let mut sending = held_sending;
     let mut used: bool = false;
     match GemTxRing_gem_tx_ring_peek(sending, slot) {
         GemTxRing_gem_tx_ring_peek_Outcome::TxDesc(entry) => {
