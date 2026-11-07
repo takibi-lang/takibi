@@ -388,16 +388,26 @@ private inline fn block_read_with(slot: borrow BlockSlot[0],
 // QEMU lane.
 const BLOCK_RUN_BLOCKS: usize = KERNEL_BLOCK_BATCH;
 
-private let mut block_run_data:
-    [u8; KERNEL_MAX_CORES * BLOCK_RUN_BLOCKS * KERNEL_BLOCK_SIZE];
-private let mut block_run_backend: [u8; KERNEL_MAX_CORES];
-private let mut block_run_first: [usize; KERNEL_MAX_CORES];
-private let mut block_run_count: [usize; KERNEL_MAX_CORES];
-private let mut block_run_epoch: [usize; KERNEL_MAX_CORES];
+// Each slot's run is owned by its BlockSlot (GitHub issue #1159): an element
+// is reached only as `g[slot.index]`.
+// One slot's run buffer; a struct so the device read slices it as a field.
+struct BlockRunBuffer { bytes: [u8; BLOCK_RUN_BLOCKS * KERNEL_BLOCK_SIZE]; }
+private let mut block_run_data: [BlockRunBuffer; KERNEL_MAX_CORES]
+    owned_by(BlockSlot.index, 1);
+private let mut block_run_backend: [u8; KERNEL_MAX_CORES]
+    owned_by(BlockSlot.index, 1);
+private let mut block_run_first: [usize; KERNEL_MAX_CORES]
+    owned_by(BlockSlot.index, 1);
+private let mut block_run_count: [usize; KERNEL_MAX_CORES]
+    owned_by(BlockSlot.index, 1);
+private let mut block_run_epoch: [usize; KERNEL_MAX_CORES]
+    owned_by(BlockSlot.index, 1);
 // The block after this slot's last device read, and its backend: a miss
 // on that block is a sequential read.
-private let mut block_run_next: [usize; KERNEL_MAX_CORES];
-private let mut block_run_next_backend: [u8; KERNEL_MAX_CORES];
+private let mut block_run_next: [usize; KERNEL_MAX_CORES]
+    owned_by(BlockSlot.index, 1);
+private let mut block_run_next_backend: [u8; KERNEL_MAX_CORES]
+    owned_by(BlockSlot.index, 1);
 private let mut block_run_reads: [AtomicWord; KERNEL_MAX_CORES];
 private let mut block_run_hits: [AtomicWord; KERNEL_MAX_CORES];
 
@@ -405,12 +415,11 @@ private let mut block_run_hits: [AtomicWord; KERNEL_MAX_CORES];
 private fn block_run_hit_here(slot: borrow BlockSlot[0],
                               device: KernelBlockDevice,
                               block: usize) -> bool {
-    let here: {0..<KERNEL_MAX_CORES as usize} = block_slot_number(slot);
-    let first: usize = block_run_first[here];
-    return block_run_count[here] != 0 &&
-           block_run_backend[here] == device.backend &&
-           block_run_epoch[here] == block_cache_epoch_now() &&
-           block >= first && block - first < block_run_count[here];
+    let first: usize = block_run_first[slot.index];
+    return block_run_count[slot.index] != 0 &&
+           block_run_backend[slot.index] == device.backend &&
+           block_run_epoch[slot.index] == block_cache_epoch_now() &&
+           block >= first && block - first < block_run_count[slot.index];
 }
 
 // Copy (device, block) out of this slot's run, if it holds it.
@@ -419,14 +428,11 @@ private fn block_run_take(slot: borrow BlockSlot[0], device: KernelBlockDevice,
                           destination: [u8; KERNEL_BLOCK_SIZE..]) -> bool {
     if (block_run_hit_here(slot, device, block) == false) { return false; }
     let here: {0..<KERNEL_MAX_CORES as usize} = block_slot_number(slot);
-    let offset: usize = block - block_run_first[here];
+    let offset: usize = block - block_run_first[slot.index];
     if (offset >= BLOCK_RUN_BLOCKS) { return false; }
-    let within: {0..<BLOCK_RUN_BLOCKS as usize} = offset;
-    let row: {0..<KERNEL_MAX_CORES * BLOCK_RUN_BLOCKS as usize} =
-        here * BLOCK_RUN_BLOCKS + within;
-    let base: usize = row * KERNEL_BLOCK_SIZE;
+    let base: usize = offset * KERNEL_BLOCK_SIZE;
     slice_copy(destination[0..<KERNEL_BLOCK_SIZE],
-               block_run_data[base..<base + KERNEL_BLOCK_SIZE]);
+               block_run_data[slot.index].bytes[base..<base + KERNEL_BLOCK_SIZE]);
     atomic_word_fetch_add(&block_run_hits[here], 1);
     return true;
 }
@@ -434,17 +440,15 @@ private fn block_run_take(slot: borrow BlockSlot[0], device: KernelBlockDevice,
 private fn block_run_wanted(slot: borrow BlockSlot[0],
                             device: KernelBlockDevice,
                             block: usize) -> bool {
-    let here: {0..<KERNEL_MAX_CORES as usize} = block_slot_number(slot);
-    return block_run_next[here] == block &&
-           block_run_next_backend[here] == device.backend;
+    return block_run_next[slot.index] == block &&
+           block_run_next_backend[slot.index] == device.backend;
 }
 
 private fn block_run_note_single(slot: borrow BlockSlot[0],
                                  device: KernelBlockDevice,
                                  block: usize) {
-    let here: {0..<KERNEL_MAX_CORES as usize} = block_slot_number(slot);
-    block_run_next[here] = block + 1;
-    block_run_next_backend[here] = device.backend;
+    block_run_next[slot.index] = block + 1;
+    block_run_next_backend[slot.index] = device.backend;
 }
 
 // Read the run starting at `first` into this slot's buffer. False leaves
@@ -458,11 +462,11 @@ private fn block_run_read(slot: borrow BlockSlot[0], device: KernelBlockDevice,
     if (count > BLOCK_RUN_BLOCKS) { count = BLOCK_RUN_BLOCKS; }
     // The epoch is taken before the device is, so a write that lands while
     // the run is being read retires it.
-    block_run_count[here] = 0;
+    block_run_count[slot.index] = 0;
     let epoch: usize = block_cache_epoch_now();
     let guard = block_device_take(slot);
     let transferred: bool =
-        block_run_transfer_locked(guard, here, device, first, count);
+        block_run_transfer_locked(guard, slot, device, first, count);
     block_device_give(guard);
     if (transferred == false) { return false; }
     for offset: usize in 0..<BLOCK_RUN_BLOCKS {
@@ -471,29 +475,28 @@ private fn block_run_read(slot: borrow BlockSlot[0], device: KernelBlockDevice,
         }
     }
     workload_profile_note_block_read(count * KERNEL_BLOCK_SIZE);
-    block_run_backend[here] = device.backend;
-    block_run_first[here] = first;
-    block_run_epoch[here] = epoch;
-    block_run_count[here] = count;
-    block_run_next[here] = first + count;
-    block_run_next_backend[here] = device.backend;
+    block_run_backend[slot.index] = device.backend;
+    block_run_first[slot.index] = first;
+    block_run_epoch[slot.index] = epoch;
+    block_run_count[slot.index] = count;
+    block_run_next[slot.index] = first + count;
+    block_run_next_backend[slot.index] = device.backend;
     atomic_word_fetch_add(&block_run_reads[here], 1);
     return true;
 }
 
 private fn block_run_transfer_locked(
         guard: borrow BlockDeviceGuard[&block_device_lock],
-        here: {0..<KERNEL_MAX_CORES as usize}, device: KernelBlockDevice,
+        slot: borrow BlockSlot[0], device: KernelBlockDevice,
         first: usize, count: usize) -> bool !{unsafe} {
     if (block_fault_hits(guard, false)) { return false; }
     if (device.backend == 1) {
         if (count > BLOCK_RUN_BLOCKS) { return false; }
-        // A checked slice of this slot's run: the slot index and the count
-        // check above bound it inside block_run_data (#637 stage 3).
-        let base: usize = here * BLOCK_RUN_BLOCKS * KERNEL_BLOCK_SIZE;
+        // A checked slice of this slot's run: the count check above bounds
+        // it inside the slot's buffer (#637 stage 3).
         let length: usize = count * KERNEL_BLOCK_SIZE;
         match disk_read_sectors(guard, (first * 2) as u32,
-                                block_run_data[base..<base + length]) {
+                                block_run_data[slot.index].bytes[0..<length]) {
             DiskIoResult::Err(error) => { return false; }
             DiskIoResult::Ok => { return true; }
         }
@@ -501,13 +504,11 @@ private fn block_run_transfer_locked(
         for offset: usize in 0..<BLOCK_RUN_BLOCKS {
             if (offset < count) {
                 // One request per block, its index one the compiler can bound.
-                let row: {0..<KERNEL_MAX_CORES * BLOCK_RUN_BLOCKS as usize} =
-                    here * BLOCK_RUN_BLOCKS + offset;
-                let base: usize = row * KERNEL_BLOCK_SIZE;
+                let base: usize = offset * KERNEL_BLOCK_SIZE;
                 let sector: u32 = ((first + offset) * 2) as u32;
                 if (virtio_blk_read_block(
                         guard, sector,
-                        block_run_data[base..<base + KERNEL_BLOCK_SIZE]) == false) {
+                        block_run_data[slot.index].bytes[base..<base + KERNEL_BLOCK_SIZE]) == false) {
                     return false;
                 }
             }

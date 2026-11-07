@@ -31,13 +31,6 @@ kernel/arch/arm64/kernel/platform_uart_common.tkb	uart_rx_handler	read-by uart_r
 kernel/arch/arm64/kernel/secondary.tkb	kernel_online_cores	read-by kernel_online_core_count,kernel_online_core_note_cpu_on: 2026-10-31 retain-partition: every online-prefix walk; only core 0's boot writes it, with the range rechecked at each read (outside 1..=max reads as 1)
 kernel/arch/arm64/mm/asid.tkb	asid_bits	read-by asid_width_bits: 2026-10-31 written once by asid_init with the MMU off, where the compiler refuses an atomic call; read lock-free after
 kernel/arch/arm64/mm/asid.tkb	asid_last	read-by asid_highest_value,asid_assign_locked: 2026-10-31 written once by asid_init with the MMU off, where the compiler refuses an atomic call; read lock-free after
-kernel/drivers/block/memory.tkb	block_run_backend	read-by block_run_hit_here: 2026-10-31 slot: the read-ahead run of the BlockSlot holder, retired by the atomic epoch
-kernel/drivers/block/memory.tkb	block_run_count	read-by block_run_hit_here: 2026-10-31 slot: as block_run_backend; zeroed before a refill by the same holder
-kernel/drivers/block/memory.tkb	block_run_data	read-by block_run_take,block_run_transfer_locked: 2026-10-31 slot: bytes of the BlockSlot holder; the device writes them under block_device_lock
-kernel/drivers/block/memory.tkb	block_run_epoch	read-by block_run_hit_here: 2026-10-31 slot: epoch taken by the BlockSlot holder before its device read
-kernel/drivers/block/memory.tkb	block_run_first	read-by block_run_hit_here,block_run_take: 2026-10-31 slot: first block of the BlockSlot holder's run
-kernel/drivers/block/memory.tkb	block_run_next	read-by block_run_wanted: 2026-10-31 slot: the BlockSlot holder's sequential-read hint
-kernel/drivers/block/memory.tkb	block_run_next_backend	read-by block_run_wanted: 2026-10-31 slot: backend of that hint, same holder
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_base	read-by virtio_blk_init,main: 2026-10-31 boot: set by the DTB device map on core 0 before the first init; never written after
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_queue	read-by virtio_blk_submit_owned,virtio_blk_setup_queue: 2026-10-31 lock: one request at a time under block_device_lock, a TaskMutex a preempted holder keeps
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_regs	read-by virtio_blk_capacity_sectors,virtio_blk_init,virtio_blk_submit_owned: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after

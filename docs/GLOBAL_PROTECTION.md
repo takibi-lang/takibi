@@ -403,3 +403,9 @@ entries below that date are history, left as written.
   `init_boot_fixture_pending` (now claimed by compare-and-swap, so the
   report runs once) and `init_boot_fixture_reported`, and
   `clone_growth_probe_ok`.
+- 2026-11-07: the read-ahead run (#1159 option B1, step 3). memory.tkb's seven
+  `block_run_*` arrays are `owned_by(BlockSlot.index, 1)`, each reached as
+  `g[slot.index]`; `block_run_data` becomes one `BlockRunBuffer` per slot, a
+  struct so the device read slices it as a field (same bytes), and
+  `block_run_transfer_locked` takes the `BlockSlot` instead of its number.
+  217 -> 210 unprotected.
