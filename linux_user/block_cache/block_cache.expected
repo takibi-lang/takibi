@@ -1,3 +1,4 @@
+ok     the second operation is given the other slot
 ok     a block never filled misses
 ok     a filled block hits with the bytes it was filled with
 ok     the backend is part of the key

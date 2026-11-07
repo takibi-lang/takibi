@@ -1,3 +1,4 @@
+use "kernel/drivers/block/block_slot.tkb";
 use "kernel/drivers/block/block_cache.tkb";
 use "kernel/lib/task_mutex.tkb";
 use "kernel/lib/atomic_word.tkb";
@@ -75,9 +76,8 @@ fn virtio_block_device_ext2() -> KernelBlockDeviceResult {
 // release it, releases it twice, or keeps using it after the release.
 // Static storage, as ext2's slot pool (DECISIONS.md 2026-10-17).
 //
-// Trusted here, and only here (TRUSTED_BASE.md): block_slot_acquire returns
-// a slot no other live BlockSlot names. Its compare-exchange over
-// block_slot_words is what makes that so; nothing checks it.
+// Trusted in block_slot.tkb, and only there (TRUSTED_BASE.md): no two live
+// BlockSlots name one slot. Its compare-exchange is what makes that so.
 //
 // Only the public entry points acquire, and no function in this file calls
 // one of them, so an operation holds one slot at a time
@@ -93,54 +93,15 @@ fn virtio_block_device_ext2() -> KernelBlockDeviceResult {
 //   is not trusted for exclusivity -- the compare-exchange is -- so a
 //   preemptible kernel only loses the locality, and the counters then count
 //   concurrent operations rather than CPUs.
-// - The cache (block_cache.tkb) takes the slot's index as a plain number and
-//   trusts its caller to hold the slot; only this file calls it
-//   (scripts/check_slot_pool_entries.py).
-private let mut block_slot_words: [AtomicWord; KERNEL_MAX_CORES];
+// - The cache (block_cache.tkb) takes the BlockSlot itself: its sets are
+//   owned_by(BlockSlot.index, ...) (GitHub issue #1159).
+// BlockSlot, block_slot_acquire_from and block_slot_release are in
+// block_slot.tkb.
 
-// `[unit]` is always 0: an owner needs a static parameter, and the slot's
-// identity is its private index, which only this file reads.
-linear struct BlockSlot[unit: usize] {
-    private index: {0..<KERNEL_MAX_CORES as usize};
-}
-
-// A free slot, waiting for one if every slot is held. The compare-exchange
-// is an acquire, pairing with the release store in block_slot_release, so
-// the previous holder's last writes happen before this holder's first read.
+// A free slot, waiting for one if every slot is held; this CPU's slot first.
 fn block_slot_acquire() -> BlockSlot[0] !{may_block} {
     preempt_assert_blockable();
-    let mut index: {0..<KERNEL_MAX_CORES as usize} = 0;
-    let mut held: bool = false;
-    let hint: usize = cpu_id();
-    if (hint < KERNEL_MAX_CORES) {
-        let preferred: {0..<KERNEL_MAX_CORES as usize} = hint;
-        if (atomic_word_compare_exchange(&block_slot_words[preferred], 0, 1)) {
-            index = preferred;
-            held = true;
-        }
-    }
-    let mut waited: bool = false;
-    while (held == false) {
-        for i: usize in 0..<KERNEL_MAX_CORES {
-            if (held == false &&
-                atomic_word_compare_exchange(&block_slot_words[i], 0, 1)) {
-                index = i;
-                held = true;
-            }
-        }
-        // Every slot is held: retry. An unmasked spin, so the tick can switch
-        // to a holder this core preempted (kernel/CONCURRENCY.md, slot pools).
-        if (held == false && waited == false) {
-            slot_pool_wait_note(SlotPoolWaitPool::Block);
-            waited = true;
-        }
-    }
-    let mut slot: BlockSlot[0] = { index };
-    return slot;
-}
-
-fn block_slot_release(slot: sink BlockSlot[0]) {
-    atomic_word_store(&block_slot_words[slot.index], 0);
+    return block_slot_acquire_from(cpu_id());
 }
 
 // GitHub issues #281 and #208: what the block layer was actually asked for
@@ -185,7 +146,7 @@ private fn block_call_total(counters: borrow [AtomicWord; KERNEL_MAX_CORES..]) -
 
 private fn block_note_call(slot: borrow BlockSlot[0],
                            counters: borrow [AtomicWord; KERNEL_MAX_CORES..]) {
-    atomic_word_fetch_add(&counters[slot.index], 1);
+    atomic_word_fetch_add(&counters[block_slot_number(slot)], 1);
 }
 
 fn block_read_call_total() -> usize {
@@ -246,7 +207,7 @@ fn block_device_take(slot: borrow BlockSlot[0])
         block_note_call(slot, block_device_waits as []AtomicWord);
         task_mutex_acquire(&block_device_lock);
     }
-    let mut guard: BlockDeviceGuard[&block_device_lock] = { slot.index };
+    let mut guard: BlockDeviceGuard[&block_device_lock] = { block_slot_number(slot) };
     return guard;
 }
 
@@ -374,7 +335,7 @@ private inline fn block_read_with(slot: borrow BlockSlot[0],
                                   device: KernelBlockDevice, block: usize,
                                   destination: [u8; KERNEL_BLOCK_SIZE..])
         -> BlockIoResult !{unsafe} {
-    match block_cache_read(slot.index, device.backend, block, destination) {
+    match block_cache_read(slot, device.backend, block, destination) {
         BlockCacheReadResult::Hit => { return BlockIoResult::Ok; }
         BlockCacheReadResult::Miss => { }
     }
@@ -382,7 +343,7 @@ private inline fn block_read_with(slot: borrow BlockSlot[0],
     // leaves the filled copy stale (GitHub issue #553).
     let mut epoch: BlockCacheEpoch = block_cache_epoch_of(device.backend, block);
     if (block_run_take(slot, device, block, destination)) {
-        block_cache_fill(slot.index, device.backend, block, destination, epoch);
+        block_cache_fill(slot, device.backend, block, destination, epoch);
         return BlockIoResult::Ok;
     }
     // A run that was read and then cannot answer -- another core wrote in
@@ -390,7 +351,7 @@ private inline fn block_read_with(slot: borrow BlockSlot[0],
     if (block_run_wanted(slot, device, block)) {
         if (block_run_read(slot, device, block)) {
             if (block_run_take(slot, device, block, destination)) {
-                block_cache_fill(slot.index, device.backend, block,
+                block_cache_fill(slot, device.backend, block,
                                  destination, epoch);
                 return BlockIoResult::Ok;
             }
@@ -401,7 +362,7 @@ private inline fn block_read_with(slot: borrow BlockSlot[0],
         BlockIoResult::Ok => { }
     }
     block_run_note_single(slot, device, block);
-    block_cache_fill(slot.index, device.backend, block, destination, epoch);
+    block_cache_fill(slot, device.backend, block, destination, epoch);
     return BlockIoResult::Ok;
 }
 
@@ -444,7 +405,7 @@ private let mut block_run_hits: [AtomicWord; KERNEL_MAX_CORES];
 private fn block_run_hit_here(slot: borrow BlockSlot[0],
                               device: KernelBlockDevice,
                               block: usize) -> bool {
-    let here: {0..<KERNEL_MAX_CORES as usize} = slot.index;
+    let here: {0..<KERNEL_MAX_CORES as usize} = block_slot_number(slot);
     let first: usize = block_run_first[here];
     return block_run_count[here] != 0 &&
            block_run_backend[here] == device.backend &&
@@ -457,7 +418,7 @@ private fn block_run_take(slot: borrow BlockSlot[0], device: KernelBlockDevice,
                           block: usize,
                           destination: [u8; KERNEL_BLOCK_SIZE..]) -> bool {
     if (block_run_hit_here(slot, device, block) == false) { return false; }
-    let here: {0..<KERNEL_MAX_CORES as usize} = slot.index;
+    let here: {0..<KERNEL_MAX_CORES as usize} = block_slot_number(slot);
     let offset: usize = block - block_run_first[here];
     if (offset >= BLOCK_RUN_BLOCKS) { return false; }
     let within: {0..<BLOCK_RUN_BLOCKS as usize} = offset;
@@ -473,7 +434,7 @@ private fn block_run_take(slot: borrow BlockSlot[0], device: KernelBlockDevice,
 private fn block_run_wanted(slot: borrow BlockSlot[0],
                             device: KernelBlockDevice,
                             block: usize) -> bool {
-    let here: {0..<KERNEL_MAX_CORES as usize} = slot.index;
+    let here: {0..<KERNEL_MAX_CORES as usize} = block_slot_number(slot);
     return block_run_next[here] == block &&
            block_run_next_backend[here] == device.backend;
 }
@@ -481,7 +442,7 @@ private fn block_run_wanted(slot: borrow BlockSlot[0],
 private fn block_run_note_single(slot: borrow BlockSlot[0],
                                  device: KernelBlockDevice,
                                  block: usize) {
-    let here: {0..<KERNEL_MAX_CORES as usize} = slot.index;
+    let here: {0..<KERNEL_MAX_CORES as usize} = block_slot_number(slot);
     block_run_next[here] = block + 1;
     block_run_next_backend[here] = device.backend;
 }
@@ -490,7 +451,7 @@ private fn block_run_note_single(slot: borrow BlockSlot[0],
 // no run behind, and the caller reads the one block it wanted instead.
 private fn block_run_read(slot: borrow BlockSlot[0], device: KernelBlockDevice,
                           first: usize) -> bool !{unsafe} {
-    let here: {0..<KERNEL_MAX_CORES as usize} = slot.index;
+    let here: {0..<KERNEL_MAX_CORES as usize} = block_slot_number(slot);
     let available: usize = block_count(device);
     if (first >= available) { return false; }
     let mut count: usize = available - first;
@@ -580,7 +541,7 @@ fn block_write(device: KernelBlockDevice, block: usize,
         BlockIoResult::Invalid => { }
         BlockIoResult::Ok => { written = true; }
     }
-    block_cache_note_write(slot.index, device.backend, block, source, written,
+    block_cache_note_write(slot, device.backend, block, source, written,
                            epoch);
     block_slot_release(slot);
     if (written) { return BlockIoResult::Ok; }
@@ -591,7 +552,7 @@ fn block_write(device: KernelBlockDevice, block: usize,
 // USB path -- retires every cached copy, counted as this slot's writes.
 fn block_forget_all() !{unsafe} {
     let slot: BlockSlot[0] = block_slot_acquire();
-    block_cache_forget_all(slot.index);
+    block_cache_forget_all(slot);
     block_slot_release(slot);
 }
 

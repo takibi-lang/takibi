@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 def sources() -> dict[str, str]:
     names = [
         "kernel/drivers/block/memory.tkb",
+        "kernel/drivers/block/block_slot.tkb",
         "kernel/kernel/workload_evidence.tkb",
         "kernel/kernel/syscall.tkb",
         "kernel/kernel/process.tkb",
@@ -28,6 +29,7 @@ def sources() -> dict[str, str]:
 def problems(tree: dict[str, str]) -> list[str]:
     tree = {name: LayoutSource(text) for name, text in tree.items()}
     memory = tree["kernel/drivers/block/memory.tkb"]
+    block_slot = tree["kernel/drivers/block/block_slot.tkb"]
     evidence = tree["kernel/kernel/workload_evidence.tkb"]
     syscall = tree["kernel/kernel/syscall.tkb"]
     process = tree["kernel/kernel/process.tkb"]
@@ -47,12 +49,13 @@ def problems(tree: dict[str, str]) -> list[str]:
     # GitHub issue #638: the counters are per BlockSlot. The verdict reads
     # them by core number, which is right only while a CPU's operations take
     # the slot its number names first.
+    # The hint is the current CPU (memory.tkb), tried first (block_slot.tkb).
     slot_hint = (
-        "    let hint: usize = cpu_id();\n"
         "    if (hint < KERNEL_MAX_CORES) {\n"
         "        let preferred: {0..<KERNEL_MAX_CORES as usize} = hint;\n"
         "        if (atomic_word_compare_exchange(&block_slot_words[preferred], 0, 1)) {")
-    if slot_hint not in memory:
+    if ("return block_slot_acquire_from(cpu_id());" not in memory
+            or slot_hint not in block_slot):
         result.append("the block slot acquire no longer tries the current "
                       "cpu's slot first, so per-slot counters do not name cores")
     for condition in (
@@ -154,7 +157,7 @@ def main() -> int:
     controls = []
     mutations = {
         "exclusion": ("kernel/drivers/block/memory.tkb", "task_mutex_trylock", "removed_trylock"),
-        "slot hint": ("kernel/drivers/block/memory.tkb", "let hint: usize = cpu_id();", "let hint: usize = 0;"),
+        "slot hint": ("kernel/drivers/block/memory.tkb", "return block_slot_acquire_from(cpu_id());", "return block_slot_acquire_from(0);"),
         "cpu0 wait": ("kernel/kernel/workload_evidence.tkb", "block_device_wait_count(0) == 0 ||", "removed_cpu0_wait == 0 ||"),
         "secondary id": ("kernel/kernel/workload_evidence.tkb", "block_read_call_count(SECONDARY_CORE_ID) == 0 ||", "block_read_call_count(1) == 0 ||"),
         "default placement": (

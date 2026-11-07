@@ -495,13 +495,15 @@ rules globally.
 - The block layer's per-operation state (the read-ahead run, the block
   cache's entries and write counts, the block counters) is the same shape:
   a pool of `KERNEL_MAX_CORES` slots reached through a linear `BlockSlot`
-  (#638). Trusted: `block_slot_acquire` in
-  `kernel/drivers/block/memory.tkb` returns a slot no other live token
-  names (its compare-exchange; the `cpu_id()` it tries first is a locality
-  hint, not trusted). `kernel/drivers/block/block_cache.tkb` takes the
-  slot's index as a plain number and trusts its caller to hold the slot;
-  `scripts/check_slot_pool_entries.py` keeps memory.tkb its only kernel
-  caller and checks the one-slot-per-operation rule for both pools.
+  (#638). Trusted: `block_slot_acquire_from` in
+  `kernel/drivers/block/block_slot.tkb` returns a slot no other live token
+  names (its compare-exchange; the `cpu_id()` memory.tkb's
+  `block_slot_acquire` hands it to try first is a locality hint, not
+  trusted). `kernel/drivers/block/block_cache.tkb` takes the `BlockSlot`
+  itself, and its entry arrays are `owned_by(BlockSlot.index, ...)`
+  (#1159), so the compiler confines a holder to its own set.
+  `scripts/check_slot_pool_entries.py` checks the one-slot-per-operation
+  rule for both pools.
 - The ext2 exec staging (the PT_LOAD source file, a dynamic pair's
   interpreter file, the one-block read buffer) is the same shape: a pool of
   `KERNEL_MAX_CORES` slots reached through a linear `ProcessImageSlot`

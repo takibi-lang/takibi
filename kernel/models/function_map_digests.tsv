@@ -2,7 +2,8 @@
 # function a kernel/models/README.md row stamps, and its digest as
 # reviewed. Do not edit by hand.
 address_space_inspect_stopped	61c99763f4fd84c677cb1b098ec45f5e
-block_slot_acquire	3bbea80d7b99416c707cba18e9215d81
+block_slot_acquire	dcefc7c83b32632eede0494c405f2a49
+block_slot_acquire_from	5399b58b5d93c23e7497b4b17c1a1791
 block_slot_release	f85fd7ffaa2d60305bac3a6b74e831ca
 console_lock	0452488b33a11ffc90e6faf2988f08a2
 console_unlock	7f3f011af2a8a5863ed413537307b175

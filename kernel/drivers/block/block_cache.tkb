@@ -18,11 +18,11 @@
 //   every chunk and each data block once, so the data blocks are what an LRU
 //   gives up; round-robin would have evicted the metadata instead.
 //
-// One set of slots per writer, indexed by the number the caller passes
-// and sized by execution_model.tkb's KERNEL_MAX_CORES. The writer was a core
-// until GitHub issue #638; it is now memory.tkb's BlockSlot, one per block
-// operation in flight, whose index the caller passes. Below, "core" means
-// that writer. Sized the way ext2's scratch
+// One set of slots per writer, sized by execution_model.tkb's
+// KERNEL_MAX_CORES. The writer was a core until GitHub issue #638; it is now
+// a BlockSlot (block_slot.tkb), one per block operation in flight, which the
+// caller passes, and each set is owned_by(BlockSlot.index, ...) (GitHub
+// issue #1159). Below, "core" means that writer. Sized the way ext2's scratch
 // buffers and the block counters already are, so raising the build's core
 // maximum resizes this file with no edit here (GitHub issue #9): a
 // syscall that reaches the filesystem may run on either core. What one core
@@ -50,16 +50,17 @@
 // a write it could not yet see. Release/acquire is what makes the count the
 // later half of that pair on the hardware as well.
 //
-// Current limitations (2026-10-17):
-// - The index is a plain number, and this file trusts its caller to hold
-//   the BlockSlot it names, so that one writer at a time uses each set and
-//   each write count. Only memory.tkb calls in (and linux_user/block_cache,
-//   which plays two writers); scripts/check_slot_pool_entries.py keeps it so.
+// Current limitations (2026-11-07):
+// - The write counts and hit counts are AtomicWord rows indexed by the
+//   slot's number (block_slot_number), not owned_by: a count is read by
+//   every core's epoch sum, and its one writer is the slot holder by the
+//   same token, not by a rule the compiler checks for these rows.
 //
 // Kept free of device access and logging, so linux_user/block_cache can
-// compile this file itself and drive two simulated cores against it.
+// compile this file itself and drive two real slots against it.
 
 use "kernel/lib/atomic_word.tkb";
+use "kernel/drivers/block/block_slot.tkb";
 const BLOCK_CACHE_BYTES: usize = 1024;
 const BLOCK_CACHE_SLOTS: usize = 16;
 // Distinct blocks written in a boot: 18; distinct single-block reads: 44.
@@ -73,14 +74,26 @@ must_use variant BlockCacheReadResult { Hit; Miss; }
 // bare count instead.
 struct BlockCacheEpoch { private value: usize; }
 
+// Each set of BLOCK_CACHE_SLOTS entries is owned by one BlockSlot (GitHub
+// issue #1159): an entry is reached only as `g[slot.index * BLOCK_CACHE_SLOTS
+// + k]`, k below BLOCK_CACHE_SLOTS, so a holder reaches only its own set.
+// One entry's bytes; a struct so an element is sliced as a field.
+struct BlockCacheBytes { bytes: [u8; BLOCK_CACHE_BYTES]; }
 private let mut block_cache_data:
-    [u8; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS * BLOCK_CACHE_BYTES];
-private let mut block_cache_backend: [u8; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS];
-private let mut block_cache_block: [usize; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS];
-private let mut block_cache_valid: [bool; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS];
-private let mut block_cache_epoch: [usize; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS];
-private let mut block_cache_used: [usize; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS];
-private let mut block_cache_tick: [usize; KERNEL_MAX_CORES];
+    [BlockCacheBytes; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS]
+    owned_by(BlockSlot.index, BLOCK_CACHE_SLOTS);
+private let mut block_cache_backend: [u8; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS]
+    owned_by(BlockSlot.index, BLOCK_CACHE_SLOTS);
+private let mut block_cache_block: [usize; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS]
+    owned_by(BlockSlot.index, BLOCK_CACHE_SLOTS);
+private let mut block_cache_valid: [bool; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS]
+    owned_by(BlockSlot.index, BLOCK_CACHE_SLOTS);
+private let mut block_cache_epoch: [usize; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS]
+    owned_by(BlockSlot.index, BLOCK_CACHE_SLOTS);
+private let mut block_cache_used: [usize; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS]
+    owned_by(BlockSlot.index, BLOCK_CACHE_SLOTS);
+private let mut block_cache_tick: [usize; KERNEL_MAX_CORES]
+    owned_by(BlockSlot.index, 1);
 private let mut block_cache_hits: [AtomicWord; KERNEL_MAX_CORES];
 private let mut block_cache_writes:
     [AtomicWord; KERNEL_MAX_CORES * BLOCK_CACHE_BUCKETS];
@@ -107,102 +120,95 @@ private fn block_cache_write_epoch() -> usize !{unsafe} {
     return epoch;
 }
 
-private fn block_cache_count_write(core: {0..<KERNEL_MAX_CORES as usize},
+private fn block_cache_count_write(slot: borrow BlockSlot[0],
                                    bucket: {0..<BLOCK_CACHE_BUCKETS as usize})
         !{unsafe} {
     let index: {0..<KERNEL_MAX_CORES * BLOCK_CACHE_BUCKETS as usize} =
-        core * BLOCK_CACHE_BUCKETS + bucket;
+        block_slot_number(slot) * BLOCK_CACHE_BUCKETS + bucket;
     let published: usize = atomic_word_load(&block_cache_writes[index]) + 1;
     atomic_word_store(&block_cache_writes[index], published);
 }
 
-private fn block_cache_touch(core: {0..<KERNEL_MAX_CORES as usize},
-                             index: {0..<KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS as usize}) {
-    let tick: usize = block_cache_tick[core] + 1;
-    block_cache_tick[core] = tick;
-    block_cache_used[index] = tick;
+private fn block_cache_touch(slot: borrow BlockSlot[0],
+                             k: {0..<BLOCK_CACHE_SLOTS as usize}) {
+    let tick: usize = block_cache_tick[slot.index] + 1;
+    block_cache_tick[slot.index] = tick;
+    block_cache_used[slot.index * BLOCK_CACHE_SLOTS + k] = tick;
 }
 
-// The slot of this core that holds (backend, block) at its current epoch.
+// The entry of this slot's set that holds (backend, block) at its current
+// epoch.
 must_use variant BlockCacheSlot {
     Missing;
-    Found({0..<KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS as usize});
+    Found({0..<BLOCK_CACHE_SLOTS as usize});
 }
 
-private fn block_cache_find(core: {0..<KERNEL_MAX_CORES as usize},
+private fn block_cache_find(slot: borrow BlockSlot[0],
                             backend: u8, block: usize) -> BlockCacheSlot {
     let epoch: usize = block_cache_bucket_epoch(block_cache_bucket(block));
-    for slot: usize in 0..<BLOCK_CACHE_SLOTS {
-        let index: {0..<KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS as usize} =
-            core * BLOCK_CACHE_SLOTS + slot;
-        if (block_cache_valid[index] && block_cache_epoch[index] == epoch &&
-            block_cache_backend[index] == backend &&
-            block_cache_block[index] == block) {
-            return BlockCacheSlot::Found(index);
+    for k: usize in 0..<BLOCK_CACHE_SLOTS {
+        if (block_cache_valid[slot.index * BLOCK_CACHE_SLOTS + k] &&
+            block_cache_epoch[slot.index * BLOCK_CACHE_SLOTS + k] == epoch &&
+            block_cache_backend[slot.index * BLOCK_CACHE_SLOTS + k] == backend &&
+            block_cache_block[slot.index * BLOCK_CACHE_SLOTS + k] == block) {
+            return BlockCacheSlot::Found(k);
         }
     }
     return BlockCacheSlot::Missing;
 }
 
-// The slot a fill takes: the one already holding the block if there is one,
+// The entry a fill takes: the one already holding the block if there is one,
 // else an empty or stale one, else the least recently used.
-private fn block_cache_victim(core: {0..<KERNEL_MAX_CORES as usize},
+private fn block_cache_victim(slot: borrow BlockSlot[0],
                               backend: u8, block: usize)
-        -> {0..<KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS as usize} {
-    let base: {0..<KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS as usize} =
-        core * BLOCK_CACHE_SLOTS;
-    let mut victim: {0..<KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS as usize} = base;
+        -> {0..<BLOCK_CACHE_SLOTS as usize} {
+    let mut victim: {0..<BLOCK_CACHE_SLOTS as usize} = 0;
     let mut oldest: usize = 0xFFFFFFFFFFFFFFFF;
-    for slot: usize in 0..<BLOCK_CACHE_SLOTS {
-        let index: {0..<KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS as usize} =
-            core * BLOCK_CACHE_SLOTS + slot;
-        if (block_cache_valid[index] == false ||
-            block_cache_epoch[index] != block_cache_bucket_epoch(
-                block_cache_bucket(block_cache_block[index]))) {
-            return index;
+    for k: usize in 0..<BLOCK_CACHE_SLOTS {
+        if (block_cache_valid[slot.index * BLOCK_CACHE_SLOTS + k] == false ||
+            block_cache_epoch[slot.index * BLOCK_CACHE_SLOTS + k] !=
+                block_cache_bucket_epoch(block_cache_bucket(
+                    block_cache_block[slot.index * BLOCK_CACHE_SLOTS + k]))) {
+            return k;
         }
-        if (block_cache_backend[index] == backend &&
-            block_cache_block[index] == block) {
-            return index;
+        if (block_cache_backend[slot.index * BLOCK_CACHE_SLOTS + k] == backend &&
+            block_cache_block[slot.index * BLOCK_CACHE_SLOTS + k] == block) {
+            return k;
         }
-        if (block_cache_used[index] < oldest) {
-            oldest = block_cache_used[index];
-            victim = index;
+        if (block_cache_used[slot.index * BLOCK_CACHE_SLOTS + k] < oldest) {
+            oldest = block_cache_used[slot.index * BLOCK_CACHE_SLOTS + k];
+            victim = k;
         }
     }
     return victim;
 }
 
-private fn block_cache_store(core: {0..<KERNEL_MAX_CORES as usize},
+private fn block_cache_store(slot: borrow BlockSlot[0],
                              backend: u8, block: usize,
                              source: borrow [u8; BLOCK_CACHE_BYTES..],
                              epoch: usize) {
-    let index: {0..<KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS as usize} =
-        block_cache_victim(core, backend, block);
-    let base: usize = index * BLOCK_CACHE_BYTES;
-    slice_copy(block_cache_data[base..<base + BLOCK_CACHE_BYTES],
+    let k: {0..<BLOCK_CACHE_SLOTS as usize} =
+        block_cache_victim(slot, backend, block);
+    slice_copy(block_cache_data[slot.index * BLOCK_CACHE_SLOTS + k].bytes as []u8,
                source[0..<BLOCK_CACHE_BYTES]);
-    block_cache_backend[index] = backend;
-    block_cache_block[index] = block;
-    block_cache_epoch[index] = epoch;
-    block_cache_valid[index] = true;
-    block_cache_touch(core, index);
+    block_cache_backend[slot.index * BLOCK_CACHE_SLOTS + k] = backend;
+    block_cache_block[slot.index * BLOCK_CACHE_SLOTS + k] = block;
+    block_cache_epoch[slot.index * BLOCK_CACHE_SLOTS + k] = epoch;
+    block_cache_valid[slot.index * BLOCK_CACHE_SLOTS + k] = true;
+    block_cache_touch(slot, k);
 }
 
-// Copy (backend, block) into destination if this core holds it.
-fn block_cache_read(core: usize, backend: u8, block: usize,
+// Copy (backend, block) into destination if this slot's set holds it.
+fn block_cache_read(slot: borrow BlockSlot[0], backend: u8, block: usize,
                     destination: borrow [u8; BLOCK_CACHE_BYTES..])
         -> BlockCacheReadResult {
-    if (core >= KERNEL_MAX_CORES) { return BlockCacheReadResult::Miss; }
-    let here: {0..<KERNEL_MAX_CORES as usize} = core;
-    match block_cache_find(here, backend, block) {
+    match block_cache_find(slot, backend, block) {
         BlockCacheSlot::Missing => { return BlockCacheReadResult::Miss; }
-        BlockCacheSlot::Found(index) => {
-            let base: usize = index * BLOCK_CACHE_BYTES;
+        BlockCacheSlot::Found(k) => {
             slice_copy(destination[0..<BLOCK_CACHE_BYTES],
-                       block_cache_data[base..<base + BLOCK_CACHE_BYTES]);
-            block_cache_touch(here, index);
-            atomic_word_fetch_add(&block_cache_hits[here], 1);
+                       block_cache_data[slot.index * BLOCK_CACHE_SLOTS + k].bytes as []u8);
+            block_cache_touch(slot, k);
+            atomic_word_fetch_add(&block_cache_hits[block_slot_number(slot)], 1);
             return BlockCacheReadResult::Hit;
         }
     }
@@ -217,38 +223,32 @@ fn block_cache_epoch_of(backend: u8, block: usize) -> BlockCacheEpoch {
 }
 
 // After a device read: keep what was read, at the epoch taken before it.
-fn block_cache_fill(core: usize, backend: u8, block: usize,
+fn block_cache_fill(slot: borrow BlockSlot[0], backend: u8, block: usize,
                     source: borrow [u8; BLOCK_CACHE_BYTES..],
                     epoch: BlockCacheEpoch) {
-    if (core >= KERNEL_MAX_CORES) { return; }
-    let here: {0..<KERNEL_MAX_CORES as usize} = core;
-    block_cache_store(here, backend, block, source, epoch.value);
+    block_cache_store(slot, backend, block, source, epoch.value);
 }
 
 // After a device write, whatever its outcome: every core's copies of blocks
 // in its bucket stop matching. When the write succeeded, this core keeps the
 // bytes it wrote, at the epoch taken before the write plus this write alone,
 // so any other write to the bucket since then leaves the copy stale.
-fn block_cache_note_write(core: usize, backend: u8, block: usize,
+fn block_cache_note_write(slot: borrow BlockSlot[0], backend: u8, block: usize,
                           source: borrow [u8; BLOCK_CACHE_BYTES..],
                           written: bool, epoch_before: BlockCacheEpoch)
         !{unsafe} {
-    if (core >= KERNEL_MAX_CORES) { return; }
-    let here: {0..<KERNEL_MAX_CORES as usize} = core;
-    block_cache_count_write(here, block_cache_bucket(block));
+    block_cache_count_write(slot, block_cache_bucket(block));
     if (written) {
-        block_cache_store(here, backend, block, source,
+        block_cache_store(slot, backend, block, source,
                           epoch_before.value + 1);
     }
 }
 
 // A write that went around block_write -- usb_provision_rootfs's batched
 // USB path -- names no block, so it retires every bucket.
-fn block_cache_forget_all(core: usize) !{unsafe} {
-    if (core >= KERNEL_MAX_CORES) { return; }
-    let here: {0..<KERNEL_MAX_CORES as usize} = core;
+fn block_cache_forget_all(slot: borrow BlockSlot[0]) !{unsafe} {
     for bucket: usize in 0..<BLOCK_CACHE_BUCKETS {
-        block_cache_count_write(here, bucket);
+        block_cache_count_write(slot, bucket);
     }
 }
 

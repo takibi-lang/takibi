@@ -375,3 +375,10 @@ file's comment lines are not rows.
   `NetRxCanAcquire` view guards stay listed: carrying them needs the token to
   be an indexed linear struct, a change of the net layer's shared spelling
   (#1416).
+- 2026-11-07: the block cache's sets (#1159 option B1, step 2). `BlockSlot`
+  and its pool move to `kernel/drivers/block/block_slot.tkb`; the cache's
+  functions take `borrow BlockSlot[0]` instead of the slot's number, and its
+  seven entry arrays are `owned_by(BlockSlot.index, ...)` (`slot_owned`):
+  each entry is reached as `g[slot.index * BLOCK_CACHE_SLOTS + k]`. The four
+  `allowed_callers.tsv` rows that held the cache to memory.tkb go with the
+  plain index. 224 -> 217 unprotected.

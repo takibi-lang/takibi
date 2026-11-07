@@ -31,13 +31,6 @@ kernel/arch/arm64/kernel/platform_uart_common.tkb	uart_rx_handler	read-by uart_r
 kernel/arch/arm64/kernel/secondary.tkb	kernel_online_cores	read-by kernel_online_core_count,kernel_online_core_note_cpu_on: 2026-10-31 retain-partition: every online-prefix walk; only core 0's boot writes it, with the range rechecked at each read (outside 1..=max reads as 1)
 kernel/arch/arm64/mm/asid.tkb	asid_bits	read-by asid_width_bits: 2026-10-31 written once by asid_init with the MMU off, where the compiler refuses an atomic call; read lock-free after
 kernel/arch/arm64/mm/asid.tkb	asid_last	read-by asid_highest_value,asid_assign_locked: 2026-10-31 written once by asid_init with the MMU off, where the compiler refuses an atomic call; read lock-free after
-kernel/drivers/block/block_cache.tkb	block_cache_backend	read-by block_cache_find,block_cache_victim: 2026-10-31 slot: a set is owned by the linear BlockSlot its index came from, kept across preemption; nothing else names it
-kernel/drivers/block/block_cache.tkb	block_cache_block	read-by block_cache_find,block_cache_victim: 2026-10-31 slot: as block_cache_backend, the holder of the BlockSlot alone
-kernel/drivers/block/block_cache.tkb	block_cache_data	read-by block_cache_read,block_cache_store: 2026-10-31 slot: 1 KiB copies in and out by the BlockSlot holder; no pointer leaves the file
-kernel/drivers/block/block_cache.tkb	block_cache_epoch	read-by block_cache_find,block_cache_victim: 2026-10-31 slot: the BlockSlot holder compares it with the atomic write counts, which decide staleness
-kernel/drivers/block/block_cache.tkb	block_cache_tick	read-by block_cache_touch: 2026-10-31 slot: the LRU clock of the BlockSlot holder, indexed by that slot
-kernel/drivers/block/block_cache.tkb	block_cache_used	read-by block_cache_victim: 2026-10-31 slot: LRU stamps of the BlockSlot holder
-kernel/drivers/block/block_cache.tkb	block_cache_valid	read-by block_cache_find,block_cache_victim: 2026-10-31 slot: the BlockSlot holder; written last in block_cache_store
 kernel/drivers/block/memory.tkb	block_run_backend	read-by block_run_hit_here: 2026-10-31 slot: the read-ahead run of the BlockSlot holder, retired by the atomic epoch
 kernel/drivers/block/memory.tkb	block_run_count	read-by block_run_hit_here: 2026-10-31 slot: as block_run_backend; zeroed before a refill by the same holder
 kernel/drivers/block/memory.tkb	block_run_data	read-by block_run_take,block_run_transfer_locked: 2026-10-31 slot: bytes of the BlockSlot holder; the device writes them under block_device_lock

@@ -46,10 +46,10 @@ the acquire of a pool ranked the same or further out (RANK). Also no function
 handed a guard of a lower-level TaskMutex reaches any pool's acquire: those
 guards are inside every pool. kernel/models/SlotPool.tla is the protocol.
 
-BlockSlot also covers kernel/drivers/block/block_cache.tkb, whose entries
-are indexed by the slot's number as a plain usize: rows of
-scripts/allowed_callers.tsv hold its slot-indexed functions to memory.tkb, on
-the compiler's call-graph table (#567).
+BlockSlot also covers kernel/drivers/block/block_cache.tkb, whose entry
+arrays are owned_by(BlockSlot.index, ...) (#1159): its functions take the
+BlockSlot itself, so the compiler, not a caller list, ties an entry to its
+holder.
 """
 
 import re
