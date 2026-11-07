@@ -299,7 +299,7 @@ private fn virtio_blk_submit_write_data(head: sink VirtioBlkChainHead[0],
 }
 
 // A read's data descriptor: the receive range the device writes.
-private fn virtio_blk_submit_read_data(head: sink VirtioBlkChainHead[0],
+private inline fn virtio_blk_submit_read_data(head: sink VirtioBlkChainHead[0],
                                        data_span: borrow DmaDeviceSpan)
         -> VirtioBlkChainBody[0] {
     virtio_blk_desc_span(1, data_span);
@@ -307,7 +307,7 @@ private fn virtio_blk_submit_read_data(head: sink VirtioBlkChainHead[0],
     return body;
 }
 
-private fn virtio_blk_submit_data(head: sink VirtioBlkChainHead[0], write: bool,
+private inline fn virtio_blk_submit_data(head: sink VirtioBlkChainHead[0], write: bool,
                                   source: borrow [u8; 1024..],
                                   data_span: borrow DmaDeviceSpan)
         -> VirtioBlkChainBody[0] !{unsafe} {
@@ -316,7 +316,7 @@ private fn virtio_blk_submit_data(head: sink VirtioBlkChainHead[0], write: bool,
 }
 
 // The data descriptor's link and the status descriptor end the chain.
-private fn virtio_blk_submit_status(body: sink VirtioBlkChainBody[0],
+private inline fn virtio_blk_submit_status(body: sink VirtioBlkChainBody[0],
                                     data_flags: i32,
                                     status_span: borrow DmaDeviceSpan)
         -> VirtioBlkChainReady[0] {
@@ -328,7 +328,7 @@ private fn virtio_blk_submit_status(body: sink VirtioBlkChainBody[0],
 }
 
 // The whole chain is written: make it available, publish, and notify.
-private fn virtio_blk_submit_notify(ready: sink VirtioBlkChainReady[0]) {
+private inline fn virtio_blk_submit_notify(ready: sink VirtioBlkChainReady[0]) {
     let stage: usize = ready.stage;
     let avail_idx: VirtioRingIndex = virtio_blk_queue.avail.idx;
     let slot: {0..<8 as usize} = ((avail_idx as u16) as usize) % 8;
