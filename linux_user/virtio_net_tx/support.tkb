@@ -227,8 +227,12 @@ fn run_driver_case(reply_timeout: bool) !{may_block} {
         IoAttach::Attached => {}
         IoAttach::TooSmall => { check(false, "native fake MMIO window refused"); }
     }
-    virtio_base = address as i32;
-    virtio_net_gic_intid = 48;
+    // The kernel's boot DTB walk sets these under the boot phase.
+    let phase = boot_phase_mint();
+    boot_once_set(&virtio_base, phase, address as i32);
+    boot_once_set(&virtio_net_gic_intid, phase, 48);
+    boot_once_set(&rp1_dma_pci_offset, phase, 0);
+    boot_phase_end(phase);
     // A modern transport offering queues of eight.
     fake_regs[1] = 2;
     fake_regs[13] = 8;
@@ -326,8 +330,9 @@ fn run_initialized_case(ready: sink NetRxCanAcquire, reply_timeout: bool) !{may_
 // The kernel's address mint (kernel/drivers/dma_address.tkb, which
 // virtio_used.tkb uses) names RP1's inbound offset; the kernel defines it in
 // rpi5/pcie.tkb, which this fixture does not compile.
-// The kernel's is a BootOnce(usize) read through boot_once_get; this cell and
-// reader stand in for that shape without the boot phase.
-struct Rp1DmaOffsetCell { value: usize; }
-let mut rp1_dma_pci_offset: Rp1DmaOffsetCell;
-fn boot_once_get(cell: &mut Rp1DmaOffsetCell) -> usize { return (*cell).value; }
+// The kernel's BootOnce(usize), set to 0 with the discovery words.
+let mut rp1_dma_pci_offset: BootOnce(usize);
+// The kernel's stop for a BootOnce read before its write (boot_prologue.tkb).
+fn boot_once_unwritten_stop() {
+    check(false, "a BootOnce cell read before its boot write");
+}

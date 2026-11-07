@@ -39,6 +39,7 @@
 use "kernel/net/netconfig.tkb";
 use "kernel/lib/init_once.tkb";
 use "kernel/lib/atomic_word.tkb";
+use "kernel/lib/boot_once.tkb";
 use "kernel/drivers/virtio_ring.tkb";
 use "kernel/drivers/net/virtio_net_tx_wait.tkb";
 use "kernel/drivers/net/virtio_net_tx_dma.tkb";
