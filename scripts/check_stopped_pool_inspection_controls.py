@@ -62,7 +62,10 @@ def main():
         target = root / 'kernel/mm/address_space.tkb'
         with target.open('a', encoding='ascii') as output:
             output.write('\nfn unchecked() { region_pool_inspect_unproven__AddressSpaceBacking(); }\n')
-        assert any('unreviewed inspection mint' in item for item in problems(root))
+        # GitHub issue #567: the caller set is scripts/allowed_callers.tsv's
+        # (call-graph table); here a stray call still breaks the one call
+        # per reviewed mint.
+        assert any('one call per declared function' in item for item in problems(root))
     report_pass('stopped-pool-inspection-controls',
                 'every resume/start marker, missing borrow/IRQ exclusion (also when kept only in a comment), public mint and unreviewed mint are refused',
                 cases=cases.ran)

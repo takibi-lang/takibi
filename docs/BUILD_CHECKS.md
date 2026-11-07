@@ -131,7 +131,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_gic_iar_intid.py` | the platform interrupt dispatchers decide on `GICC_IAR & 0x3FF` and hand only the raw word back to GICC_EOIR, so an SGI's sender bits cannot hide it (#632); a mask present only in a comment is refused (#815) |
 | `check_stack_proof_states.py` | a process start takes only `Startable` and a reap only `Reapable`, named token mints read `stack_owner_cpu`; bare-address seams are declared, and direct default `FrameRef` declarations are refused (not arbitrary aggregate initialization) |
 | `check_stack_proof_states_controls.py` | Negative controls for weakened stack tokens/mints, undeclared address seams, and direct default frame declarations; comments and strings remain permitted |
-| `check_stopped_pool_inspection.py` | the finite RegionPool diagnostic mint set borrows full-stop authority, retains IRQ exclusion, and has complete resume/start invalidation annotations |
+| `check_stopped_pool_inspection.py` | the finite RegionPool diagnostic mint set borrows full-stop authority, retains IRQ exclusion, and has complete resume/start invalidation annotations; which functions may call an inspection is five rows of `scripts/allowed_callers.tsv`, read from the call-graph table (#567) |
 | `check_stopped_pool_inspection_controls.py` | missing context markers, weakened mint contracts and an unreviewed inspection mint are refused |
 | `check_world_stop_refusals.py` | no `WorldStopResult::Busy` or `Partial` arm fail-stops the kernel; a refused world stop is waited out or handed back (#632); the #641 rank rules are `buildcheck_world_stop_rank.py` |
 | `check_core_role_sites.py` | every literal fixed-core comparison in kernel `.tkb` carries a `core-role:` reason (#775) |

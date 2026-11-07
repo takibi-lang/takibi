@@ -46,7 +46,13 @@ def file_scan(relative, source):
         if not calls:
             continue
         key = relative, name
-        if key not in MINTS or calls != [MINTS.get(key)]:
+        # GitHub issue #567: which functions may call an inspection is the
+        # caller set of rows in scripts/allowed_callers.tsv, read from the
+        # call-graph table (calls and function values). Here: each reviewed
+        # mint calls its own inspection exactly once.
+        if key not in MINTS:
+            continue
+        if calls != [MINTS.get(key)]:
             minted.append((name, f'{relative}:{name}: unreviewed inspection mint {calls}'))
             continue
         header = body.split('{', 1)[0]
