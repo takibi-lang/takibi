@@ -227,7 +227,7 @@ fn main() !{unsafe} {
             kernel_boot_log(" net_intid=");
             uart_put_udec(virtio_net_intid() as usize);
             kernel_boot_log(" block_base_bytes=");
-            uart_put_udec(virtio_blk_base as usize);
+            uart_put_udec(virtio_blk_base_get() as usize);
             kernel_boot_log("\n");
         }
     }

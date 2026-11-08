@@ -36,6 +36,7 @@
 // virtio_net_gic_enable() for platform_irq_init() to call once net_init()
 // has discovered the device's slot.
 
+use "kernel/lib/set_once.tkb";
 use "kernel/net/netconfig.tkb";
 use "kernel/lib/init_once.tkb";
 use "kernel/lib/atomic_word.tkb";
@@ -218,7 +219,20 @@ const VIRTIO_NET_HDR_LEN: usize = 12;
 let mut virtio_net_queues: [VirtqNetQueue; 2] align(64);
 // The used rings' addresses as programmed (RX, TX), for DDB and the native
 // fixture's stand-in device.
-let mut virtio_net_used_addr: [usize; 2];
+// Set once per queue by virtio_queue_setup (SetOnce, GitHub issue #1159);
+// a queue whose cell is unset has no used ring yet.
+private let mut virtio_net_used_rx: SetOnce(usize);
+private let mut virtio_net_used_tx: SetOnce(usize);
+
+// The used ring's address of `queue` (0 RX, 1 TX), 0 before its setup.
+fn virtio_net_used_address(queue: {0..<2 as usize}) -> usize {
+    if (queue == 0) {
+        if (set_once_is_set(&virtio_net_used_rx) == false) { return 0; }
+        return set_once_get(&virtio_net_used_rx);
+    }
+    if (set_once_is_set(&virtio_net_used_tx) == false) { return 0; }
+    return set_once_get(&virtio_net_used_tx);
+}
 // The pool slot whose buffer each RX descriptor holds (VIRTIO_PKT_NONE
 // while a descriptor has none).
 // (The pool slot of each RX descriptor is the capability's rx_desc_pkt.)
@@ -306,7 +320,17 @@ fn virtio_queue_setup(queue: {0..<2 as usize}, used_queue: usize) -> bool !{unsa
     virtio_net_regs.queue_device_low = (used & 0xFFFFFFFF) as u32;
     virtio_net_regs.queue_device_high = (used >> 32) as u32;
     virtio_net_regs.queue_ready = 1;
-    virtio_net_used_addr[queue] = used;
+    if (queue == 0) {
+        match set_once_claim(&virtio_net_used_rx) {
+            SetOnceBegin::Taken => {}
+            SetOnceBegin::Claimed(claim) => { set_once_publish(&virtio_net_used_rx, claim, used); }
+        }
+    } else {
+        match set_once_claim(&virtio_net_used_tx) {
+            SetOnceBegin::Taken => {}
+            SetOnceBegin::Claimed(claim) => { set_once_publish(&virtio_net_used_tx, claim, used); }
+        }
+    }
     return true;
 }
 
@@ -405,7 +429,7 @@ fn net_init() -> NetInitResult {
 fn kernel_net_rx_frame_pending(stopped: borrow MachineStopped[&kernel_world_stop])
         -> NetPendingState !{unsafe} {
     if (atomic_word_load(&virtio_net_ready) == 0) { return NetPendingState::No; }
-    let address: usize = virtio_net_used_addr[0];
+    let address: usize = virtio_net_used_address(0);
     if (address == 0) { return NetPendingState::Unknown; }
     let word: usize = unsafe { atomic_load_acquire(address) };
     let idx: usize = (word >> 16) & 0xFFFF;

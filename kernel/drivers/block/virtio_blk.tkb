@@ -4,6 +4,7 @@
 // its own region, read only through snapshots (kernel/drivers/virtio_used.tkb,
 // GitHub issue #740).
 
+use "kernel/lib/set_once.tkb";
 use "kernel/drivers/virtio_ring.tkb";
 use "kernel/drivers/dma_address.tkb";
 use "kernel/lib/mutex.tkb";
@@ -45,7 +46,21 @@ struct packed VirtioBlkRequest {
     sector: u64;
 }
 
-let mut virtio_blk_base: i32 = 0;
+// GitHub issue #1159: the device map's discovery record, set once (SetOnce);
+// 0 until then.
+private let mut virtio_blk_base: SetOnce(i32);
+
+fn virtio_blk_base_set(base: i32) {
+    match set_once_claim(&virtio_blk_base) {
+        SetOnceBegin::Taken => {}
+        SetOnceBegin::Claimed(claim) => { set_once_publish(&virtio_blk_base, claim, base); }
+    }
+}
+
+fn virtio_blk_base_get() -> i32 {
+    if (set_once_is_set(&virtio_blk_base) == false) { return 0; }
+    return set_once_get(&virtio_blk_base);
+}
 // The transport's registers, attached by the platform device map when it
 // finds the block device; virtio_blk_base stays its discovery record.
 let mut virtio_blk_regs: IoHandle(VirtioMmioRegs);
@@ -185,7 +200,7 @@ fn virtio_blk_init(guard: borrow BlockDeviceGuard[&block_device_lock])
     let mut status: VirtioBlkStatus = virtio_blk_status(guard);
     if (status.disabled) { return false; }
     if (status.ready) { return true; }
-    if (virtio_blk_base == 0) { return false; }
+    if (virtio_blk_base_get() == 0) { return false; }
     if (virtio_blk_regs.version != VIRTIO_MMIO_VERSION_MODERN) { return false; }
     if (virtio_blk_reset(guard) == false) { return false; }
     if (virtio_blk_used_claim() == false) { return false; }

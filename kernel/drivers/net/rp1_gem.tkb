@@ -8,6 +8,7 @@
 // continuously polling either ring). TX completion uses the primary queue
 // interrupt bank and a 14 ms elapsed-time failure budget.
 
+use "kernel/lib/set_once.tkb";
 use "kernel/lib/atomic_word.tkb";
 use "kernel/net/netconfig.tkb";
 use "kernel/lib/init_once.tkb";
@@ -165,7 +166,8 @@ private let mut gem_rx_pkt_published: AtomicWord;
 private let mut net_init_once: InitOnce;
 private let mut rp1_gem_net_ready: AtomicWord;
 // The RX ring's CPU address, recorded when the ring is programmed (#959).
-private let mut gem_rx_ring_cpu_address: usize = 0;
+// Set once when the ring is programmed (SetOnce, GitHub issue #1159).
+private let mut gem_rx_ring_cpu_address: SetOnce(usize);
 // Set once a TX completion went unconfirmed: gem_halt() has stopped the MAC
 // (or failed to), so no later frame is submitted this boot.
 private let mut gem_tx_down: AtomicWord;
@@ -320,7 +322,12 @@ private fn gem_pkt_recycle_at(r: borrow mut NetRxCanAcquire[net], index: usize,
 // A ring's bus address, from its Ready owner's span (`addressed`).
 private fn gem_rx_ring_bus(r: borrow GemRxRing_Ready[b, o, 4]) -> usize !{unsafe} {
     let mut span: DmaDeviceSpan = GemRxRing_Ready_span(r);
-    gem_rx_ring_cpu_address = dma_span_cpu_address(span);
+    match set_once_claim(&gem_rx_ring_cpu_address) {
+        SetOnceBegin::Taken => {}
+        SetOnceBegin::Claimed(claim) => {
+            set_once_publish(&gem_rx_ring_cpu_address, claim, dma_span_cpu_address(span));
+        }
+    }
     return rp1_span_bus_address(span);
 }
 private fn gem_tx_ring_bus(r: borrow GemTxRing_Ready[b, o, 4]) -> usize !{unsafe} {
@@ -465,9 +472,11 @@ fn kernel_net_rx_frame_pending(stopped: borrow MachineStopped[&kernel_world_stop
         -> NetPendingState !{unsafe} {
     if (atomic_word_load(&rp1_gem_net_ready) == 0) { return NetPendingState::No; }
     if (atomic_word_load(&gem_rx_pkt_published) >= GEM_PKTS) { return NetPendingState::No; }
-    if (gem_rx_ring_cpu_address == 0) { return NetPendingState::Unknown; }
-    kernel_ddb_dcache_clean_invalidate(gem_rx_ring_cpu_address);
-    let word: usize = unsafe { atomic_load_acquire(gem_rx_ring_cpu_address) };
+    if (set_once_is_set(&gem_rx_ring_cpu_address) == false) { return NetPendingState::Unknown; }
+    let ring: usize = set_once_get(&gem_rx_ring_cpu_address);
+    if (ring == 0) { return NetPendingState::Unknown; }
+    kernel_ddb_dcache_clean_invalidate(ring);
+    let word: usize = unsafe { atomic_load_acquire(ring) };
     if ((word & 1) != 0) { return NetPendingState::Yes; }
     return NetPendingState::No;
 }

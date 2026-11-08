@@ -153,7 +153,7 @@ fn gem_fixture_rx_stage(name: *u8, desc: usize, buffer: usize) !{unsafe} {
 
 fn gem_fixture_rx_control() !{unsafe} {
     pcie2_dma_inbound_setup();
-    let desc: usize = gem_rx_ring_cpu_address;
+    let desc: usize = set_once_get(&gem_rx_ring_cpu_address);
     dma_finish_rx(unsafe { desc as *align(64) u8 }, 64);
     let inside_bus: usize = (gem_fixture_load(desc) & 0xFFFFFFFC) |
                             (gem_fixture_load(desc + 8) << 32);

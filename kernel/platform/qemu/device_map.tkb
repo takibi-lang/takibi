@@ -126,7 +126,7 @@ fn qemu_virtio_apply_boot_dtb(phase: borrow BootPhase[boot], dtb: usize)
                             }
                             IoAttach::Attached => {}
                         }
-                        virtio_blk_base = transport.base as i32;
+                        virtio_blk_base_set(transport.base as i32);
                         block_found = true;
                     }
                 }

@@ -92,7 +92,7 @@ fn dma_fixture_run() !{unsafe} {
         IoAttach::Attached => {}
         IoAttach::TooSmall => { dma_fixture_require(false, "register window"); }
     }
-    virtio_blk_base = 1;
+    virtio_blk_base_set(1);
     // The driver's entries take the device guard, as memory.tkb's callers do.
     let slot: BlockSlot[0] = block_slot_acquire();
     let guard = block_device_take(slot);
