@@ -11201,6 +11201,18 @@ private fn kernel_process_uart_waiter_any(guard: borrow ProcessRunGuard[&schedul
     return ProcessUartWaiter::Missing;
 }
 
+private fn kernel_process_uart_waiter_related_or_any(
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+        current: ProcessHandle) -> ProcessUartWaiter !{unsafe} {
+    match kernel_process_uart_waiter_related(guard, current) {
+        ProcessUartWaiter::Found(related) => {
+            return ProcessUartWaiter::Found(related);
+        }
+        ProcessUartWaiter::Missing => {}
+    }
+    return kernel_process_uart_waiter_any(guard);
+}
+
 private fn kernel_process_uart_waiter_related(
         guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
         current: ProcessHandle) -> ProcessUartWaiter !{unsafe} {
@@ -11349,7 +11361,11 @@ fn kernel_process_uart_wake(guard: borrow ProcessRunGuard[&scheduled_process_run
         }
         ProcessCurrentRead::Running(current_task) => {
             current_pid = scheduled_process_pid_of_handle(current_task);
-            kernel_process_uart_waiter_related(guard, current_task)
+            // GitHub issue #1470: relatives first, then anyone. An orphan
+            // (its parent reaped, #1310) running here has no family link to
+            // the shell blocked on the terminal, and dropping the byte left
+            // that shell asleep with the byte in the ring for good.
+            kernel_process_uart_waiter_related_or_any(guard, current_task)
         }
     };
     let ProcessUartWaiter::Found(waiter) = found else {
