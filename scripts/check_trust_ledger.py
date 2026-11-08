@@ -147,6 +147,7 @@ RULES = {
     "SetOnce": "#1159",
     "StopCell": "#1159",
     "guarded_ref": "#1159",
+    "TestDriverPhase": "#1462",
     "code removed": "dead code deleted with no replacement",
     "category split": "the sites moved to another category; none left the base",
     "counted again": "#1311: the same files, a count that ignores layout",

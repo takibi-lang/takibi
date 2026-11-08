@@ -20,20 +20,19 @@
 // So the union is what both platforms now run, and `ext2_mutation` became a
 // common view rather than a QEMU-only one.
 use "kernel/fs/ext2/ext2.tkb";
+use "kernel/kernel/test_driver_phase.tkb";
 use "kernel/printk/log.tkb";
 use "kernel/arch/arm64/kernel/timer.tkb";
 
 const EXT2_WRITE_FIXTURE_BYTES: usize = 13 * KERNEL_BLOCK_SIZE;
-// This fixture runs once in boot on core 0, before userspace or peers can
-// reach the rootfs. Its buffers are shared only across its own calls.
+// This fixture runs once, from kernel_test_driver_run, as the boot thread on
+// CPU 0 before the boot handoff, so no peer dispatches a process (the
+// TestDriverPhase its entry borrows, GitHub issue #1462). It may be switched,
+// on CPU 0, to an EL0 child it starts; its buffers are reached only by the
+// boot thread, shared only across its own calls.
 private let mut ext2_write_fixture_source: [u8; EXT2_WRITE_FIXTURE_BYTES];
 private let mut ext2_write_fixture_readback: [u8; KERNEL_BLOCK_SIZE];
 private let mut ext2_write_fixture_bitmap: [u8; KERNEL_BLOCK_SIZE];
-
-private fn ext2_write_fixture_execution_model_assumption() {
-    static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "stands in for a boot-phase assumption (core 0, before any process exists); review at the preemption flip (GitHub issue #638)");
-}
 
 private fn ext2_write_fixture_counts_match(mount: Ext2Mount,
                                            blocks: usize, inodes: usize)
@@ -136,7 +135,6 @@ private fn ext2_exhaustion_filler(guard: borrow Ext2MutationGuard[&ext2_mutation
 // but the fourteenth claim, for the indirect block, must roll them back.
 // The original file and the complete bitmap must survive before EL0 runs.
 private fn ext2_write_exhaustion_check(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount) -> bool {
-    ext2_write_fixture_execution_model_assumption();
     let mut free: usize = 0;
     let mut inodes: usize = 0;
     match ext2_free_counts(mount) {
@@ -423,7 +421,6 @@ private fn ext2_full_check_in(guard: borrow Ext2MutationGuard[&ext2_mutation_loc
 }
 
 fn ext2_full_check(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount) -> bool {
-    ext2_write_fixture_execution_model_assumption();
     let mut blocks: usize = 0;
     let mut inodes: usize = 0;
     match ext2_free_counts(mount) {
@@ -442,7 +439,6 @@ fn ext2_full_check(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: 
 }
 
 private fn ext2_write_indirect_check(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount) -> bool {
-    ext2_write_fixture_execution_model_assumption();
     let mut before_blocks: usize = 0;
     let mut before_inodes: usize = 0;
     match ext2_free_counts(mount) {
@@ -938,7 +934,6 @@ private fn ext2_io_fence(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], m
 }
 
 private fn ext2_io_failure_check(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount) -> bool {
-    ext2_write_fixture_execution_model_assumption();
     let mut base_blocks: usize = 0;
     let mut base_inodes: usize = 0;
     match ext2_free_counts(mount) {
@@ -1441,7 +1436,8 @@ fn ext2_release_failure_check(guard: borrow Ext2MutationGuard[&ext2_mutation_loc
     return ext2_release_fenced >= EXT2_RELEASE_OPS;
 }
 
-fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
+fn kernel_ext2_fixture_run(mount: Ext2Mount, phase: borrow TestDriverPhase[driver])
+        !{logs, unsafe} {
     // GitHub issue #249: save the mount for
     // the exec prepare (kernel_exec_resolve_ext2_exec), which runs later, from
     // a syscall-return path outside fn main()'s own scope.
@@ -1616,13 +1612,14 @@ fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
 // same way once the body above stopped being written twice. Extracting the
 // body made this identical, and scripts/check_platform_file_parity.py said so
 // on the next run -- the check finding the next layer down is what it is for.
-fn kernel_ext2_mount_and_run(device: KernelBlockDevice) !{logs, unsafe} {
+fn kernel_ext2_mount_and_run(device: KernelBlockDevice,
+                             phase: borrow TestDriverPhase[driver]) !{logs, unsafe} {
     match ext2_mount(device) {
         Ext2MountResult::Invalid => {
             kernel_boot_log("ext2 mount: invalid\n");
         }
         Ext2MountResult::Mounted(mount) => {
-            kernel_ext2_fixture_run(mount);
+            kernel_ext2_fixture_run(mount, phase);
         }
     }
 }

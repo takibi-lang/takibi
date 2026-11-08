@@ -3,6 +3,7 @@
 // exchange. Masks hide evidence; they never fabricate a completion or halt.
 // This runs in the boot network step before another network client exists.
 use "kernel/lib/execution_model.tkb";
+use "kernel/kernel/test_driver_phase.tkb";
 
 let mut gem_fixture_failed: bool;
 let mut gem_fixture_hide_completion: bool;
@@ -109,9 +110,11 @@ fn gem_fixture_keep(ready_in: sink NetRxCanAcquire[net], packet: borrow [u8; 151
     return ready;
 }
 
-fn gem_fixture_run(ready_in: sink NetRxCanAcquire[net]) !{may_block} {
-    static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "stands in for a boot-phase assumption (core 0, before any process exists); review at the preemption flip (GitHub issue #638)");
+// Runs from kernel_test_driver_run as the boot thread on CPU 0, before the
+// boot handoff: the TestDriverPhase it borrows (GitHub issue #1462). The
+// NIC SPI pin is the caller's separate premise.
+fn gem_fixture_run(ready_in: sink NetRxCanAcquire[net],
+        phase: borrow TestDriverPhase[driver]) !{may_block} {
     let mut ready = ready_in;
     let mut packet: [u8; 1514];
     for index: usize in 0..<1514 { packet[index] = 0; }

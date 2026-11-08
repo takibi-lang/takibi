@@ -343,14 +343,14 @@ def main():
     if args.mode.startswith("irq-"):
         init = kernel / "platform/rpi5/init.tkb"
         text = init.read_text(encoding="ascii")
-        start = text.index("fn kernel_test_platform_network() {")
+        start = text.index("fn kernel_test_platform_network(phase: borrow TestDriverPhase[driver]) {")
         end = text.index("\n}\n", start) + 3
-        body = """fn kernel_test_platform_network() {
+        body = """fn kernel_test_platform_network(phase: borrow TestDriverPhase[driver]) {
     match network_capability_take() {
         NetworkCapabilityTakeResult::Empty => { kernel_boot_log("FAIL gem-probe: init\\n"); }
         NetworkCapabilityTakeResult::Ready(ready) => {
             kernel_boot_log("gem-probe: mode MODE\\n");
-            gem_probe_run(ready);
+            gem_probe_run(ready, phase);
         }
     }
     while (true) { workload_profile_interrupt_wait(); }
@@ -389,11 +389,11 @@ def main():
 
     init = kernel / "platform/rpi5/init.tkb"
     text = init.read_text(encoding="ascii")
-    start = text.index("fn kernel_test_platform_network() {")
+    start = text.index("fn kernel_test_platform_network(phase: borrow TestDriverPhase[driver]) {")
     end = text.index("\n}\n", start) + 3
     unconfirmed = str(args.mode.startswith("unconfirmed")).lower()
     reply = str(args.mode.endswith("reply")).lower()
-    body = """fn kernel_test_platform_network() {
+    body = """fn kernel_test_platform_network(phase: borrow TestDriverPhase[driver]) {
     match network_capability_take() {
         NetworkCapabilityTakeResult::Empty => {
             gem_fixture_require(false, "physical GEM initialization");
@@ -402,7 +402,7 @@ def main():
             kernel_boot_log("gem-tx fixture: mode MODE\\n");
             gem_fixture_hide_halt = UNCONFIRMED;
             gem_fixture_reply_path = REPLY;
-            gem_fixture_run(ready);
+            gem_fixture_run(ready, phase);
         }
     }
     while (true) { workload_profile_interrupt_wait(); }

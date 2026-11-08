@@ -92,7 +92,7 @@ fn kernel_platform_net_capability_return(ready: sink NetRxCanAcquire[net]) {
     }
 }
 
-fn kernel_test_platform_network() {
+fn kernel_test_platform_network(phase: borrow TestDriverPhase[driver]) {
     // GitHub issue #830: ARP and ICMP run with the NIC SPI pinned to one
     // non-zero core; the TCP echo after them runs with it rotating.
     nic_irq_evidence_pin_begin(RPI5_GEM_GIC_INTID);
@@ -211,7 +211,7 @@ fn kernel_usb_disk_initialize() -> DiskIoResult {
     return result;
 }
 
-fn kernel_test_platform_storage() {
+fn kernel_test_platform_storage(phase: borrow TestDriverPhase[driver]) {
     let init_result: DiskIoResult = kernel_usb_disk_initialize();
     kernel_boot_log_xhci_capability();
     match init_result {
@@ -265,7 +265,7 @@ fn kernel_test_platform_storage() {
                     xhci_irq_evidence_report();
                 }
             }
-            kernel_ext2_mount_and_run(usb_device);
+            kernel_ext2_mount_and_run(usb_device, phase);
         }
     }
 }

@@ -488,6 +488,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/kernel/process_wait.tkb \
 	kernel/kernel/stack_poison.tkb \
 	kernel/kernel/stall_probe.tkb \
+	kernel/kernel/test_driver_phase.tkb \
 	kernel/kernel/profile_samples.tkb \
 	kernel/kernel/profile_session.tkb \
 	kernel/kernel/profile_timeline.tkb \

@@ -1,4 +1,5 @@
 use "kernel/lib/atomic_word.tkb";
+use "kernel/kernel/test_driver_phase.tkb";
 use "kernel/lib/atomic_enum.tkb";
 use "kernel/kernel/pool_lock_wait.tkb";
 use "kernel/kernel/stall_probe.tkb";
@@ -6564,7 +6565,28 @@ fn kernel_process_execution_reset() !{changes_witness_ProcessCurrent} {
 // stack for core 0's idle loop (kernel_idle_boot_enter), where PID 1,
 // already published Ready, is started like any other process; that first
 // start opens dispatch on every core (kernel_process_secondary_start).
-fn kernel_process_boot_handoff() !{unsafe, changes_witness_ProcessCurrent} {
+// GitHub issue #1462: the test-driver phase's premise, read by its one
+// begin (kernel/kernel/test_driver_phase.tkb), which stops when it is false:
+// this is CPU 0, the boot handoff has not happened (so no peer dispatches a
+// process), and the current record is the boot thread.
+fn kernel_test_driver_phase_premise() -> bool !{unsafe} {
+    if (cpu_id() != 0 ||
+        atomic_word_load(&scheduled_process_boot_handed_off) != 0 ||
+        execution_state[execution_cpu_index()].current_live == false) {
+        return false;
+    }
+    let mut current: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
+    let guard = process_run_lock();
+    let boot_thread: bool =
+        scheduled_process_record_live_locked(guard, current).kernel_thread;
+    process_run_unlock(guard);
+    return boot_thread;
+}
+
+fn kernel_process_boot_handoff(phase: sink TestDriverPhase[driver])
+        !{unsafe, changes_witness_ProcessCurrent} {
+    // The test-driver phase ends here, before peers may dispatch (#1462).
+    test_driver_phase_end(phase);
     execution_state[execution_cpu_index()].scheduler_enabled = false;
     execution_state[execution_cpu_index()].reschedule_pending = false;
     process_image_activate_root(address_space_boot_root());

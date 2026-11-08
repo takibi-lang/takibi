@@ -199,6 +199,20 @@ rules globally.
   write compiles after the end on that path. Trusted: that nothing mints a
   second phase, and that the secondaries see the boot writes because the
   boot core's stores precede the PSCI call that starts them.
+- The test-driver phase (GitHub issue #1462). `test_driver_phase_begin`
+  (`kernel/kernel/test_driver_phase.tkb`) is `!{unsafe}` and is called once,
+  in `kernel_test_driver_run`, with `kernel_test_driver_phase_premise()`
+  (`kernel/kernel/process.tkb`) as its argument, and stops unless that is
+  true: CPU 0, the boot handoff not yet done, and the current record is the
+  boot thread. The ext2 and rpi5 gem_tx fixtures borrow the token, and
+  `kernel_process_boot_handoff` consumes it, so no fixture call compiles
+  past the handoff. Trusted: that the premise, checked once at the begin,
+  holds until the handoff. That holds because peers return Idle before the
+  handoff, so the boot thread is resumed only on CPU 0, and a switch on
+  CPU 0 reaches only processes the boot thread started, which do not touch
+  the fixtures' private buffers. Also trusted: that nothing begins a second
+  phase. The callers of begin, premise and end are rows of
+  `scripts/allowed_callers.tsv`.
 - `*io T` supplies volatile access semantics. The register address, width,
   permitted access direction, ordering requirements, and device state still
   come from the platform specification and driver reasoning.

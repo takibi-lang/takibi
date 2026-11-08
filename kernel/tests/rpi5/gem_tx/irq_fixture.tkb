@@ -1,6 +1,7 @@
 // Test-only boot probe: bounded records, no UART in the measured TX path.
 use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/execution_model.tkb";
+use "kernel/kernel/test_driver_phase.tkb";
 
 let mut gem_probe_tx_irqs: AtomicWord;
 let mut gem_probe_last_tx_irq: AtomicWord;
@@ -69,9 +70,11 @@ fn gem_probe_peer(ready_in: sink NetRxCanAcquire[net])
     return ready;
 }
 
-fn gem_probe_run(ready_in: sink NetRxCanAcquire[net]) !{may_block} {
-    static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "stands in for a boot-phase assumption (core 0, before any process exists); review at the preemption flip (GitHub issue #638)");
+// Runs from kernel_test_driver_run as the boot thread on CPU 0, before the
+// boot handoff: the TestDriverPhase it borrows (GitHub issue #1462). The
+// NIC SPI pin is the caller's separate premise.
+fn gem_probe_run(ready_in: sink NetRxCanAcquire[net],
+        phase: borrow TestDriverPhase[driver]) !{may_block} {
     let mut ready = ready_in;
     kernel_boot_log("gem-probe: imr0="); uart_put_udec(gem.imr as usize);
     kernel_boot_log(" frequency="); uart_put_udec(read_cntfrq() as usize);

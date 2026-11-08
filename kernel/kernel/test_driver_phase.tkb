@@ -1,0 +1,53 @@
+// GitHub issue #1462 (maintainer, 2026-11-08): the test-driver phase. The
+// boot fixtures that run from kernel_test_driver_run (the ext2 fixture and
+// the rpi5 gem_tx fixtures) borrow this token instead of carrying a
+// static_assert(KERNEL_PREEMPTIBLE == 0) stand-in (#638 stage 9).
+//
+// The premise it names, checked at run time where it is minted
+// (test_driver_phase_begin, with process.tkb's kernel_test_driver_phase_premise):
+// - the code runs on CPU 0, as the boot thread (the kernel_thread record);
+// - the boot handoff has not happened, so no peer CPU dispatches a process
+//   (kernel_process_secondary_start returns Idle on every other CPU until
+//   then) and the boot thread cannot be resumed on another CPU.
+// It does NOT say that nothing else runs: under preemption the boot thread
+// may be switched, on CPU 0, to a process it started itself (an EL0 child of
+// a fixture). What the fixtures rely on, their private buffers, is reached
+// only by the boot thread.
+//
+// The token ends in kernel_process_boot_handoff, which consumes it, so no
+// fixture call compiles past the handoff on that path. Trusted (TRUSTED_BASE.md,
+// test-driver phase): that nothing mints a second token; the callers of the
+// mint and end are rows of scripts/allowed_callers.tsv.
+//
+// Current limitations (2026-11-08):
+// - The premise is checked at the mint only, at run time; that it still holds
+//   until the handoff rests on the boot thread staying on CPU 0 (peers return
+//   Idle before the handoff), not on a type.
+// - The rpi5 gem fixtures' NIC SPI pin is a separate premise, not this token's.
+use "kernel/lib/atomic_word.tkb";
+use "kernel/arch/arm64/kernel/cpu_stop_extern.tkb";
+
+private let mut test_driver_phase_ended: AtomicWord;
+
+// Indexed by the end flag's address: one phase per boot.
+linear struct TestDriverPhase[phase: addr] {
+    private held: usize;
+}
+
+// Begun once, by kernel_test_driver_run (scripts/allowed_callers.tsv), with
+// kernel_test_driver_phase_premise() as its argument; stops when the premise
+// does not hold.
+fn test_driver_phase_begin(premise: bool)
+        -> TestDriverPhase[&test_driver_phase_ended] !{unsafe} {
+    if (premise == false) {
+        kernel_invariant_stop();
+    }
+    let mut phase: TestDriverPhase[&test_driver_phase_ended] = { 1 };
+    return phase;
+}
+
+// The only caller is kernel_process_boot_handoff.
+fn test_driver_phase_end(phase: sink TestDriverPhase[driver]) {
+    let held: usize = phase.held;
+    atomic_word_store(&test_driver_phase_ended, 1);
+}
