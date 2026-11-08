@@ -108,6 +108,11 @@ orphan_holder_pid=$!
 kill -0 "$(/bin/cat /orphan.pid)" 2>/dev/null && echo orphan-of-zombie-parent-kept || echo orphan-of-zombie-parent-collected
 wait "$orphan_holder_pid"
 /bin/rm /orphan.pid
+# GitHub issue #1470: a fork child that never execs, outliving its reaped
+# parent. Its exit gives the clone back after the parent's root is gone.
+/bin/busybox sh -c '( i=0; while [ $i -lt 3000 ]; do i=$((i+1)); done ) </dev/null >/dev/null 2>&1 & exit 0'
+/bin/sleep 2
+echo clone-outlived-reaped-parent-ok
 # Pin one background child to CPU 0 before the actual BusyBox sleep applet
 # runs in the foreground. The kernel records the applet's nanosleep entry on
 # the peer before applying the peer-safety table. Ash's normal foreground

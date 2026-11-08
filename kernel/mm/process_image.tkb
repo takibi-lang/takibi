@@ -116,8 +116,7 @@ private fn process_image_set_pair_source(slot: borrow ProcessImageSlot[0],
     let mut source: ProcessImageExt2Source = { mount, inode, length };
     process_image_staging[slot.index].pair_source = ProcessImageSourceState::Ext2(source);
 }
-// GitHub issue #448: the source root, the destination root, and the running
-// page count of "the clone in flight" live in the destination's own
+// GitHub issue #448: the destination root and the running page count of "the clone in flight" live in the destination's own
 // ProcessImageRecord, because there is no longer one clone in flight. See
 // ProcessCloneVm* below for what that ceiling cost.
 
@@ -183,7 +182,6 @@ struct ProcessImageRecord {
     // detector is also the same: end-of-boot accounting fails if a page or
     // a pooled record does not come back.
     clone_vm_outstanding: bool;
-    clone_vm_source_root: usize;
     clone_vm_page_count: usize;
     // GitHub issue #1151: the (address, generation) of this root's mmap
     // region bitmap, or 0 while no mmap has taken a page. A reference, not
@@ -397,7 +395,7 @@ private fn process_image_record_value(
         pinned: sink RegionPinned(ProcessImageRecord)[images],
         note_missing: bool) -> ProcessImageRecord !{unsafe} {
     let mut value: ProcessImageRecord = {
-        0, 0, false, 0, 0, 0, false, 0, false, 0, 0, 0, 0
+        0, 0, false, 0, 0, 0, false, 0, false, 0, 0, 0
     };
     match pinned {
         RegionPinned(ProcessImageRecord)::Stale => {
@@ -425,7 +423,6 @@ private fn process_image_record_copy(record: borrow &mut ProcessImageRecord)
     value.exec_image_installed = record.exec_image_installed;
     value.exec_image_page_count = record.exec_image_page_count;
     value.clone_vm_outstanding = record.clone_vm_outstanding;
-    value.clone_vm_source_root = record.clone_vm_source_root;
     value.clone_vm_page_count = record.clone_vm_page_count;
     value.mmap_bitmap = record.mmap_bitmap;
     value.mmap_bitmap_generation = record.mmap_bitmap_generation;
@@ -631,17 +628,6 @@ fn process_image_set_clone_vm_outstanding(root: usize @ identity,
     };
     let record: &mut ProcessImageRecord = region_pin_record(pin);
     record.clone_vm_outstanding = value;
-    process_image_record_unpin(pin);
-}
-
-fn process_image_set_clone_vm_source_root(root: usize @ identity,
-        evidence: borrow ProcessImageRecordExists[identity], value: usize) !{unsafe} {
-    let RegionPinned(ProcessImageRecord)::Pinned(pin) =
-            process_image_record_pin(&process_image_pool, root) else {
-        RegionPinned(ProcessImageRecord)::Stale => { process_image_record_lost(); return; }
-    };
-    let record: &mut ProcessImageRecord = region_pin_record(pin);
-    record.clone_vm_source_root = value;
     process_image_record_unpin(pin);
 }
 
@@ -1143,7 +1129,6 @@ fn process_image_clone_vm_begin(source_space: AddressSpaceRoot,
         ProcessImageRecordReady::Missing => { return ProcessCloneVmResult::OutOfMemory; }
         ProcessImageRecordReady::Ready(ready) => { ready }
     };
-    process_image_set_clone_vm_source_root(dest, evidence, source);
     process_image_set_clone_vm_page_count(dest, evidence, 0);
     let mut clone_page_count: usize = 0;
     address_space_clear_root(dest_space);
@@ -1315,8 +1300,8 @@ fn process_image_cancel_activation(
     address_space_cancel_activation(prepared);
 }
 
-// Give the parent's copy-on-write pages back and put the parent's root
-// into TTBR0 again. `dest_root` is the root the clone was made INTO -- the
+// Give the parent's copy-on-write pages back and move TTBR0 to root 0
+// (#1470: not the parent's root, which nothing holds). `dest_root` is the root the clone was made INTO -- the
 // caller's own, at every one of the three call sites, since a clone is
 // reaped by the process that received it (when it execs, when it exits, or
 // when the rest of the clone failed under it).
@@ -1337,18 +1322,21 @@ fn process_image_clone_vm_reap(dest_space: AddressSpaceRoot) -> ProcessCloneVmRe
     if (process_image_record_read(dest, evidence).clone_vm_outstanding == false) {
         return ProcessCloneVmReapResult::Missing;
     }
-    let source: usize = process_image_record_read(dest, evidence).clone_vm_source_root;
     // The caller remains the logical current process throughout this
-    // non-preemptible EL1 span. Activate the retained source before releasing
-    // mappings from a destination that may still be installed in TTBR0.
-    // GitHub issue #638 stage 9 (#1331 root review): the span is real now. The
+    // non-preemptible EL1 span. Move TTBR0 off the destination before
+    // releasing its mappings, onto permanent root 0 -- never the clone's
+    // source. GitHub issue #1470: nothing holds the source's root while the
+    // child runs (the clone retains its pages, not its tables), so a parent
+    // already exited and reaped left a dead or recycled key here and the
+    // activation fail-stopped; and a live source could be freed on a peer
+    // while installed here until the next activation. Root 0 is never freed.
+    // GitHub issue #638 stage 9 (#1331 root review): the span is real. The
     // caller's record names the destination, so a switch inside would resume
     // it on the destination while its mappings are released; the exit path
     // reaches here with no span of its own (the clone path holds one, which
     // this nests in).
     let span = preempt_span_begin();
-    kernel_process_activate_stable_root(
-        address_space_root_of_key(source));
+    process_image_activate_root(address_space_boot_root());
     process_clone_vm_rollback(dest_space);
     preempt_span_end(span);
     return ProcessCloneVmReapResult::Reaped;

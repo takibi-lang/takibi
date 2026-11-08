@@ -245,6 +245,7 @@ sub: inner
 16
 orphan-of-reaped-parent-collected
 orphan-of-zombie-parent-collected
+clone-outlived-reaped-parent-ok
 / # / # / # smp placement: BusyBox sleep applet ran on a peer without affinity
 / # two-jobs-ok
 repl-ok

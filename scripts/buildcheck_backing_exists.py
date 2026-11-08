@@ -87,7 +87,7 @@ private fn image_exists_control() -> ProcessImageRecordExists[0] {
             ("stack_growth_active", "false"), ("stack_top_page", "0"),
             ("stack_low_page", "0"), ("heap_page_count", "0"),
             ("exec_image_installed", "false"), ("exec_image_page_count", "0"),
-            ("clone_vm_outstanding", "false"), ("clone_vm_source_root", "0"),
+            ("clone_vm_outstanding", "false"),
             ("clone_vm_page_count", "0")]:
         cases.append((f"image {field} without evidence", image,
                       f"\nprivate fn image_exists_control() {{ process_image_set_{field}(0, {value}); }}\n",
