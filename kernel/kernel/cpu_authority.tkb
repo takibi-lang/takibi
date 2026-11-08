@@ -28,6 +28,19 @@
 // CpuHere is minted after the raise, so the CPU it names stays the CPU until
 // the region ends.
 //
+// Stage 9 debt (a) (#638 stage 8 comment: "the raise can still migrate
+// between its TPIDR read and store") is closed by this placement, not by a
+// mask. The leaf is ldur, add, stur on SP's word, and a tick can land between
+// the load and the store:
+// - raising 0 -> 1: the consult reads 0 and may switch. The word stays 0 while
+//   the task is away, after_switch resets it to 0 wherever the task resumes,
+//   and the resumed stur writes 0 + 1. No CpuHere exists yet: cpu_id() is read
+//   after the stur.
+// - raising n -> n + 1 with n > 0, or lowering: the consult reads a nonzero
+//   count and refuses, so the task finishes the store on the same CPU.
+// No other writer reaches the word while its task runs: an interrupt stands
+// on its own stack's word and only reads this one (preempt_count_at).
+//
 // The region helpers are inline: they run three levels deep on every mask and
 // unmask, so as out-of-line calls they cost 21 ns of a lock pair (GitHub issue
 // #1288, measured on RPi5). The count's leaf is one call, as TPIDR_EL1's was.
