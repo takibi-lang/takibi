@@ -651,3 +651,8 @@ entries below that date are history, left as written.
   fields are `AtomicWord`s (cold is 1 or 0), stored under the run lock,
   published by `move_cost_stored` and printed by core 0. One row leaves
   the allowlist.
+- 2026-11-08: `process_test_evidence` (#1475): every `ProcessTestEvidence`
+  field is an `AtomicWord` (the two flags 1 or 0). Counters are
+  fetch_add, the clone release is a compare-and-swap decrement that stops
+  at zero, and the one-time UART marker is claimed by compare-and-swap.
+  One row leaves the allowlist.
