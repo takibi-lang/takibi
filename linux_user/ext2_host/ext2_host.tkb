@@ -552,7 +552,6 @@ fn run_line(mount: Ext2Mount, number: usize, line: []const u8) !{unsafe} {
         }
         _ => { answer = LINUX_EINVAL; }
     }
-    ext2_mutation_give(guard);
     uart_print(number);
     uart_puts(" ");
     put_slice(line);
@@ -579,13 +578,15 @@ fn run_line(mount: Ext2Mount, number: usize, line: []const u8) !{unsafe} {
         // clean, so the script compares the image after the recovery.
         if (ext2_is_fenced()) {
             uart_puts(" fenced recover=");
-            match ext2_recover(mount) {
+            match ext2_recover(guard, mount) {
                 Ext2RecoverResult::Recovered => { uart_puts("ok"); }
                 Ext2RecoverResult::Failed => { uart_puts("failed"); }
             }
         }
         uart_puts("\n");
     }
+    // GitHub issue #1159: the recovery above mutates under the same guard.
+    ext2_mutation_give(guard);
 }
 
 fn app_main() !{unsafe} {

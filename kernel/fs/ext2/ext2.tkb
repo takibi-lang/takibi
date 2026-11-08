@@ -1160,21 +1160,21 @@ private inline fn ext2_regular_file_allocated_sectors_with(slot: borrow Ext2Slot
     }
 }
 
-fn ext2_resize_small_file(mount: Ext2Mount, inode_number: usize,
+fn ext2_resize_small_file(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, inode_number: usize,
                           source: []const u8)
         -> Ext2ResizeResult !{unsafe} {
     let slot: Ext2Slot[0] = ext2_slot_acquire();
-    let result: Ext2ResizeResult = ext2_resize_small_file_with(slot, mount,
+    let result: Ext2ResizeResult = ext2_resize_small_file_with(guard, slot, mount,
             inode_number, source);
     ext2_slot_release(slot);
     return result;
 }
 
-private inline fn ext2_resize_small_file_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_resize_small_file_with(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0],
         mount: Ext2Mount, inode_number: usize,
                           source: []const u8)
         -> Ext2ResizeResult !{unsafe} {
-    return ext2_replace_regular_file_with(slot, mount, inode_number, source,
+    return ext2_replace_regular_file_with(guard, slot, mount, inode_number, source,
                                      EXT2_MAX_WRITE_ALLOCATIONS);
 }
 
@@ -1415,18 +1415,17 @@ fn ext2_block_bitmap_snapshot(mount: Ext2Mount,
 //   remembered: nothing here scans the inode table for unreferenced blocks.
 // - THE FENCE IS ONE KERNEL-WIDE WORD, because the kernel mounts one
 //   filesystem. It is read and written by the ext2 mutators, which callers
-//   serialize under ext2_mutation_lock (the boot fixture runs alone on core 0).
+//   serialize under ext2_mutation_lock. The pending blocks are
+//   Ext2MutationState's, reached only with the guard (#1159).
 private let mut ext2_fenced: AtomicWord;
 const EXT2_FENCE_PENDING_MAX: usize =
     EXT2_MAX_WRITE_ALLOCATIONS + EXT2_MAX_SINGLE_FILE_BLOCKS + 2;
-private let mut ext2_fence_pending: [usize; EXT2_FENCE_PENDING_MAX];
-private let mut ext2_fence_pending_count: usize;
 
-private fn ext2_fence_pending_add(block: usize) {
-    let count: usize = ext2_fence_pending_count;
+private fn ext2_fence_pending_add(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], block: usize) {
+    let count: usize = guarded_ref(guard, ext2_mutation_state.fence_count);
     if (count < EXT2_FENCE_PENDING_MAX) {
-        ext2_fence_pending[count] = block;
-        ext2_fence_pending_count = count + 1;
+        guarded_ref(guard, ext2_mutation_state.fence)[count] = block;
+        guarded_ref(guard, ext2_mutation_state.fence_count) = count + 1;
     }
 }
 
@@ -1676,38 +1675,38 @@ private fn ext2_bitmap_fill_restore_with(slot: borrow Ext2Slot[0],
 
 // Give back one claim that will never be handed out. Fences the mount when
 // the bit or the counters cannot be made right.
-private fn ext2_settle_claim(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private fn ext2_settle_claim(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount,
         inode_bitmap: bool,
                              index: usize) !{unsafe} {
     if (ext2_bitmap_force_clear(slot, mount, inode_bitmap, index) == false ||
         ext2_recount(slot, mount) == false) {
         atomic_word_store(&ext2_fenced, 1);
-        if (inode_bitmap == false) { ext2_fence_pending_add(index + 1); }
+        if (inode_bitmap == false) { ext2_fence_pending_add(guard, index + 1); }
     }
 }
 
 // Try to make a fenced mount writable again: the counters are rewritten from
 // the bitmaps and read back as agreeing. Blocks leaked by the failure that
 // fenced it stay allocated (see the limitations above).
-fn ext2_recover(mount: Ext2Mount) -> Ext2RecoverResult !{unsafe} {
+fn ext2_recover(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount) -> Ext2RecoverResult !{unsafe} {
     let slot: Ext2Slot[0] = ext2_slot_acquire();
-    let result: Ext2RecoverResult = ext2_recover_with(slot, mount);
+    let result: Ext2RecoverResult = ext2_recover_with(guard, slot, mount);
     ext2_slot_release(slot);
     return result;
 }
 
-private inline fn ext2_recover_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_recover_with(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0],
         mount: Ext2Mount) -> Ext2RecoverResult !{unsafe} {
     // GitHub issue #1088: a release whose rollback failed finishes it first.
     let owed: usize = atomic_word_load(&ext2_undo_owed);
     if (owed > 0) {
-        let remaining: usize = ext2_undo_replay(slot, mount, owed);
+        let remaining: usize = ext2_undo_replay(guard, slot, mount, owed);
         atomic_word_store(&ext2_undo_owed, remaining);
         if (remaining != 0) { return Ext2RecoverResult::Failed; }
     }
     for pending: usize in 0..<EXT2_FENCE_PENDING_MAX {
-        if (pending < ext2_fence_pending_count) {
-            let block: usize = ext2_fence_pending[pending];
+        if (pending < guarded_ref(guard, ext2_mutation_state.fence_count)) {
+            let block: usize = guarded_ref(guard, ext2_mutation_state.fence)[pending];
             if (block == 0 || block > mount.filesystem_blocks - 1 ||
                 ext2_bitmap_force_clear(slot, mount, false,
                         block - 1) == false) {
@@ -1721,7 +1720,7 @@ private inline fn ext2_recover_with(slot: borrow Ext2Slot[0],
         Ext2FreeCountsResult::Invalid => { return Ext2RecoverResult::Failed; }
         Ext2FreeCountsResult::Counts(counts) => { }
     }
-    ext2_fence_pending_count = 0;
+    guarded_ref(guard, ext2_mutation_state.fence_count) = 0;
     atomic_word_store(&ext2_fenced, 0);
     return Ext2RecoverResult::Recovered;
 }
@@ -1739,8 +1738,8 @@ private inline fn ext2_recover_with(slot: borrow Ext2Slot[0],
 //
 // Current limitations (2026-10-25):
 // - ONE LOG, KERNEL-WIDE, like ext2_fenced: its users are mutators, which
-//   callers serialize under ext2_mutation_lock (the boot fixture runs alone
-//   on core 0).
+//   hold ext2_mutation_lock's guard; the compiler checks it at every row
+//   access (guarded_ref, #1159).
 // - A FAILED ROLLBACK FENCES AND KEEPS THE LOG. The rows not yet put back
 //   stay in it, ext2_undo_save refuses on a fenced mount so nothing
 //   overwrites them, and ext2_recover finishes the rollback before it
@@ -1759,7 +1758,17 @@ struct Ext2UndoRow {
     bytes: [u8; EXT2_UNDO_BYTES];
 }
 
-private let mut ext2_undo_rows: [Ext2UndoRow; EXT2_UNDO_ROWS];
+// GitHub issue #1159 (2026-11-08 guarded_ref decision): the undo log and the
+// fence's pending blocks are reached only as guarded_ref(guard, ...) with the
+// mutation guard, in place, so the compiler checks that every access holds
+// ext2_mutation_lock. ext2_fenced and ext2_undo_owed stay atomic words: the
+// fence is also read by readers that do not hold the lock.
+struct Ext2MutationState {
+    private undo: [Ext2UndoRow; EXT2_UNDO_ROWS] guarded_by(ext2_mutation_lock);
+    private fence: [usize; EXT2_FENCE_PENDING_MAX] guarded_by(ext2_mutation_lock);
+    private fence_count: usize guarded_by(ext2_mutation_lock);
+}
+private let mut ext2_mutation_state: Ext2MutationState;
 // Rows a fenced mount still owes the disk; ext2_recover puts them back.
 private let mut ext2_undo_owed: AtomicWord;
 
@@ -1778,7 +1787,7 @@ private fn ext2_undo_begin() -> Ext2Undo[0] {
 // `in_file`) as they are now, before the caller changes them for a write of
 // `block` through ext2_undo_write. False when the log is full, the range
 // does not fit a row, or the mount is fenced.
-private fn ext2_undo_save(slot: borrow Ext2Slot[0],
+private fn ext2_undo_save(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0],
         undo: borrow mut Ext2Undo[0], block: usize, in_file: bool,
         offset: usize, length: usize) -> bool {
     if (atomic_word_load(&ext2_fenced) != 0) { return false; }
@@ -1789,12 +1798,12 @@ private fn ext2_undo_save(slot: borrow Ext2Slot[0],
     }
     let mut bytes: Ext2Bytes = ext2_metadata();
     if (in_file) { bytes = ext2_file(); }
-    ext2_undo_rows[row].block = block;
-    ext2_undo_rows[row].offset = offset;
-    ext2_undo_rows[row].length = length;
+    guarded_ref(guard, ext2_mutation_state.undo)[row].block = block;
+    guarded_ref(guard, ext2_mutation_state.undo)[row].offset = offset;
+    guarded_ref(guard, ext2_mutation_state.undo)[row].length = length;
     for i: usize in 0..<EXT2_UNDO_BYTES {
         if (i < length) {
-            ext2_undo_rows[row].bytes[i] = ext2_byte(slot, bytes, offset + i);
+            guarded_ref(guard, ext2_mutation_state.undo)[row].bytes[i] = ext2_byte(slot, bytes, offset + i);
         }
     }
     return true;
@@ -1803,12 +1812,12 @@ private fn ext2_undo_save(slot: borrow Ext2Slot[0],
 // Write `block` from the buffer whose range ext2_undo_save just kept. The
 // row joins the log only when the write landed: a rejected write left the
 // block as it was, so there is nothing of it to put back.
-private fn ext2_undo_write(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private fn ext2_undo_write(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount,
         undo: borrow mut Ext2Undo[0], block: usize, in_file: bool)
         -> bool !{unsafe} {
     let row: usize = undo.count;
     if (row >= EXT2_UNDO_ROWS) { return false; }
-    if (ext2_undo_rows[row].block != block) { return false; }
+    if (guarded_ref(guard, ext2_mutation_state.undo)[row].block != block) { return false; }
     let mut written: bool = false;
     if (in_file) {
         match ext2_block_write(mount, block,
@@ -1829,12 +1838,12 @@ private fn ext2_undo_write(slot: borrow Ext2Slot[0], mount: Ext2Mount,
 
 // Put row `row` back with the raw block_write, a repair a fenced mount still
 // allows. Uses the metadata buffer.
-private fn ext2_undo_put_back(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private fn ext2_undo_put_back(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount,
         row: usize) -> bool !{unsafe} {
     if (row >= EXT2_UNDO_ROWS) { return false; }
-    let block: usize = ext2_undo_rows[row].block;
-    let offset: usize = ext2_undo_rows[row].offset;
-    let length: usize = ext2_undo_rows[row].length;
+    let block: usize = guarded_ref(guard, ext2_mutation_state.undo)[row].block;
+    let offset: usize = guarded_ref(guard, ext2_mutation_state.undo)[row].offset;
+    let length: usize = guarded_ref(guard, ext2_mutation_state.undo)[row].length;
     if (block == 0 || block >= mount.filesystem_blocks ||
         length > EXT2_UNDO_BYTES || offset > KERNEL_BLOCK_SIZE - length) {
         return false;
@@ -1847,7 +1856,7 @@ private fn ext2_undo_put_back(slot: borrow Ext2Slot[0], mount: Ext2Mount,
     for i: usize in 0..<EXT2_UNDO_BYTES {
         if (i < length) {
             ext2_set_byte(slot, ext2_metadata(), offset + i,
-                          ext2_undo_rows[row].bytes[i]);
+                          guarded_ref(guard, ext2_mutation_state.undo)[row].bytes[i]);
         }
     }
     match block_write(mount.device, block,
@@ -1861,14 +1870,14 @@ private fn ext2_undo_put_back(slot: borrow Ext2Slot[0], mount: Ext2Mount,
 // still owed: zero when all landed, otherwise the rows up to and including
 // the first that did not. Putting a row back twice writes the same bytes,
 // so replaying rows already put back is harmless.
-private fn ext2_undo_replay(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private fn ext2_undo_replay(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount,
         rows: usize) -> usize !{unsafe} {
     let mut remaining: usize = rows;
     for step: usize in 0..<EXT2_UNDO_ROWS {
         let current: usize = remaining;
         if (current > 0 && current <= EXT2_UNDO_ROWS) {
             let row: usize = current - 1;
-            if (ext2_undo_put_back(slot, mount, row) == false) {
+            if (ext2_undo_put_back(guard, slot, mount, row) == false) {
                 return current;
             }
             remaining = row;
@@ -1881,9 +1890,9 @@ private fn ext2_undo_commit(undo: sink Ext2Undo[0]) {}
 
 // The operation failed: put its rows back. False when a row could not be,
 // in which case the mount is fenced and owes the rest (see above).
-private fn ext2_undo_abort(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private fn ext2_undo_abort(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount,
         undo: sink Ext2Undo[0]) -> bool !{unsafe} {
-    let owed: usize = ext2_undo_replay(slot, mount, undo.count);
+    let owed: usize = ext2_undo_replay(guard, slot, mount, undo.count);
     if (owed == 0) { return true; }
     atomic_word_store(&ext2_undo_owed, owed);
     atomic_word_store(&ext2_fenced, 1);
@@ -1895,9 +1904,9 @@ private fn ext2_undo_abort(slot: borrow Ext2Slot[0], mount: Ext2Mount,
 // the operation happened (the mount is fenced too when the recount failed).
 must_use variant Ext2ReleaseResult { RolledBack; Fenced; Committed; }
 
-private fn ext2_release_abort(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private fn ext2_release_abort(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount,
         undo: sink Ext2Undo[0]) -> Ext2ReleaseResult !{unsafe} {
-    if (ext2_undo_abort(slot, mount, undo)) {
+    if (ext2_undo_abort(guard, slot, mount, undo)) {
         return Ext2ReleaseResult::RolledBack;
     }
     return Ext2ReleaseResult::Fenced;
@@ -2054,7 +2063,7 @@ private fn ext2_walk_map(slot: borrow Ext2Slot[0], mount: Ext2Mount,
 // block bitmap, then the counters are recounted from the bitmaps and the
 // freed blocks scrubbed. A failed read, a block whose bit is already clear,
 // or a rejected bitmap write rolls the log back instead.
-private fn ext2_release_commit(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private fn ext2_release_commit(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount,
         undo: sink Ext2Undo[0], map: Ext2BlockMap)
         -> Ext2ReleaseResult !{unsafe} {
     let mut cleared: bool = false;
@@ -2071,7 +2080,7 @@ private fn ext2_release_commit(slot: borrow Ext2Slot[0], mount: Ext2Mount,
             }
         }
     }
-    if (cleared == false) { return ext2_release_abort(slot, mount, undo); }
+    if (cleared == false) { return ext2_release_abort(guard, slot, mount, undo); }
     ext2_undo_commit(undo);
     if (ext2_recount(slot, mount) == false) { atomic_word_store(&ext2_fenced, 1); }
     if (ext2_walk_map(slot, mount, map, Ext2WalkMode::Scrub)) { }
@@ -2091,25 +2100,25 @@ private fn ext2_release_check(slot: borrow Ext2Slot[0], mount: Ext2Mount,
 }
 
 // Logged: the whole inode record zeroed, as ext2_release_inode does.
-private fn ext2_inode_clear_logged(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private fn ext2_inode_clear_logged(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount,
         undo: borrow mut Ext2Undo[0], file: Ext2Inode) -> bool !{unsafe} {
     match block_read(mount.device, file.table_block,
                      ext2_scratch[slot.index].metadata as []u8) {
         BlockIoResult::Invalid => { return false; }
         BlockIoResult::Ok => { }
     }
-    if (ext2_undo_save(slot, undo, file.table_block, false, file.table_offset,
+    if (ext2_undo_save(guard, slot, undo, file.table_block, false, file.table_offset,
                        128) == false) {
         return false;
     }
     let mut inode_bytes: Ext2Bytes =
         ext2_at(ext2_metadata(), file.table_offset);
     for i: usize in 0..<128 { ext2_set_byte(slot, inode_bytes, i, 0); }
-    return ext2_undo_write(slot, mount, undo, file.table_block, false);
+    return ext2_undo_write(guard, slot, mount, undo, file.table_block, false);
 }
 
 // Logged: O_TRUNC's inode -- size 0, no sectors, no block pointers.
-private fn ext2_inode_truncate_logged(slot: borrow Ext2Slot[0],
+private fn ext2_inode_truncate_logged(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0],
         mount: Ext2Mount, undo: borrow mut Ext2Undo[0], file: Ext2Inode)
         -> bool !{unsafe} {
     match block_read(mount.device, file.table_block,
@@ -2117,7 +2126,7 @@ private fn ext2_inode_truncate_logged(slot: borrow Ext2Slot[0],
         BlockIoResult::Invalid => { return false; }
         BlockIoResult::Ok => { }
     }
-    if (ext2_undo_save(slot, undo, file.table_block, false, file.table_offset,
+    if (ext2_undo_save(guard, slot, undo, file.table_block, false, file.table_offset,
                        128) == false) {
         return false;
     }
@@ -2133,11 +2142,11 @@ private fn ext2_inode_truncate_logged(slot: borrow Ext2Slot[0],
             return false;
         }
     }
-    return ext2_undo_write(slot, mount, undo, file.table_block, false);
+    return ext2_undo_write(guard, slot, mount, undo, file.table_block, false);
 }
 
 // Logged: an inode's link count.
-private fn ext2_inode_links_logged(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private fn ext2_inode_links_logged(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount,
         undo: borrow mut Ext2Undo[0], file: Ext2Inode, links: usize)
         -> bool !{unsafe} {
     if (links > 0xFFFF) { return false; }
@@ -2147,18 +2156,18 @@ private fn ext2_inode_links_logged(slot: borrow Ext2Slot[0], mount: Ext2Mount,
         BlockIoResult::Ok => { }
     }
     if (file.table_offset > KERNEL_BLOCK_SIZE - 28 ||
-        ext2_undo_save(slot, undo, file.table_block, false,
+        ext2_undo_save(guard, slot, undo, file.table_block, false,
                        file.table_offset + 26, 2) == false ||
         ext2_put_u16(slot, ext2_at(ext2_metadata(), file.table_offset), 26,
                      links as u16) == false) {
         return false;
     }
-    return ext2_undo_write(slot, mount, undo, file.table_block, false);
+    return ext2_undo_write(guard, slot, mount, undo, file.table_block, false);
 }
 
 // Logged: an inode's bitmap bit set (a create, GitHub issue #1120) or
 // cleared. The counters move at the recount.
-private fn ext2_inode_bitmap_logged(slot: borrow Ext2Slot[0],
+private fn ext2_inode_bitmap_logged(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0],
         mount: Ext2Mount, undo: borrow mut Ext2Undo[0], inode_number: usize,
         set: bool) -> bool !{unsafe} {
     if (inode_number < 2 || inode_number > mount.inode_count) { return false; }
@@ -2174,16 +2183,16 @@ private fn ext2_inode_bitmap_logged(slot: borrow Ext2Slot[0],
     let mut next: u8 = value & (mask ^ 0xFF);
     if (set) { next = value | mask; }
     if (((value & mask) != 0) == set ||
-        ext2_undo_save(slot, undo, mount.inode_bitmap_block, false,
+        ext2_undo_save(guard, slot, undo, mount.inode_bitmap_block, false,
                        byte_index, 1) == false ||
         ext2_set_byte(slot, ext2_metadata(), byte_index, next) == false) {
         return false;
     }
-    return ext2_undo_write(slot, mount, undo, mount.inode_bitmap_block, false);
+    return ext2_undo_write(guard, slot, mount, undo, mount.inode_bitmap_block, false);
 }
 
 // Logged: the group's used-directories count, up (mkdir) or down by one.
-private fn ext2_used_directories_logged(slot: borrow Ext2Slot[0],
+private fn ext2_used_directories_logged(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0],
         mount: Ext2Mount, undo: borrow mut Ext2Undo[0], increment: bool)
         -> bool !{unsafe} {
     match block_read(mount.device, 2, ext2_scratch[slot.index].file as []u8) {
@@ -2196,37 +2205,37 @@ private fn ext2_used_directories_logged(slot: borrow Ext2Slot[0],
     }
     let mut next: usize = used - 1;
     if (increment) { next = used + 1; }
-    if (ext2_undo_save(slot, undo, 2, true, 16, 2) == false ||
+    if (ext2_undo_save(guard, slot, undo, 2, true, 16, 2) == false ||
         ext2_put_u16(slot, ext2_file(), 16, next as u16) == false) {
         return false;
     }
-    return ext2_undo_write(slot, mount, undo, 2, true);
+    return ext2_undo_write(guard, slot, mount, undo, 2, true);
 }
 
 // Free an inode none of whose names is left once the log commits: its
 // record is zeroed and its bit cleared, logged, and its blocks are freed by
 // the commit. The caller has logged the removal of its last name.
-private fn ext2_release_file_logged(slot: borrow Ext2Slot[0],
+private fn ext2_release_file_logged(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0],
         mount: Ext2Mount, undo: sink Ext2Undo[0], file: Ext2Inode,
         inode_number: usize) -> Ext2ReleaseResult !{unsafe} {
     let mut log: Ext2Undo[0] = undo;
     match ext2_block_map_read(slot, mount, file) {
         Ext2BlockMapResult::Invalid => {
-            return ext2_release_abort(slot, mount, log);
+            return ext2_release_abort(guard, slot, mount, log);
         }
         Ext2BlockMapResult::Map(map) => {
             if (ext2_release_check(slot, mount, map) == false ||
-                ext2_inode_clear_logged(slot, mount, log, file) == false ||
-                ext2_inode_bitmap_logged(slot, mount, log,
+                ext2_inode_clear_logged(guard, slot, mount, log, file) == false ||
+                ext2_inode_bitmap_logged(guard, slot, mount, log,
                         inode_number, false) == false) {
-                return ext2_release_abort(slot, mount, log);
+                return ext2_release_abort(guard, slot, mount, log);
             }
-            return ext2_release_commit(slot, mount, log, map);
+            return ext2_release_commit(guard, slot, mount, log, map);
         }
     }
 }
 
-fn ext2_bitmap_claim(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+fn ext2_bitmap_claim(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount,
         inode_bitmap: bool,
                      first_index: usize, item_count: usize)
         -> Ext2BitmapClaimResult {
@@ -2261,7 +2270,7 @@ fn ext2_bitmap_claim(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                 Ext2CounterResult::Invalid => {
                     // The bit is set and the counters are in an unknown
                     // half-written state: give the claim back.
-                    ext2_settle_claim(slot, mount, inode_bitmap, index);
+                    ext2_settle_claim(guard, slot, mount, inode_bitmap, index);
                     return Ext2BitmapClaimResult::Invalid;
                 }
                 Ext2CounterResult::Updated => {
@@ -2309,16 +2318,16 @@ fn ext2_bitmap_release(slot: borrow Ext2Slot[0], mount: Ext2Mount,
     }
 }
 
-fn ext2_bitmap_roundtrip_check(mount: Ext2Mount)
+fn ext2_bitmap_roundtrip_check(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount)
         -> Ext2BitmapProbeResult {
     let slot: Ext2Slot[0] = ext2_slot_acquire();
-    let result: Ext2BitmapProbeResult = ext2_bitmap_roundtrip_check_with(slot,
+    let result: Ext2BitmapProbeResult = ext2_bitmap_roundtrip_check_with(guard, slot,
             mount);
     ext2_slot_release(slot);
     return result;
 }
 
-private inline fn ext2_bitmap_roundtrip_check_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_bitmap_roundtrip_check_with(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0],
         mount: Ext2Mount)
         -> Ext2BitmapProbeResult {
     let mut before_blocks: usize = 0;
@@ -2334,7 +2343,7 @@ private inline fn ext2_bitmap_roundtrip_check_with(slot: borrow Ext2Slot[0],
         }
     }
     let mut block_index: usize = 0;
-    match ext2_bitmap_claim(slot, 
+    match ext2_bitmap_claim(guard, slot, 
             mount, false, mount.inode_table_block + 16,
             mount.filesystem_blocks - 1) {
         Ext2BitmapClaimResult::Full => {
@@ -2346,7 +2355,7 @@ private inline fn ext2_bitmap_roundtrip_check_with(slot: borrow Ext2Slot[0],
         Ext2BitmapClaimResult::Claimed(index) => { block_index = index; }
     }
     let mut inode_index: usize = 0;
-    match ext2_bitmap_claim(slot, mount, true, 11, mount.inode_count) {
+    match ext2_bitmap_claim(guard, slot, mount, true, 11, mount.inode_count) {
         Ext2BitmapClaimResult::Full => {
             match ext2_bitmap_release(slot, mount, false, block_index) {
                 Ext2BitmapReleaseResult::Invalid => { }
@@ -2419,7 +2428,7 @@ fn ext2_inode_owner_new(bitmap_index: usize,
     return owner;
 }
 
-fn ext2_allocate_block(slot: borrow Ext2Slot[0],
+fn ext2_allocate_block(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0],
         mount: Ext2Mount) -> Ext2BlockAllocResult {
     let inode_table_bytes: usize = mount.inode_count * mount.inode_size;
     let inode_table_blocks: usize =
@@ -2430,7 +2439,7 @@ fn ext2_allocate_block(slot: borrow Ext2Slot[0],
     }
     // Bitmap index zero represents filesystem block one for a 1 KiB ext2
     // volume. This mount contract already requires first_data_block == 1.
-    match ext2_bitmap_claim(slot, 
+    match ext2_bitmap_claim(guard, slot, 
             mount, false, first_block - 1, mount.filesystem_blocks - 1) {
         Ext2BitmapClaimResult::Full => { return Ext2BlockAllocResult::NoSpace; }
         Ext2BitmapClaimResult::Invalid => {
@@ -2444,7 +2453,7 @@ fn ext2_allocate_block(slot: borrow Ext2Slot[0],
             match ext2_block_write(mount, block_number,
                               ext2_scratch[slot.index].file as []u8) {
                 BlockIoResult::Invalid => {
-                    ext2_settle_claim(slot, mount, false, bitmap_index);
+                    ext2_settle_claim(guard, slot, mount, false, bitmap_index);
                     return Ext2BlockAllocResult::Failed;
                 }
                 BlockIoResult::Ok => {
@@ -2457,11 +2466,11 @@ fn ext2_allocate_block(slot: borrow Ext2Slot[0],
     }
 }
 
-fn ext2_allocate_inode(slot: borrow Ext2Slot[0],
+fn ext2_allocate_inode(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0],
         mount: Ext2Mount) -> Ext2InodeAllocResult {
     // Inodes 1..10 are ext2 reserved in revision 1. Bitmap index 10 is
     // therefore the first allocatable inode (inode number 11).
-    match ext2_bitmap_claim(slot, mount, true, 10, mount.inode_count) {
+    match ext2_bitmap_claim(guard, slot, mount, true, 10, mount.inode_count) {
         Ext2BitmapClaimResult::Full => {
             return Ext2InodeAllocResult::NoSpace;
         }
@@ -2476,13 +2485,13 @@ fn ext2_allocate_inode(slot: borrow Ext2Slot[0],
             let table_offset: usize = byte_offset % KERNEL_BLOCK_SIZE;
             if (table_block >= mount.filesystem_blocks ||
                 table_offset > KERNEL_BLOCK_SIZE - 128) {
-                ext2_settle_claim(slot, mount, true, bitmap_index);
+                ext2_settle_claim(guard, slot, mount, true, bitmap_index);
                 return Ext2InodeAllocResult::Failed;
             }
             match block_read(mount.device, table_block,
                              ext2_scratch[slot.index].metadata as []u8) {
                 BlockIoResult::Invalid => {
-                    ext2_settle_claim(slot, mount, true, bitmap_index);
+                    ext2_settle_claim(guard, slot, mount, true, bitmap_index);
                     return Ext2InodeAllocResult::Failed;
                 }
                 BlockIoResult::Ok => { }
@@ -2494,7 +2503,7 @@ fn ext2_allocate_inode(slot: borrow Ext2Slot[0],
             match ext2_block_write(mount, table_block,
                               ext2_scratch[slot.index].metadata as []u8) {
                 BlockIoResult::Invalid => {
-                    ext2_settle_claim(slot, mount, true, bitmap_index);
+                    ext2_settle_claim(guard, slot, mount, true, bitmap_index);
                     return Ext2InodeAllocResult::Failed;
                 }
                 BlockIoResult::Ok => {
@@ -2575,7 +2584,7 @@ private fn ext2_write_allocations_block(slot: borrow Ext2Slot[0],
 // recount both counters from the bitmaps. True only when every clear and the
 // recount completed. A failed scrub is not counted: the block is already free,
 // and the scrub only keeps the staged bytes from a later owner.
-private fn ext2_write_allocations_rollback(slot: borrow Ext2Slot[0],
+private fn ext2_write_allocations_rollback(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0],
         mount: Ext2Mount, allocations: sink Ext2WriteAllocations[0])
         -> Ext2WriteFinishResult !{unsafe} {
     let mut settled: bool = true;
@@ -2608,17 +2617,17 @@ private fn ext2_write_allocations_rollback(slot: borrow Ext2Slot[0],
             let block: usize = ext2_write_allocations_block(slot, allocations,
                     index);
             if (block != 0 && block < mount.filesystem_blocks) {
-                ext2_fence_pending_add(block);
+                ext2_fence_pending_add(guard, block);
             }
         }
     }
     return Ext2WriteFinishResult::Invalid;
 }
 
-private fn ext2_write_abort(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private fn ext2_write_abort(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount,
                             allocations: sink Ext2WriteAllocations[0])
         -> Ext2ResizeResult !{unsafe} {
-    match ext2_write_allocations_rollback(slot, mount, allocations) {
+    match ext2_write_allocations_rollback(guard, slot, mount, allocations) {
         Ext2WriteFinishResult::Invalid => { atomic_word_store(&ext2_fenced, 1); }
         Ext2WriteFinishResult::Finished => { }
     }
@@ -2627,10 +2636,10 @@ private fn ext2_write_abort(slot: borrow Ext2Slot[0], mount: Ext2Mount,
 }
 
 // Exhaustion keeps its reason only after rollback has proved consistency.
-private fn ext2_write_no_space_abort(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private fn ext2_write_no_space_abort(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount,
                                     allocations: sink Ext2WriteAllocations[0])
         -> Ext2ResizeResult !{unsafe} {
-    match ext2_write_abort(slot, mount, allocations) {
+    match ext2_write_abort(guard, slot, mount, allocations) {
         Ext2ResizeResult::Invalid => { return Ext2ResizeResult::NoSpace; }
         Ext2ResizeResult::NoSpace => { return Ext2ResizeResult::NoSpace; }
         Ext2ResizeResult::Fenced => { return Ext2ResizeResult::Fenced; }
@@ -2644,40 +2653,40 @@ private fn ext2_write_allocations_published(
 // Replace a regular file through one indirect level. Every new block is
 // filled before the inode names any of them. A failed claim or data write
 // rolls back the entire new set and leaves the old inode/data untouched.
-fn ext2_replace_regular_file(mount: Ext2Mount, inode_number: usize,
+fn ext2_replace_regular_file(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, inode_number: usize,
                              source: []const u8, allocation_budget: usize)
         -> Ext2ResizeResult !{unsafe} {
     let slot: Ext2Slot[0] = ext2_slot_acquire();
-    let result: Ext2ResizeResult = ext2_replace_regular_file_with(slot, mount,
+    let result: Ext2ResizeResult = ext2_replace_regular_file_with(guard, slot, mount,
             inode_number, source, allocation_budget);
     ext2_slot_release(slot);
     return result;
 }
 
-private fn ext2_replace_regular_file_with(slot: borrow Ext2Slot[0],
+private fn ext2_replace_regular_file_with(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0],
         mount: Ext2Mount, inode_number: usize,
                              source: []const u8, allocation_budget: usize)
         -> Ext2ResizeResult !{unsafe} {
-    return ext2_update_regular_file(slot, mount, inode_number, 0, source,
+    return ext2_update_regular_file(guard, slot, mount, inode_number, 0, source,
                                     false, allocation_budget);
 }
 
-fn ext2_write_regular_file_range(mount: Ext2Mount, inode_number: usize,
+fn ext2_write_regular_file_range(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, inode_number: usize,
                                  offset: usize, source: []const u8)
         -> Ext2ResizeResult !{unsafe} {
     let slot: Ext2Slot[0] = ext2_slot_acquire();
-    let result: Ext2ResizeResult = ext2_write_regular_file_range_with(slot,
+    let result: Ext2ResizeResult = ext2_write_regular_file_range_with(guard, slot,
             mount, inode_number, offset, source);
     ext2_slot_release(slot);
     return result;
 }
 
-private inline fn ext2_write_regular_file_range_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_write_regular_file_range_with(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0],
         mount: Ext2Mount, inode_number: usize,
                                  offset: usize, source: []const u8)
         -> Ext2ResizeResult !{unsafe} {
     if (source.len == 0) { return Ext2ResizeResult::Invalid; }
-    return ext2_update_regular_file(slot, mount, inode_number, offset, source,
+    return ext2_update_regular_file(guard, slot, mount, inode_number, offset, source,
                                     true, EXT2_MAX_WRITE_ALLOCATIONS);
 }
 
@@ -2740,7 +2749,7 @@ private fn ext2_named_blocks(old_blocks: borrow [usize; EXT2_MAX_SINGLE_FILE_BLO
     return named;
 }
 
-private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private fn ext2_update_regular_file(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount,
         inode_number: usize,
                                     offset: usize, source: []const u8,
                                     preserve_existing: bool,
@@ -2828,15 +2837,15 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                     ext2_block_replaced(index, offset, source.len, inode.size,
                             old_count, new_size, old_blocks[index], preserve_existing)) {
                     if (allocations.count >= allocation_budget) {
-                        return ext2_write_abort(slot, mount, allocations);
+                        return ext2_write_abort(guard, slot, mount, allocations);
                     }
-                    match ext2_allocate_block(slot, mount) {
+                    match ext2_allocate_block(guard, slot, mount) {
                         Ext2BlockAllocResult::NoSpace => {
-                            return ext2_write_no_space_abort(slot, mount,
+                            return ext2_write_no_space_abort(guard, slot, mount,
                                     allocations);
                         }
                         Ext2BlockAllocResult::Failed => {
-                            return ext2_write_abort(slot, mount, allocations);
+                            return ext2_write_abort(guard, slot, mount, allocations);
                         }
                         Ext2BlockAllocResult::Allocated(owner) => {
                             let block: usize = ext2_block_number(owner);
@@ -2845,7 +2854,7 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                                     Ext2OwnerReleaseResult::Invalid => { }
                                     Ext2OwnerReleaseResult::Released => { }
                                 }
-                                return ext2_write_abort(slot, mount,
+                                return ext2_write_abort(guard, slot, mount,
                                         allocations);
                             }
                             // Recorded before anything else can fail, so the
@@ -2853,7 +2862,7 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                             match ext2_write_allocations_record(slot, 
                                     mount, allocations, owner) {
                                 Ext2WriteRecordResult::Full(restored) => {
-                                    return ext2_write_abort(slot, mount,
+                                    return ext2_write_abort(guard, slot, mount,
                                             restored);
                                 }
                                 Ext2WriteRecordResult::Recorded(updated) => {
@@ -2865,7 +2874,7 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                                         mount.device, old_blocks[index],
                                         ext2_scratch[slot.index].file as []u8) {
                                     BlockIoResult::Invalid => {
-                                        return ext2_write_abort(slot, mount,
+                                        return ext2_write_abort(guard, slot, mount,
                                                 allocations);
                                     }
                                     BlockIoResult::Ok => { }
@@ -2893,7 +2902,7 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                             match ext2_block_write(mount, block,
                                               ext2_scratch[slot.index].file as []u8) {
                                 BlockIoResult::Invalid => {
-                                    return ext2_write_abort(slot, mount,
+                                    return ext2_write_abort(guard, slot, mount,
                                             allocations);
                                 }
                                 BlockIoResult::Ok => { }
@@ -2907,15 +2916,15 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                     EXT2_MAX_DIRECT_BLOCKS, new_count, offset, source.len,
                     inode.size, old_count, new_size, preserve_existing) != 0) {
                 if (allocations.count >= allocation_budget) {
-                    return ext2_write_abort(slot, mount, allocations);
+                    return ext2_write_abort(guard, slot, mount, allocations);
                 }
-                match ext2_allocate_block(slot, mount) {
+                match ext2_allocate_block(guard, slot, mount) {
                     Ext2BlockAllocResult::NoSpace => {
-                        return ext2_write_no_space_abort(slot, mount,
+                        return ext2_write_no_space_abort(guard, slot, mount,
                                 allocations);
                     }
                     Ext2BlockAllocResult::Failed => {
-                        return ext2_write_abort(slot, mount, allocations);
+                        return ext2_write_abort(guard, slot, mount, allocations);
                     }
                     Ext2BlockAllocResult::Allocated(owner) => {
                         new_indirect = ext2_block_number(owner);
@@ -2925,12 +2934,12 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                                 Ext2OwnerReleaseResult::Invalid => { }
                                 Ext2OwnerReleaseResult::Released => { }
                             }
-                            return ext2_write_abort(slot, mount, allocations);
+                            return ext2_write_abort(guard, slot, mount, allocations);
                         }
                         match ext2_write_allocations_record(slot, 
                                 mount, allocations, owner) {
                             Ext2WriteRecordResult::Full(restored) => {
-                                return ext2_write_abort(slot, mount, restored);
+                                return ext2_write_abort(guard, slot, mount, restored);
                             }
                             Ext2WriteRecordResult::Recorded(updated) => {
                                 allocations = updated;
@@ -2966,14 +2975,14 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                             ext2_put_u32(slot, ext2_file(),
                                 single_index * 4,
                                 block as u32) == false) {
-                            return ext2_write_abort(slot, mount, allocations);
+                            return ext2_write_abort(guard, slot, mount, allocations);
                         }
                     }
                 }
                 match ext2_block_write(mount, new_indirect,
                                   ext2_scratch[slot.index].file as []u8) {
                     BlockIoResult::Invalid => {
-                        return ext2_write_abort(slot, mount, allocations);
+                        return ext2_write_abort(guard, slot, mount, allocations);
                     }
                     BlockIoResult::Ok => { }
                 }
@@ -2981,7 +2990,7 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
             match block_read(mount.device, inode.table_block,
                              ext2_scratch[slot.index].metadata as []u8) {
                 BlockIoResult::Invalid => {
-                    return ext2_write_abort(slot, mount, allocations);
+                    return ext2_write_abort(guard, slot, mount, allocations);
                 }
                 BlockIoResult::Ok => { }
             }
@@ -2990,7 +2999,7 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
             if (ext2_u32(slot, inode_bytes, 4) as usize != inode.size ||
                 ext2_u32(slot, inode_bytes, 28) as usize != old_sectors ||
                 ext2_u32(slot, inode_bytes, 88) as usize != old_indirect) {
-                return ext2_write_abort(slot, mount, allocations);
+                return ext2_write_abort(guard, slot, mount, allocations);
             }
             let mut next_direct: usize = 0;
             for index: usize in 0..<EXT2_MAX_DIRECT_BLOCKS {
@@ -3006,12 +3015,12 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                     }
                     if ((block != 0 && block < 2) ||
                         block >= mount.filesystem_blocks) {
-                        return ext2_write_abort(slot, mount, allocations);
+                        return ext2_write_abort(guard, slot, mount, allocations);
                     }
                 }
                 if (ext2_put_u32(slot, inode_bytes, 40 + index * 4,
                                  block as u32) == false) {
-                    return ext2_write_abort(slot, mount, allocations);
+                    return ext2_write_abort(guard, slot, mount, allocations);
                 }
             }
             let mut new_pointer_blocks: usize = 0;
@@ -3024,12 +3033,12 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                                new_pointer_blocks) * 2) as u32) == false ||
                 ext2_put_u32(slot, inode_bytes, 88,
                         new_indirect as u32) == false) {
-                return ext2_write_abort(slot, mount, allocations);
+                return ext2_write_abort(guard, slot, mount, allocations);
             }
             match ext2_block_write(mount, inode.table_block,
                               ext2_scratch[slot.index].metadata as []u8) {
                 BlockIoResult::Invalid => {
-                    return ext2_write_abort(slot, mount, allocations);
+                    return ext2_write_abort(guard, slot, mount, allocations);
                 }
                 BlockIoResult::Ok => { }
             }
@@ -3087,11 +3096,11 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                             ext2_block_replaced(index, offset, source.len,
                                     inode.size, old_count, new_size,
                                     old_blocks[index], preserve_existing)) {
-                            ext2_fence_pending_add(old_blocks[index]);
+                            ext2_fence_pending_add(guard, old_blocks[index]);
                         }
                     }
                     if (old_indirect != 0) {
-                        ext2_fence_pending_add(old_indirect);
+                        ext2_fence_pending_add(guard, old_indirect);
                     }
                     return Ext2ResizeResult::Fenced;
                 }
@@ -3104,15 +3113,15 @@ private fn ext2_update_regular_file(slot: borrow Ext2Slot[0], mount: Ext2Mount,
 
 // A small exercise of the same runtime-sized owner that file replacement
 // uses: two claims must be released by one rollback obligation.
-fn ext2_write_allocations_roundtrip_check(mount: Ext2Mount)
+fn ext2_write_allocations_roundtrip_check(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount)
         -> Ext2BitmapProbeResult {
     let slot: Ext2Slot[0] = ext2_slot_acquire();
-    let result: Ext2BitmapProbeResult = ext2_write_allocations_roundtrip_check_with(slot, mount);
+    let result: Ext2BitmapProbeResult = ext2_write_allocations_roundtrip_check_with(guard, slot, mount);
     ext2_slot_release(slot);
     return result;
 }
 
-private inline fn ext2_write_allocations_roundtrip_check_with(slot: borrow Ext2Slot[0], mount: Ext2Mount)
+private inline fn ext2_write_allocations_roundtrip_check_with(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount)
         -> Ext2BitmapProbeResult {
     let mut before_blocks: usize = 0;
     let mut before_inodes: usize = 0;
@@ -3129,9 +3138,9 @@ private inline fn ext2_write_allocations_roundtrip_check_with(slot: borrow Ext2S
     let mut allocations: Ext2WriteAllocations[0] =
         ext2_write_allocations_begin();
     for step: usize in 0..<2 {
-        match ext2_allocate_block(slot, mount) {
+        match ext2_allocate_block(guard, slot, mount) {
             Ext2BlockAllocResult::NoSpace => {
-                match ext2_write_allocations_rollback(slot, mount,
+                match ext2_write_allocations_rollback(guard, slot, mount,
                         allocations) {
                     Ext2WriteFinishResult::Invalid => { }
                     Ext2WriteFinishResult::Finished => { }
@@ -3139,7 +3148,7 @@ private inline fn ext2_write_allocations_roundtrip_check_with(slot: borrow Ext2S
                 return Ext2BitmapProbeResult::Invalid;
             }
             Ext2BlockAllocResult::Failed => {
-                match ext2_write_allocations_rollback(slot, mount,
+                match ext2_write_allocations_rollback(guard, slot, mount,
                         allocations) {
                     Ext2WriteFinishResult::Invalid => { }
                     Ext2WriteFinishResult::Finished => { }
@@ -3150,7 +3159,7 @@ private inline fn ext2_write_allocations_roundtrip_check_with(slot: borrow Ext2S
                 match ext2_write_allocations_record(slot, mount, allocations,
                         owner) {
                     Ext2WriteRecordResult::Full(restored) => {
-                        match ext2_write_allocations_rollback(slot, mount,
+                        match ext2_write_allocations_rollback(guard, slot, mount,
                                 restored) {
                             Ext2WriteFinishResult::Invalid => { }
                             Ext2WriteFinishResult::Finished => { }
@@ -3175,7 +3184,7 @@ private inline fn ext2_write_allocations_roundtrip_check_with(slot: borrow Ext2S
                       blocks + 2 == before_blocks && inodes == before_inodes;
         }
     }
-    match ext2_write_allocations_rollback(slot, mount, allocations) {
+    match ext2_write_allocations_rollback(guard, slot, mount, allocations) {
         Ext2WriteFinishResult::Invalid => {
             return Ext2BitmapProbeResult::Invalid;
         }
@@ -3230,17 +3239,17 @@ fn ext2_release_inode(slot: borrow Ext2Slot[0], mount: Ext2Mount,
     }
 }
 
-fn ext2_owner_roundtrip_check(mount: Ext2Mount) -> Ext2BitmapProbeResult {
+fn ext2_owner_roundtrip_check(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount) -> Ext2BitmapProbeResult {
     let slot: Ext2Slot[0] = ext2_slot_acquire();
-    let result: Ext2BitmapProbeResult = ext2_owner_roundtrip_check_with(slot,
+    let result: Ext2BitmapProbeResult = ext2_owner_roundtrip_check_with(guard, slot,
             mount);
     ext2_slot_release(slot);
     return result;
 }
 
-private inline fn ext2_owner_roundtrip_check_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_owner_roundtrip_check_with(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0],
         mount: Ext2Mount) -> Ext2BitmapProbeResult {
-    match ext2_allocate_block(slot, mount) {
+    match ext2_allocate_block(guard, slot, mount) {
         Ext2BlockAllocResult::NoSpace => {
             return Ext2BitmapProbeResult::Invalid;
         }
@@ -3256,7 +3265,7 @@ private inline fn ext2_owner_roundtrip_check_with(slot: borrow Ext2Slot[0],
                 }
                 return Ext2BitmapProbeResult::Invalid;
             }
-            match ext2_allocate_inode(slot, mount) {
+            match ext2_allocate_inode(guard, slot, mount) {
                 Ext2InodeAllocResult::Failed => {
                     match ext2_release_block(slot, mount, block_owner) {
                         Ext2OwnerReleaseResult::Invalid => { }
@@ -3474,7 +3483,7 @@ private fn ext2_inode_pick(slot: borrow Ext2Slot[0], mount: Ext2Mount)
 
 // Logged: a claimed inode's record written whole -- mode, size, links,
 // sectors and its first block pointer, everything else zero.
-private fn ext2_inode_init_logged(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private fn ext2_inode_init_logged(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount,
         undo: borrow mut Ext2Undo[0], inode_number: usize, mode: usize,
         size: usize, links: usize, sectors: usize, block: usize)
         -> bool !{unsafe} {
@@ -3496,7 +3505,7 @@ private fn ext2_inode_init_logged(slot: borrow Ext2Slot[0], mount: Ext2Mount,
         BlockIoResult::Invalid => { return false; }
         BlockIoResult::Ok => { }
     }
-    if (ext2_undo_save(slot, undo, table_block, false, table_offset,
+    if (ext2_undo_save(guard, slot, undo, table_block, false, table_offset,
                        128) == false) {
         return false;
     }
@@ -3509,7 +3518,7 @@ private fn ext2_inode_init_logged(slot: borrow Ext2Slot[0], mount: Ext2Mount,
         ext2_put_u32(slot, inode_bytes, 40, block as u32) == false) {
         return false;
     }
-    return ext2_undo_write(slot, mount, undo, table_block, false);
+    return ext2_undo_write(guard, slot, mount, undo, table_block, false);
 }
 
 // GitHub issue #537: a new directory's block holds `.` naming itself and
@@ -3552,7 +3561,7 @@ private fn ext2_directory_init_claimed(slot: borrow Ext2Slot[0],
 // implementation's limit) or with no free block this answers NoSpace
 // (GitHub issues #698, #968). GitHub issue #1120: the new blocks are
 // claimed, the pointer-block entry and the directory's inode logged.
-private fn ext2_directory_grow_logged(slot: borrow Ext2Slot[0],
+private fn ext2_directory_grow_logged(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0],
         mount: Ext2Mount, undo: borrow mut Ext2Undo[0],
         claims: borrow mut Ext2Claims[0], directory: Ext2Inode, blocks: usize,
         inode_number: usize, name: borrow []const u8)
@@ -3635,13 +3644,13 @@ private fn ext2_directory_grow_logged(slot: borrow Ext2Slot[0],
             BlockIoResult::Ok => { }
         }
         if (ext2_u32(slot, ext2_file(), entry) != 0 ||
-            ext2_undo_save(slot, undo, existing, true, entry, 4) == false ||
+            ext2_undo_save(guard, slot, undo, existing, true, entry, 4) == false ||
             ext2_put_u32(slot, ext2_file(), entry, block as u32) == false ||
-            ext2_undo_write(slot, mount, undo, existing, true) == false) {
+            ext2_undo_write(guard, slot, mount, undo, existing, true) == false) {
             return Ext2DirectoryAddResult::Invalid;
         }
     }
-    if (ext2_undo_save(slot, undo, directory.table_block, false,
+    if (ext2_undo_save(guard, slot, undo, directory.table_block, false,
                        directory.table_offset, 128) == false) {
         return Ext2DirectoryAddResult::Invalid;
     }
@@ -3666,7 +3675,7 @@ private fn ext2_directory_grow_logged(slot: borrow Ext2Slot[0],
                      (directory.size + KERNEL_BLOCK_SIZE) as u32) == false ||
         ext2_put_u32(slot, inode_bytes, 28,
                      sectors + added_sectors) == false ||
-        ext2_undo_write(slot, mount, undo, directory.table_block,
+        ext2_undo_write(guard, slot, mount, undo, directory.table_block,
                         false) == false) {
         return Ext2DirectoryAddResult::Invalid;
     }
@@ -3683,7 +3692,7 @@ private fn ext2_directory_grow_logged(slot: borrow Ext2Slot[0],
 // is the first eight bytes of the record that takes the entry: its record
 // length when the entry splits off its slack, or, for a dead record, its
 // inode and name length. Putting it back makes the new entry slack again.
-private fn ext2_directory_add_logged(slot: borrow Ext2Slot[0],
+private fn ext2_directory_add_logged(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0],
         mount: Ext2Mount, undo: borrow mut Ext2Undo[0],
         claims: borrow mut Ext2Claims[0], directory_inode: usize,
         inode_number: usize, name: borrow []const u8)
@@ -3741,7 +3750,7 @@ private fn ext2_directory_add_logged(slot: borrow Ext2Slot[0],
                         let new_offset: usize = entry_start + actual;
                         let new_length: usize = record_length - actual;
                         let mut new_entry: Ext2Bytes = ext2_at(base, new_offset);
-                        if (ext2_undo_save(slot, undo, block, true,
+                        if (ext2_undo_save(guard, slot, undo, block, true,
                                            entry_start, 8) == false ||
                             (actual != 0 &&
                              ext2_put_u16(slot, entry, 4,
@@ -3768,7 +3777,7 @@ private fn ext2_directory_add_logged(slot: borrow Ext2Slot[0],
                             return Ext2DirectoryAddResult::Invalid;
                         }
                         slice_copy(name_target, name);
-                        if (ext2_undo_write(slot, mount, undo, block, true)) {
+                        if (ext2_undo_write(guard, slot, mount, undo, block, true)) {
                             return Ext2DirectoryAddResult::Updated;
                         }
                         return Ext2DirectoryAddResult::Invalid;
@@ -3776,7 +3785,7 @@ private fn ext2_directory_add_logged(slot: borrow Ext2Slot[0],
                     cursor = cursor + record_length;
                 }
             }
-            return ext2_directory_grow_logged(slot, mount, undo, claims,
+            return ext2_directory_grow_logged(guard, slot, mount, undo, claims,
                     directory, blocks, inode_number, name);
         }
     }
@@ -3788,7 +3797,7 @@ private fn ext2_directory_add_logged(slot: borrow Ext2Slot[0],
 // when `recount` or a block was claimed. A failed recount fences, and
 // ext2_recover recounts. With no block claimed the last logged write was
 // the commit.
-private fn ext2_create_commit(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private fn ext2_create_commit(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount,
         undo: sink Ext2Undo[0], claims: borrow Ext2Claims[0], recount: bool)
         -> Ext2ReleaseResult !{unsafe} {
     let count: usize = claims.count;
@@ -3827,7 +3836,7 @@ private fn ext2_create_commit(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                 }
             }
         }
-        if (marked == false) { return ext2_release_abort(slot, mount, undo); }
+        if (marked == false) { return ext2_release_abort(guard, slot, mount, undo); }
     }
     ext2_undo_commit(undo);
     if ((recount || count > 0) && ext2_recount(slot, mount) == false) {
@@ -3840,19 +3849,19 @@ private fn ext2_create_commit(slot: borrow Ext2Slot[0], mount: Ext2Mount,
 // bitmap or directory and the rollback landed) or committed.
 must_use variant Ext2CreateStep { Invalid; NoSpace; Created; }
 
-private fn ext2_create_finish(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private fn ext2_create_finish(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount,
         undo: sink Ext2Undo[0], claims: sink Ext2Claims[0], linked: bool,
         no_space: bool, recount: bool) -> Ext2CreateStep !{unsafe} {
     let mut held: Ext2Claims[0] = claims;
     if (linked) {
         let committed: Ext2ReleaseResult =
-            ext2_create_commit(slot, mount, undo, held, recount);
+            ext2_create_commit(guard, slot, mount, undo, held, recount);
         // The claimed blocks are named by the tree now, or were never marked.
         ext2_claims_unused(held);
         return ext2_create_step(committed, no_space);
     }
     ext2_claims_unused(held);
-    return ext2_create_step(ext2_release_abort(slot, mount, undo), no_space);
+    return ext2_create_step(ext2_release_abort(guard, slot, mount, undo), no_space);
 }
 
 private fn ext2_create_step(result: Ext2ReleaseResult, no_space: bool)
@@ -3871,7 +3880,7 @@ private fn ext2_create_step(result: Ext2ReleaseResult, no_space: bool)
 // log: removed when `replacement` is 0, otherwise made to name `replacement`
 // in place, which is rename's replacement of an existing target (GitHub
 // issue #1088) -- one write, so the target name never goes missing.
-private fn ext2_directory_rewrite_logged(slot: borrow Ext2Slot[0],
+private fn ext2_directory_rewrite_logged(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0],
         mount: Ext2Mount, undo: borrow mut Ext2Undo[0],
         directory_inode: usize, inode_number: usize,
         name: borrow []const u8, replacement: usize)
@@ -3951,7 +3960,7 @@ private fn ext2_directory_rewrite_logged(slot: borrow Ext2Slot[0],
                         // ext2_directory_add writes it.
                         if (replacement != 0 || has_previous == false) {
                             if ((replacement == 0 && index == 0) ||
-                                ext2_undo_save(slot, undo, block, true,
+                                ext2_undo_save(guard, slot, undo, block, true,
                                                entry_start, 8) == false ||
                                 ext2_put_u32(slot, entry, 0,
                                              replacement as u32) == false) {
@@ -3960,7 +3969,7 @@ private fn ext2_directory_rewrite_logged(slot: borrow Ext2Slot[0],
                             if (replacement != 0) {
                                 ext2_set_byte(slot, entry, 7, 0);
                             }
-                            if (ext2_undo_write(slot, mount, undo, block,
+                            if (ext2_undo_write(guard, slot, mount, undo, block,
                                                 true)) {
                                 return Ext2DirectoryResult::Updated;
                             }
@@ -3973,13 +3982,13 @@ private fn ext2_directory_rewrite_logged(slot: borrow Ext2Slot[0],
                             ext2_u16(slot, previous_entry, 4) as usize;
                         if (previous_length > 0xFFFF - record_length ||
                             previous_start > KERNEL_BLOCK_SIZE - 8 ||
-                            ext2_undo_save(slot, undo, block, true,
+                            ext2_undo_save(guard, slot, undo, block, true,
                                            previous_start + 4, 2) == false ||
                             ext2_put_u16(slot, previous_entry, 4,
                                          (previous_length + record_length) as u16) == false) {
                             return Ext2DirectoryResult::Invalid;
                         }
-                        if (ext2_undo_write(slot, mount, undo, block, true)) {
+                        if (ext2_undo_write(guard, slot, mount, undo, block, true)) {
                             return Ext2DirectoryResult::Updated;
                         }
                         return Ext2DirectoryResult::Invalid;
@@ -4066,49 +4075,49 @@ const EXT2_ROOT_INODE: usize = 2;
 // replacements made after publication, rather than this initial owner.
 fn ext2_linked_file_keep(linked: sink Ext2LinkedFile[inode, block]) {}
 
-fn ext2_create_root_file(mount: Ext2Mount, name: []const u8, content: []const u8)
+fn ext2_create_root_file(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, name: []const u8, content: []const u8)
         -> Ext2CreateResult {
     let slot: Ext2Slot[0] = ext2_slot_acquire();
-    let result: Ext2CreateResult = ext2_create_root_file_with(slot, mount,
+    let result: Ext2CreateResult = ext2_create_root_file_with(guard, slot, mount,
             name, content);
     ext2_slot_release(slot);
     return result;
 }
 
-private inline fn ext2_create_root_file_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_create_root_file_with(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0],
         mount: Ext2Mount, name: []const u8, content: []const u8)
         -> Ext2CreateResult {
-    return ext2_create_file_in_with(slot, mount, EXT2_ROOT_INODE, name,
+    return ext2_create_file_in_with(guard, slot, mount, EXT2_ROOT_INODE, name,
             content);
 }
 
-fn ext2_unlink_root_file(mount: Ext2Mount,
+fn ext2_unlink_root_file(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount,
                          linked: sink Ext2LinkedFile[inode, block],
                          name: []const u8) -> Ext2UnlinkResult {
     let slot: Ext2Slot[0] = ext2_slot_acquire();
-    let result: Ext2UnlinkResult = ext2_unlink_root_file_with(slot, mount,
+    let result: Ext2UnlinkResult = ext2_unlink_root_file_with(guard, slot, mount,
             linked, name);
     ext2_slot_release(slot);
     return result;
 }
 
-private inline fn ext2_unlink_root_file_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_unlink_root_file_with(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0],
         mount: Ext2Mount,
                          linked: sink Ext2LinkedFile[inode, block],
                          name: []const u8) -> Ext2UnlinkResult {
-    return ext2_unlink_file_in_with(slot, mount, EXT2_ROOT_INODE, linked, name);
+    return ext2_unlink_file_in_with(guard, slot, mount, EXT2_ROOT_INODE, linked, name);
 }
 
-fn ext2_create_file_in(mount: Ext2Mount, directory_inode: usize,
+fn ext2_create_file_in(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, directory_inode: usize,
                        name: []const u8, content: []const u8) -> Ext2CreateResult {
     let slot: Ext2Slot[0] = ext2_slot_acquire();
-    let result: Ext2CreateResult = ext2_create_file_in_with(slot, mount,
+    let result: Ext2CreateResult = ext2_create_file_in_with(guard, slot, mount,
             directory_inode, name, content);
     ext2_slot_release(slot);
     return result;
 }
 
-private fn ext2_create_file_in_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private fn ext2_create_file_in_with(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount,
         directory_inode: usize,
                        name: []const u8, content: []const u8) -> Ext2CreateResult {
     // GitHub issue #1120: the data block is claimed and written, the inode
@@ -4147,17 +4156,17 @@ private fn ext2_create_file_in_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
     let mut linked: bool = false;
     let mut no_space: bool = false;
     if (ext2_claimed_write(slot, mount, claims, block) &&
-        ext2_inode_init_logged(slot, mount, undo, inode_number, 0x81A4,
+        ext2_inode_init_logged(guard, slot, mount, undo, inode_number, 0x81A4,
                                content.len, 1, 2, block) &&
-        ext2_inode_bitmap_logged(slot, mount, undo, inode_number, true)) {
-        match ext2_directory_add_logged(slot, mount, undo, claims,
+        ext2_inode_bitmap_logged(guard, slot, mount, undo, inode_number, true)) {
+        match ext2_directory_add_logged(guard, slot, mount, undo, claims,
                 directory_inode, inode_number, name) {
             Ext2DirectoryAddResult::Invalid => { }
             Ext2DirectoryAddResult::NoSpace => { no_space = true; }
             Ext2DirectoryAddResult::Updated => { linked = true; }
         }
     }
-    match ext2_create_finish(slot, mount, undo, claims, linked, no_space,
+    match ext2_create_finish(guard, slot, mount, undo, claims, linked, no_space,
                              true) {
         Ext2CreateStep::Invalid => { return Ext2CreateResult::Invalid; }
         Ext2CreateStep::NoSpace => { return Ext2CreateResult::NoSpace; }
@@ -4181,17 +4190,17 @@ must_use variant Ext2CreateEmptyResult { Invalid; NoSpace; Created(usize); }
 
 // GitHub issue #1147: `permissions` is the new inode's permission bits
 // (the low 12 of i_mode), the caller's mode with its umask applied.
-fn ext2_create_empty_file_in(mount: Ext2Mount, directory_inode: usize,
+fn ext2_create_empty_file_in(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, directory_inode: usize,
                              name: borrow []const u8, permissions: usize)
         -> Ext2CreateEmptyResult !{unsafe} {
     let slot: Ext2Slot[0] = ext2_slot_acquire();
-    let result: Ext2CreateEmptyResult = ext2_create_empty_file_in_with(slot,
+    let result: Ext2CreateEmptyResult = ext2_create_empty_file_in_with(guard, slot,
             mount, directory_inode, name, permissions);
     ext2_slot_release(slot);
     return result;
 }
 
-private fn ext2_create_empty_file_in_with(slot: borrow Ext2Slot[0],
+private fn ext2_create_empty_file_in_with(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0],
         mount: Ext2Mount, directory_inode: usize, name: borrow []const u8,
         permissions: usize)
         -> Ext2CreateEmptyResult !{unsafe} {
@@ -4215,17 +4224,17 @@ private fn ext2_create_empty_file_in_with(slot: borrow Ext2Slot[0],
     let mut undo: Ext2Undo[0] = ext2_undo_begin();
     let mut linked: bool = false;
     let mut no_space: bool = false;
-    if (ext2_inode_init_logged(slot, mount, undo, inode_number,
+    if (ext2_inode_init_logged(guard, slot, mount, undo, inode_number,
                                0x8000 | (permissions & 0xFFF), 0, 1, 0, 0) &&
-        ext2_inode_bitmap_logged(slot, mount, undo, inode_number, true)) {
-        match ext2_directory_add_logged(slot, mount, undo, claims,
+        ext2_inode_bitmap_logged(guard, slot, mount, undo, inode_number, true)) {
+        match ext2_directory_add_logged(guard, slot, mount, undo, claims,
                 directory_inode, inode_number, name) {
             Ext2DirectoryAddResult::Invalid => { }
             Ext2DirectoryAddResult::NoSpace => { no_space = true; }
             Ext2DirectoryAddResult::Updated => { linked = true; }
         }
     }
-    match ext2_create_finish(slot, mount, undo, claims, linked, no_space,
+    match ext2_create_finish(guard, slot, mount, undo, claims, linked, no_space,
                              true) {
         Ext2CreateStep::Invalid => { return Ext2CreateEmptyResult::Invalid; }
         Ext2CreateStep::NoSpace => { return Ext2CreateEmptyResult::NoSpace; }
@@ -4235,17 +4244,17 @@ private fn ext2_create_empty_file_in_with(slot: borrow Ext2Slot[0],
     }
 }
 
-fn ext2_unlink_file_in(mount: Ext2Mount, directory_inode: usize,
+fn ext2_unlink_file_in(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, directory_inode: usize,
                        linked: sink Ext2LinkedFile[inode, block],
                        name: []const u8) -> Ext2UnlinkResult {
     let slot: Ext2Slot[0] = ext2_slot_acquire();
-    let result: Ext2UnlinkResult = ext2_unlink_file_in_with(slot, mount,
+    let result: Ext2UnlinkResult = ext2_unlink_file_in_with(guard, slot, mount,
             directory_inode, linked, name);
     ext2_slot_release(slot);
     return result;
 }
 
-private fn ext2_unlink_file_in_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private fn ext2_unlink_file_in_with(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount,
         directory_inode: usize,
                        linked: sink Ext2LinkedFile[inode, block],
                        name: []const u8) -> Ext2UnlinkResult {
@@ -4260,7 +4269,7 @@ private fn ext2_unlink_file_in_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
             if (found != inode_number) { return Ext2UnlinkResult::Invalid; }
         }
     }
-    match ext2_unlink_name_with(slot, mount, directory_inode, name) {
+    match ext2_unlink_name_with(guard, slot, mount, directory_inode, name) {
         Ext2UnlinkNameResult::Unlinked => { return Ext2UnlinkResult::Unlinked; }
         Ext2UnlinkNameResult::Invalid => { return Ext2UnlinkResult::Invalid; }
         Ext2UnlinkNameResult::NotFound => { return Ext2UnlinkResult::Invalid; }
@@ -4300,17 +4309,17 @@ private fn ext2_linked_directory_new(block_owner: sink Ext2BlockOwner[block],
 fn ext2_directory_keep(linked: sink Ext2LinkedDirectory[inode, block]) {}
 
 // `permissions` as ext2_create_empty_file_in's (GitHub issue #1147).
-fn ext2_make_directory_in(mount: Ext2Mount, parent_inode: usize,
+fn ext2_make_directory_in(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, parent_inode: usize,
                           name: borrow []const u8, permissions: usize)
         -> Ext2MkdirResult {
     let slot: Ext2Slot[0] = ext2_slot_acquire();
-    let result: Ext2MkdirResult = ext2_make_directory_in_with(slot, mount,
+    let result: Ext2MkdirResult = ext2_make_directory_in_with(guard, slot, mount,
             parent_inode, name, permissions);
     ext2_slot_release(slot);
     return result;
 }
 
-private fn ext2_make_directory_in_with(slot: borrow Ext2Slot[0],
+private fn ext2_make_directory_in_with(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0],
         mount: Ext2Mount, parent_inode: usize,
                           name: borrow []const u8, permissions: usize)
         -> Ext2MkdirResult {
@@ -4351,24 +4360,24 @@ private fn ext2_make_directory_in_with(slot: borrow Ext2Slot[0],
     let mut undo: Ext2Undo[0] = ext2_undo_begin();
     let mut linked: bool = false;
     let mut no_space: bool = false;
-    if (ext2_inode_init_logged(slot, mount, undo, inode_number,
+    if (ext2_inode_init_logged(guard, slot, mount, undo, inode_number,
                                0x4000 | (permissions & 0xFFF),
                                KERNEL_BLOCK_SIZE, 2, 2, block) &&
-        ext2_inode_bitmap_logged(slot, mount, undo, inode_number, true) &&
+        ext2_inode_bitmap_logged(guard, slot, mount, undo, inode_number, true) &&
         ext2_directory_init_claimed(slot, mount, claims, block, inode_number,
                                     parent_inode)) {
-        match ext2_directory_add_logged(slot, mount, undo, claims,
+        match ext2_directory_add_logged(guard, slot, mount, undo, claims,
                 parent_inode, inode_number, name) {
             Ext2DirectoryAddResult::Invalid => { }
             Ext2DirectoryAddResult::NoSpace => { no_space = true; }
             Ext2DirectoryAddResult::Updated => {
-                linked = ext2_inode_links_logged(slot, mount, undo, parent,
+                linked = ext2_inode_links_logged(guard, slot, mount, undo, parent,
                                                  parent.links + 1) &&
-                    ext2_used_directories_logged(slot, mount, undo, true);
+                    ext2_used_directories_logged(guard, slot, mount, undo, true);
             }
         }
     }
-    match ext2_create_finish(slot, mount, undo, claims, linked, no_space,
+    match ext2_create_finish(guard, slot, mount, undo, claims, linked, no_space,
                              true) {
         Ext2CreateStep::Invalid => { return Ext2MkdirResult::Invalid; }
         Ext2CreateStep::NoSpace => { return Ext2MkdirResult::NoSpace; }
@@ -4412,7 +4421,7 @@ private fn ext2_linked_directory_spent(
 // GitHub issue #1088: the entry, the parent's link, the group's
 // used-directories count, the inode record and its bit, all logged, then the
 // block freed by the commit. A rejected write puts every one back.
-private fn ext2_rmdir_release(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private fn ext2_rmdir_release(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount,
         parent_inode: usize, linked: sink Ext2LinkedDirectory[inode, block],
         directory: Ext2Inode, name: borrow []const u8)
         -> Ext2RmdirResult !{unsafe} {
@@ -4426,27 +4435,27 @@ private fn ext2_rmdir_release(slot: borrow Ext2Slot[0], mount: Ext2Mount,
             // A directory's own `.` and its entry in its parent mean it never
             // has fewer than two links.
             if ((parent.mode & 0xF000) == 0x4000 && parent.links > 2) {
-                match ext2_directory_rewrite_logged(slot, mount, undo,
+                match ext2_directory_rewrite_logged(guard, slot, mount, undo,
                         parent_inode, inode_number, name, 0) {
                     Ext2DirectoryResult::Invalid => { }
                     Ext2DirectoryResult::Updated => {
-                        unlinked = ext2_inode_links_logged(slot, mount, undo,
+                        unlinked = ext2_inode_links_logged(guard, slot, mount, undo,
                                 parent, parent.links - 1) &&
-                            ext2_used_directories_logged(slot, mount, undo, false);
+                            ext2_used_directories_logged(guard, slot, mount, undo, false);
                     }
                 }
             }
         }
     }
     if (unlinked == false) {
-        match ext2_release_abort(slot, mount, undo) {
+        match ext2_release_abort(guard, slot, mount, undo) {
             Ext2ReleaseResult::RolledBack => { }
             Ext2ReleaseResult::Fenced => { }
             Ext2ReleaseResult::Committed => { }
         }
         return Ext2RmdirResult::Invalid;
     }
-    match ext2_release_file_logged(slot, mount, undo, directory,
+    match ext2_release_file_logged(guard, slot, mount, undo, directory,
                                    inode_number) {
         Ext2ReleaseResult::Committed => { return Ext2RmdirResult::Removed; }
         Ext2ReleaseResult::RolledBack => { return Ext2RmdirResult::Invalid; }
@@ -4540,16 +4549,16 @@ private inline fn ext2_claim_directory_with(slot: borrow Ext2Slot[0],
 // A symlink, or a file larger than the doubly-indirect reach, is
 // Unsupported. The last link of a file reaching an indirect block releases
 // its blocks through the O_TRUNC walk (GitHub issue #1020).
-fn ext2_unlink_name(mount: Ext2Mount, parent_inode: usize,
+fn ext2_unlink_name(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, parent_inode: usize,
                     name: borrow []const u8) -> Ext2UnlinkNameResult !{unsafe} {
     let slot: Ext2Slot[0] = ext2_slot_acquire();
-    let result: Ext2UnlinkNameResult = ext2_unlink_name_with(slot, mount,
+    let result: Ext2UnlinkNameResult = ext2_unlink_name_with(guard, slot, mount,
             parent_inode, name);
     ext2_slot_release(slot);
     return result;
 }
 
-private fn ext2_unlink_name_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private fn ext2_unlink_name_with(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount,
         parent_inode: usize,
                     name: borrow []const u8) -> Ext2UnlinkNameResult !{unsafe} {
     if (name.len == 0) { return Ext2UnlinkNameResult::Invalid; }
@@ -4588,10 +4597,10 @@ private fn ext2_unlink_name_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
             // GitHub issue #1088: the entry goes first, then the inode or
             // its link, all logged, so a rejected write puts the name back.
             let mut undo: Ext2Undo[0] = ext2_undo_begin();
-            match ext2_directory_rewrite_logged(slot, mount, undo,
+            match ext2_directory_rewrite_logged(guard, slot, mount, undo,
                     parent_inode, inode_number, name, 0) {
                 Ext2DirectoryResult::Invalid => {
-                    match ext2_release_abort(slot, mount, undo) {
+                    match ext2_release_abort(guard, slot, mount, undo) {
                         Ext2ReleaseResult::RolledBack => { }
                         Ext2ReleaseResult::Fenced => { }
                         Ext2ReleaseResult::Committed => { }
@@ -4600,21 +4609,21 @@ private fn ext2_unlink_name_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                 }
                 Ext2DirectoryResult::Updated => { }
             }
-            return ext2_unlink_release(slot, mount, undo, file, inode_number);
+            return ext2_unlink_release(guard, slot, mount, undo, file, inode_number);
         }
     }
 }
 
 // The rest of an unlink whose entry the log holds removed: one link fewer,
 // or, for the last, the file released (GitHub issues #1020, #1088).
-private fn ext2_unlink_release(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private fn ext2_unlink_release(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount,
         undo: sink Ext2Undo[0], file: Ext2Inode, inode_number: usize)
         -> Ext2UnlinkNameResult !{unsafe} {
     let mut log: Ext2Undo[0] = undo;
     if (file.links > 1) {
-        if (ext2_inode_links_logged(slot, mount, log, file,
+        if (ext2_inode_links_logged(guard, slot, mount, log, file,
                                     file.links - 1) == false) {
-            match ext2_release_abort(slot, mount, log) {
+            match ext2_release_abort(guard, slot, mount, log) {
                 Ext2ReleaseResult::RolledBack => { }
                 Ext2ReleaseResult::Fenced => { }
                 Ext2ReleaseResult::Committed => { }
@@ -4624,7 +4633,7 @@ private fn ext2_unlink_release(slot: borrow Ext2Slot[0], mount: Ext2Mount,
         ext2_undo_commit(log);
         return Ext2UnlinkNameResult::Unlinked;
     }
-    match ext2_release_file_logged(slot, mount, log, file, inode_number) {
+    match ext2_release_file_logged(guard, slot, mount, log, file, inode_number) {
         Ext2ReleaseResult::Committed => { return Ext2UnlinkNameResult::Unlinked; }
         Ext2ReleaseResult::RolledBack => { return Ext2UnlinkNameResult::Invalid; }
         Ext2ReleaseResult::Fenced => { return Ext2UnlinkNameResult::Invalid; }
@@ -4641,16 +4650,16 @@ private fn ext2_unlink_release(slot: borrow Ext2Slot[0], mount: Ext2Mount,
 // Truncated with nothing written.
 must_use variant Ext2TruncateResult { Invalid; Truncated; }
 
-fn ext2_truncate_regular_file(mount: Ext2Mount, inode_number: usize)
+fn ext2_truncate_regular_file(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, inode_number: usize)
         -> Ext2TruncateResult !{unsafe} {
     let slot: Ext2Slot[0] = ext2_slot_acquire();
-    let result: Ext2TruncateResult = ext2_truncate_regular_file_with(slot,
+    let result: Ext2TruncateResult = ext2_truncate_regular_file_with(guard, slot,
             mount, inode_number);
     ext2_slot_release(slot);
     return result;
 }
 
-private fn ext2_truncate_regular_file_with(slot: borrow Ext2Slot[0],
+private fn ext2_truncate_regular_file_with(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0],
         mount: Ext2Mount, inode_number: usize)
         -> Ext2TruncateResult !{unsafe} {
     if (atomic_word_load(&ext2_fenced) != 0) { return Ext2TruncateResult::Invalid; }
@@ -4674,16 +4683,16 @@ private fn ext2_truncate_regular_file_with(slot: borrow Ext2Slot[0],
                         return Ext2TruncateResult::Invalid;
                     }
                     let mut undo: Ext2Undo[0] = ext2_undo_begin();
-                    if (ext2_inode_truncate_logged(slot, mount, undo,
+                    if (ext2_inode_truncate_logged(guard, slot, mount, undo,
                                                    file) == false) {
-                        match ext2_release_abort(slot, mount, undo) {
+                        match ext2_release_abort(guard, slot, mount, undo) {
                             Ext2ReleaseResult::RolledBack => { }
                             Ext2ReleaseResult::Fenced => { }
                             Ext2ReleaseResult::Committed => { }
                         }
                         return Ext2TruncateResult::Invalid;
                     }
-                    match ext2_release_commit(slot, mount, undo, map) {
+                    match ext2_release_commit(guard, slot, mount, undo, map) {
                         Ext2ReleaseResult::Committed => {
                             return Ext2TruncateResult::Truncated;
                         }
@@ -4716,7 +4725,7 @@ private fn ext2_name_is_dot_entry(name: borrow []const u8) -> bool {
 // undo log, so a rejected write leaves both names as they were. The old
 // order (unlink the target, then add the new name) lost the target when the
 // add failed.
-private fn ext2_rename_over(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private fn ext2_rename_over(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount,
         old_parent: usize, old_name: borrow []const u8,
         new_parent: usize, new_name: borrow []const u8,
         inode_number: usize, target: usize) -> Ext2RenameResult !{unsafe} {
@@ -4734,11 +4743,11 @@ private fn ext2_rename_over(slot: borrow Ext2Slot[0], mount: Ext2Mount,
             }
             let mut undo: Ext2Undo[0] = ext2_undo_begin();
             let mut moved: bool = false;
-            match ext2_directory_rewrite_logged(slot, mount, undo, new_parent,
+            match ext2_directory_rewrite_logged(guard, slot, mount, undo, new_parent,
                     target, new_name, inode_number) {
                 Ext2DirectoryResult::Invalid => { }
                 Ext2DirectoryResult::Updated => {
-                    match ext2_directory_rewrite_logged(slot, mount, undo,
+                    match ext2_directory_rewrite_logged(guard, slot, mount, undo,
                             old_parent, inode_number, old_name, 0) {
                         Ext2DirectoryResult::Invalid => { }
                         Ext2DirectoryResult::Updated => { moved = true; }
@@ -4746,14 +4755,14 @@ private fn ext2_rename_over(slot: borrow Ext2Slot[0], mount: Ext2Mount,
                 }
             }
             if (moved == false) {
-                match ext2_release_abort(slot, mount, undo) {
+                match ext2_release_abort(guard, slot, mount, undo) {
                     Ext2ReleaseResult::RolledBack => { }
                     Ext2ReleaseResult::Fenced => { }
                     Ext2ReleaseResult::Committed => { }
                 }
                 return Ext2RenameResult::Invalid;
             }
-            match ext2_unlink_release(slot, mount, undo, file, target) {
+            match ext2_unlink_release(guard, slot, mount, undo, file, target) {
                 Ext2UnlinkNameResult::Unlinked => {
                     return Ext2RenameResult::Renamed;
                 }
@@ -4785,17 +4794,17 @@ private fn ext2_rename_over(slot: borrow Ext2Slot[0], mount: Ext2Mount,
 // target is replaced, as rename(2) specifies, through ext2_rename_over; an
 // existing directory target is refused. A target that already names the
 // source is left alone and counts as done, as POSIX says.
-fn ext2_rename_in(mount: Ext2Mount, old_parent: usize, old_name: borrow []const u8,
+fn ext2_rename_in(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, old_parent: usize, old_name: borrow []const u8,
                   new_parent: usize, new_name: borrow []const u8)
         -> Ext2RenameResult !{unsafe} {
     let slot: Ext2Slot[0] = ext2_slot_acquire();
-    let result: Ext2RenameResult = ext2_rename_in_with(slot, mount, old_parent,
+    let result: Ext2RenameResult = ext2_rename_in_with(guard, slot, mount, old_parent,
             old_name, new_parent, new_name);
     ext2_slot_release(slot);
     return result;
 }
 
-private inline fn ext2_rename_in_with(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private inline fn ext2_rename_in_with(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount,
         old_parent: usize, old_name: borrow []const u8,
                   new_parent: usize, new_name: borrow []const u8)
         -> Ext2RenameResult !{unsafe} {
@@ -4832,12 +4841,12 @@ private inline fn ext2_rename_in_with(slot: borrow Ext2Slot[0], mount: Ext2Mount
                 return Ext2RenameResult::IsDirectory;
             }
             if (source_is_directory) { return Ext2RenameResult::NotDirectory; }
-            return ext2_rename_over(slot, mount, old_parent, old_name,
+            return ext2_rename_over(guard, slot, mount, old_parent, old_name,
                                     new_parent, new_name, inode_number,
                                     target);
         }
     }
-    return ext2_rename_new(slot, mount, old_parent, old_name, new_parent,
+    return ext2_rename_new(guard, slot, mount, old_parent, old_name, new_parent,
                            new_name, inode_number);
 }
 
@@ -4846,7 +4855,7 @@ private inline fn ext2_rename_in_with(slot: borrow Ext2Slot[0], mount: Ext2Mount
 // that grows claims its block, set by the commit), so a rejected write
 // leaves the old name alone, never both. The old order removed the new name
 // with a forward write, and a second rejection left two names for one link.
-private fn ext2_rename_new(slot: borrow Ext2Slot[0], mount: Ext2Mount,
+private fn ext2_rename_new(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0], mount: Ext2Mount,
         old_parent: usize, old_name: borrow []const u8,
         new_parent: usize, new_name: borrow []const u8, inode_number: usize)
         -> Ext2RenameResult !{unsafe} {
@@ -4854,19 +4863,19 @@ private fn ext2_rename_new(slot: borrow Ext2Slot[0], mount: Ext2Mount,
     let mut undo: Ext2Undo[0] = ext2_undo_begin();
     let mut moved: bool = false;
     let mut no_space: bool = false;
-    match ext2_directory_add_logged(slot, mount, undo, claims, new_parent,
+    match ext2_directory_add_logged(guard, slot, mount, undo, claims, new_parent,
                                     inode_number, new_name) {
         Ext2DirectoryAddResult::Invalid => { }
         Ext2DirectoryAddResult::NoSpace => { no_space = true; }
         Ext2DirectoryAddResult::Updated => {
-            match ext2_directory_rewrite_logged(slot, mount, undo,
+            match ext2_directory_rewrite_logged(guard, slot, mount, undo,
                     old_parent, inode_number, old_name, 0) {
                 Ext2DirectoryResult::Invalid => { }
                 Ext2DirectoryResult::Updated => { moved = true; }
             }
         }
     }
-    match ext2_create_finish(slot, mount, undo, claims, moved, no_space,
+    match ext2_create_finish(guard, slot, mount, undo, claims, moved, no_space,
                              false) {
         Ext2CreateStep::Invalid => { return Ext2RenameResult::Invalid; }
         Ext2CreateStep::NoSpace => { return Ext2RenameResult::NoSpace; }
@@ -4874,17 +4883,17 @@ private fn ext2_rename_new(slot: borrow Ext2Slot[0], mount: Ext2Mount,
     }
 }
 
-fn ext2_remove_directory_in(mount: Ext2Mount, parent_inode: usize,
+fn ext2_remove_directory_in(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, parent_inode: usize,
                             linked: sink Ext2LinkedDirectory[inode, block],
                             name: borrow []const u8) -> Ext2RmdirResult {
     let slot: Ext2Slot[0] = ext2_slot_acquire();
-    let result: Ext2RmdirResult = ext2_remove_directory_in_with(slot, mount,
+    let result: Ext2RmdirResult = ext2_remove_directory_in_with(guard, slot, mount,
             parent_inode, linked, name);
     ext2_slot_release(slot);
     return result;
 }
 
-private inline fn ext2_remove_directory_in_with(slot: borrow Ext2Slot[0],
+private inline fn ext2_remove_directory_in_with(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], slot: borrow Ext2Slot[0],
         mount: Ext2Mount, parent_inode: usize,
                             linked: sink Ext2LinkedDirectory[inode, block],
                             name: borrow []const u8) -> Ext2RmdirResult {
@@ -4893,7 +4902,7 @@ private inline fn ext2_remove_directory_in_with(slot: borrow Ext2Slot[0],
         Ext2RmdirStep::Refused => { return Ext2RmdirResult::Refused(linked); }
         Ext2RmdirStep::NotEmpty => { return Ext2RmdirResult::NotEmpty(linked); }
         Ext2RmdirStep::Empty(directory) => {
-            return ext2_rmdir_release(slot, mount, parent_inode, linked,
+            return ext2_rmdir_release(guard, slot, mount, parent_inode, linked,
                                       directory, name);
         }
     }

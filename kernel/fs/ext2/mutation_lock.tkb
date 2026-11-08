@@ -76,11 +76,11 @@
 //   every path, but a sixth arm added later would compile and simply fail to
 //   exclude. The structural answer is a check that every ext2 mutator is
 //   reached only under this guard.
-// - THE BOOT FIXTURE MUTATES WITHOUT IT, in kernel/init/ext2_fixture.tkb.
-//   That is sound for the reason the old admission claim was: it runs on
-//   core 0 before any peer can reach a filesystem. It is also why the check
-//   above cannot simply demand the guard at every mutator call site without
-//   naming that path.
+// - (2026-11-08, #1159) The boot fixture takes the guard too: the undo log
+//   and the fence's pending blocks are reached only with it (guarded_ref),
+//   so every mutator that logs or fences now carries it as a parameter.
+//   A mutator that neither logs nor fences is still held to the guard only
+//   by scripts/buildcheck_ext2_mutation_guard.py.
 use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/task_mutex.tkb";
 use "kernel/lib/execution_model.tkb";

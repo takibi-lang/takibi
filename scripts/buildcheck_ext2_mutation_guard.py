@@ -77,13 +77,10 @@ HELD = "guard: borrow Ext2MutationGuard[&ext2_mutation_lock]"
 # without the guard by design.
 DEFINING = {MUTATOR_FILE, LOCK_FILE}
 
-# Files permitted to mutate without the guard, and why.
-UNGUARDED_ALLOWED = {
-    "kernel/init/ext2_fixture.tkb":
-        "the remaining file-creation fixture exercises content-bearing "
-        "creation APIs no syscall reaches, before userspace can reach the "
-        "filesystem",
-}
+# Files permitted to mutate without the guard, and why. Empty since GitHub
+# issue #1159 (2026-11-08): the boot fixture takes the guard too, because
+# the undo log and the fence are reached only with it (guarded_ref).
+UNGUARDED_ALLOWED: dict[str, str] = {}
 
 
 def mutators_called(row: dict, mutators=MUTATORS) -> list[str]:

@@ -7597,7 +7597,7 @@ private fn syscall_truncate_under_with(slot: borrow SyscallSlot[0],
     let mode: usize = ext2_inode_mode(mount, inode_number) & 0xF000;
     if (mode == 0x4000) { return LINUX_EISDIR; }
     if (mode != 0x8000) { return LINUX_EINVAL; }
-    match ext2_truncate_regular_file(mount, inode_number) {
+    match ext2_truncate_regular_file(guard, mount, inode_number) {
         Ext2TruncateResult::Invalid => { return LINUX_EIO; }
         Ext2TruncateResult::Truncated => { return 0; }
     }

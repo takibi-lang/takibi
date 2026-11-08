@@ -320,11 +320,13 @@ linear `Ext2Slot` and releases it at exit, so two operations never share one
 even when one blocks on the device); `elf64.tkb`'s
 `ELF_IDENT_MAGIC` (a constant table, not mutable runtime state in practice).
 
-`ext2/ext2.tkb`'s `ext2_fenced`, `ext2_fence_pending` and
-`ext2_fence_pending_count` (GitHub issue #595) are one kernel-wide word and one
-operation's worth of block numbers: the kernel mounts one filesystem, callers
-serialize ext2 mutations under `ext2_mutation_lock`, and a fenced mount refuses
-the next mutation, so a second pending list cannot arise.
+`ext2/ext2.tkb`'s `ext2_fenced` and the pending blocks (GitHub issue #595) are
+one kernel-wide word and one operation's worth of block numbers: the kernel
+mounts one filesystem, callers serialize ext2 mutations under
+`ext2_mutation_lock`, and a fenced mount refuses the next mutation, so a second
+pending list cannot arise. Since GitHub issue #1159 the pending blocks and the
+undo log are `Ext2MutationState`'s `guarded_by(ext2_mutation_lock)` fields,
+reached only as `guarded_ref` with the mutation guard.
 `drivers/block/memory.tkb`'s `block_fault_*` words are the block-I/O failure
 injector of the same issue, armed and read under the block-device lock and
 armed only by the boot fixture.

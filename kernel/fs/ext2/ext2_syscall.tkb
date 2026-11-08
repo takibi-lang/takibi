@@ -62,7 +62,7 @@ fn ext2_syscall_write_at(mount: Ext2Mount,
         return LINUX_EINVAL;
     }
     return ext2_syscall_write_errno(
-        ext2_write_regular_file_range(mount, inode, offset, content));
+        ext2_write_regular_file_range(guard, mount, inode, offset, content));
 }
 
 // `permissions`, here and in ext2_syscall_mkdir, is the new inode's
@@ -87,7 +87,7 @@ fn ext2_syscall_open_leaf(mount: Ext2Mount,
                 return Ext2SyscallOpenResult::Errno(LINUX_EISDIR);
             }
             if (truncate && mode == 0x8000) {
-                match ext2_truncate_regular_file(mount, existing) {
+                match ext2_truncate_regular_file(guard, mount, existing) {
                     Ext2TruncateResult::Invalid => {
                         return Ext2SyscallOpenResult::Errno(LINUX_EIO);
                     }
@@ -100,7 +100,7 @@ fn ext2_syscall_open_leaf(mount: Ext2Mount,
             if (create == false) { return Ext2SyscallOpenResult::Errno(LINUX_ENOENT); }
         }
     }
-    match ext2_create_empty_file_in(mount, parent_inode, leaf, permissions) {
+    match ext2_create_empty_file_in(guard, mount, parent_inode, leaf, permissions) {
         Ext2CreateEmptyResult::Invalid => { return Ext2SyscallOpenResult::Errno(LINUX_EIO); }
         Ext2CreateEmptyResult::NoSpace => {
             return Ext2SyscallOpenResult::Errno(LINUX_ENOSPC);
@@ -124,7 +124,7 @@ fn ext2_syscall_mkdir(mount: Ext2Mount,
     if (answer == 0) {
         // The directory stays, so its owner ends here: the tree names it
         // from now on, and a later rmdir claims it back from the tree.
-        match ext2_make_directory_in(mount, parent_inode, leaf, permissions) {
+        match ext2_make_directory_in(guard, mount, parent_inode, leaf, permissions) {
             Ext2MkdirResult::Invalid => { answer = LINUX_EIO; }
             Ext2MkdirResult::NoSpace => { answer = LINUX_ENOSPC; }
             Ext2MkdirResult::Created(directory) => {
@@ -141,8 +141,7 @@ fn ext2_syscall_mkdir(mount: Ext2Mount,
 fn ext2_syscall_unlink(mount: Ext2Mount,
         guard: borrow Ext2MutationGuard[&ext2_mutation_lock],
         parent_inode: usize, leaf: borrow []u8) -> usize !{unsafe} {
-    let answer: usize = match ext2_unlink_name(
-            mount, parent_inode, leaf) {
+    let answer: usize = match ext2_unlink_name(guard, mount, parent_inode, leaf) {
         Ext2UnlinkNameResult::Unlinked => { 0 }
         Ext2UnlinkNameResult::NotFound => { LINUX_ENOENT }
         Ext2UnlinkNameResult::IsDirectory => { LINUX_EISDIR }
@@ -164,7 +163,7 @@ fn ext2_syscall_rmdir(mount: Ext2Mount,
         Ext2ClaimResult::NotFound => { answer = LINUX_ENOENT; }
         Ext2ClaimResult::NotDirectory => { answer = LINUX_ENOTDIR; }
         Ext2ClaimResult::Claimed(directory) => {
-            match ext2_remove_directory_in(mount,
+            match ext2_remove_directory_in(guard, mount,
                                            parent_inode, directory, leaf) {
                 Ext2RmdirResult::Removed => { }
                 Ext2RmdirResult::Invalid => { answer = LINUX_EIO; }
@@ -189,8 +188,7 @@ fn ext2_syscall_rename(mount: Ext2Mount,
         guard: borrow Ext2MutationGuard[&ext2_mutation_lock],
         old_directory: usize, old_name: borrow []u8,
         new_parent_inode: usize, new_leaf: borrow []u8) -> usize !{unsafe} {
-    let answer: usize = match ext2_rename_in(
-            mount, old_directory, old_name,
+    let answer: usize = match ext2_rename_in(guard, mount, old_directory, old_name,
             new_parent_inode, new_leaf) {
         Ext2RenameResult::Renamed => { 0 }
         Ext2RenameResult::NotFound => { LINUX_ENOENT }

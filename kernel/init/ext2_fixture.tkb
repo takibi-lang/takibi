@@ -103,10 +103,10 @@ private fn ext2_exhaustion_mode(mount: Ext2Mount) -> Ext2ExhaustionMode {
 // it as holes (#1087).
 // EL0 shrinks and removes both after observing ENOSPC; no test syscall or
 // unowned bitmap reservation is carried across userspace execution.
-private fn ext2_exhaustion_filler(mount: Ext2Mount, name: []const u8,
+private fn ext2_exhaustion_filler(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, name: []const u8,
                                   blocks: usize) -> bool {
     if (blocks == 0 || blocks > EXT2_MAX_SINGLE_FILE_BLOCKS) { return false; }
-    match ext2_create_root_file(mount, name, bs"x") {
+    match ext2_create_root_file(guard, mount, name, bs"x") {
         Ext2CreateResult::Invalid => { return false; }
         Ext2CreateResult::NoSpace => { return false; }
         Ext2CreateResult::Created(linked) => { ext2_linked_file_keep(linked); }
@@ -117,7 +117,7 @@ private fn ext2_exhaustion_filler(mount: Ext2Mount, name: []const u8,
         Ext2LookupResult::Found(inode) => {
             for block: usize in 0..<EXT2_MAX_SINGLE_FILE_BLOCKS {
                 if (block < blocks) {
-                    match ext2_write_regular_file_range(mount, inode,
+                    match ext2_write_regular_file_range(guard, mount, inode,
                             block * KERNEL_BLOCK_SIZE + KERNEL_BLOCK_SIZE - 1,
                             bs"x") {
                         Ext2ResizeResult::Resized => { }
@@ -135,7 +135,7 @@ private fn ext2_exhaustion_filler(mount: Ext2Mount, name: []const u8,
 // Leave thirteen real free blocks: the thirteen data blocks can be staged,
 // but the fourteenth claim, for the indirect block, must roll them back.
 // The original file and the complete bitmap must survive before EL0 runs.
-private fn ext2_write_exhaustion_check(mount: Ext2Mount) -> bool {
+private fn ext2_write_exhaustion_check(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount) -> bool {
     ext2_write_fixture_execution_model_assumption();
     let mut free: usize = 0;
     let mut inodes: usize = 0;
@@ -159,7 +159,7 @@ private fn ext2_write_exhaustion_check(mount: Ext2Mount) -> bool {
     // thirteen cannot be represented. Shift one block to the second file
     // when the first file would leave that gap in the remaining budget.
     if (free - first == 27) { first = first - 1; }
-    if (ext2_exhaustion_filler(mount, bs"enospc-a", first) == false) {
+    if (ext2_exhaustion_filler(guard, mount, bs"enospc-a", first) == false) {
         return false;
     }
     match ext2_free_counts(mount) {
@@ -174,7 +174,7 @@ private fn ext2_write_exhaustion_check(mount: Ext2Mount) -> bool {
     if (free <= 13) { return false; }
     let mut second: usize = free - 13;
     if (second > EXT2_MAX_DIRECT_BLOCKS) { second = second - 1; }
-    if (ext2_exhaustion_filler(mount, bs"enospc-b", second) == false ||
+    if (ext2_exhaustion_filler(guard, mount, bs"enospc-b", second) == false ||
         ext2_write_fixture_counts_match(mount, 13, inodes - 2) == false) {
         return false;
     }
@@ -192,7 +192,7 @@ private fn ext2_write_exhaustion_check(mount: Ext2Mount) -> bool {
             if (length != KERNEL_BLOCK_SIZE) { return false; }
         }
     }
-    match ext2_resize_small_file(mount, inode, ext2_write_fixture_source as []u8) {
+    match ext2_resize_small_file(guard, mount, inode, ext2_write_fixture_source as []u8) {
         Ext2ResizeResult::NoSpace => { }
         Ext2ResizeResult::Invalid => { return false; }
         Ext2ResizeResult::Resized => { return false; }
@@ -210,9 +210,9 @@ private fn ext2_write_exhaustion_check(mount: Ext2Mount) -> bool {
 // 12288 bytes, and peer-mutate later failed naming the wrong cause. Undo
 // what the check made: recover a fence, unlink both fillers (absent is
 // fine), and require /mutable.txt and the free counts as they were.
-private fn ext2_exhaustion_filler_remove(mount: Ext2Mount,
+private fn ext2_exhaustion_filler_remove(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount,
                                          name: []const u8) -> bool !{unsafe} {
-    match ext2_unlink_name(mount, EXT2_ROOT_INODE, name) {
+    match ext2_unlink_name(guard, mount, EXT2_ROOT_INODE, name) {
         Ext2UnlinkNameResult::Unlinked => { return true; }
         Ext2UnlinkNameResult::NotFound => { return true; }
         Ext2UnlinkNameResult::Invalid => { return false; }
@@ -221,16 +221,16 @@ private fn ext2_exhaustion_filler_remove(mount: Ext2Mount,
     }
 }
 
-private fn ext2_exhaustion_restore(mount: Ext2Mount, blocks: usize,
+private fn ext2_exhaustion_restore(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, blocks: usize,
                                    inodes: usize) -> bool !{unsafe} {
     if (ext2_is_fenced()) {
-        match ext2_recover(mount) {
+        match ext2_recover(guard, mount) {
             Ext2RecoverResult::Failed => { return false; }
             Ext2RecoverResult::Recovered => { }
         }
     }
-    let a: bool = ext2_exhaustion_filler_remove(mount, bs"enospc-a");
-    let b: bool = ext2_exhaustion_filler_remove(mount, bs"enospc-b");
+    let a: bool = ext2_exhaustion_filler_remove(guard, mount, bs"enospc-a");
+    let b: bool = ext2_exhaustion_filler_remove(guard, mount, bs"enospc-b");
     if (a == false || b == false) { return false; }
     match ext2_lookup_root(mount, bs"mutable.txt") {
         Ext2LookupResult::Invalid => { return false; }
@@ -248,15 +248,15 @@ private fn ext2_exhaustion_restore(mount: Ext2Mount, blocks: usize,
 // lands inside enospc-a's one-byte range writes.
 const EXT2_EXHAUSTION_FAULT_SKIP: usize = 50;
 
-private fn ext2_exhaustion_fault_case(mount: Ext2Mount) -> bool !{unsafe} {
+private fn ext2_exhaustion_fault_case(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount) -> bool !{unsafe} {
     match ext2_free_counts(mount) {
         Ext2FreeCountsResult::Invalid => { return false; }
         Ext2FreeCountsResult::Counts(counts) => {
             let (blocks, inodes) = counts;
             block_fault_arm(true, EXT2_EXHAUSTION_FAULT_SKIP, false);
-            let passed: bool = ext2_write_exhaustion_check(mount);
+            let passed: bool = ext2_write_exhaustion_check(guard, mount);
             let injected: usize = block_fault_disarm();
-            let restored: bool = ext2_exhaustion_restore(mount, blocks, inodes);
+            let restored: bool = ext2_exhaustion_restore(guard, mount, blocks, inodes);
             return passed == false && injected != 0 && restored;
         }
     }
@@ -264,7 +264,7 @@ private fn ext2_exhaustion_fault_case(mount: Ext2Mount) -> bool !{unsafe} {
 
 // The real check. On failure it restores and answers false, so the caller
 // halts before EL0 runs its ENOSPC fixture against a volume with room.
-private fn ext2_exhaustion_run(mount: Ext2Mount) -> bool !{logs, unsafe} {
+private fn ext2_exhaustion_run(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount) -> bool !{logs, unsafe} {
     match ext2_free_counts(mount) {
         Ext2FreeCountsResult::Invalid => {
             kernel_boot_log("ext2 exhaustion: failed, free counts unreadable\n");
@@ -272,11 +272,11 @@ private fn ext2_exhaustion_run(mount: Ext2Mount) -> bool !{logs, unsafe} {
         }
         Ext2FreeCountsResult::Counts(counts) => {
             let (blocks, inodes) = counts;
-            if (ext2_write_exhaustion_check(mount)) {
+            if (ext2_write_exhaustion_check(guard, mount)) {
                 kernel_boot_log("ext2 exhaustion: indirect NoSpace rollback, EL0 fillers ready\n");
                 return true;
             }
-            if (ext2_exhaustion_restore(mount, blocks, inodes)) {
+            if (ext2_exhaustion_restore(guard, mount, blocks, inodes)) {
                 kernel_boot_log("ext2 exhaustion: failed, fillers removed, mutable.txt intact\n");
             } else {
                 kernel_boot_log("ext2 exhaustion: failed, fillers or mutable.txt not restored\n");
@@ -308,13 +308,13 @@ private fn ext2_full_names_absent(mount: Ext2Mount) -> bool {
     }
 }
 
-private fn ext2_full_refuses(mount: Ext2Mount) -> bool {
+private fn ext2_full_refuses(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount) -> bool {
     let mut refused: bool = true;
-    match ext2_make_directory_in(mount, 2, bs"full-dir", 0x1ED) {
+    match ext2_make_directory_in(guard, mount, 2, bs"full-dir", 0x1ED) {
         Ext2MkdirResult::NoSpace => { }
         Ext2MkdirResult::Invalid => { refused = false; }
         Ext2MkdirResult::Created(directory) => {
-            match ext2_remove_directory_in(mount, 2, directory, bs"full-dir") {
+            match ext2_remove_directory_in(guard, mount, 2, directory, bs"full-dir") {
                 Ext2RmdirResult::Removed => { }
                 Ext2RmdirResult::Invalid => { }
                 Ext2RmdirResult::NotEmpty(kept) => { ext2_directory_keep(kept); }
@@ -323,11 +323,11 @@ private fn ext2_full_refuses(mount: Ext2Mount) -> bool {
             refused = false;
         }
     }
-    match ext2_create_root_file(mount, bs"full-file", bs"x") {
+    match ext2_create_root_file(guard, mount, bs"full-file", bs"x") {
         Ext2CreateResult::NoSpace => { }
         Ext2CreateResult::Invalid => { refused = false; }
         Ext2CreateResult::Created(linked) => {
-            match ext2_unlink_root_file(mount, linked, bs"full-file") {
+            match ext2_unlink_root_file(guard, mount, linked, bs"full-file") {
                 Ext2UnlinkResult::Invalid => { }
                 Ext2UnlinkResult::Unlinked => { }
             }
@@ -337,13 +337,13 @@ private fn ext2_full_refuses(mount: Ext2Mount) -> bool {
     return refused;
 }
 
-private fn ext2_full_control(mount: Ext2Mount) -> bool {
+private fn ext2_full_control(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount) -> bool {
     let mut ok: bool = false;
-    match ext2_make_directory_in(mount, 2, bs"full-dir", 0x1ED) {
+    match ext2_make_directory_in(guard, mount, 2, bs"full-dir", 0x1ED) {
         Ext2MkdirResult::NoSpace => { }
         Ext2MkdirResult::Invalid => { }
         Ext2MkdirResult::Created(directory) => {
-            match ext2_remove_directory_in(mount, 2, directory, bs"full-dir") {
+            match ext2_remove_directory_in(guard, mount, 2, directory, bs"full-dir") {
                 Ext2RmdirResult::Removed => { ok = true; }
                 Ext2RmdirResult::Invalid => { }
                 Ext2RmdirResult::NotEmpty(kept) => { ext2_directory_keep(kept); }
@@ -351,11 +351,11 @@ private fn ext2_full_control(mount: Ext2Mount) -> bool {
             }
         }
     }
-    match ext2_create_root_file(mount, bs"full-file", bs"x") {
+    match ext2_create_root_file(guard, mount, bs"full-file", bs"x") {
         Ext2CreateResult::NoSpace => { return false; }
         Ext2CreateResult::Invalid => { return false; }
         Ext2CreateResult::Created(linked) => {
-            match ext2_unlink_root_file(mount, linked, bs"full-file") {
+            match ext2_unlink_root_file(guard, mount, linked, bs"full-file") {
                 Ext2UnlinkResult::Invalid => { return false; }
                 Ext2UnlinkResult::Unlinked => { return ok; }
             }
@@ -363,13 +363,13 @@ private fn ext2_full_control(mount: Ext2Mount) -> bool {
     }
 }
 
-private fn ext2_full_check_one(mount: Ext2Mount, inode_bitmap: bool,
+private fn ext2_full_check_one(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, inode_bitmap: bool,
                                blocks: usize, inodes: usize) -> bool {
     match page_alloc(PageOwnerTag::BootFixture) {
         PageAllocResult::OutOfMemory => { return false; }
         PageAllocResult::Allocated(page) => {
             let bytes: [u8; PAGE_SIZE..] = page_bytes(page);
-            let ok: bool = ext2_full_check_in(mount, inode_bitmap, blocks,
+            let ok: bool = ext2_full_check_in(guard, mount, inode_bitmap, blocks,
                     inodes, bytes[0..<KERNEL_BLOCK_SIZE]);
             page_free(page);
             return ok;
@@ -377,7 +377,7 @@ private fn ext2_full_check_one(mount: Ext2Mount, inode_bitmap: bool,
     }
 }
 
-private fn ext2_full_check_in(mount: Ext2Mount, inode_bitmap: bool,
+private fn ext2_full_check_in(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, inode_bitmap: bool,
                               blocks: usize, inodes: usize,
                               saved: borrow [u8; KERNEL_BLOCK_SIZE..]) -> bool {
     match ext2_block_bitmap_snapshot(
@@ -404,7 +404,7 @@ private fn ext2_full_check_in(mount: Ext2Mount, inode_bitmap: bool,
             ok = marked > 0 && (full_blocks == 0 || full_inodes == 0) &&
                  ext2_write_fixture_counts_match(mount, full_blocks,
                                                  full_inodes) &&
-                 ext2_full_refuses(mount) &&
+                 ext2_full_refuses(guard, mount) &&
                  ext2_write_fixture_counts_match(mount, full_blocks,
                                                  full_inodes) &&
                  ext2_full_names_absent(mount) &&
@@ -422,7 +422,7 @@ private fn ext2_full_check_in(mount: Ext2Mount, inode_bitmap: bool,
            ext2_counters_match_bitmaps(mount);
 }
 
-fn ext2_full_check(mount: Ext2Mount) -> bool {
+fn ext2_full_check(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount) -> bool {
     ext2_write_fixture_execution_model_assumption();
     let mut blocks: usize = 0;
     let mut inodes: usize = 0;
@@ -434,14 +434,14 @@ fn ext2_full_check(mount: Ext2Mount) -> bool {
             inodes = free_inodes;
         }
     }
-    return ext2_full_check_one(mount, false, blocks, inodes) &&
-           ext2_full_check_one(mount, true, blocks, inodes) &&
-           ext2_full_control(mount) &&
+    return ext2_full_check_one(guard, mount, false, blocks, inodes) &&
+           ext2_full_check_one(guard, mount, true, blocks, inodes) &&
+           ext2_full_control(guard, mount) &&
            ext2_write_fixture_counts_match(mount, blocks, inodes) &&
            ext2_counters_match_bitmaps(mount);
 }
 
-private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
+private fn ext2_write_indirect_check(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount) -> bool {
     ext2_write_fixture_execution_model_assumption();
     let mut before_blocks: usize = 0;
     let mut before_inodes: usize = 0;
@@ -486,8 +486,7 @@ private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
     // Three blocks are allocated and filled; the fourth claim is refused.
     // The unchanged file and free counts prove that the prefix was rolled
     // back before the inode could name any of it.
-    match ext2_replace_regular_file(
-            mount, inode_number, ext2_write_fixture_source as []u8, 3) {
+    match ext2_replace_regular_file(guard, mount, inode_number, ext2_write_fixture_source as []u8, 3) {
         Ext2ResizeResult::Resized => { return false; }
         Ext2ResizeResult::Fenced => { return false; }
         Ext2ResizeResult::NoSpace => { return false; }
@@ -523,8 +522,7 @@ private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
             }
         }
     }
-    match ext2_resize_small_file(
-            mount, inode_number, ext2_write_fixture_source as []u8) {
+    match ext2_resize_small_file(guard, mount, inode_number, ext2_write_fixture_source as []u8) {
         Ext2ResizeResult::NoSpace => { return false; }
         Ext2ResizeResult::Invalid => { return false; }
         Ext2ResizeResult::Fenced => { return false; }
@@ -561,7 +559,7 @@ private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
             }
         }
     }
-    match ext2_resize_small_file(mount, inode_number, bs"") {
+    match ext2_resize_small_file(guard, mount, inode_number, bs"") {
         Ext2ResizeResult::NoSpace => { return false; }
         Ext2ResizeResult::Invalid => { return false; }
         Ext2ResizeResult::Fenced => { return false; }
@@ -573,8 +571,7 @@ private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
             mount, before_blocks + 1, before_inodes) == false) {
         return false;
     }
-    match ext2_resize_small_file(
-            mount, inode_number, ext2_write_fixture_source as []u8) {
+    match ext2_resize_small_file(guard, mount, inode_number, ext2_write_fixture_source as []u8) {
         Ext2ResizeResult::NoSpace => { return false; }
         Ext2ResizeResult::Invalid => { return false; }
         Ext2ResizeResult::Fenced => { return false; }
@@ -587,7 +584,7 @@ private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
     if (ext2_write_fixture_sectors_match(mount, inode_number, 28) == false) {
         return false;
     }
-    match ext2_resize_small_file(mount, inode_number, bs"before\n") {
+    match ext2_resize_small_file(guard, mount, inode_number, bs"before\n") {
         Ext2ResizeResult::NoSpace => { return false; }
         Ext2ResizeResult::Invalid => { return false; }
         Ext2ResizeResult::Fenced => { return false; }
@@ -601,9 +598,8 @@ private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
 // The ext2 mutation helpers. They were reachable only from the QEMU fixture
 // until this file existed; both platforms run them now, and `ext2_mutation`
 // is a common view.
-fn ext2_create_check(mount: Ext2Mount) -> bool {
-    match ext2_create_root_file(
-            mount, bs"created.txt", bs"created on ext2\n") {
+fn ext2_create_check(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount) -> bool {
+    match ext2_create_root_file(guard, mount, bs"created.txt", bs"created on ext2\n") {
         Ext2CreateResult::Invalid => { return false; }
         Ext2CreateResult::NoSpace => { return false; }
         Ext2CreateResult::Created(linked) => {
@@ -623,7 +619,7 @@ fn ext2_create_check(mount: Ext2Mount) -> bool {
                 Ext2LookupResult::Invalid => { }
                 Ext2LookupResult::NotFound => { }
             }
-            match ext2_unlink_root_file(mount, linked, bs"created.txt") {
+            match ext2_unlink_root_file(guard, mount, linked, bs"created.txt") {
                 Ext2UnlinkResult::Invalid => { return false; }
                 Ext2UnlinkResult::Unlinked => { }
             }
@@ -644,7 +640,7 @@ fn ext2_create_check(mount: Ext2Mount) -> bool {
 // `/etc` is used because the fixture already builds it and BusyBox already
 // reads from it, so this asserts against a directory the rest of the boot
 // depends on rather than one invented for the test.
-fn ext2_create_in_directory_check(mount: Ext2Mount) -> bool {
+fn ext2_create_in_directory_check(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount) -> bool {
     let mut directory: usize = 0;
     match ext2_lookup_root(mount, bs"etc") {
         Ext2LookupResult::Found(inode_number) => { directory = inode_number; }
@@ -652,7 +648,7 @@ fn ext2_create_in_directory_check(mount: Ext2Mount) -> bool {
         Ext2LookupResult::NotFound => { return false; }
     }
     if (directory == 2) { return false; }
-    match ext2_create_file_in(mount, directory, bs"nested.txt",
+    match ext2_create_file_in(guard, mount, directory, bs"nested.txt",
                               bs"created in /etc\n") {
         Ext2CreateResult::Invalid => { return false; }
         Ext2CreateResult::NoSpace => { return false; }
@@ -681,7 +677,7 @@ fn ext2_create_in_directory_check(mount: Ext2Mount) -> bool {
                 Ext2LookupResult::Invalid => { }
                 Ext2LookupResult::Found(existing) => { }
             }
-            match ext2_unlink_file_in(mount, directory, linked,
+            match ext2_unlink_file_in(guard, mount, directory, linked,
                                       bs"nested.txt") {
                 Ext2UnlinkResult::Invalid => { return false; }
                 Ext2UnlinkResult::Unlinked => { }
@@ -786,7 +782,7 @@ private fn ext2_io_file_is(mount: Ext2Mount, inode: usize, large: bool,
 
 // Run the replacement with a failure armed and classify what it left. Every
 // check goes through a mount made afresh from the device.
-private fn ext2_io_case(mount: Ext2Mount, inode: usize, large: bool,
+private fn ext2_io_case(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, inode: usize, large: bool,
                         on_write: bool, skip: usize, sticky: bool,
                         base_blocks: usize, base_inodes: usize)
         -> Ext2IoCase {
@@ -801,8 +797,7 @@ private fn ext2_io_case(mount: Ext2Mount, inode: usize, large: bool,
     }
     block_fault_arm(on_write, skip, sticky);
     if (large) {
-        match ext2_replace_regular_file(
-                mount, inode, ext2_write_fixture_source as []u8,
+        match ext2_replace_regular_file(guard, mount, inode, ext2_write_fixture_source as []u8,
                 EXT2_MAX_WRITE_ALLOCATIONS) {
             Ext2ResizeResult::Resized => { outcome = 0; }
             Ext2ResizeResult::NoSpace => { outcome = 1; }
@@ -810,8 +805,7 @@ private fn ext2_io_case(mount: Ext2Mount, inode: usize, large: bool,
             Ext2ResizeResult::Fenced => { outcome = 2; }
         }
     } else {
-        match ext2_replace_regular_file(
-                mount, inode, ext2_write_fixture_source[0..<EXT2_IO_SMALL_BYTES],
+        match ext2_replace_regular_file(guard, mount, inode, ext2_write_fixture_source[0..<EXT2_IO_SMALL_BYTES],
                 EXT2_MAX_WRITE_ALLOCATIONS) {
             Ext2ResizeResult::Resized => { outcome = 0; }
             Ext2ResizeResult::NoSpace => { outcome = 1; }
@@ -862,15 +856,15 @@ private fn ext2_io_case(mount: Ext2Mount, inode: usize, large: bool,
 // Put the fixture file back to its original seven bytes with the device
 // healthy, recovering the mount first when it was fenced, and check that the
 // bitmap and counters are the ones the fixture started with.
-private fn ext2_io_restore(mount: Ext2Mount, inode: usize,
+private fn ext2_io_restore(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, inode: usize,
                            base_blocks: usize, base_inodes: usize) -> bool {
     if (ext2_is_fenced()) {
-        match ext2_recover(mount) {
+        match ext2_recover(guard, mount) {
             Ext2RecoverResult::Failed => { return false; }
             Ext2RecoverResult::Recovered => { }
         }
     }
-    match ext2_resize_small_file(mount, inode, bs"before\n") {
+    match ext2_resize_small_file(guard, mount, inode, bs"before\n") {
         Ext2ResizeResult::NoSpace => { return false; }
         Ext2ResizeResult::Invalid => { return false; }
         Ext2ResizeResult::Fenced => { return false; }
@@ -883,13 +877,13 @@ private fn ext2_io_restore(mount: Ext2Mount, inode: usize,
 
 // Fail one access of the chosen kind at each position from `first` on, until
 // a run finishes before reaching the position. False on any broken verdict.
-private fn ext2_io_sweep(mount: Ext2Mount, inode: usize, large: bool,
+private fn ext2_io_sweep(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, inode: usize, large: bool,
                          on_write: bool, first: usize, last: usize,
                          base_blocks: usize, base_inodes: usize) -> bool {
     let mut done: bool = false;
     for skip: usize in 0..<EXT2_IO_SWEEP_LIMIT {
         if (done == false && skip >= first && skip <= last) {
-            match ext2_io_case(mount, inode, large, on_write, skip, false,
+            match ext2_io_case(guard, mount, inode, large, on_write, skip, false,
                                base_blocks, base_inodes) {
                 Ext2IoCase::Broken => { return false; }
                 Ext2IoCase::Fenced => { return false; }
@@ -897,7 +891,7 @@ private fn ext2_io_sweep(mount: Ext2Mount, inode: usize, large: bool,
                 Ext2IoCase::RolledBack => { }
                 Ext2IoCase::Committed => { }
             }
-            if (ext2_io_restore(mount, inode, base_blocks, base_inodes) == false) {
+            if (ext2_io_restore(guard, mount, inode, base_blocks, base_inodes) == false) {
                 return false;
             }
         }
@@ -908,10 +902,10 @@ private fn ext2_io_sweep(mount: Ext2Mount, inode: usize, large: bool,
 // A device that keeps failing from write number `skip` on: the mutation must
 // end Fenced, refuse the next one with the device healthy again, and leave
 // the mount consistent once ext2_recover has run.
-private fn ext2_io_fence(mount: Ext2Mount, inode: usize, skip: usize,
+private fn ext2_io_fence(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, inode: usize, skip: usize,
                          committed: bool, base_blocks: usize,
                          base_inodes: usize) -> bool {
-    match ext2_io_case(mount, inode, false, true, skip, true,
+    match ext2_io_case(guard, mount, inode, false, true, skip, true,
                        base_blocks, base_inodes) {
         Ext2IoCase::Fenced => { }
         Ext2IoCase::Broken => { return false; }
@@ -919,15 +913,14 @@ private fn ext2_io_fence(mount: Ext2Mount, inode: usize, skip: usize,
         Ext2IoCase::RolledBack => { return false; }
         Ext2IoCase::Committed => { return false; }
     }
-    match ext2_replace_regular_file(
-            mount, inode, ext2_write_fixture_source[0..<EXT2_IO_SMALL_BYTES],
+    match ext2_replace_regular_file(guard, mount, inode, ext2_write_fixture_source[0..<EXT2_IO_SMALL_BYTES],
             EXT2_MAX_WRITE_ALLOCATIONS) {
         Ext2ResizeResult::Fenced => { }
         Ext2ResizeResult::NoSpace => { return false; }
         Ext2ResizeResult::Invalid => { return false; }
         Ext2ResizeResult::Resized => { return false; }
     }
-    match ext2_recover(mount) {
+    match ext2_recover(guard, mount) {
         Ext2RecoverResult::Failed => { return false; }
         Ext2RecoverResult::Recovered => { }
     }
@@ -941,10 +934,10 @@ private fn ext2_io_fence(mount: Ext2Mount, inode: usize, skip: usize,
     if (committed == false && ext2_io_bitmap_matches(mount) == false) {
         return false;
     }
-    return ext2_io_restore(mount, inode, base_blocks, base_inodes);
+    return ext2_io_restore(guard, mount, inode, base_blocks, base_inodes);
 }
 
-private fn ext2_io_failure_check(mount: Ext2Mount) -> bool {
+private fn ext2_io_failure_check(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount) -> bool {
     ext2_write_fixture_execution_model_assumption();
     let mut base_blocks: usize = 0;
     let mut base_inodes: usize = 0;
@@ -976,7 +969,7 @@ private fn ext2_io_failure_check(mount: Ext2Mount) -> bool {
     // Small payload: reference run, then a failed write and a failed read at
     // every position the mutation reaches.
     let small_before: usize = block_write_call_total();
-    match ext2_io_case(mount, inode, false, true, 1000000, false,
+    match ext2_io_case(guard, mount, inode, false, true, 1000000, false,
                        base_blocks, base_inodes) {
         Ext2IoCase::Clean => { }
         Ext2IoCase::Broken => { return false; }
@@ -985,22 +978,22 @@ private fn ext2_io_failure_check(mount: Ext2Mount) -> bool {
         Ext2IoCase::Committed => { return false; }
     }
     let small_writes: usize = block_write_call_total() - small_before;
-    if (ext2_io_restore(mount, inode, base_blocks, base_inodes) == false) {
+    if (ext2_io_restore(guard, mount, inode, base_blocks, base_inodes) == false) {
         return false;
     }
-    if (ext2_io_sweep(mount, inode, false, true, 0, EXT2_IO_SWEEP_LIMIT,
+    if (ext2_io_sweep(guard, mount, inode, false, true, 0, EXT2_IO_SWEEP_LIMIT,
                       base_blocks, base_inodes) == false) {
         return false;
     }
-    if (ext2_io_sweep(mount, inode, false, false, 0, EXT2_IO_SWEEP_LIMIT,
+    if (ext2_io_sweep(guard, mount, inode, false, false, 0, EXT2_IO_SWEEP_LIMIT,
                       base_blocks, base_inodes) == false) {
         return false;
     }
     // A device that keeps failing: once early (a staged claim is left to
     // clean up) and once after the inode is published (old space is left).
     if (small_writes < 8 ||
-        ext2_io_fence(mount, inode, 6, false, base_blocks, base_inodes) == false ||
-        ext2_io_fence(mount, inode, small_writes - 3, true,
+        ext2_io_fence(guard, mount, inode, 6, false, base_blocks, base_inodes) == false ||
+        ext2_io_fence(guard, mount, inode, small_writes - 3, true,
                       base_blocks, base_inodes) == false) {
         return false;
     }
@@ -1009,7 +1002,7 @@ private fn ext2_io_failure_check(mount: Ext2Mount) -> bool {
     // write and a restore, so only the writes the small payload lacks are
     // tried: the pointer block, the inode publication and one release write.
     let large_before: usize = block_write_call_total();
-    match ext2_io_case(mount, inode, true, true, 1000000, false,
+    match ext2_io_case(guard, mount, inode, true, true, 1000000, false,
                        base_blocks, base_inodes) {
         Ext2IoCase::Clean => { }
         Ext2IoCase::Broken => { return false; }
@@ -1018,15 +1011,15 @@ private fn ext2_io_failure_check(mount: Ext2Mount) -> bool {
         Ext2IoCase::Committed => { return false; }
     }
     let large_writes: usize = block_write_call_total() - large_before;
-    if (ext2_io_restore(mount, inode, base_blocks, base_inodes) == false ||
+    if (ext2_io_restore(guard, mount, inode, base_blocks, base_inodes) == false ||
         large_writes < 16 || large_writes >= EXT2_IO_SWEEP_LIMIT) {
         return false;
     }
     // The last four writes are the old block's release, the one before them
     // is the inode, and the one before that is the pointer block.
-    return ext2_io_sweep(mount, inode, true, true, large_writes - 6,
+    return ext2_io_sweep(guard, mount, inode, true, true, large_writes - 6,
                          large_writes - 5, base_blocks, base_inodes) &&
-           ext2_io_sweep(mount, inode, true, true, large_writes - 3,
+           ext2_io_sweep(guard, mount, inode, true, true, large_writes - 3,
                          large_writes - 3, base_blocks, base_inodes);
 }
 
@@ -1079,15 +1072,14 @@ private fn ext2_release_lookup(mount: Ext2Mount, name: []const u8) -> usize {
 }
 
 // A new file of `length` payload bytes, or 0.
-private fn ext2_release_file(mount: Ext2Mount, name: []const u8,
+private fn ext2_release_file(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, name: []const u8,
                              length: usize) -> usize {
-    match ext2_create_empty_file_in(mount, 2, name, 0x1A4) {
+    match ext2_create_empty_file_in(guard, mount, 2, name, 0x1A4) {
         Ext2CreateEmptyResult::Invalid => { return 0; }
         Ext2CreateEmptyResult::NoSpace => { return 0; }
         Ext2CreateEmptyResult::Created(inode) => {
             if (length == 0 || length > EXT2_WRITE_FIXTURE_BYTES) { return 0; }
-            match ext2_write_regular_file_range(
-                    mount, inode, 0, ext2_write_fixture_source[0..<length]) {
+            match ext2_write_regular_file_range(guard, mount, inode, 0, ext2_write_fixture_source[0..<length]) {
                 Ext2ResizeResult::Resized => { return inode; }
                 Ext2ResizeResult::NoSpace => { return 0; }
                 Ext2ResizeResult::Invalid => { return 0; }
@@ -1097,14 +1089,14 @@ private fn ext2_release_file(mount: Ext2Mount, name: []const u8,
     }
 }
 
-private fn ext2_release_setup(mount: Ext2Mount, op: usize) -> bool {
+private fn ext2_release_setup(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, op: usize) -> bool {
     ext2_release_first = 0;
     ext2_release_second = 0;
     if (op == EXT2_RELEASE_OP_CREATE || op == EXT2_RELEASE_OP_MKDIR) {
         return true;
     }
     if (op == EXT2_RELEASE_OP_MOVE) {
-        match ext2_create_empty_file_in(mount, 2, bs"release.bin", 0x1A4) {
+        match ext2_create_empty_file_in(guard, mount, 2, bs"release.bin", 0x1A4) {
             Ext2CreateEmptyResult::Invalid => { return false; }
             Ext2CreateEmptyResult::NoSpace => { return false; }
             Ext2CreateEmptyResult::Created(inode) => {
@@ -1114,7 +1106,7 @@ private fn ext2_release_setup(mount: Ext2Mount, op: usize) -> bool {
         }
     }
     if (op == EXT2_RELEASE_OP_RMDIR) {
-        match ext2_make_directory_in(mount, 2, bs"release.dir", 0x1ED) {
+        match ext2_make_directory_in(guard, mount, 2, bs"release.dir", 0x1ED) {
             Ext2MkdirResult::NoSpace => { return false; }
             Ext2MkdirResult::Invalid => { return false; }
             Ext2MkdirResult::Created(directory) => {
@@ -1123,24 +1115,24 @@ private fn ext2_release_setup(mount: Ext2Mount, op: usize) -> bool {
             }
         }
     }
-    ext2_release_first = ext2_release_file(mount, bs"release.bin",
+    ext2_release_first = ext2_release_file(guard, mount, bs"release.bin",
                                            EXT2_RELEASE_FILE_BYTES);
     if (ext2_release_first == 0) { return false; }
     if (op == EXT2_RELEASE_OP_RENAME) {
-        ext2_release_second = ext2_release_file(mount, bs"release.new",
+        ext2_release_second = ext2_release_file(guard, mount, bs"release.new",
                                                 KERNEL_BLOCK_SIZE);
         if (ext2_release_second == 0) { return false; }
     }
     return true;
 }
 
-private fn ext2_release_rmdir(mount: Ext2Mount) -> bool {
+private fn ext2_release_rmdir(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount) -> bool {
     match ext2_claim_directory(mount, 2, bs"release.dir") {
         Ext2ClaimResult::Invalid => { return false; }
         Ext2ClaimResult::NotFound => { return false; }
         Ext2ClaimResult::NotDirectory => { return false; }
         Ext2ClaimResult::Claimed(directory) => {
-            match ext2_remove_directory_in(mount, 2, directory,
+            match ext2_remove_directory_in(guard, mount, 2, directory,
                                            bs"release.dir") {
                 Ext2RmdirResult::Removed => { return true; }
                 Ext2RmdirResult::Invalid => { return false; }
@@ -1157,15 +1149,15 @@ private fn ext2_release_rmdir(mount: Ext2Mount) -> bool {
     }
 }
 
-private fn ext2_release_run(mount: Ext2Mount, op: usize) -> bool {
+private fn ext2_release_run(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, op: usize) -> bool {
     if (op == EXT2_RELEASE_OP_TRUNCATE) {
-        match ext2_truncate_regular_file(mount, ext2_release_first) {
+        match ext2_truncate_regular_file(guard, mount, ext2_release_first) {
             Ext2TruncateResult::Invalid => { return false; }
             Ext2TruncateResult::Truncated => { return true; }
         }
     }
     if (op == EXT2_RELEASE_OP_UNLINK) {
-        match ext2_unlink_name(mount, 2, bs"release.bin") {
+        match ext2_unlink_name(guard, mount, 2, bs"release.bin") {
             Ext2UnlinkNameResult::Unlinked => { return true; }
             Ext2UnlinkNameResult::Invalid => { return false; }
             Ext2UnlinkNameResult::NotFound => { return false; }
@@ -1174,14 +1166,14 @@ private fn ext2_release_run(mount: Ext2Mount, op: usize) -> bool {
         }
     }
     if (op == EXT2_RELEASE_OP_CREATE) {
-        match ext2_create_empty_file_in(mount, 2, bs"release.new", 0x1A4) {
+        match ext2_create_empty_file_in(guard, mount, 2, bs"release.new", 0x1A4) {
             Ext2CreateEmptyResult::Invalid => { return false; }
             Ext2CreateEmptyResult::NoSpace => { return false; }
             Ext2CreateEmptyResult::Created(inode) => { return true; }
         }
     }
     if (op == EXT2_RELEASE_OP_MKDIR) {
-        match ext2_make_directory_in(mount, 2, bs"release.dir", 0x1ED) {
+        match ext2_make_directory_in(guard, mount, 2, bs"release.dir", 0x1ED) {
             Ext2MkdirResult::NoSpace => { return false; }
             Ext2MkdirResult::Invalid => { return false; }
             Ext2MkdirResult::Created(directory) => {
@@ -1191,7 +1183,7 @@ private fn ext2_release_run(mount: Ext2Mount, op: usize) -> bool {
         }
     }
     if (op == EXT2_RELEASE_OP_MOVE) {
-        match ext2_rename_in(mount, 2, bs"release.bin", 2, bs"release.mv") {
+        match ext2_rename_in(guard, mount, 2, bs"release.bin", 2, bs"release.mv") {
             Ext2RenameResult::Renamed => { return true; }
             Ext2RenameResult::Invalid => { return false; }
             Ext2RenameResult::NoSpace => { return false; }
@@ -1202,7 +1194,7 @@ private fn ext2_release_run(mount: Ext2Mount, op: usize) -> bool {
         }
     }
     if (op == EXT2_RELEASE_OP_RENAME) {
-        match ext2_rename_in(mount, 2, bs"release.new", 2, bs"release.bin") {
+        match ext2_rename_in(guard, mount, 2, bs"release.new", 2, bs"release.bin") {
             Ext2RenameResult::Renamed => { return true; }
             Ext2RenameResult::Invalid => { return false; }
             Ext2RenameResult::NoSpace => { return false; }
@@ -1212,7 +1204,7 @@ private fn ext2_release_run(mount: Ext2Mount, op: usize) -> bool {
             Ext2RenameResult::Unsupported => { return false; }
         }
     }
-    return ext2_release_rmdir(mount);
+    return ext2_release_rmdir(guard, mount);
 }
 
 // release.bin as the setup wrote it: two direct blocks, and its first
@@ -1288,26 +1280,26 @@ private fn ext2_release_names_are(mount: Ext2Mount, op: usize,
 }
 
 // Back to the state before the setup, with the device healthy.
-private fn ext2_release_teardown(mount: Ext2Mount) -> bool {
+private fn ext2_release_teardown(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount) -> bool {
     if (ext2_release_lookup(mount, bs"release.dir") > 1 &&
-        ext2_release_rmdir(mount) == false) {
+        ext2_release_rmdir(guard, mount) == false) {
         return false;
     }
-    match ext2_unlink_name(mount, 2, bs"release.bin") {
+    match ext2_unlink_name(guard, mount, 2, bs"release.bin") {
         Ext2UnlinkNameResult::Unlinked => { }
         Ext2UnlinkNameResult::NotFound => { }
         Ext2UnlinkNameResult::Invalid => { return false; }
         Ext2UnlinkNameResult::IsDirectory => { return false; }
         Ext2UnlinkNameResult::Unsupported => { return false; }
     }
-    match ext2_unlink_name(mount, 2, bs"release.mv") {
+    match ext2_unlink_name(guard, mount, 2, bs"release.mv") {
         Ext2UnlinkNameResult::Unlinked => { }
         Ext2UnlinkNameResult::NotFound => { }
         Ext2UnlinkNameResult::Invalid => { return false; }
         Ext2UnlinkNameResult::IsDirectory => { return false; }
         Ext2UnlinkNameResult::Unsupported => { return false; }
     }
-    match ext2_unlink_name(mount, 2, bs"release.new") {
+    match ext2_unlink_name(guard, mount, 2, bs"release.new") {
         Ext2UnlinkNameResult::Unlinked => { return true; }
         Ext2UnlinkNameResult::NotFound => { return true; }
         Ext2UnlinkNameResult::Invalid => { return false; }
@@ -1316,10 +1308,10 @@ private fn ext2_release_teardown(mount: Ext2Mount) -> bool {
     }
 }
 
-private fn ext2_release_case(mount: Ext2Mount, op: usize, skip: usize,
+private fn ext2_release_case(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, op: usize, skip: usize,
                              sticky: bool, base_blocks: usize,
                              base_inodes: usize) -> Ext2ReleaseCase {
-    if (ext2_release_setup(mount, op) == false) {
+    if (ext2_release_setup(guard, mount, op) == false) {
         return Ext2ReleaseCase::Broken;
     }
     let mut before_blocks: usize = 0;
@@ -1358,11 +1350,11 @@ private fn ext2_release_case(mount: Ext2Mount, op: usize, skip: usize,
         return Ext2ReleaseCase::Broken;
     }
     block_fault_arm(true, skip, sticky);
-    let done: bool = ext2_release_run(mount, op);
+    let done: bool = ext2_release_run(guard, mount, op);
     let injected: usize = block_fault_disarm();
     if (ext2_is_fenced()) {
         ext2_release_fenced = ext2_release_fenced + 1;
-        match ext2_recover(mount) {
+        match ext2_recover(guard, mount) {
             Ext2RecoverResult::Failed => { return Ext2ReleaseCase::Broken; }
             Ext2RecoverResult::Recovered => { }
         }
@@ -1385,7 +1377,7 @@ private fn ext2_release_case(mount: Ext2Mount, op: usize, skip: usize,
             return Ext2ReleaseCase::Broken;
         }
     }
-    if (ext2_release_teardown(mount) == false ||
+    if (ext2_release_teardown(guard, mount) == false ||
         ext2_write_fixture_counts_match(mount, base_blocks,
                                         base_inodes) == false) {
         return Ext2ReleaseCase::Broken;
@@ -1398,14 +1390,14 @@ private fn ext2_release_case(mount: Ext2Mount, op: usize, skip: usize,
 // Fail one write at each position from 0 on until a run commits (or
 // finishes before reaching it), then once with every write failing from the
 // second on. False on a broken verdict, or when no position rolled back.
-private fn ext2_release_sweep(mount: Ext2Mount, op: usize,
+private fn ext2_release_sweep(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, op: usize,
                               base_blocks: usize, base_inodes: usize)
         -> bool {
     let mut done: bool = false;
     let mut rolled_back: bool = false;
     for skip: usize in 0..<EXT2_RELEASE_SWEEP_LIMIT {
         if (done == false) {
-            match ext2_release_case(mount, op, skip, false, base_blocks,
+            match ext2_release_case(guard, mount, op, skip, false, base_blocks,
                                     base_inodes) {
                 Ext2ReleaseCase::Broken => { return false; }
                 Ext2ReleaseCase::Clean => { done = true; }
@@ -1414,7 +1406,7 @@ private fn ext2_release_sweep(mount: Ext2Mount, op: usize,
             }
         }
     }
-    match ext2_release_case(mount, op, 1, true, base_blocks, base_inodes) {
+    match ext2_release_case(guard, mount, op, 1, true, base_blocks, base_inodes) {
         Ext2ReleaseCase::Broken => { return false; }
         Ext2ReleaseCase::Clean => { return false; }
         Ext2ReleaseCase::RolledBack => { }
@@ -1423,7 +1415,7 @@ private fn ext2_release_sweep(mount: Ext2Mount, op: usize,
     return done && rolled_back;
 }
 
-fn ext2_release_failure_check(mount: Ext2Mount) -> bool {
+fn ext2_release_failure_check(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount) -> bool {
     let mut base_blocks: usize = 0;
     let mut base_inodes: usize = 0;
     match ext2_free_counts(mount) {
@@ -1439,7 +1431,7 @@ fn ext2_release_failure_check(mount: Ext2Mount) -> bool {
     }
     ext2_release_fenced = 0;
     for op: usize in 0..<EXT2_RELEASE_OPS {
-        if (ext2_release_sweep(mount, op, base_blocks,
+        if (ext2_release_sweep(guard, mount, op, base_blocks,
                                base_inodes) == false) {
             return false;
         }
@@ -1484,7 +1476,13 @@ fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
     } else {
         kernel_boot_log("ext2 bytes: boundary check failed\n");
     }
-    match ext2_bitmap_roundtrip_check(mount) {
+    // GitHub issue #1159: the mutation checks hold the ext2 mutation lock,
+    // as every mutating syscall does; the undo log and the fence's pending
+    // blocks are reached only with its guard. Taken after the readable-root
+    // probe above, which a held lock would refuse at the read gate, and given
+    // back before EL0 runs. Core 0 runs alone here, so it never waits.
+    let guard = ext2_mutation_take();
+    match ext2_bitmap_roundtrip_check(guard, mount) {
         Ext2BitmapProbeResult::Verified => {
             kernel_boot_log("ext2 bitmap: block+inode counts ok\n");
         }
@@ -1492,7 +1490,7 @@ fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
             kernel_boot_log("ext2 bitmap: failed\n");
         }
     }
-    match ext2_owner_roundtrip_check(mount) {
+    match ext2_owner_roundtrip_check(guard, mount) {
         Ext2BitmapProbeResult::Verified => {
             kernel_boot_log("ext2 owners: block+inode owners ok\n");
         }
@@ -1500,7 +1498,7 @@ fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
             kernel_boot_log("ext2 owners: failed\n");
         }
     }
-    match ext2_write_allocations_roundtrip_check(mount) {
+    match ext2_write_allocations_roundtrip_check(guard, mount) {
         Ext2BitmapProbeResult::Verified => {
             kernel_boot_log("ext2 write rollback: two blocks released\n");
         }
@@ -1508,12 +1506,12 @@ fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
             kernel_boot_log("ext2 write rollback: failed\n");
         }
     }
-    if (ext2_create_check(mount)) {
+    if (ext2_create_check(guard, mount)) {
         kernel_boot_log("ext2 create: create+lookup+unlink ok\n");
     } else {
         kernel_boot_log("ext2 create: failed\n");
     }
-    if (ext2_create_in_directory_check(mount)) {
+    if (ext2_create_in_directory_check(guard, mount)) {
         kernel_boot_log("ext2 nested: create+lookup+unlink in /etc ok\n");
     } else {
         kernel_boot_log("ext2 nested: failed\n");
@@ -1550,24 +1548,24 @@ fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
             }
         }
     }
-    if (ext2_write_indirect_check(mount)) {
+    if (ext2_write_indirect_check(guard, mount)) {
         kernel_boot_log("ext2 write indirect: rollback+grow+zero+restore ok\n");
     } else {
         kernel_boot_log("ext2 write indirect: failed\n");
     }
     // GitHub issue #595. Last, after every fixture that counts free blocks.
-    if (ext2_io_failure_check(mount)) {
+    if (ext2_io_failure_check(guard, mount)) {
         kernel_boot_log("ext2 io failure: every phase rolled back or committed, fence+recover ok\n");
     } else {
         kernel_boot_log("ext2 io failure: failed\n");
     }
-    if (ext2_full_check(mount)) {
+    if (ext2_full_check(guard, mount)) {
         kernel_boot_log("ext2 full: block+inode NoSpace for mkdir+create, rolled back, control ok\n");
     } else {
         kernel_boot_log("ext2 full: failed\n");
     }
     // GitHub issue #1088. After the full check, so its counts are untouched.
-    if (ext2_release_failure_check(mount)) {
+    if (ext2_release_failure_check(guard, mount)) {
         kernel_boot_log("ext2 release failure: truncate+unlink+rename+rmdir+create+mkdir+move all or nothing, fence+recover ok\n");
     } else {
         kernel_boot_log("ext2 release failure: failed\n");
@@ -1575,12 +1573,16 @@ fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
     match ext2_exhaustion_mode(mount) {
         Ext2ExhaustionMode::Invalid => {
             kernel_boot_log("ext2 exhaustion: invalid inittab\n");
+            ext2_mutation_give(guard);
             return;
         }
-        Ext2ExhaustionMode::Interactive => { return; }
+        Ext2ExhaustionMode::Interactive => {
+            ext2_mutation_give(guard);
+            return;
+        }
         Ext2ExhaustionMode::Integration => { }
     }
-    if (ext2_exhaustion_fault_case(mount)) {
+    if (ext2_exhaustion_fault_case(guard, mount)) {
         kernel_boot_log("ext2 exhaustion: write fault mid-check failed it, fillers removed, mutable.txt intact\n");
     } else {
         kernel_boot_log("ext2 exhaustion: write fault mid-check left state behind\n");
@@ -1588,7 +1590,8 @@ fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
     let exhaustion_start: usize = read_cntpct() as usize;
     let exhaustion_reads: usize = block_read_call_total();
     let exhaustion_writes: usize = block_write_call_total();
-    let exhausted: bool = ext2_exhaustion_run(mount);
+    let exhausted: bool = ext2_exhaustion_run(guard, mount);
+    ext2_mutation_give(guard);
     let exhaustion_ticks: usize = (read_cntpct() as usize) - exhaustion_start;
     kernel_boot_log("ext2 exhaustion cost: ticks=");
     uart_put_udec(exhaustion_ticks);

@@ -527,3 +527,11 @@ entries below that date are history, left as written.
   read is concurrent with the write. `profile_timeline_cores` stays listed
   (an own-element partition, a per_cpu store candidate).
 
+- 2026-11-08 (#1159, the guarded_ref decision): ext2.tkb's `ext2_undo_rows`,
+  `ext2_fence_pending` and `ext2_fence_pending_count` become the
+  `guarded_by(ext2_mutation_lock)` fields of `Ext2MutationState`
+  (`composite`), reached only as `guarded_ref(guard, ...)` in place.
+  `Ext2MutationGuard` is indexed by `&ext2_mutation_lock`. Every ext2
+  mutator that logs or fences takes the guard as a parameter, and the boot
+  fixture takes the lock around its mutation checks, so
+  buildcheck_ext2_mutation_guard.py exempts no file.
