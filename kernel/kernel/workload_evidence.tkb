@@ -579,15 +579,18 @@ struct per_cpu MoveCostOpen {
     private live: bool;
 }
 
+// AtomicWords (GitHub issue #1475): written under the run lock, published
+// by move_cost_stored, and printed by core 0.
 struct MoveCostRecord {
-    round: usize;
-    cold: bool;
-    cpu: usize;
+    round: AtomicWord;
+    // 1 for a cold pass, 0 for a warm one.
+    cold: AtomicWord;
+    cpu: AtomicWord;
     // Timer ticks this CPU took inside the pass (GitHub issue #649). The
     // PMU counts EL1 too, so a pass that took one also counted its handler.
-    ticks: usize;
-    cycles: usize;
-    instructions: usize;
+    ticks: AtomicWord;
+    cycles: AtomicWord;
+    instructions: AtomicWord;
 }
 
 private let mut move_cost_open: [MoveCostOpen; KERNEL_MAX_CORES];
@@ -2274,16 +2277,15 @@ fn workload_move_cost_progress(phase: usize, round: usize, cold: usize)
         }
         let index: usize = atomic_word_load(&move_cost_stored);
         if (index < MOVE_COST_MAX) {
-            move_cost_records[index].round = round;
-            move_cost_records[index].cold = cold != 0;
-            move_cost_records[index].cpu = raw_cpu;
-            move_cost_records[index].ticks =
-                end_ticks - move_cost_open[cpu].ticks;
-            move_cost_records[index].cycles =
-                (end_cycles - move_cost_open[cpu].cycles) & MOVE_COST_WRAP;
-            move_cost_records[index].instructions =
-                (end_instructions - move_cost_open[cpu].instructions) &
-                MOVE_COST_WRAP;
+            atomic_word_store(&move_cost_records[index].round, round);
+            let mut cold_word: usize = 0;
+            if (cold != 0) { cold_word = 1; }
+            atomic_word_store(&move_cost_records[index].cold, cold_word);
+            atomic_word_store(&move_cost_records[index].cpu, raw_cpu);
+            atomic_word_store(&move_cost_records[index].ticks, end_ticks - move_cost_open[cpu].ticks);
+            atomic_word_store(&move_cost_records[index].cycles, (end_cycles - move_cost_open[cpu].cycles) & MOVE_COST_WRAP);
+            atomic_word_store(&move_cost_records[index].instructions, (end_instructions - move_cost_open[cpu].instructions) &
+                MOVE_COST_WRAP);
             atomic_word_store(&move_cost_stored, index + 1);
         }
         process_run_unlock(guard);
@@ -2306,19 +2308,19 @@ private fn workload_move_cost_report() -> usize {
     for index: usize in 0..<MOVE_COST_MAX {
         if (index < stored) {
             kernel_boot_log("profile: move-cost name=move-cost round=");
-            uart_put_udec(move_cost_records[index].round);
-            if (move_cost_records[index].cold) {
+            uart_put_udec(atomic_word_load(&move_cost_records[index].round));
+            if (atomic_word_load(&move_cost_records[index].cold) != 0) {
                 kernel_boot_log(" kind=cold cpu=");
             } else {
                 kernel_boot_log(" kind=warm cpu=");
             }
-            uart_put_udec(move_cost_records[index].cpu);
+            uart_put_udec(atomic_word_load(&move_cost_records[index].cpu));
             kernel_boot_log(" ticks=");
-            uart_put_udec(move_cost_records[index].ticks);
+            uart_put_udec(atomic_word_load(&move_cost_records[index].ticks));
             kernel_boot_log(" cycles=");
-            uart_put_udec(move_cost_records[index].cycles);
+            uart_put_udec(atomic_word_load(&move_cost_records[index].cycles));
             kernel_boot_log(" instructions=");
-            uart_put_udec(move_cost_records[index].instructions);
+            uart_put_udec(atomic_word_load(&move_cost_records[index].instructions));
             kernel_boot_log("\n");
         }
     }

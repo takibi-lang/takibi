@@ -647,3 +647,7 @@ entries below that date are history, left as written.
   `composite`. `kernel_test_init_script`, which both mains set to true just
   before the call, is a parameter of kernel_test_driver_run. Seven rows
   leave the allowlist.
+- 2026-11-08: `move_cost_records` (#1475, first record): `MoveCostRecord`'s
+  fields are `AtomicWord`s (cold is 1 or 0), stored under the run lock,
+  published by `move_cost_stored` and printed by core 0. One row leaves
+  the allowlist.
