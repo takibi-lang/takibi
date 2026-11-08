@@ -660,3 +660,26 @@ entries below that date are history, left as written.
   field is an `AtomicWord` (the enable flag 1 or 0); a one-time counter's
   first-time test reads fetch_add's previous value. One row leaves the
   allowlist.
+
+### 2026-11-08 evidence-record incremental space review
+
+The recovered three-record slice replaces scalar fields with AtomicWord;
+it adds no record, allocation, pool, lifetime or workload. The bool fields
+occupied padded word slots already. Current linked record sizes on both
+platforms are 72 B (ProcessTestEvidence), 112 B (SyscallTestEvidence) and
+1536 B (move_cost_records). Allocation and occupancy evidence from the
+existing space checkpoint is reused at this unchanged boundary; this is
+an incremental migration, not completion of the globals milestone.
+
+Both production kernels were rebuilt at 04c94895. llvm-size-19 reports
+QEMU text/data/BSS 810628/4600/1302528 B and RPi5
+4192856/5576/1933312 B. llvm-nm-19 reports usable_ram_start
+0x40208000 and 0x7e0000 respectively; the memory-map check passes.
+The base's current checkpoint (source digest verified against origin/main
+2a135027) records text 809700/4192012 B: the respective increases are
+928/844 B for atomic access, fetch-add, first-claim CAS and decrement code.
+Those baseline text figures are inherited measurements, not a baseline
+rebuild in this recovery. No timing or cache-performance claim is made.
+The next trigger is another storage/lifetime change or completion of the
+remaining evidence-record migration. The coordinator still runs the full
+publication gate, including hardware.
