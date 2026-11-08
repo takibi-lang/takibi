@@ -71,7 +71,7 @@ LISTED = {
     "kernel/platform/rpi5/init.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/platform/rpi5/intc.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/platform/rpi5/xhci_irq_affinity.tkb": (1, FLIP, "not yet reviewed for migration"),
-    "kernel/printk/console_lock.tkb": (1, FLIP, "not yet reviewed for migration"),
+    "kernel/printk/console_lock.tkb": (1, REVIEWED, "#638 stage 9: console_measure_note_acquire reads it under a borrowed ConsoleGuard, an IRQ-masking Mutex guard, so no tick switches the holder before the CPU bit is recorded"),
     "kernel/printk/log.tkb": (4, REVIEWED, "#638 stage 9: kernel_log_core_here's writers run in preempt_off regions or boot probes; the reserve's CPU tag travels in its token; the console owner word is taken only on masked terminal or stopped-world paths; the peer probe runs in a secondary's idle loop (see the review comment in the file)"),
     "kernel/printk/log_ring_trace.tkb": (1, FLIP, "picks the buffer an event goes to; its slot is one fetch_add (#1159)"),
 }
