@@ -8262,6 +8262,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             return syscall_finish_current(frame, SyscallAction::Resume(
                 kernel_process_el1_preempt_real_close(x1)), current_authority);
         }
+        // 28 closes the cross-CPU phase's window (#638 stage 9), x1 as for
+        // 27, and answers the El1 resumes taken on another CPU.
+        if (x0 == 28) {
+            return syscall_finish_current(frame, SyscallAction::Resume(
+                kernel_process_el1_preempt_real_close_cross(x1)), current_authority);
+        }
         // /bin/protocol-trace's log-ring window (GitHub issue #656).
         if (x0 == 22) {
             if (log_storm_trace_probe()) {

@@ -19,9 +19,13 @@
 // - The spin window switches only at the spin's PC. The real window (#638
 //   stage 9 (c), maintainer option A1, 2026-11-07) admits any PC of the
 //   opener's syscalls: /bin/protocol-trace opens it around a loop of ext2
-//   reads on one CPU, beside a child spinning at EL0, and checks every read's
-//   bytes. One CPU only: a real handler moved across CPUs is not exercised
-//   here. Not a soak: one window per boot.
+//   reads, beside children spinning at EL0, and checks every read's bytes:
+//   first on CPU 1 alone, then (#638 stage 9) on CPUs 0 and 1, until a frame
+//   switched on one CPU has resumed on the other. Not a soak: one window per
+//   phase, once per boot.
+// - The cross-CPU count can undercount, never overcount: a CPU's mark of
+//   "the last real switch was mine" is cleared only by a resume there, so a
+//   stale mark can only hide a move.
 // - Nothing resets the priority mask on an El1 resume (maintainer,
 //   2026-11-05): the scenario checks the shadow after its cross-CPU take,
 //   the consult refuses a tick that interrupted a masked shadow, and every
@@ -45,6 +49,8 @@ private let mut el1_preempt_switches: AtomicWord;
 private let mut el1_preempt_window_real: AtomicWord;
 // el1_preempt_switches when the real window opened.
 private let mut el1_preempt_real_base: AtomicWord;
+// El1 resumes inside the real window on a CPU that did not switch the frame.
+private let mut el1_preempt_real_cross: AtomicWord;
 // EL1 ticks inside the window that the count refused.
 private let mut el1_preempt_count_refusals: AtomicWord;
 // Resumes of an El1 frame through el0_irq_entry's return.
@@ -55,6 +61,9 @@ private let mut el1_preempt_irq_return_resumes: AtomicWord;
 // same entry with a frame on the IRQ stack, so the address is what is compared.
 struct per_cpu El1SwitchPending {
     private frame_sp: usize;
+    // This CPU's tick switched the real window's opener and no El1 resume
+    // has run here since (#638 stage 9).
+    private real_switched: bool;
 }
 private let mut el1_switch_pending: [El1SwitchPending; KERNEL_MAX_CORES];
 
@@ -71,6 +80,7 @@ fn el1_preempt_window_close() {
 // across its switches until el1_preempt_real_close.
 fn el1_preempt_real_open(pid: usize) {
     atomic_word_store(&el1_preempt_real_base, atomic_word_load(&el1_preempt_switches));
+    atomic_word_store(&el1_preempt_real_cross, 0);
     atomic_word_store(&el1_preempt_window_real, 1);
     atomic_word_store(&el1_preempt_window_pid, pid);
 }
@@ -121,7 +131,28 @@ fn el1_preempt_switch_note(frame_sp: usize) {
     atomic_word_fetch_add(&el1_preempt_switches, 1);
     preempt_off (cpu) {
         el1_switch_pending[cpu].frame_sp = frame_sp;
+        if (atomic_word_load(&el1_preempt_window_real) != 0) {
+            el1_switch_pending[cpu].real_switched = true;
+        }
     } else { }
+}
+
+// An El1 frame resumed (kernel_process_stack_switch_complete). Inside the real
+// window only the opener has El1 frames, so a resume on a CPU whose tick did
+// not switch it is the opener's handler moved across CPUs (#638 stage 9).
+fn el1_preempt_real_resume_note() {
+    if (atomic_word_load(&el1_preempt_window_real) == 0) { return; }
+    preempt_off (cpu) {
+        if (el1_switch_pending[cpu].real_switched) {
+            el1_switch_pending[cpu].real_switched = false;
+        } else {
+            atomic_word_fetch_add(&el1_preempt_real_cross, 1);
+        }
+    } else { }
+}
+
+fn el1_preempt_real_cross_read() -> usize {
+    return atomic_word_load(&el1_preempt_real_cross);
 }
 
 // True once, on the return that installs the frame the tick chose.

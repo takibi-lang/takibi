@@ -34,6 +34,7 @@ const LOG_RING_TRACE_TAG: usize = 22;
 const PROTOCOL_TRACE_EL1_PREEMPT_TAG: usize = 25;
 const PROTOCOL_TRACE_EL1_REAL_OPEN_TAG: usize = 26;
 const PROTOCOL_TRACE_EL1_REAL_CLOSE_TAG: usize = 27;
+const PROTOCOL_TRACE_EL1_REAL_CROSS_CLOSE_TAG: usize = 28;
 const OPENAT_SYSCALL: usize = 56;
 const CLOSE_SYSCALL: usize = 57;
 const READ_SYSCALL: usize = 63;
@@ -228,6 +229,66 @@ private fn protocol_trace_el1_real() !{unsafe} {
     }
 }
 
+/* GitHub issue #638 stage 9: the same real window, with this process and two
+ * spinning children allowed CPUs 0 and 1, until a read preempted on one CPU
+ * has resumed on the other. Every read must still return the first's bytes.
+ * The calls are the peer-safe openat/read/close the CPU 1 phase made. */
+private fn protocol_trace_el1_real_cross() !{unsafe} {
+    if (protocol_trace_pin(3) != 0) {
+        protocol_trace_fail(bs"protocol-trace: cpus 0 and 1 were refused\n");
+    }
+    let mut first: [u8; 64];
+    let mut again: [u8; 64];
+    let path = bs"/etc/init.sh\0";
+    let expected: usize = protocol_trace_read_file(path, first as *u8, 64);
+    if (expected == 0 || expected >= PROTOCOL_TRACE_ERROR_FLOOR) {
+        protocol_trace_fail(bs"protocol-trace: el1 cross: /etc/init.sh did not read\n");
+    }
+    let one: usize = svc5(CLONE_SYSCALL, CLONE_FORK_SIGCHLD, 0, 0, 0, 0);
+    if (one == 0) {
+        while (true) { }
+    }
+    let two: usize = svc5(CLONE_SYSCALL, CLONE_FORK_SIGCHLD, 0, 0, 0, 0);
+    if (two == 0) {
+        while (true) { }
+    }
+    if (one >= PROTOCOL_TRACE_ERROR_FLOOR || two >= PROTOCOL_TRACE_ERROR_FLOOR) {
+        protocol_trace_fail(bs"protocol-trace: fork failed\n");
+    }
+    let mut cross: usize = 0;
+    for attempt: usize in 0..<PROTOCOL_TRACE_REAL_ATTEMPTS {
+        if (cross == 0) {
+            if (svc5(WORKLOAD_PROGRESS_SYSCALL, PROTOCOL_TRACE_EL1_REAL_OPEN_TAG,
+                     0, 0, 0, 0) != 1) {
+                protocol_trace_fail(bs"protocol-trace: el1 cross: the window did not open\n");
+            }
+            for round: usize in 0..<PROTOCOL_TRACE_REAL_READS {
+                for index: usize in 0..<64 { again[index] = 0; }
+                let got: usize = protocol_trace_read_file(path, again as *u8, 64);
+                if (got != expected) {
+                    protocol_trace_fail(bs"protocol-trace: el1 cross: a read returned another length\n");
+                }
+                for index: usize in 0..<64 {
+                    if (again[index] != first[index]) {
+                        protocol_trace_fail(bs"protocol-trace: el1 cross: a read returned other bytes\n");
+                    }
+                }
+            }
+            cross = svc5(WORKLOAD_PROGRESS_SYSCALL, PROTOCOL_TRACE_EL1_REAL_CROSS_CLOSE_TAG,
+                         1, 0, 0, 0);
+        }
+    }
+    svc5(KILL_SYSCALL, one, SIGKILL_NUMBER, 0, 0, 0);
+    svc5(KILL_SYSCALL, two, SIGKILL_NUMBER, 0, 0, 0);
+    if (svc5(WAIT4_SYSCALL, one, 0, 0, 0, 0) != one ||
+        svc5(WAIT4_SYSCALL, two, 0, 0, 0, 0) != two) {
+        protocol_trace_fail(bs"protocol-trace: el1 cross: wait4 did not reap a child\n");
+    }
+    if (cross == 0) {
+        protocol_trace_fail(bs"protocol-trace: el1 cross: no read resumed on another cpu\n");
+    }
+}
+
 fn protocol_trace_probe() {
     let mut opened: bool = false;
     // GitHub issue #665: yield once whether or not the window is deferred.
@@ -266,6 +327,7 @@ fn protocol_trace_probe() {
         protocol_trace_fail(bs"protocol-trace: the window did not close\n");
     }
     protocol_trace_el1_real();
+    protocol_trace_el1_real_cross();
     if (protocol_trace_pin(1) != 0) {
         protocol_trace_fail(bs"protocol-trace: cpu 0 alone was refused\n");
     }

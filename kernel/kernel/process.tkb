@@ -5466,6 +5466,7 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
             // #850. The #1194 boot probe's hand-made frame meets it too: the
             // probe takes no mask of its own (option F, 2026-11-07).
             if (irq_pmr_masked_here()) { kernel_invariant_stop(); }
+            el1_preempt_real_resume_note();
         }
     }
 }
@@ -8818,6 +8819,17 @@ fn kernel_process_el1_preempt_real_close(answers_ok: usize) -> usize {
         kernel_boot_log("scheduler: el1 preempt real: an ext2 read syscall preempted at EL1 and resumed, every answer intact\n");
     }
     return switches;
+}
+
+// #638 stage 9: the cross-CPU phase's close. answers_ok as above; answers the
+// El1 resumes on a CPU other than the switching one, after closing.
+fn kernel_process_el1_preempt_real_close_cross(answers_ok: usize) -> usize {
+    let cross: usize = el1_preempt_real_cross_read();
+    let switches: usize = el1_preempt_real_close();
+    if (switches != 0 && cross != 0 && answers_ok == 1) {
+        kernel_boot_log("scheduler: el1 preempt real: an ext2 read syscall preempted on one CPU and resumed on another, every answer intact\n");
+    }
+    return cross;
 }
 
 const EL1_PREEMPT_SPIN_ROUNDS: usize = 100000;
