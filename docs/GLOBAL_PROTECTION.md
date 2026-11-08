@@ -629,3 +629,11 @@ entries below that date are history, left as written.
   ext2_read_fast_symlink, ext2_block_bitmap_snapshot,
   ext2_resize/replace/write_regular_file*, block_read and its callees) take
   their buffer as `borrow`. Eight rows leave the allowlist.
+- 2026-11-08: `virtio_blk_timeout_first` and `virtio_blk_timeout_last`
+  (#1159, coordinator call (1)(a)) are `VirtioBlkTimeoutWords`, six
+  `AtomicWord`s each (`composite`), private to virtio_blk.tkb. The one
+  writer stores them under block_device_lock; DDB loads them with the world
+  stopped. A guarded_by(block_device_lock) copy beside the published one
+  would have no reader, so there is none. DDB may still see a record a
+  stopped writer half stored, as before, but each word is whole. Two rows
+  leave the allowlist.

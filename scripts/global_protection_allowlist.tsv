@@ -18,8 +18,6 @@ kernel/arch/arm64/mm/asid.tkb	asid_bits	read-by asid_width_bits: 2026-10-31 writ
 kernel/arch/arm64/mm/asid.tkb	asid_last	read-by asid_highest_value,asid_assign_locked: 2026-10-31 written once by asid_init with the MMU off, where the compiler refuses an atomic call; read lock-free after
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_queue	read-by virtio_blk_submit_owned,virtio_blk_setup_queue: 2026-10-31 lock: one request at a time under block_device_lock, a TaskMutex a preempted holder keeps
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_regs	read-by virtio_blk_capacity_sectors,virtio_blk_init,virtio_blk_submit_owned: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
-kernel/drivers/block/virtio_blk.tkb	virtio_blk_timeout_first	read-by virtio_blk_timeout_first_snapshot: 2026-10-31 lock: written under block_device_lock on the first timeout; DDB reads it with the world stopped and may catch a stopped writer mid-record, a diagnostic
-kernel/drivers/block/virtio_blk.tkb	virtio_blk_timeout_last	read-by virtio_blk_timeout_last_snapshot: 2026-10-31 lock: as virtio_blk_timeout_first, for the latest timeout
 kernel/drivers/net/rp1_gem.tkb	gem	read-by gem_halt,gem_irq_handler,gem_mdio_read: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
 kernel/drivers/net/rp1_gem.tkb	rp1_clocks	read-by net_init: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
 kernel/drivers/net/rp1_gem.tkb	rp1_gpio_ctrl	read-by gem_phy_reset: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after

@@ -151,15 +151,44 @@ let mut virtio_blk_completion_total_ticks: AtomicWord;
 fn virtio_blk_completion_total() -> usize { return atomic_word_load(&virtio_blk_completion_total_ticks); }
 fn virtio_blk_completion_max() -> usize { return atomic_word_load(&virtio_blk_completion_max_ticks); }
 fn virtio_blk_completion_count() -> usize { return atomic_word_load(&virtio_blk_completions); }
-let mut virtio_blk_timeout_first: VirtioBlkTimeoutSnapshot;
-let mut virtio_blk_timeout_last: VirtioBlkTimeoutSnapshot;
+// GitHub issue #1159 (coordinator call (1)(a), 2026-11-08): the first and
+// latest timeout are published word by word as AtomicWords. The writer
+// stores them under block_device_lock (the one submitter); DDB reads them
+// with the world stopped, without that lock, and may still see a record a
+// stopped writer had half stored -- a diagnostic, as before -- but every
+// word it reads is whole, and no reader can mistake a plain racing access
+// for a protected one.
+struct VirtioBlkTimeoutWords {
+    avail: AtomicWord;
+    used: AtomicWord;
+    seen: AtomicWord;
+    status: AtomicWord;
+    interrupt: AtomicWord;
+    used_at_reset: AtomicWord;
+}
+private let mut virtio_blk_timeout_first: VirtioBlkTimeoutWords;
+private let mut virtio_blk_timeout_last: VirtioBlkTimeoutWords;
 
 fn virtio_blk_timeout_count() -> usize { return atomic_word_load(&virtio_blk_timeouts); }
 fn virtio_blk_timeout_first_snapshot() -> VirtioBlkTimeoutSnapshot {
-    return virtio_blk_timeout_first;
+    let mut shot: VirtioBlkTimeoutSnapshot = {
+        atomic_word_load(&virtio_blk_timeout_first.avail),
+        atomic_word_load(&virtio_blk_timeout_first.used),
+        atomic_word_load(&virtio_blk_timeout_first.seen),
+        atomic_word_load(&virtio_blk_timeout_first.status),
+        atomic_word_load(&virtio_blk_timeout_first.interrupt),
+        atomic_word_load(&virtio_blk_timeout_first.used_at_reset) };
+    return shot;
 }
 fn virtio_blk_timeout_last_snapshot() -> VirtioBlkTimeoutSnapshot {
-    return virtio_blk_timeout_last;
+    let mut shot: VirtioBlkTimeoutSnapshot = {
+        atomic_word_load(&virtio_blk_timeout_last.avail),
+        atomic_word_load(&virtio_blk_timeout_last.used),
+        atomic_word_load(&virtio_blk_timeout_last.seen),
+        atomic_word_load(&virtio_blk_timeout_last.status),
+        atomic_word_load(&virtio_blk_timeout_last.interrupt),
+        atomic_word_load(&virtio_blk_timeout_last.used_at_reset) };
+    return shot;
 }
 
 // Keep the 16-bit ring-counter boundary independently testable: a normal
@@ -399,8 +428,20 @@ private fn virtio_blk_submit_owned(guard: borrow BlockDeviceGuard[&block_device_
                 virtio_blk_regs.interrupt_status as usize,
                 0 };
             snapshot.used_at_reset = virtio_blk_used_index();
-            if (atomic_word_load(&virtio_blk_timeouts) == 0) { virtio_blk_timeout_first = snapshot; }
-            virtio_blk_timeout_last = snapshot;
+            if (atomic_word_load(&virtio_blk_timeouts) == 0) {
+                atomic_word_store(&virtio_blk_timeout_first.avail, snapshot.avail);
+                atomic_word_store(&virtio_blk_timeout_first.used, snapshot.used);
+                atomic_word_store(&virtio_blk_timeout_first.seen, snapshot.seen);
+                atomic_word_store(&virtio_blk_timeout_first.status, snapshot.status);
+                atomic_word_store(&virtio_blk_timeout_first.interrupt, snapshot.interrupt);
+                atomic_word_store(&virtio_blk_timeout_first.used_at_reset, snapshot.used_at_reset);
+            }
+            atomic_word_store(&virtio_blk_timeout_last.avail, snapshot.avail);
+            atomic_word_store(&virtio_blk_timeout_last.used, snapshot.used);
+            atomic_word_store(&virtio_blk_timeout_last.seen, snapshot.seen);
+            atomic_word_store(&virtio_blk_timeout_last.status, snapshot.status);
+            atomic_word_store(&virtio_blk_timeout_last.interrupt, snapshot.interrupt);
+            atomic_word_store(&virtio_blk_timeout_last.used_at_reset, snapshot.used_at_reset);
             atomic_word_fetch_add(&virtio_blk_timeouts, 1);
             let reset_confirmed: bool =
                 virtio_blk_receive_settle_reset(guard, pending_device);
