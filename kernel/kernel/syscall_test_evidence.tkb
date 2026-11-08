@@ -14,45 +14,49 @@
 // calls may run on any CPU, so each socket counter is read and written
 // under the process-run lock. The enable flag is
 // written by core 0 at configure and at the fixture's end only.
+// GitHub issue #1475: the fields are AtomicWords (the flag 1 or 0); a
+// counter's first-time test reads fetch_add's previous value.
+
+use "kernel/lib/atomic_word.tkb";
 
 struct SyscallTestEvidence {
-    ppoll_uart_waits: usize;
-    ppoll_uart_blocks: usize;
-    ppoll_pause_blocks: usize;
-    read_uart_waits: usize;
-    socket_calls: usize;
-    bind_calls: usize;
-    listen_calls: usize;
-    socket_close_calls: usize;
-    accept_calls: usize;
-    accept_capability_roundtrips: usize;
-    connected_close_calls: usize;
-    connected_read_calls: usize;
-    connected_write_calls: usize;
-    socket_fixture_active: bool;
+    ppoll_uart_waits: AtomicWord;
+    ppoll_uart_blocks: AtomicWord;
+    ppoll_pause_blocks: AtomicWord;
+    read_uart_waits: AtomicWord;
+    socket_calls: AtomicWord;
+    bind_calls: AtomicWord;
+    listen_calls: AtomicWord;
+    socket_close_calls: AtomicWord;
+    accept_calls: AtomicWord;
+    accept_capability_roundtrips: AtomicWord;
+    connected_close_calls: AtomicWord;
+    connected_read_calls: AtomicWord;
+    connected_write_calls: AtomicWord;
+    socket_fixture_active: AtomicWord;
 }
 
 private let mut syscall_test_evidence: SyscallTestEvidence;
 
 fn syscall_test_evidence_reset_read_uart_waits() {
-    syscall_test_evidence.read_uart_waits = 0;
+    atomic_word_store(&syscall_test_evidence.read_uart_waits, 0);
 }
 
 fn syscall_test_evidence_reset_socket_counters() {
-    syscall_test_evidence.socket_fixture_active = true;
-    syscall_test_evidence.socket_calls = 0;
-    syscall_test_evidence.bind_calls = 0;
-    syscall_test_evidence.listen_calls = 0;
-    syscall_test_evidence.socket_close_calls = 0;
-    syscall_test_evidence.accept_calls = 0;
-    syscall_test_evidence.accept_capability_roundtrips = 0;
-    syscall_test_evidence.connected_close_calls = 0;
-    syscall_test_evidence.connected_read_calls = 0;
-    syscall_test_evidence.connected_write_calls = 0;
+    atomic_word_store(&syscall_test_evidence.socket_fixture_active, 1);
+    atomic_word_store(&syscall_test_evidence.socket_calls, 0);
+    atomic_word_store(&syscall_test_evidence.bind_calls, 0);
+    atomic_word_store(&syscall_test_evidence.listen_calls, 0);
+    atomic_word_store(&syscall_test_evidence.socket_close_calls, 0);
+    atomic_word_store(&syscall_test_evidence.accept_calls, 0);
+    atomic_word_store(&syscall_test_evidence.accept_capability_roundtrips, 0);
+    atomic_word_store(&syscall_test_evidence.connected_close_calls, 0);
+    atomic_word_store(&syscall_test_evidence.connected_read_calls, 0);
+    atomic_word_store(&syscall_test_evidence.connected_write_calls, 0);
 }
 
 fn syscall_test_evidence_finish_socket_fixture() {
-    syscall_test_evidence.socket_fixture_active = false;
+    atomic_word_store(&syscall_test_evidence.socket_fixture_active, 0);
 }
 
 // Returns true only the first time since the last
@@ -60,164 +64,147 @@ fn syscall_test_evidence_finish_socket_fixture() {
 // a one-time boot log line, mirroring
 // process_test_evidence_record_uart_block()'s own pattern.
 fn syscall_test_evidence_record_ppoll_uart_wait() -> bool {
-    syscall_test_evidence.ppoll_uart_waits =
-        syscall_test_evidence.ppoll_uart_waits + 1;
-    return syscall_test_evidence.ppoll_uart_waits == 1;
+    return atomic_word_fetch_add(&syscall_test_evidence.ppoll_uart_waits, 1) == 0;
 }
 
 // The same one-time pattern, for a stdin ppoll that blocked beside a Ready
 // process instead of retrying in the kernel (GitHub issue #9).
 fn syscall_test_evidence_record_ppoll_uart_block() -> bool {
-    syscall_test_evidence.ppoll_uart_blocks =
-        syscall_test_evidence.ppoll_uart_blocks + 1;
-    return syscall_test_evidence.ppoll_uart_blocks == 1;
+    return atomic_word_fetch_add(&syscall_test_evidence.ppoll_uart_blocks, 1) == 0;
 }
 
 // The same one-time pattern, for ppoll(0, NULL) -- pause() -- that blocked
 // until a signal instead of waiting Running in the kernel (GitHub issue #870).
 fn syscall_test_evidence_record_ppoll_pause_block() -> bool {
-    syscall_test_evidence.ppoll_pause_blocks =
-        syscall_test_evidence.ppoll_pause_blocks + 1;
-    return syscall_test_evidence.ppoll_pause_blocks == 1;
+    return atomic_word_fetch_add(&syscall_test_evidence.ppoll_pause_blocks, 1) == 0;
 }
 
 fn syscall_test_evidence_record_read_uart_wait() -> bool {
-    syscall_test_evidence.read_uart_waits =
-        syscall_test_evidence.read_uart_waits + 1;
-    return syscall_test_evidence.read_uart_waits == 1;
+    return atomic_word_fetch_add(&syscall_test_evidence.read_uart_waits, 1) == 0;
 }
 
 fn syscall_test_evidence_record_socket() {
-    if (syscall_test_evidence.socket_fixture_active == false) { return; }
+    if (atomic_word_load(&syscall_test_evidence.socket_fixture_active) == 0) { return; }
     let guard = process_run_lock();
-    syscall_test_evidence.socket_calls =
-        syscall_test_evidence.socket_calls + 1;
+    atomic_word_fetch_add(&syscall_test_evidence.socket_calls, 1);
     process_run_unlock(guard);
 }
 
 fn syscall_test_evidence_socket_calls() -> usize {
     let guard = process_run_lock();
-    let value: usize = syscall_test_evidence.socket_calls;
+    let value: usize = atomic_word_load(&syscall_test_evidence.socket_calls);
     process_run_unlock(guard);
     return value;
 }
 
 fn syscall_test_evidence_record_bind() {
-    if (syscall_test_evidence.socket_fixture_active == false) { return; }
+    if (atomic_word_load(&syscall_test_evidence.socket_fixture_active) == 0) { return; }
     let guard = process_run_lock();
-    syscall_test_evidence.bind_calls =
-        syscall_test_evidence.bind_calls + 1;
+    atomic_word_fetch_add(&syscall_test_evidence.bind_calls, 1);
     process_run_unlock(guard);
 }
 
 fn syscall_test_evidence_bind_calls() -> usize {
     let guard = process_run_lock();
-    let value: usize = syscall_test_evidence.bind_calls;
+    let value: usize = atomic_word_load(&syscall_test_evidence.bind_calls);
     process_run_unlock(guard);
     return value;
 }
 
 fn syscall_test_evidence_record_listen() {
-    if (syscall_test_evidence.socket_fixture_active == false) { return; }
+    if (atomic_word_load(&syscall_test_evidence.socket_fixture_active) == 0) { return; }
     let guard = process_run_lock();
-    syscall_test_evidence.listen_calls =
-        syscall_test_evidence.listen_calls + 1;
+    atomic_word_fetch_add(&syscall_test_evidence.listen_calls, 1);
     process_run_unlock(guard);
 }
 
 fn syscall_test_evidence_listen_calls() -> usize {
     let guard = process_run_lock();
-    let value: usize = syscall_test_evidence.listen_calls;
+    let value: usize = atomic_word_load(&syscall_test_evidence.listen_calls);
     process_run_unlock(guard);
     return value;
 }
 
 fn syscall_test_evidence_record_socket_close() {
-    if (syscall_test_evidence.socket_fixture_active == false) { return; }
+    if (atomic_word_load(&syscall_test_evidence.socket_fixture_active) == 0) { return; }
     let guard = process_run_lock();
-    syscall_test_evidence.socket_close_calls =
-        syscall_test_evidence.socket_close_calls + 1;
+    atomic_word_fetch_add(&syscall_test_evidence.socket_close_calls, 1);
     process_run_unlock(guard);
 }
 
 fn syscall_test_evidence_socket_close_calls() -> usize {
     let guard = process_run_lock();
-    let value: usize = syscall_test_evidence.socket_close_calls;
+    let value: usize = atomic_word_load(&syscall_test_evidence.socket_close_calls);
     process_run_unlock(guard);
     return value;
 }
 
 fn syscall_test_evidence_record_accept() {
-    if (syscall_test_evidence.socket_fixture_active == false) { return; }
+    if (atomic_word_load(&syscall_test_evidence.socket_fixture_active) == 0) { return; }
     let guard = process_run_lock();
-    syscall_test_evidence.accept_calls =
-        syscall_test_evidence.accept_calls + 1;
+    atomic_word_fetch_add(&syscall_test_evidence.accept_calls, 1);
     process_run_unlock(guard);
 }
 
 fn syscall_test_evidence_accept_calls() -> usize {
     let guard = process_run_lock();
-    let value: usize = syscall_test_evidence.accept_calls;
+    let value: usize = atomic_word_load(&syscall_test_evidence.accept_calls);
     process_run_unlock(guard);
     return value;
 }
 
 fn syscall_test_evidence_record_accept_capability_roundtrip() {
-    if (syscall_test_evidence.socket_fixture_active == false) { return; }
+    if (atomic_word_load(&syscall_test_evidence.socket_fixture_active) == 0) { return; }
     let guard = process_run_lock();
-    syscall_test_evidence.accept_capability_roundtrips =
-        syscall_test_evidence.accept_capability_roundtrips + 1;
+    atomic_word_fetch_add(&syscall_test_evidence.accept_capability_roundtrips, 1);
     process_run_unlock(guard);
 }
 
 fn syscall_test_evidence_accept_capability_roundtrips() -> usize {
     let guard = process_run_lock();
-    let value: usize = syscall_test_evidence.accept_capability_roundtrips;
+    let value: usize = atomic_word_load(&syscall_test_evidence.accept_capability_roundtrips);
     process_run_unlock(guard);
     return value;
 }
 
 fn syscall_test_evidence_record_connected_close() {
-    if (syscall_test_evidence.socket_fixture_active == false) { return; }
+    if (atomic_word_load(&syscall_test_evidence.socket_fixture_active) == 0) { return; }
     let guard = process_run_lock();
-    syscall_test_evidence.connected_close_calls =
-        syscall_test_evidence.connected_close_calls + 1;
+    atomic_word_fetch_add(&syscall_test_evidence.connected_close_calls, 1);
     process_run_unlock(guard);
 }
 
 fn syscall_test_evidence_connected_close_calls() -> usize {
     let guard = process_run_lock();
-    let value: usize = syscall_test_evidence.connected_close_calls;
+    let value: usize = atomic_word_load(&syscall_test_evidence.connected_close_calls);
     process_run_unlock(guard);
     return value;
 }
 
 fn syscall_test_evidence_record_connected_read() {
-    if (syscall_test_evidence.socket_fixture_active == false) { return; }
+    if (atomic_word_load(&syscall_test_evidence.socket_fixture_active) == 0) { return; }
     let guard = process_run_lock();
-    syscall_test_evidence.connected_read_calls =
-        syscall_test_evidence.connected_read_calls + 1;
+    atomic_word_fetch_add(&syscall_test_evidence.connected_read_calls, 1);
     process_run_unlock(guard);
 }
 
 fn syscall_test_evidence_connected_read_calls() -> usize {
     let guard = process_run_lock();
-    let value: usize = syscall_test_evidence.connected_read_calls;
+    let value: usize = atomic_word_load(&syscall_test_evidence.connected_read_calls);
     process_run_unlock(guard);
     return value;
 }
 
 fn syscall_test_evidence_record_connected_write() {
-    if (syscall_test_evidence.socket_fixture_active == false) { return; }
+    if (atomic_word_load(&syscall_test_evidence.socket_fixture_active) == 0) { return; }
     let guard = process_run_lock();
-    syscall_test_evidence.connected_write_calls =
-        syscall_test_evidence.connected_write_calls + 1;
+    atomic_word_fetch_add(&syscall_test_evidence.connected_write_calls, 1);
     process_run_unlock(guard);
 }
 
 fn syscall_test_evidence_connected_write_calls() -> usize {
     let guard = process_run_lock();
-    let value: usize = syscall_test_evidence.connected_write_calls;
+    let value: usize = atomic_word_load(&syscall_test_evidence.connected_write_calls);
     process_run_unlock(guard);
     return value;
 }

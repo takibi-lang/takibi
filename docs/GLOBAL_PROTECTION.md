@@ -656,3 +656,7 @@ entries below that date are history, left as written.
   fetch_add, the clone release is a compare-and-swap decrement that stops
   at zero, and the one-time UART marker is claimed by compare-and-swap.
   One row leaves the allowlist.
+- 2026-11-08: `syscall_test_evidence` (#1475): every `SyscallTestEvidence`
+  field is an `AtomicWord` (the enable flag 1 or 0); a one-time counter's
+  first-time test reads fetch_add's previous value. One row leaves the
+  allowlist.
