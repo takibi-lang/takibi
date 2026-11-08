@@ -56,6 +56,9 @@ exempt kernel/kernel/test_driver_phase.tkb  the test-driver phase's end flag (Gi
 exempt kernel/init/ext2_fixture.tkb  GitHub issue #1462: its buffers are reached only by the boot thread on CPU 0 before the boot handoff, the premise of the TestDriverPhase its entry borrows (checked at the mint); this holds with preemption (a switch to its own EL0 child leaves them alone)
 exempt kernel/tests/rpi5/gem_tx/fixture.tkb  GitHub issue #1462: test-only; reached only as the boot thread on CPU 0 before the boot handoff, the premise of the TestDriverPhase it borrows (checked at the mint)
 exempt kernel/tests/rpi5/gem_tx/irq_fixture.tkb  GitHub issue #1462: test-only; reached only as the boot thread on CPU 0 before the boot handoff, the premise of the TestDriverPhase it borrows (checked at the mint)
+exempt kernel/mm/page.tkb  GitHub issue #638 stage 9 lock-holder review: the allocator lock is an IRQ-masking Mutex, so its holder is never preempted; the page metadata store is reached under it and the bound-break counter is a LockedCell
+exempt kernel/drivers/serial/terminal.tkb  GitHub issue #638 stage 9 lock-holder review: the settings are reached under a borrowed ProcessRunGuard (IRQ-masking); the file's own globals are AtomicWord
+exempt kernel/drivers/serial/terminal_echo_ring.tkb  GitHub issue #638 stage 9 lock-holder review: the ring state is reached under a borrowed ConsoleGuard (IRQ-masking); the two counters are AtomicWord
 exempt kernel/tests/qemu/dma/virtio_blk_fixture.tkb  test-only entry boots no peers and keeps IRQs masked; independent of the production scheduler execution model
 exempt kernel/drivers/block/virtio_blk.tkb  device state; every command is issued under memory.tkb's block_device_lock (GitHub issue #533)
 exempt kernel/drivers/block/virtio_blk_dma.tkb  the receive allocation's owner slot and its mint functions, reached only from virtio_blk.tkb under block_device_lock (GitHub issue #716)

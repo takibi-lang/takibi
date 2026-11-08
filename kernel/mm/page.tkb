@@ -1271,16 +1271,13 @@ private fn page_run_release_indices(pool: borrow &mut BootPagePool, metas: borro
 // from page_transferred_release_physical), and locking those without the split
 // would deadlock on the second acquire.
 //
-// This assertion names the OTHER number, not the core count, and that is
-// the point of having two. The lock excludes a second core. What it does
-// not survive is a holder losing the CPU: a preempted holder whose
-// successor allocates would spin on a lock its own core holds, on one core
-// or on eight. KERNEL_PREEMPTIBLE == 0 is why that cannot happen, and this
-// is the site that says so.
-fn page_allocator_execution_model_assumption() {
-    static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "a preempted holder of the page-allocator lock deadlocks its own core's next allocation");
-}
+// GitHub issue #638 stage 9 (lock-holder review, 2026-11-08): a holder of
+// this lock cannot lose the CPU, and that rests on the lock, not on
+// KERNEL_PREEMPTIBLE. It is a Mutex, which masks IRQs for the hold, so no
+// tick arrives on the holder's core, and the IRQ-return consult refuses a
+// tick that interrupted a masked shadow anyway (#638 stage 9 slice 1). The
+// static_assert(KERNEL_PREEMPTIBLE == 0) that stood here named a premise the
+// mask already gives; kernel/EXECUTION_MODEL exempts the file for that reason.
 
 fn page_allocator_init() !{unsafe} {
     // The allocator is initialized before PSCI starts a peer and while the

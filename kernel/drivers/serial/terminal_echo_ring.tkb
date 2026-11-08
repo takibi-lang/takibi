@@ -37,8 +37,10 @@ fn terminal_echo_count_full() -> TerminalEchoPushResult {
 
 fn terminal_echo_state_push(state: borrow &mut TerminalEchoState,
                             operation: TerminalEchoOperation) -> TerminalEchoPushResult {
-    static_assert(KERNEL_PREEMPTIBLE == 0,
-        "terminal echo queue holders keep the console lock without preemption");
+    // GitHub issue #638 stage 9 (lock-holder review): the state is reached only
+    // through terminal_echo.tkb under a borrowed ConsoleGuard, an IRQ-masking
+    // guard, so the holder cannot be preempted; the KERNEL_PREEMPTIBLE assert
+    // that stood here named what the mask gives.
     // The two low bits encode the byte-expansion shape; the remaining
     // bits carry a byte or an erasure count, never an address or ownership.
     let mut encoded: u32 = 0;

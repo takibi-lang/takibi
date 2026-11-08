@@ -4218,14 +4218,17 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection_pool, con
 // take an owner.
 //
 // What still rests on the execution model is PREEMPTION on one core. A
-// TaskMutex deliberately does not mask interrupts. If the scheduler could
-// preempt its holder and run another task that waits for that same connection
-// on the same core, the waiter would spin forever because the holder cannot
-// resume. Keep that narrower condition compile-time checked until the
-// scheduler learns not to run a blocked waiter there.
+// TaskMutex deliberately does not mask interrupts. GitHub issue #638 stage 9
+// (lock-holder review, 2026-11-08): with preemption on, a preempted holder and
+// a same-core waiter both make progress, but slowly: the waiter spins with the
+// preempt count at zero (task_mutex_acquire is may_block, which no PreemptOff
+// span may reach, #1350), so the next tick switches it away, and the tick's
+// successor walk reaches the holder. The cost is a tick of spinning per
+// contention, which the route review's waiter-yields TaskMutex removes. Keep
+// the assert until the flip so the cost is a decision, not an accident.
 fn tcp_execution_model_assumption() {
     static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "a preempted TaskMutex holder and its same-core waiter cannot both make progress");
+                  "a TaskMutex waiter spins until the tick switches it to the holder (live: the acquire is may_block, so no span holds it, and the tick walks the run order); lifted at the flip, with the waiter-yields TaskMutex of the route review (GitHub issue #638)");
 }
 
 // Samples allocator metadata while holding only this pool allocation guard.

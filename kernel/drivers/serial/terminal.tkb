@@ -92,8 +92,10 @@ fn terminal_word(bytes: borrow [u8; TERMINAL_TERMIOS_BYTES..],
 }
 
 private fn terminal_initialize(settings: borrow &mut TerminalSettings) {
-    static_assert(KERNEL_PREEMPTIBLE == 0,
-        "terminal settings and input state require non-preemptible lock holders");
+    // GitHub issue #638 stage 9 (lock-holder review): the settings are reached
+    // only from a TerminalStateRecord taken under a borrowed ProcessRunGuard,
+    // an IRQ-masking guard, so the holder cannot be preempted; the
+    // KERNEL_PREEMPTIBLE assert that stood here named what the mask gives.
     if (settings.initialized) { return; }
     for index: usize in 0..<TERMINAL_TERMIOS_BYTES {
         terminal_settings_set(settings, index, 0);
