@@ -6573,11 +6573,12 @@ fn kernel_test_driver_phase_premise() -> bool !{unsafe} {
     // core-role: the boot fixtures run on the boot thread, which core 0 runs
     // (CONCURRENCY.md, Core roles: Test-driver phase).
     if (cpu_id() != 0 ||
-        atomic_word_load(&scheduled_process_boot_handed_off) != 0 ||
-        execution_state[execution_cpu_index()].current_live == false) {
+        atomic_word_load(&scheduled_process_boot_handed_off) != 0) {
         return false;
     }
-    let mut current: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
+    let ProcessCurrentRead::Running(current) = kernel_process_current_read() else {
+        ProcessCurrentRead::Idle => { return false; }
+    };
     let guard = process_run_lock();
     let boot_thread: bool =
         scheduled_process_record_live_locked(guard, current).kernel_thread;
