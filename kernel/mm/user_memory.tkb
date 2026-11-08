@@ -317,12 +317,21 @@ fn user_probe_root_write_byte(root: AddressSpaceRoot, address: usize, value: u8)
     if (user_range_span_ok(root, address, 1, UserAccessMode::Write) == false) {
         return UserWriteResult::Fault;
     }
+    // GitHub issue #638 stage 9 (#1331 root review): the boot thread's record
+    // names root 0, so a switch between the activation and the access would
+    // resume it on root 0. The span keeps the two on one root.
+    let span = preempt_span_begin();
     address_space_activate_root(root);
     match user_range_base(address, 1) {
-        UserRangeBase::Refused => { return UserWriteResult::Fault; }
+        UserRangeBase::Refused => {
+            preempt_span_end(span);
+            return UserWriteResult::Fault;
+        }
         UserRangeBase::Base(base) => {
             let mut range: UserWriteRange[0] = { root, base, 1 };
-            return user_write_byte(range, 0, value);
+            let written: UserWriteResult = user_write_byte(range, 0, value);
+            preempt_span_end(span);
+            return written;
         }
     }
 }
@@ -332,12 +341,19 @@ fn user_probe_root_read_byte(root: AddressSpaceRoot, address: usize)
     if (user_range_span_ok(root, address, 1, UserAccessMode::Read) == false) {
         return (false, 0);
     }
+    // The same span as user_probe_root_write_byte's (#638 stage 9).
+    let span = preempt_span_begin();
     address_space_activate_root(root);
     match user_range_base(address, 1) {
-        UserRangeBase::Refused => { return (false, 0); }
+        UserRangeBase::Refused => {
+            preempt_span_end(span);
+            return (false, 0);
+        }
         UserRangeBase::Base(base) => {
             let mut range: UserReadRange[0] = { root, base, 1 };
-            return (true, user_read_byte(range, 0));
+            let value: u8 = user_read_byte(range, 0);
+            preempt_span_end(span);
+            return (true, value);
         }
     }
 }

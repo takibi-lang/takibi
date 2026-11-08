@@ -1341,9 +1341,16 @@ fn process_image_clone_vm_reap(dest_space: AddressSpaceRoot) -> ProcessCloneVmRe
     // The caller remains the logical current process throughout this
     // non-preemptible EL1 span. Activate the retained source before releasing
     // mappings from a destination that may still be installed in TTBR0.
+    // GitHub issue #638 stage 9 (#1331 root review): the span is real now. The
+    // caller's record names the destination, so a switch inside would resume
+    // it on the destination while its mappings are released; the exit path
+    // reaches here with no span of its own (the clone path holds one, which
+    // this nests in).
+    let span = preempt_span_begin();
     kernel_process_activate_stable_root(
         address_space_root_of_key(source));
     process_clone_vm_rollback(dest_space);
+    preempt_span_end(span);
     return ProcessCloneVmReapResult::Reaped;
 }
 
