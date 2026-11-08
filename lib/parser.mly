@@ -665,9 +665,20 @@ proto_item:
       | "property" when attrs = [] && r.pr_args = [] -> PProperty (r.pr_name, loc)
       | _ -> raise (Types.TypeError (loc, Printf.sprintf
                "unknown protocol item '%s %s'" k r.pr_name)) }
-  | k = IDENT n = IDENT LPAREN i = proto_ref w = option(preceded(COMMA, proto_ref))
+  | k = IDENT n = IDENT LPAREN i = proto_ref rest = list(preceded(COMMA, proto_operand))
     RPAREN mods = list(proto_mod) ARROW alts = separated_nonempty_list(PIPE, proto_alt) SEMI
     { let loc = $symbolstartpos in
+      (* GitHub issue #1159: after the subject, at most one witness, then
+         the action's value arguments `x: T`. *)
+      let w, tl = match rest with
+        | Either.Left r :: tl -> (Some r, tl)
+        | tl -> (None, tl) in
+      let vs = List.map (function
+        | Either.Right v -> v
+        | Either.Left (r : proto_ref) -> raise (Types.TypeError (r.pr_loc,
+            Printf.sprintf "protocol action '%s' takes at most one witness, \
+              before its value arguments; '%s' is out of place" n r.pr_name)))
+        tl in
       match k with
       | "transition" ->
           let alts = List.map (fun (label, r, extra) ->
@@ -676,12 +687,12 @@ proto_item:
                 "transition result '%s' takes no modifier '%s'" r.pr_name
                 (List.hd extra)));
             { pa_label = label; pa_state = r }) alts in
-          PTransition (n, i, w, alts, mods, loc)
+          PTransition (n, i, w, vs, alts, mods, loc)
       | "observe" ->
           if w <> None || mods <> [] then
             raise (Types.TypeError (loc, Printf.sprintf
               "observe '%s' takes exactly one subject state and no modifier" n));
-          PObserve (n, i, List.map (fun (label, r, extra) ->
+          PObserve (n, i, vs, List.map (fun (label, r, extra) ->
             if label <> None then
               raise (Types.TypeError (r.pr_loc,
                 "an observation outcome cannot be labelled"));
@@ -713,6 +724,13 @@ proto_mod:
    it takes whenever the state is entered from a state without it. *)
 proto_field:
   | n = IDENT COLON t = type_expr ASSIGN v = INT SEMI { (n, t, v) }
+
+(* GitHub issue #1159: an operand of a protocol action after its subject:
+   a witness state reference, or a value argument `x: T`. *)
+proto_operand:
+  | r = proto_ref { Either.Left r }
+  | n = IDENT COLON t = type_expr
+    { Either.Right { pv_name = n; pv_type = t; pv_loc = $symbolstartpos } }
 
 proto_ref:
   | n = IDENT args = loption(delimited(LBRACKET, separated_nonempty_list(COMMA, proto_arg), RBRACKET))

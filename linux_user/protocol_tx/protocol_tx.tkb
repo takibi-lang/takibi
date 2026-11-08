@@ -8,7 +8,12 @@
 // owner kept in a global Place across functions. This file is a
 // device-semantics file (--device-semantics-file): its observation asserts
 // completion. What must not compile is in test/test_takibi.ml,
-// "protocol-declarations".
+// "protocol-declarations" and "protocol-action-values".
+//
+// GitHub issue #1159: what one request rings (the doorbell's tail) and
+// how often its completion is polled are the actions' value arguments,
+// passed by the caller to the wrapper and by the wrapper to the lowering;
+// no global relays them and no owner stores them.
 
 const RING: usize = 4;
 
@@ -22,8 +27,8 @@ protocol TxRing[inst: usize] retains region(Desc)[b, RING] tx {
     state Ready access write;
     state InFlight[req] device;
     init Ready;
-    transition submit(Ready) -> InFlight[fresh req];
-    observe completion(InFlight[req]) -> Done[req] completes | Pending;
+    transition submit(Ready, tail: u32) -> InFlight[fresh req];
+    observe completion(InFlight[req], every: usize) -> Done[req] completes | Pending;
     transition reclaim(InFlight[req], Done[req]) -> Ready;
     property disjoint;
     model cells 2;
@@ -36,17 +41,20 @@ private let mut rung_third: usize = 0;
 private let mut polls: usize = 0;
 
 // The doorbell: runs after the clean and the state change, on InFlight.
-fn submit(s: borrow TxRing_InFlight[b, o, 4, r]) !{unsafe} {
+fn submit(s: borrow TxRing_InFlight[b, o, 4, r], tail: u32) !{unsafe} {
     let mut whole: DmaDeviceSpan = TxRing_InFlight_span(s);
     let mut third: DmaDeviceSpan = TxRing_InFlight_span_at(s, 2);
     rung_base = unsafe { dma_span_address(whole) };
     rung_length = dma_span_length(whole);
     rung_third = unsafe { dma_span_address(third) } - rung_base;
-    uart_puts("doorbell\n");
+    uart_puts("doorbell tail ");
+    uart_print(tail as usize);
+    uart_puts("\n");
 }
-fn completion(s: borrow TxRing_InFlight[b, o, 4, r]) -> TxRing_completion_Raw {
+fn completion(s: borrow TxRing_InFlight[b, o, 4, r], every: usize)
+        -> TxRing_completion_Raw {
     polls = polls + 1;
-    if (polls % 2 == 0) { return TxRing_completion_Raw::Done; }
+    if (every > 0 && polls % every == 0) { return TxRing_completion_Raw::Done; }
     return TxRing_completion_Raw::Pending;
 }
 fn reclaim(s: borrow TxRing_InFlight[b, o, 4, r]) { uart_puts("reclaimed\n"); }
@@ -89,7 +97,7 @@ fn step(value: u64) !{unsafe} {
         Place::Full(ready) => {
             let mut desc: Desc = { value, 64, 1 };
             TxRing_Ready_write(ready, 2, desc);
-            match TxRing_submit(ready) {
+            match TxRing_submit(ready, 3) {
                 TxRing_submit_Result::InFlight(flight) => {
                     park(wait(flight));
                 }
@@ -99,7 +107,7 @@ fn step(value: u64) !{unsafe} {
 }
 
 fn wait(flight: TxRing_InFlight[b, o, 4, r]) -> TxRing_Ready[b, o, 4] {
-    match TxRing_completion(flight) {
+    match TxRing_completion(flight, 2) {
         TxRing_completion_Outcome::Done(done) => {
             return TxRing_reclaim(flight, done);
         }

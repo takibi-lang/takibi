@@ -624,17 +624,29 @@ type proto_alt = {
 }
 [@@deriving show]
 
+(* GitHub issue #1159: one value argument of a protocol action. *)
+type proto_arg = {
+  pv_name : string;
+  pv_type : type_expr;
+  pv_loc : loc [@printer pp_loc];
+}
+[@@deriving show]
+
 type proto_item =
   | PState of proto_ref * string list * (string * type_expr * int64) list
   (* state Name[params] attributes; -- attributes are contextual words.
      GitHub issue #1395: `state Name[params] attrs { f: T = k; ... }` adds
      data fields the state owner carries, each with its initial value. *)
   | PInit of proto_ref
-  | PTransition of string * proto_ref * proto_ref option * proto_alt list
-      * string list * loc
-  (* transition name(Input[args], Witness[args]) -> alts modifiers; *)
-  | PObserve of string * proto_ref * (proto_ref * string list) list * loc
-  (* observe name(Subject[args]) -> Outcome[args] modifiers | ...; *)
+  | PTransition of string * proto_ref * proto_ref option * proto_arg list
+      * proto_alt list * string list * loc
+  (* transition name(Input[args], Witness[args], x: T, ...) -> alts modifiers; *)
+  | PObserve of string * proto_ref * proto_arg list
+      * (proto_ref * string list) list * loc
+  (* observe name(Subject[args], x: T, ...) -> Outcome[args] modifiers | ...;
+     GitHub issue #1159: the trailing `x: T` are per-publication values the
+     generated wrapper takes and hands to the action's lowering unchanged;
+     they are not state and the model does not see them. *)
   | PProperty of string * loc
   | PModel of string * int * loc
 [@@deriving show]

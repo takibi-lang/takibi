@@ -4638,6 +4638,20 @@ position; `protocol` itself is the one contextual keyword.
   subject), `quiesces` ends it for a stop/reset, and an unmarked outcome is
   not evidence about the span. A transition's witness must be an outcome
   observed on that transition's own input state, with the same arguments.
+- `transition name(Input[args], Witness[args], x: T, ...)` and `observe
+  name(Subject[args], x: T, ...)` (GitHub issue #1159) -- after the subject
+  (and a transition's optional witness) an action may take value arguments,
+  each a scalar type. They are what one action needs from its caller -- the
+  doorbell a publication rings, how long its event is awaited -- not state:
+  the generated wrapper `P_name` takes them after its own parameters and
+  passes them unchanged, in order, to the lowering, which must declare them
+  last with the same types; no owner stores them and the next action does
+  not see them, so they cost no owner copy. The generated TLA+ model ignores
+  them. A name the wrapper binds (`s`, `w`, `i`, `k`, `value`, `snap`,
+  `next`, a region or state index, a `__off` name) is rejected, as is a
+  value argument on an observation with a `snapshot` outcome. Use them for
+  a per-action value and a state field (#1395) for a value that must
+  survive into later actions.
 - `property disjoint;` checks that CPU and device authority never overlap,
   `property prepared_before_read;` that the device never reads an unwritten
   cell. At least one is required.

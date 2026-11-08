@@ -112,17 +112,19 @@ let item (top : Ast.toplevel) : item =
   let where_clause (a, _, b) = static_arg a; static_arg b in
   let proto_ref (r : Ast.proto_ref) =
     plain r.pr_name; list (fun (s, _) -> comma s) r.pr_args in
+  let proto_args vs =
+    List.iter (fun (v : Ast.proto_arg) -> comma v.pv_name; ty v.pv_type) vs in
   let proto_item = function
     | Ast.PState (r, ss, fs) -> proto_ref r; list plain ss;
       List.iter (fun (f, t, _) -> plain f; ty t) fs
     | Ast.PInit r -> proto_ref r
-    | Ast.PTransition (s, a, b, alts, ss, _) ->
-        comma s; proto_ref a; opt proto_ref b;
+    | Ast.PTransition (s, a, b, vs, alts, ss, _) ->
+        comma s; proto_ref a; opt proto_ref b; proto_args vs;
         list (fun (alt : Ast.proto_alt) ->
           opt plain alt.pa_label; proto_ref alt.pa_state) alts;
         list plain ss
-    | Ast.PObserve (s, r, obs, _) ->
-        comma s; proto_ref r;
+    | Ast.PObserve (s, r, vs, obs, _) ->
+        comma s; proto_ref r; proto_args vs;
         list (fun (r, ss) -> proto_ref r; list plain ss) obs
     | Ast.PProperty (s, _) | Ast.PModel (s, _, _) -> comma s in
   let fields = list typed_param in

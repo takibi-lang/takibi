@@ -251,7 +251,7 @@ let validate (d : protocol_decl) : t =
     | _ -> fail loc "protocol '%s' has more than one 'init' state" d.proto_name in
   (* Observations: each outcome is a witness type bound to its subject. *)
   let outcomes = List.concat_map (function
-    | PObserve (_, subj, outs, oloc) ->
+    | PObserve (_, subj, _, outs, oloc) ->
         let s = find_state subj.pr_loc subj.pr_name in
         check_arity subj s;
         let bound = List.map fst subj.pr_args in
@@ -293,11 +293,43 @@ let validate (d : protocol_decl) : t =
     | _ -> []) d.proto_items in
   check_distinct loc "observation outcome" (List.map (fun o -> o.o_name) outcomes);
   let action_names = List.filter_map (function
-    | PTransition (n, _, _, _, _, _) | PObserve (n, _, _, _) -> Some n
+    | PTransition (n, _, _, _, _, _, _) | PObserve (n, _, _, _, _) -> Some n
     | _ -> None) d.proto_items in
   check_distinct loc "transition or observation" action_names;
+  (* GitHub issue #1159: an action's value arguments are scalars handed
+     from the caller to the lowering for this one action -- what a
+     publication rings or how long its event is awaited -- not state: the
+     next action does not see them and the model ignores them. Their names
+     must not capture a name the generated wrapper binds. *)
+  let _, _, region_idx = d.proto_region in
+  List.iter (fun (n, (input : proto_ref), (vs : proto_arg list), results, snapshot) ->
+    check_distinct (match vs with v :: _ -> v.pv_loc | [] -> loc)
+      (Printf.sprintf "value argument of '%s'" n)
+      (List.map (fun v -> v.pv_name) vs);
+    let bound = region_idx @ List.map fst input.pr_args
+      @ List.concat_map (fun (r : proto_ref) -> List.map fst r.pr_args) results in
+    List.iter (fun v ->
+      if snapshot then
+        fail v.pv_loc "observe '%s' has a snapshot outcome, whose wrapper \
+          takes the element index; it takes no value argument '%s'" n v.pv_name;
+      if List.mem v.pv_name ([ "s"; "w"; "i"; "k"; "value"; "snap"; "next" ] @ bound)
+         || String.ends_with ~suffix:"__off" v.pv_name then
+        fail v.pv_loc "value argument '%s' of '%s' collides with a name the \
+          generated wrapper binds" v.pv_name n;
+      match v.pv_type with
+      | TypeBool | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeUsize
+      | TypeI8 | TypeI16 | TypeI32 | TypeI64 | TypeIsize -> ()
+      | _ -> fail v.pv_loc "value argument '%s' of '%s' must have a scalar type"
+               v.pv_name n) vs)
+    (List.filter_map (function
+      | PTransition (n, input, _, vs, alts, _, _) ->
+          Some (n, input, vs, List.map (fun a -> a.pa_state) alts, false)
+      | PObserve (n, input, vs, outs, _) ->
+          Some (n, input, vs, List.map fst outs,
+                List.exists (fun (_, m) -> m = [ "snapshot" ]) outs)
+      | _ -> None) d.proto_items);
   let transitions = List.filter_map (function
-    | PTransition (n, input, witness, alts, mods, tloc) ->
+    | PTransition (n, input, witness, _, alts, mods, tloc) ->
         let s = find_state input.pr_loc input.pr_name in
         check_arity input s;
         List.iter (fun (a, f) ->
@@ -883,6 +915,15 @@ let element_bytes (prog : toplevel list) (d : protocol_decl) : int option =
         | _ -> None) prog
   | _ -> None
 
+(* GitHub issue #1159: an action's value arguments, appended to the
+   generated wrapper's parameters and passed unchanged to its lowering. *)
+let value_params (d : protocol_decl) (vs : proto_arg list) =
+  String.concat "" (List.map (fun v ->
+    Printf.sprintf ", %s: %s" v.pv_name (type_source d.proto_loc v.pv_type)) vs)
+
+let value_args (vs : proto_arg list) =
+  String.concat "" (List.map (fun v -> ", " ^ v.pv_name) vs)
+
 let source_of ?bytes_field (d : protocol_decl) (p : t) : string =
   let _, elem, idx = d.proto_region in
   let b, n = match idx with [ b; n ] -> (b, n) | _ -> assert false in
@@ -1006,11 +1047,12 @@ let source_of ?bytes_field (d : protocol_decl) (p : t) : string =
     end) p.outcomes;
   (* Observations, grouped by declaration order of their outcomes. *)
   let observes = List.filter_map (function
-    | PObserve (name, subj, _, _) -> Some (name, subj) | _ -> None) d.proto_items in
-  List.iter (fun (name, (subj : proto_ref)) ->
+    | PObserve (name, subj, vs, _, _) -> Some (name, subj, vs) | _ -> None) d.proto_items in
+  List.iter (fun (name, (subj : proto_ref), vs) ->
+    let vparams = value_params d vs and vargs = value_args vs in
     let outs = List.filter (fun o -> o.o_subject = subj.pr_name &&
       List.exists (fun it -> match it with
-        | PObserve (n', _, os, _) when n' = name ->
+        | PObserve (n', _, _, os, _) when n' = name ->
             List.exists (fun ((r : proto_ref), _) -> r.pr_name = o.o_name) os
         | _ -> false) d.proto_items) p.outcomes in
     let args = List.map fst subj.pr_args in
@@ -1053,8 +1095,9 @@ let source_of ?bytes_field (d : protocol_decl) (p : t) : string =
       (if all_args = [] then "" else "[" ^ String.concat ", " all_args ^ "]") in
     (match snap with
      | None ->
-         add "fn %s_%s(s: borrow %s) -> %s {" pn name (ty subj.pr_name args) outcome_ty;
-         add "    match %s(s) {" name
+         add "fn %s_%s(s: borrow %s%s) -> %s {" pn name (ty subj.pr_name args)
+           vparams outcome_ty;
+         add "    match %s(s%s) {" name vargs
      | Some _ ->
          add "fn %s_%s(s: borrow %s, i: usize @ k) -> %s where k < %s {" pn name
            (ty subj.pr_name args) outcome_ty count;
@@ -1075,15 +1118,17 @@ let source_of ?bytes_field (d : protocol_decl) (p : t) : string =
     add "    }";
     add "}") observes;
   let trans_items = List.filter_map (function
-    | PTransition (name, input, witness, alts, _, _) -> Some (name, input, witness, alts)
+    | PTransition (name, input, witness, vs, alts, _, _) -> Some (name, input, witness, vs, alts)
     | _ -> None) d.proto_items in
-  List.iter (fun (name, (input : proto_ref), (witness : proto_ref option), alts) ->
+  List.iter (fun (name, (input : proto_ref), (witness : proto_ref option), vs, alts) ->
+    let vargs = value_args vs in
     let t = List.find (fun t -> t.t_name = name) p.transitions in
     let in_args = List.map fst input.pr_args in
     let params = Printf.sprintf "s: %s%s" (ty input.pr_name in_args)
       (match witness with
        | None -> ""
-       | Some w -> Printf.sprintf ", w: %s" (view w.pr_name (List.map fst w.pr_args))) in
+       | Some w -> Printf.sprintf ", w: %s" (view w.pr_name (List.map fst w.pr_args)))
+      ^ value_params d vs in
     let spend = match witness with
       | None -> ""
       | Some w -> Printf.sprintf "%s_%s_spend(w); " pn w.pr_name in
@@ -1134,7 +1179,7 @@ let source_of ?bytes_field (d : protocol_decl) (p : t) : string =
         add "    %s(s.memory);" prepare;
         add "    let mut next: %s = %s;" (target_ty a ~packed:true)
           (lit ~src:input.pr_name a.pa_state.pr_name);
-        add "    %s(next);" name;
+        add "    %s(next%s);" name vargs;
         if fresh then add "    return %s_%s_Result::%s(next);" pn name (label a)
         else add "    return next;";
         add "}"
@@ -1142,7 +1187,7 @@ let source_of ?bytes_field (d : protocol_decl) (p : t) : string =
     if simple then begin
       let a = List.hd alts in
       add "fn %s_%s(%s) -> %s {" pn name params (target_ty a ~packed:false);
-      add "    %s%s(s);" spend name;
+      add "    %s%s(s%s);" spend name vargs;
       finish a "    ";
       add "    let mut next: %s = %s;" (target_ty a ~packed:false)
         (lit ~src:input.pr_name a.pa_state.pr_name);
@@ -1155,7 +1200,7 @@ let source_of ?bytes_field (d : protocol_decl) (p : t) : string =
       let result_ty = result_variant () in
       add "fn %s_%s(%s) -> %s {" pn name params result_ty;
       if spend <> "" then add "    %s" spend;
-      add "    match %s(s) {" name;
+      add "    match %s(s%s) {" name vargs;
       List.iter (fun a ->
         add "        %s_%s_Choice::%s => {" pn name (label a);
         finish a "            ";
@@ -1183,7 +1228,7 @@ let parse_generated (name : string) (src : string) : toplevel list =
 let check_lowering (prog : toplevel list) (d : protocol_decl) (p : t) =
   let file = source_file_of_loc d.proto_loc in
   let actions = List.filter_map (function
-    | PTransition (n, input, _, alts, _, l) ->
+    | PTransition (n, input, _, vs, alts, _, l) ->
         let simple = match alts with
           | [ a ] -> List.for_all (fun (_, f) -> not f) a.pa_state.pr_args
           | _ -> false in
@@ -1195,22 +1240,22 @@ let check_lowering (prog : toplevel list) (d : protocol_decl) (p : t) =
                        && publishes p input.pr_name a.pa_state.pr_name ->
               a.pa_state
           | _ -> input in
-        Some (n, subject, (if simple || subject != input then None
+        Some (n, subject, vs, (if simple || subject != input then None
                            else Some (Printf.sprintf "%s_%s_Choice" p.name n)), l)
-    | PObserve (n, subj, _, l) ->
-        Some (n, subj, Some (Printf.sprintf "%s_%s_Raw" p.name n), l)
+    | PObserve (n, subj, vs, _, l) ->
+        Some (n, subj, vs, Some (Printf.sprintf "%s_%s_Raw" p.name n), l)
     | _ -> None) d.proto_items in
   let snapshot_observe n = List.exists (function
-    | PObserve (n', _, outs, _) when n' = n ->
+    | PObserve (n', _, _, outs, _) when n' = n ->
         List.exists (fun (_, mods) -> mods = [ "snapshot" ]) outs
     | _ -> false) d.proto_items in
   let _, elem, _ = d.proto_region in
   (* A snapshot observation also needs its release lowering: what the
      consumer tells the device once it has read the entry. *)
-  let actions = actions @ List.concat_map (fun (n, subj, _, l) ->
-    if snapshot_observe n then [ (n ^ "_release", subj, None, l) ] else [])
+  let actions = actions @ List.concat_map (fun (n, subj, _, _, l) ->
+    if snapshot_observe n then [ (n ^ "_release", subj, [], None, l) ] else [])
     actions in
-  List.iter (fun (n, (input : proto_ref), ret, l) ->
+  List.iter (fun (n, (input : proto_ref), (vs : proto_arg list), ret, l) ->
     match List.find_opt (function
         | FuncDef f -> f.name = n && source_file_of_loc f.def_loc = file
         | _ -> false) prog with
@@ -1221,7 +1266,15 @@ let check_lowering (prog : toplevel list) (d : protocol_decl) (p : t) =
            data takes the owner mutably, so it can advance that data. *)
         let mut_release = String.ends_with ~suffix:"_release" n
           && (List.find (fun s -> s.s_name = input.pr_name) p.states).s_fields <> [] in
-        let param_ok = match f.params with
+        (* GitHub issue #1159: the action's value arguments come last, each
+           with its declared type. *)
+        let nv = List.length vs in
+        let nf = List.length f.params in
+        let head = List.filteri (fun i _ -> i < nf - nv) f.params in
+        let tail = List.filteri (fun i _ -> i >= nf - nv) f.params in
+        let values_ok = nf >= nv && List.for_all2 (fun (_, t) v ->
+            t = Some v.pv_type) tail vs in
+        let param_ok = values_ok && match head with
           | [ (_, Some (TypeBorrowMut (TypeIndexed (name, args)))) ] when mut_release ->
               name = owner && List.length args = arity
           | [ (_, Some (TypeBorrow (TypeIndexed (name, args)))) ] when not mut_release ->
@@ -1233,8 +1286,11 @@ let check_lowering (prog : toplevel list) (d : protocol_decl) (p : t) =
           | _ -> false in
         if not param_ok then
           fail f.def_loc "protocol '%s' action '%s' must take exactly \
-            'borrow %s[...]' with %d static argument(s)%s" p.name n owner arity
-            (if snapshot_observe n then ", then the element value" else "");
+            'borrow %s[...]' with %d static argument(s)%s%s" p.name n owner arity
+            (if snapshot_observe n then ", then the element value" else "")
+            (if vs = [] then "" else Printf.sprintf ", then the value argument(s) %s"
+               (String.concat ", " (List.map (fun v ->
+                  v.pv_name ^ ": " ^ type_source d.proto_loc v.pv_type) vs)));
         if f.where_clauses <> [] then
           fail f.def_loc "protocol '%s' action '%s' cannot add 'where' \
             constraints: the generated wrapper has no facts to discharge them; \

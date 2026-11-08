@@ -30397,6 +30397,94 @@ let net_capability_tests = [
       "is private to");
 ]
 
+(* GitHub issue #1159: an action's value arguments, handed from the
+   wrapper's caller to the lowering for that one action. *)
+let valued_protocol =
+  sealed_protocol
+  |> replace_once ~sub:"transition submit(Reserved[req]) requires prepared"
+       ~by:"transition submit(Reserved[req], tag: u32) requires prepared"
+  |> replace_once ~sub:"observe completion(InFlight[req])"
+       ~by:"observe completion(InFlight[req], wait: usize)"
+  |> replace_once ~sub:"fn submit(s: borrow Ring_Reserved[b, o, n, r]) {}"
+       ~by:"private let mut last_tag: u32 = 0;\n\
+            fn submit(s: borrow Ring_Reserved[b, o, n, r], tag: u32) { last_tag = tag; }"
+  |> replace_once ~sub:"fn completion(s: borrow Ring_InFlight[b, o, n, r]) -> Ring_completion_Raw {"
+       ~by:"fn completion(s: borrow Ring_InFlight[b, o, n, r], wait: usize) -> Ring_completion_Raw {"
+
+let valued_consumer =
+  sealed_consumer
+  |> replace_once ~sub:"Ring_submit(r)" ~by:"Ring_submit(r, 7)"
+  |> replace_once ~sub:"Ring_completion(flight)" ~by:"Ring_completion(flight, 3)"
+
+let valued_refused ?(proto = valued_protocol) ?(use = valued_consumer) fragment () =
+  match infer_sealed ~proto ~use () with
+  | _ -> Alcotest.failf "expected an error containing %S" fragment
+  | exception Types.TypeError (_, msg) ->
+      if not (contains_substring msg fragment)
+      then Alcotest.failf "TypeError %S does not contain %S" msg fragment
+  | exception Types.MultiTypeError errors ->
+      if not (List.exists (fun (_, msg) -> contains_substring msg fragment) errors)
+      then Alcotest.failf "no entry contains %S: %s" fragment
+          (String.concat " | " (List.map snd errors))
+
+let protocol_value_tests = [
+  Alcotest.test_case "action values: passed to the lowering, accepted" `Quick
+    (fun () -> ignore (infer_sealed ~proto:valued_protocol ~use:valued_consumer ()));
+  Alcotest.test_case "action values: the wrapper passes them unchanged" `Quick
+    (fun () ->
+      let d = List.find_map (function Ast.ProtocolDef d -> Some d | _ -> None)
+          (let lb = Lexing.from_string valued_protocol in
+           Lexing.set_filename lb "ring.tkb"; Parser.program Lexer.read lb) in
+      let src = Protocol_decl.source_of (Option.get d)
+          (Protocol_decl.validate (Option.get d)) in
+      Alcotest.(check bool) "submit takes tag" true
+        (contains_substring src ", tag: u32) ->");
+      Alcotest.(check bool) "submit passes tag" true
+        (contains_substring src "submit(s, tag);");
+      Alcotest.(check bool) "completion passes wait" true
+        (contains_substring src "match completion(s, wait) {");
+      Alcotest.(check bool) "no owner field" false
+        (contains_substring src "private tag:"));
+  Alcotest.test_case "action values: a caller must pass them" `Quick
+    (valued_refused ~use:(replace_once ~sub:"Ring_submit(r, 7)" ~by:"Ring_submit(r)"
+                            valued_consumer) "");
+  Alcotest.test_case "action values: a lowering must take them" `Quick
+    (valued_refused
+       ~proto:(replace_once ~sub:"fn submit(s: borrow Ring_Reserved[b, o, n, r], tag: u32)"
+                 ~by:"fn submit(s: borrow Ring_Reserved[b, o, n, r])" valued_protocol)
+       "then the value argument(s) tag: u32");
+  Alcotest.test_case "action values: a lowering's type must match" `Quick
+    (valued_refused
+       ~proto:(replace_once ~sub:"tag: u32) { last_tag = tag; }"
+                 ~by:"tag: u64) { last_tag = tag as u32; }" valued_protocol)
+       "then the value argument(s) tag: u32");
+  Alcotest.test_case "action values: a wrapper name is refused" `Quick
+    (valued_refused
+       ~proto:(replace_once ~sub:"observe completion(InFlight[req], wait: usize)"
+                 ~by:"observe completion(InFlight[req], value: usize)" valued_protocol)
+       "collides with a name the generated wrapper binds");
+  Alcotest.test_case "action values: an index name is refused" `Quick
+    (valued_refused
+       ~proto:(replace_once ~sub:"observe completion(InFlight[req], wait: usize)"
+                 ~by:"observe completion(InFlight[req], req: usize)" valued_protocol)
+       "collides with a name the generated wrapper binds");
+  Alcotest.test_case "action values: duplicates are refused" `Quick
+    (valued_refused
+       ~proto:(replace_once ~sub:"(Reserved[req], tag: u32)"
+                 ~by:"(Reserved[req], tag: u32, tag: u32)" valued_protocol)
+       "value argument of 'submit'");
+  Alcotest.test_case "action values: only scalars" `Quick
+    (valued_refused
+       ~proto:(replace_once ~sub:"(Reserved[req], tag: u32)"
+                 ~by:"(Reserved[req], tag: *u32)" valued_protocol)
+       "must have a scalar type");
+  Alcotest.test_case "action values: the witness comes first" `Quick
+    (valued_refused
+       ~proto:(replace_once ~sub:"transition resume(InFlight[req], Matching[req])"
+                 ~by:"transition resume(InFlight[req], x: u32, Matching[req])" valued_protocol)
+       "at most one witness");
+]
+
 let sealed_protocol_tests = [
   Alcotest.test_case "sealed owners: the declared graph is accepted" `Quick
     (fun () -> ignore (infer_sealed ()));
@@ -31583,6 +31671,7 @@ let named_groups_unisolated = [
   "device-protocols", device_protocol_tests;
   "protocol-snapshots", snapshot_tests;
   "protocol-sealed-owners", sealed_protocol_tests;
+  "protocol-action-values", protocol_value_tests;
   "net-capability", net_capability_tests;
   "protocol-state-access", sealed_access_tests;
   "text-search", text_search_tests;
