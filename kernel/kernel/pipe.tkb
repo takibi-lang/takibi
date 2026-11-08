@@ -20,8 +20,8 @@
 //   pipe_end_close. The lock is held across the user copy (that is why it is
 //   a TaskMutex, kernel/lib/task_mutex.tkb), so no interrupt handler may
 //   take it, and nothing here is reached from one. A preempted holder and a
-//   same-core waiter would deadlock, which is what the KERNEL_PREEMPTIBLE
-//   assertion at the end keeps checked.
+//   same-core waiter both make progress under preemption, slowly; see the
+//   KERNEL_PREEMPTIBLE assertion at the end (#638 stage 9).
 // - A WRITE LARGER THAN THE ROOM IS SHORT. A write of more than
 //   PIPE_BUFFER_BYTES writes what fits and returns that count, where Linux
 //   blocks until the whole of it is written; musl's stdio, BusyBox's
@@ -393,7 +393,16 @@ fn pipe_write_amount(pipe: borrow &mut Pipe, requested: usize) -> usize {
     return room;
 }
 
+// GitHub issue #638 stage 9 (lock-holder review, 2026-11-08), the tcp.tkb
+// verdict: the pipe lock is a TaskMutex, which does not mask interrupts. With
+// preemption on, a preempted holder and a same-core waiter both make progress,
+// slowly: the waiter spins with the preempt count at zero (task_mutex_acquire
+// is may_block, which no PreemptOff span may reach, #1350), so the next tick
+// switches it away and the successor walk reaches the holder. The cost is up
+// to a tick of spinning per contention, which the route review's
+// waiter-yields TaskMutex removes. Kept until the flip so the cost is a
+// decision, not an accident.
 fn pipe_execution_model_assumption() {
     static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "a preempted pipe-lock holder and its same-core waiter cannot both make progress");
+                  "a TaskMutex waiter spins until the tick switches it to the holder (live: the acquire is may_block, so no span holds it, and the tick walks the run order); lifted at the flip, with the waiter-yields TaskMutex of the route review (GitHub issue #638)");
 }

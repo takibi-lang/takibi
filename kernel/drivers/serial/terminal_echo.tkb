@@ -24,8 +24,11 @@ fn terminal_echo_reset(guard: borrow ConsoleGuard[&console_tx_lock]) {
 
 // The first push claims the storage: no boot step has to come first.
 private fn terminal_echo_claim(guard: borrow ConsoleGuard[&console_tx_lock]) {
-    static_assert(KERNEL_PREEMPTIBLE == 0,
-        "terminal echo queue holders keep the console lock without preemption");
+    // GitHub issue #638 stage 9 (lock-holder review): the echo state is a place
+    // guarded_by the console lock, reached only under a borrowed ConsoleGuard,
+    // an IRQ-masking Mutex guard, so no tick reaches a holder on its core (and
+    // the IRQ-return consult refuses a masked shadow). The KERNEL_PREEMPTIBLE
+    // assert that stood here named what the mask gives.
     if (place_is_full(guard, terminal_echo_store.state)) { return; }
     let RegionOf(TerminalEchoState)::Taken(claimed) = region_of(terminal_echo_state) else {
         RegionOf(TerminalEchoState)::Gone => { return; }

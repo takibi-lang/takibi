@@ -34,8 +34,11 @@ private region let mut terminal_state_frames: [PageFrame; 3];
 // The first use makes the record: no boot step has to come first.
 private fn terminal_state_take(guard: borrow ProcessRunGuard[&scheduled_process_run_lock])
         -> TerminalStateRecord[0] {
-    static_assert(KERNEL_PREEMPTIBLE == 0,
-        "terminal state holders keep the run lock without preemption");
+    // GitHub issue #638 stage 9 (lock-holder review): the record and the frames
+    // are places guarded_by the run lock, reached only under a borrowed
+    // ProcessRunGuard, an IRQ-masking Mutex guard, so no tick reaches a holder
+    // on its core (and the IRQ-return consult refuses a masked shadow). The
+    // KERNEL_PREEMPTIBLE assert that stood here named what the mask gives.
     match place_take(guard, terminal_state_store.record) {
         Place::Full(record) => { return record; }
         Place::Empty => {}
