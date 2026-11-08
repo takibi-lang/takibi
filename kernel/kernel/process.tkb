@@ -6570,6 +6570,8 @@ fn kernel_process_execution_reset() !{changes_witness_ProcessCurrent} {
 // this is CPU 0, the boot handoff has not happened (so no peer dispatches a
 // process), and the current record is the boot thread.
 fn kernel_test_driver_phase_premise() -> bool !{unsafe} {
+    // core-role: the boot fixtures run on the boot thread, which core 0 runs
+    // (CONCURRENCY.md, Core roles: Test-driver phase).
     if (cpu_id() != 0 ||
         atomic_word_load(&scheduled_process_boot_handed_off) != 0 ||
         execution_state[execution_cpu_index()].current_live == false) {
