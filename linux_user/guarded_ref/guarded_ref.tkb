@@ -1,0 +1,65 @@
+// GitHub issue #1159 (2026-11-08 guarded_ref decision): guarded_by plain
+// fields reached as guarded_ref(guard, r.f). Stores through the place land
+// in the global itself, not in a copy: each value is written in one
+// function and read back in another, under a fresh guard.
+//
+// An unguarded access, a guard of another lock and an escaping reference do
+// not compile; that half is test/test_takibi.ml's.
+//
+// Expected output (linux_user/guarded_ref/guarded_ref.expected):
+//   0x00000000   the count starts at zero
+//   0x00000003   three increments land in the global
+//   0x00001159   an element field written in place reads back
+//   0x00000042   an element byte written in place reads back
+
+struct DemoLock { private word: usize; }
+let mut demo_lock: DemoLock;
+linear struct DemoGuard[lock: addr] { private cpu: usize; }
+
+struct DemoRow { block: usize; bytes: [u8; 4]; }
+struct DemoState {
+    private rows: [DemoRow; 2] guarded_by(demo_lock);
+    private count: usize guarded_by(demo_lock);
+}
+private let mut demo_state: DemoState;
+
+fn demo_take() -> DemoGuard[&demo_lock] {
+    let mut guard: DemoGuard[&demo_lock] = { 0 };
+    return guard;
+}
+
+fn demo_give(guard: sink DemoGuard[&demo_lock]) {
+    let cpu: usize = guard.cpu;
+}
+
+fn demo_bump(guard: borrow DemoGuard[&demo_lock]) {
+    guarded_ref(guard, demo_state.count) = guarded_ref(guard, demo_state.count) + 1;
+}
+
+fn demo_fill(guard: borrow DemoGuard[&demo_lock], row: {0..<2 as usize}) {
+    guarded_ref(guard, demo_state.rows)[row].block = 0x1159;
+    guarded_ref(guard, demo_state.rows)[row].bytes[2] = 0x42;
+}
+
+fn demo_count(guard: borrow DemoGuard[&demo_lock]) -> usize {
+    return guarded_ref(guard, demo_state.count);
+}
+
+fn app_main() -> i32 {
+    let first = demo_take();
+    uart_println_hex(demo_count(first) as i32);
+    demo_bump(first);
+    demo_bump(first);
+    demo_give(first);
+    let second = demo_take();
+    demo_bump(second);
+    uart_println_hex(demo_count(second) as i32);
+    demo_fill(second, 1);
+    demo_give(second);
+    let third = demo_take();
+    uart_println_hex(guarded_ref(third, demo_state.rows)[1].block as i32);
+    let byte: u8 = guarded_ref(third, demo_state.rows)[1].bytes[2];
+    uart_println_hex(byte as i32);
+    demo_give(third);
+    return 0;
+}

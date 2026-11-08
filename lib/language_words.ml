@@ -115,6 +115,7 @@ let compiler_builtins = [
   "slice_copy"; "slice_eq"; "zero_fill"; "assume_init"; "place_take"; "place_put"; "place_borrow"; "place_is_full"; "min"; "max";
   "src_loc";
   "stopped_read";
+  "guarded_ref";
   "i32_min";
   "wrapping_mul_u32";
   "dma_publish"; "dma_consume"; "signal_fence";

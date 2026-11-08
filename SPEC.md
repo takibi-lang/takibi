@@ -2072,8 +2072,9 @@ let previous = place_take(guard, record_of(owner).pin);
 let displaced = place_put(guard, record_of(owner).pin, pin);
 ```
 
-- `guarded_by(L)` is accepted only on a private Place field of a plain
-  struct, and `L` must be a global. The two-operand forms
+- `guarded_by(L)` is accepted on a private field of a plain struct, and
+  `L` must be a global. A Place field so guarded must hold linear content;
+  a plain field is reached through `guarded_ref` (below). The two-operand forms
   `place_take(guard, r.f)` / `place_put(guard, r.f, v)` require the
   guard's one `addr` index to be `&L`; a guarded field is not accepted in
   the mutex form, and an unguarded one not in this form.
@@ -2094,6 +2095,36 @@ let displaced = place_put(guard, record_of(owner).pin, pin);
 - Trusted: the accessor's `@ p` (that the record it returns is holder p's)
   and the guard's mint, as for every authority-derived reference. The
   operation lowers to the same load and store as any place.
+
+#### Guarded plain fields (GitHub issue #1159)
+
+```takibi
+struct Ext2MutationState {
+    private undo: [Ext2UndoRow; EXT2_UNDO_ROWS] guarded_by(ext2_mutation_lock);
+    private fence_count: usize guarded_by(ext2_mutation_lock);
+}
+private let mut ext2_mutation_state: Ext2MutationState;
+
+guarded_ref(guard, ext2_mutation_state.undo)[row].block = block;
+let n: usize = guarded_ref(guard, ext2_mutation_state.fence_count);
+```
+
+- A private plain field declared `guarded_by(L)` is reached only as
+  `guarded_ref(g, r.f)`. `g` is a bare guard binding whose one `addr`
+  index is `&L`, the check `place_take` makes. Any other access -- `r.f`,
+  `&r.f`, `r.f` as a call argument -- is rejected, also in the declaring
+  file.
+- The result is a place, not a value: an assignment to it, or an index or
+  field below it, works on the field itself, with no copy. It lives for
+  that one expression. It cannot be addressed (`&guarded_ref(...)`, also
+  through an index or field below it), and read as a value it must be a
+  scalar or an enum, so no reference to the field and no aggregate copy
+  outlives the guard.
+- The guard is erased in code generation. Trusted: the guard's mint, as
+  for every guarded_by place.
+
+`linux_user/guarded_ref` stores through the place and reads it back under
+a later guard.
 
 `linux_user/pin_placement` exercises the lifecycle: a pin taken in one
 action, kept across a return to user space, refusing a migration, and

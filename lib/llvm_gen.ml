@@ -5417,6 +5417,11 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       if is_volatile then set_volatile true store;
       (value_ty, old_value)
 
+  | Call ("guarded_ref", [_; place]) ->
+      (* GitHub issue #1159: the guard is erased; the checker held its lock
+         against the field's guarded_by, and the place is the field. *)
+      gen_expr ?expected_ty locals place
+
   | Call ("stopped_read", [_; place]) ->
       (* GitHub issue #1159 rule 1: the authority is erased; the read is the
          place's own value. *)
@@ -5832,6 +5837,9 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
          effect-only expr case in this function (dma_publish/
          interrupt_wait/etc. above). *)
       (match lhs.desc with
+       | Call ("guarded_ref", [_; place]) ->
+           (* GitHub issue #1159: a store to the guarded field itself. *)
+           gen_expr locals { e with desc = Assign (place, rhs) }
        | Var name ->
            let target_ty_opt =
              match local_find_opt locals name with
@@ -5962,6 +5970,9 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
    share both layout and place/value classification. *)
 and gen_field_access locals (base_expr : Ast.expr) (fname : string)
     : field_access =
+  match base_expr.desc with
+  | Call ("guarded_ref", [_; place]) -> gen_field_access locals place fname
+  | _ ->
   let (base_ty, base_v, inherited_volatile) = match base_expr.desc with
     | Deref inner ->
         let (ty, value) = gen_expr locals inner in
@@ -6135,6 +6146,9 @@ and gen_index_place locals (base : Ast.expr) (idx : Ast.expr) loc
    already accepted -- it validates the exact same shapes first). *)
 and resolve_index_storage ~op locals (base : Ast.expr) : index_storage =
   match base.desc with
+  | Ast.Call ("guarded_ref", [_; place]) ->
+      (* GitHub issue #1159: index the guarded field in place. *)
+      resolve_index_storage ~op locals place
   | Ast.Var id ->
       (match local_find_opt locals id with
        | Some (Mut (TypeArray (elem_ty, n), ptr)) ->

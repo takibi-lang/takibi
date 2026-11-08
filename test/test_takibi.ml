@@ -3094,6 +3094,22 @@ let stop_cell_user = "
   fn test1159() -> bool { return stop_cell_get(&on1159); }
 "
 
+(* GitHub issue #1159 (2026-11-08): guarded_ref over guarded_by plain
+   fields, with a guard indexed by the lock's address. *)
+let guarded_ref_base = "
+  struct Lock1159 { private word: usize; }
+  let mut m1159: Lock1159;
+  let mut other1159: Lock1159;
+  linear struct G1159[lock: addr] { private cpu: usize; }
+  struct Row1159 { block: usize; bytes: [u8; 4]; }
+  struct State1159 {
+    private rows: [Row1159; 2] guarded_by(m1159);
+    private count: usize guarded_by(m1159);
+    private free: usize;
+  }
+  private let mut st1159: State1159;
+"
+
 let issue370_cell_fixture = {|
   linear struct CellOwner[p: addr] { private value: usize; }
   struct BrandCell[p: addr] {
@@ -12244,10 +12260,78 @@ linear struct Owner746b[page: usize] {
        "linear struct Pin7h[p: usize] { id: usize @ p; }
         struct R7h { private pin: Place(Pin7h[self]); }");
 
-  Alcotest.test_case "guarded_by is rejected on a non-place field" `Quick
-    (expect_type_error "only a private Place field"
-       "private let mut lock7i: i32;
-        struct R7i { private n: usize guarded_by(lock7i); }");
+  (* GitHub issue #1159 (2026-11-08 guarded_ref decision): a private plain
+     field may be guarded_by(L); it is reached only as guarded_ref(g, r.f)
+     with a guard indexed by &L, as a place for one expression. The three
+     programs the decision names are rejected: an unguarded access, a guard
+     of another lock, a reference that escapes. *)
+  Alcotest.test_case "guarded_ref reads and writes a guarded field in place" `Quick
+    (expect_ok (guarded_ref_base ^ "
+      fn ok1159(g: borrow G1159[&m1159], i: {0..<2 as usize}) -> usize {
+        guarded_ref(g, st1159.rows)[i].block = 3;
+        guarded_ref(g, st1159.rows)[i].bytes[1] = 2;
+        guarded_ref(g, st1159.count) = guarded_ref(g, st1159.count) + 1;
+        let b: usize = guarded_ref(g, st1159.rows)[i].block;
+        let c: u8 = guarded_ref(g, st1159.rows)[i].bytes[1];
+        return b + guarded_ref(g, st1159.count) + (c as usize);
+      }"));
+  Alcotest.test_case "guarded field: an unguarded write is rejected" `Quick
+    (expect_type_error "is guarded_by(m1159): reach it only as guarded_ref"
+       (guarded_ref_base ^ "
+      fn bad1159() { st1159.count = 0; }"));
+  Alcotest.test_case "guarded field: an unguarded read is rejected" `Quick
+    (expect_type_error "is guarded_by(m1159): reach it only as guarded_ref"
+       (guarded_ref_base ^ "
+      fn bad1159() -> usize { return st1159.count; }"));
+  Alcotest.test_case "guarded field: an unguarded address is rejected" `Quick
+    (expect_type_error "is guarded_by(m1159): reach it only as guarded_ref"
+       (guarded_ref_base ^ "
+      fn bad1159() -> *usize { return &st1159.count; }"));
+  Alcotest.test_case "guarded_ref rejects a guard of another lock" `Quick
+    (expect_type_error "guarded_ref guard does not hold 'm1159'"
+       (guarded_ref_base ^ "
+      fn bad1159(g: borrow G1159[&other1159]) {
+        guarded_ref(g, st1159.count) = 0;
+      }"));
+  Alcotest.test_case "guarded_ref's place cannot escape as a reference" `Quick
+    (expect_type_error "its address would outlive the guard"
+       (guarded_ref_base ^ "
+      fn bad1159(g: borrow G1159[&m1159]) {
+        let r: *usize = &guarded_ref(g, st1159.count);
+      }"));
+  Alcotest.test_case "guarded_ref's place cannot escape through an element" `Quick
+    (expect_type_error "its address would outlive the guard"
+       (guarded_ref_base ^ "
+      fn bad1159(g: borrow G1159[&m1159]) -> *usize {
+        return &guarded_ref(g, st1159.rows)[0].block;
+      }"));
+  Alcotest.test_case "guarded_ref copies out a scalar, not an aggregate" `Quick
+    (expect_type_error "is read as a scalar or enum only"
+       (guarded_ref_base ^ "
+      fn bad1159(g: borrow G1159[&m1159]) {
+        let r: Row1159 = guarded_ref(g, st1159.rows)[0];
+      }"));
+  Alcotest.test_case "guarded_ref's array field is not a call argument" `Quick
+    (expect_type_error "is read as a scalar or enum only"
+       (guarded_ref_base ^ "
+      fn sink1159(b: [u8; 4]) {}
+      fn bad1159(g: borrow G1159[&m1159]) {
+        sink1159(guarded_ref(g, st1159.rows)[0].bytes);
+      }"));
+  Alcotest.test_case "guarded_ref needs a guarded_by field" `Quick
+    (expect_type_error "declares no guarded_by lock"
+       (guarded_ref_base ^ "
+      fn bad1159(g: borrow G1159[&m1159]) -> usize {
+        return guarded_ref(g, st1159.free);
+      }"));
+  Alcotest.test_case "guarded_ref compiles to the field's own address" `Quick
+    (expect_codegen_ok (guarded_ref_base ^ "
+      fn ok1159(g: borrow G1159[&m1159], i: {0..<2 as usize}) -> usize {
+        guarded_ref(g, st1159.rows)[i].block = 3;
+        guarded_ref(g, st1159.rows)[i].bytes[1] = 2;
+        guarded_ref(g, st1159.count) = guarded_ref(g, st1159.count) + 1;
+        return guarded_ref(g, st1159.rows)[i].block + guarded_ref(g, st1159.count);
+      }"));
 
   Alcotest.test_case "guarded_by must name a global" `Quick
     (expect_type_error "which is not a global"

@@ -3709,6 +3709,52 @@ let record_call_target loc fname target =
    | _ -> ());
   resolved_call_targets := StringMap.add key target !resolved_call_targets
 
+(* GitHub issue #1159 (2026-11-08 guarded_ref decision): a private plain
+   (non-Place) field declared `guarded_by(L)` is reached only as
+   `guarded_ref(g, r.f)`, with g a guard whose addr index is &L. The result
+   is a place for one expression: the base of an index or a field, a scalar
+   read, or an assignment target. It is never addressed, so no reference to
+   the field outlives the statement that holds the guard.
+
+   guarded_ref_permit is the field name the current guarded_ref has opened:
+   the one field check that consumes it is that call's own `r.f`. Any other
+   access of a guarded plain field finds no permit and is refused.
+   guarded_ref_bases holds, physically, the nodes of a guarded_ref chain
+   that are the base of a larger place; guarded_ref_values the outermost
+   nodes already checked to be read as a scalar. *)
+let guarded_ref_permit : string option ref = ref None
+let guarded_ref_bases : Ast.expr list ref = ref []
+let guarded_ref_values : Ast.expr list ref = ref []
+
+let is_guarded_plain_field sname fname =
+  Guarded_registry.lock_of sname fname <> None
+  && not (is_stable_owner_field sname fname)
+
+let check_guarded_plain_access (loc : Ast.loc) sname fname =
+  if is_guarded_plain_field sname fname then
+    match !guarded_ref_permit with
+    | Some f when f = fname -> guarded_ref_permit := None
+    | _ ->
+        let lock = Option.get (Guarded_registry.lock_of sname fname) in
+        raise (TypeError (loc, Printf.sprintf
+          "field '%s.%s' is guarded_by(%s): reach it only as \
+           guarded_ref(guard, r.%s), with a guard whose index is &%s"
+          sname fname lock fname lock))
+
+(* The root of a place chain is a guarded_ref call. *)
+let rec guarded_ref_rooted (e : Ast.expr) = match e.desc with
+  | Ast.Call ("guarded_ref", _) -> true
+  | Ast.Index (b, _) | Ast.FieldGet (b, _) -> guarded_ref_rooted b
+  | _ -> false
+
+(* Every proper sub-place of [e] down to its guarded_ref root is a base. *)
+let rec mark_guarded_ref_bases (e : Ast.expr) = match e.desc with
+  | Ast.Index (b, _) | Ast.FieldGet (b, _) ->
+      if not (List.memq b !guarded_ref_bases) then
+        guarded_ref_bases := b :: !guarded_ref_bases;
+      mark_guarded_ref_bases b
+  | _ -> ()
+
 (* GitHub issue #613: the compiler-declared, unindexed result of a
    compare-and-swap (Cas_result). *)
 let cas_result_ty () = TVariant (Atomic_spec.cas_result_type, [], [])
@@ -3723,6 +3769,17 @@ let is_compare_swap name =
 let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   check_owned_index_at tyenv e;
   match e.desc with
+  | (Index (b, _) | FieldGet (b, _))
+    when guarded_ref_rooted b
+         && not (List.memq e !guarded_ref_bases)
+         && not (List.memq e !guarded_ref_values) ->
+      (* GitHub issue #1159: the outermost place of a guarded_ref chain,
+         read as a value. Its sub-places are bases; it copies a scalar. *)
+      guarded_ref_values := e :: !guarded_ref_values;
+      mark_guarded_ref_bases e;
+      let t = infer_expr senv eenv tyenv fenv e in
+      require_guarded_ref_scalar eenv e t;
+      t
   | IntLit _    -> fresh ()  (* polymorphic: unifies with any integer type via context *)
   | BoolLit _   -> TBool
   | StringLit _ -> TPtr TU8
@@ -6058,6 +6115,13 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | _ -> raise (TypeError (e.loc, Printf.sprintf
            "%s expects two arguments: %s(ptr, len)" fname fname)))
 
+  | Call ("guarded_ref", args) ->
+      let fe = open_guarded_ref senv eenv tyenv fenv e args in
+      let t = Fun.protect ~finally:(fun () -> guarded_ref_permit := None)
+          (fun () -> infer_expr senv eenv tyenv fenv fe) in
+      if not (List.memq e !guarded_ref_bases) then
+        require_guarded_ref_scalar eenv e t;
+      t
   | Call ("stopped_read" as fname, args) ->
       (* GitHub issue #1159 rule 1: a stopped-world read of any CPU's
          per_cpu element. The authority is a `borrow MachineStopped`
@@ -6539,7 +6603,15 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
          enclosing statement's `s.loc`). Always returns TVoid: assignment
          is not itself a readable value in this language (see Ast.Assign's
          own comment for why). *)
+      if guarded_ref_rooted lhs then mark_guarded_ref_bases lhs;
       (match lhs.desc with
+       | Call ("guarded_ref", args) ->
+           (* GitHub issue #1159: `guarded_ref(g, r.f) = v` stores to r.f
+              with the permit open for that one field check. *)
+           let fe = open_guarded_ref senv eenv tyenv fenv lhs args in
+           Fun.protect ~finally:(fun () -> guarded_ref_permit := None)
+             (fun () -> infer_expr senv eenv tyenv fenv
+                 { e with desc = Assign (fe, rhs) })
        | Var name ->
            check_private_global_access lhs.loc name;
            invalidate_place_projections name;
@@ -6771,6 +6843,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                    Printf.sprintf "unknown struct type '%s'" sname))
            in
            check_private_field_access e.loc sname fname;
+           check_guarded_plain_access e.loc sname fname;
            if is_stable_owner_field sname fname then
              raise (TypeError (e.loc, Printf.sprintf
                "stable owner field '%s.%s' cannot be assigned directly; use place_take or place_put while holding its guard"
@@ -6813,6 +6886,7 @@ and check_no_temporary_field_place ~operation senv eenv tyenv fenv
   match strip_singleton base_ty with
   | TStruct _ | TIndexedStruct _ ->
       (match base.desc with
+       | Ast.Call ("guarded_ref", _) -> ()
        | Ast.Call _ ->
            raise (TypeError (base.loc, Printf.sprintf
              "cannot %s a field of a call's result: it is a temporary" operation))
@@ -6896,6 +6970,10 @@ and check_no_write_through_shared_ref senv eenv tyenv fenv (e : Ast.expr) : unit
    from a raw field is separately recorded as a trusted mint for confinement. *)
 and infer_addrof_wrapped senv eenv tyenv fenv (e : Ast.expr) (inner : Ast.expr)
     (wrap : [`Ptr | `Ref | `RefMut]) : ty =
+  if guarded_ref_rooted inner then
+    raise (TypeError (e.loc,
+      "guarded_ref is a place for this expression only: its address would \
+       outlive the guard; read or assign it in place"));
   (* A raw field address exports a writable alias too. Shared storage must
      stay read-only even when the expected result is a raw pointer. *)
   (match wrap with
@@ -6976,6 +7054,7 @@ and infer_addrof_wrapped senv eenv tyenv fenv (e : Ast.expr) (inner : Ast.expr)
              Printf.sprintf "unknown struct type '%s'" sname))
        in
        check_private_field_access e.loc sname fname;
+       check_guarded_plain_access e.loc sname fname;
        if is_stable_owner_field sname fname then
          raise (TypeError (e.loc, Printf.sprintf
            "stable owner field '%s.%s' cannot be addressed; use place_take or place_put while holding its guard"
@@ -7090,6 +7169,7 @@ and infer_field_access ?(slice_source = false) ~decay senv eenv tyenv fenv
               Printf.sprintf "unknown struct type '%s'" sname))
       in
       check_private_field_access loc sname fname;
+      check_guarded_plain_access loc sname fname;
       if is_stable_owner_field sname fname then
         raise (TypeError (loc, Printf.sprintf
           "stable owner field '%s.%s' cannot be read directly; use place_take or place_put while holding its guard"
@@ -7259,6 +7339,10 @@ and place_undecayed_type senv eenv tyenv fenv (e : Ast.expr) : ty =
       lookup e.loc name tyenv
   | Ast.FieldGet (base_expr, fname) ->
       infer_field_access ~decay:false senv eenv tyenv fenv e.loc base_expr fname
+  | Ast.Call ("guarded_ref", args) ->
+      let fe = open_guarded_ref senv eenv tyenv fenv e args in
+      Fun.protect ~finally:(fun () -> guarded_ref_permit := None)
+        (fun () -> place_undecayed_type senv eenv tyenv fenv fe)
   | Ast.Index _ ->
       raise (TypeError (e.loc,
         "indexing another index expression's result directly (`a[i][j]` or \
@@ -7268,6 +7352,52 @@ and place_undecayed_type senv eenv tyenv fenv (e : Ast.expr) : ty =
       raise (TypeError (e.loc,
         "an index/slice base must be a variable or a chain of struct field \
          accesses, not an arbitrary expression"))
+
+(* GitHub issue #1159: check guarded_ref(g, r.f)'s guard against f's
+   guarded_by lock and open the permit for f. Returns `r.f`. *)
+and open_guarded_ref senv eenv tyenv fenv (e : Ast.expr) args : Ast.expr =
+  match args with
+  | [ ({ desc = Var _; _ } as guard);
+      ({ desc = FieldGet (base_expr, fname); _ } as field_expr) ] ->
+      let guard_lock =
+        place_guard_lock "guarded_ref" guard
+          (infer_expr senv eenv tyenv fenv guard) in
+      let bt = infer_expr senv eenv tyenv fenv base_expr in
+      let sname = match struct_instance (repr (strip_singleton bt)) with
+        | Some (sname, _) -> sname
+        | None -> raise (TypeError (base_expr.loc,
+            "guarded_ref's second argument must be a field of a struct"))
+      in
+      let lock = match Guarded_registry.lock_of sname fname with
+        | Some lock when not (is_stable_owner_field sname fname) -> lock
+        | Some _ -> raise (TypeError (field_expr.loc, Printf.sprintf
+            "'%s.%s' is a guarded_by place; use place_take or place_put"
+            sname fname))
+        | None -> raise (TypeError (field_expr.loc, Printf.sprintf
+            "guarded_ref: field '%s.%s' declares no guarded_by lock"
+            sname fname))
+      in
+      (try unify_static guard_lock
+             (static_identity_for_place { field_expr with desc = Var lock })
+       with Unify_error _ ->
+         raise (TypeError (guard.loc, Printf.sprintf
+           "guarded_ref guard does not hold '%s', the lock that guards '%s.%s'"
+           lock sname fname)));
+      guarded_ref_permit := Some fname;
+      field_expr
+  | _ -> raise (TypeError (e.loc,
+      "guarded_ref expects a bare guard binding and a field: \
+       guarded_ref(guard, r.field)"))
+
+and require_guarded_ref_scalar eenv (e : Ast.expr) t =
+  let is_enum n = StringMap.mem n eenv in
+  match repr t, non_scalar_kind ~is_enum t with
+  | (TRef _ | TRefMut _ | TPtr _ | TAlignedPtr _), _ | _, Some _ ->
+      raise (TypeError (e.loc, Printf.sprintf
+        "a guarded_ref place is read as a scalar or enum only (this one is \
+         %s): index it or select a field below it, inside the guard"
+        (Types.to_string t)))
+  | _ -> ()
 
 (* -- Checking mode --------------------------------------------------------- *)
 (* check_expr pushes the expected type inward (bidirectional checking).
@@ -9227,6 +9357,9 @@ let validate_per_cpu (prog : Ast.toplevel list) =
 let reset_compilation_state () =
   Line_owner.reset ();
   Hashtbl.reset stopped_read_indices;
+  guarded_ref_permit := None;
+  guarded_ref_bases := [];
+  guarded_ref_values := [];
   runtime_bounds_regions := StringSet.empty;
   active_runtime_bounds_key := "";
   runtime_bounds := Runtime_bounds.empty;
@@ -10817,10 +10950,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           (* GitHub issue #131 slice 3: guarded_by and `self`. *)
           (match Guarded_registry.lock_of sname fname with
            | Some lock ->
-               if not (is_stable_owner_field sname fname) then
-                 raise (TypeError (sloc, Printf.sprintf
-                   "guarded_by on '%s.%s': only a private Place field holding \
-                    linear content is guarded by a lock" sname fname));
+               (* GitHub issue #1159: a private plain field may be
+                  guarded_by too; it is then reached only through
+                  guarded_ref. A Place without linear content may not. *)
+               (match ty with
+                | Ast.TypeGenericInst ("Place", _)
+                  when not (is_stable_owner_field sname fname) ->
+                    raise (TypeError (sloc, Printf.sprintf
+                      "guarded_by on '%s.%s': a Place field guarded by a lock \
+                       holds linear content" sname fname))
+                | _ -> ());
                if not (StringSet.mem lock !global_address_names) then
                  raise (TypeError (sloc, Printf.sprintf
                    "guarded_by on '%s.%s' names '%s', which is not a global"
