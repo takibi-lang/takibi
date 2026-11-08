@@ -155,7 +155,9 @@ owners are TaskMutex, the spare stack stays masked). #980
    until #1006; the boot probe erets into a hand-made El1 frame through the
    successor path, on QEMU and RPi5, #1194); (4)
    a non-stopping CPU-authority mint and the `!{interrupt}`-derives-
-   `PreemptOff` rule (#641 item 1); (5) site migration (process_image's
+   `PreemptOff` rule (#641 item 1; done 2026-10-29, 20e22f3c: D1 (a) an
+   `!{interrupt}` function is called only masked and mints CPU authority
+   there, D2 (i) a fallible `preempt_off (cpu) { } else { }`); (5) site migration (process_image's
    target root, the log's partial line with an owner word, done (#1159),
    `syscall_ext2_reader`, done (#1323: a dispatch local), exception_evidence);
    (6) the slot pools'
