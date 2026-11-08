@@ -2120,6 +2120,14 @@ let n: usize = guarded_ref(guard, ext2_mutation_state.fence_count);
   through an index or field below it), and read as a value it must be a
   scalar or an enum, so no reference to the field and no aggregate copy
   outlives the guard.
+- A guarded array field (or an array below it) may become a slice, `as
+  []T` or `[lo..<hi]`, in one position only (2026-11-08, #1159 (2)): a
+  call argument whose parameter is `borrow` or `borrow mut`, or an operand
+  of `slice_copy` or `slice_eq`. A callee cannot keep a borrow, so the
+  slice ends with the call, inside the caller's guard. Bound to a local,
+  returned, stored or passed to an owning parameter, it is still refused.
+  Two such arguments of one call over the same guarded field, one of them
+  writable, are refused (they would alias).
 - The guard is erased in code generation. Trusted: the guard's mint, as
   for every guarded_by place.
 

@@ -30,11 +30,16 @@ must_use variant UsbProvisionVerifyResult { Invalid; Different; Equal; }
 // Exclusive bound for the 64 * 1024-byte batch. A literal const is usable
 // in the refined type that proves the dynamic prefix below.
 const USB_PROVISION_BATCH_BOUND: usize = 65537;
-private let mut usb_provision_batch:
-    [u8; USB_PROVISION_BATCH_BOUND - 1];
-// One expanded chunk: what usb_provision_rootfs writes, and what
-// usb_provision_rootfs_verify compares the read-back batch with.
-private let mut usb_provision_expanded: [u8; LZ4_IMAGE_CHUNK_BYTES];
+// GitHub issue #1159 (2): the batch, and one expanded chunk (what
+// usb_provision_rootfs writes, and what usb_provision_rootfs_verify compares
+// the read-back batch with), are used only under the block device guard, so
+// they are guarded_by(block_device_lock) and reach a callee only as a
+// borrowed slice of guarded_ref.
+struct UsbProvisionBuffers {
+    private batch: [u8; USB_PROVISION_BATCH_BOUND - 1] guarded_by(block_device_lock);
+    private expanded: [u8; LZ4_IMAGE_CHUNK_BYTES] guarded_by(block_device_lock);
+}
+private let mut usb_provision_buffers: UsbProvisionBuffers;
 
 // The provisioning batch and the container's chunk are one geometry, and
 // the extent is whole chunks, so every batch is a full chunk.
@@ -52,9 +57,10 @@ must_use variant UsbProvisionChunkResult {
     Next(usize);
 }
 
-private fn usb_provision_expand(cursor: usize) -> UsbProvisionChunkResult {
-    match lz4_image_expand_chunk(usb_provision_container as []const u8,
-                                 cursor, usb_provision_expanded as []u8) {
+private fn usb_provision_expand(guard: borrow BlockDeviceGuard[&block_device_lock],
+                                cursor: usize) -> UsbProvisionChunkResult {
+    match lz4_image_expand_chunk(usb_provision_container as []const u8, cursor,
+            guarded_ref(guard, usb_provision_buffers.expanded) as []u8) {
         Lz4ImageChunkResult::Invalid => { return UsbProvisionChunkResult::Invalid; }
         Lz4ImageChunkResult::Expanded(next) => {
             return UsbProvisionChunkResult::Next(next);
@@ -92,6 +98,92 @@ fn usb_provision_rootfs(destination: KernelBlockDevice) -> UsbProvisionResult {
     return result;
 }
 
+// One batch of usb_provision_rootfs_locked, from the guarded batch buffer
+// (#1159 (2): a borrowed slice, so it ends with this call). False is Invalid.
+private fn usb_provision_write_batch(guard: borrow BlockDeviceGuard[&block_device_lock],
+                                     first_block: usize, batch: usize,
+                                     bytes: borrow [u8; LZ4_IMAGE_CHUNK_BYTES..]) -> bool {
+    let transfer_length: usize = batch * KERNEL_BLOCK_SIZE;
+    if (transfer_length > bytes.len) {
+        return false;
+    }
+    let mut transfer: []u8;
+    if (transfer_length >= 0 && transfer_length <
+        USB_PROVISION_BATCH_BOUND) {
+        let bounded_length:
+            {0..<USB_PROVISION_BATCH_BOUND as usize} = transfer_length;
+        transfer = bytes[0..<bounded_length];
+    } else {
+        return false;
+    }
+    match disk_write_sectors(guard, (first_block * 2) as u32, transfer) {
+        DiskIoResult::Err(error) => {
+            let mut fallback_offset: usize = 0;
+            let mut fallback_blocks: usize = batch / 2;
+            if (fallback_blocks == 0) {
+                fallback_blocks = 1;
+            }
+            while (fallback_offset < batch) {
+                let mut transfer_blocks: usize = fallback_blocks;
+                if (transfer_blocks > batch - fallback_offset) {
+                    transfer_blocks = batch - fallback_offset;
+                }
+                let block_offset: usize =
+                    fallback_offset * KERNEL_BLOCK_SIZE;
+                let transfer_length: usize =
+                    transfer_blocks * KERNEL_BLOCK_SIZE;
+                if (block_offset > bytes.len) {
+                    return false;
+                }
+                let remaining = bytes[block_offset..<bytes.len];
+                if (transfer_length > remaining.len) {
+                    return false;
+                }
+                let block_bytes = remaining[0..<transfer_length];
+                if (transfer_blocks == 1) {
+                    if (block_bytes.len < KERNEL_BLOCK_SIZE) {
+                        return false;
+                    }
+                    match disk_write(guard,
+                            ((first_block + fallback_offset) * 2) as u32,
+                            block_bytes[0..<512]) {
+                        DiskIoResult::Err(single_error) => {
+                            return false;
+                        }
+                        DiskIoResult::Ok => { }
+                    }
+                    match disk_write(guard,
+                            ((first_block + fallback_offset) * 2 + 1) as u32,
+                            block_bytes[512..<KERNEL_BLOCK_SIZE]) {
+                        DiskIoResult::Err(single_error) => {
+                            return false;
+                        }
+                        DiskIoResult::Ok => { }
+                    }
+                    fallback_offset = fallback_offset + 1;
+                } else {
+                    match disk_write_sectors(guard,
+                            ((first_block + fallback_offset) * 2) as u32,
+                            block_bytes) {
+                        DiskIoResult::Err(smaller_error) => {
+                            fallback_blocks = transfer_blocks / 2;
+                            if (fallback_blocks == 0) {
+                                fallback_blocks = 1;
+                            }
+                        }
+                        DiskIoResult::Ok => {
+                            fallback_offset = fallback_offset +
+                                               transfer_blocks;
+                        }
+                    }
+                }
+            }
+        }
+        DiskIoResult::Ok => { }
+    }
+    return true;
+}
+
 private fn usb_provision_rootfs_locked(guard: borrow BlockDeviceGuard[&block_device_lock],
                                        destination: KernelBlockDevice)
         -> UsbProvisionResult {
@@ -106,90 +198,15 @@ private fn usb_provision_rootfs_locked(guard: borrow BlockDeviceGuard[&block_dev
     let mut first_block: usize = 0;
     while (first_block < USB_PROVISION_BLOCKS) {
         let batch: usize = KERNEL_BLOCK_BATCH;
-        match usb_provision_expand(cursor) {
+        match usb_provision_expand(guard, cursor) {
             UsbProvisionChunkResult::Invalid => { return UsbProvisionResult::Invalid; }
             UsbProvisionChunkResult::Next(next) => { cursor = next; }
         }
-        slice_copy(usb_provision_batch as []u8,
-                   usb_provision_expanded as []const u8);
-        let bytes = usb_provision_batch as []u8;
-        let transfer_length: usize = batch * KERNEL_BLOCK_SIZE;
-        if (transfer_length > bytes.len) {
+        slice_copy(guarded_ref(guard, usb_provision_buffers.batch) as []u8,
+                   guarded_ref(guard, usb_provision_buffers.expanded) as []const u8);
+        if (usb_provision_write_batch(guard, first_block, batch,
+                guarded_ref(guard, usb_provision_buffers.batch) as [u8; LZ4_IMAGE_CHUNK_BYTES..]) == false) {
             return UsbProvisionResult::Invalid;
-        }
-        let mut transfer: []u8;
-        if (transfer_length >= 0 && transfer_length <
-            USB_PROVISION_BATCH_BOUND) {
-            let bounded_length:
-                {0..<USB_PROVISION_BATCH_BOUND as usize} = transfer_length;
-            transfer = bytes[0..<bounded_length];
-        } else {
-            return UsbProvisionResult::Invalid;
-        }
-        match disk_write_sectors(guard, (first_block * 2) as u32, transfer) {
-            DiskIoResult::Err(error) => {
-                let mut fallback_offset: usize = 0;
-                let mut fallback_blocks: usize = batch / 2;
-                if (fallback_blocks == 0) {
-                    fallback_blocks = 1;
-                }
-                while (fallback_offset < batch) {
-                    let mut transfer_blocks: usize = fallback_blocks;
-                    if (transfer_blocks > batch - fallback_offset) {
-                        transfer_blocks = batch - fallback_offset;
-                    }
-                    let block_offset: usize =
-                        fallback_offset * KERNEL_BLOCK_SIZE;
-                    let transfer_length: usize =
-                        transfer_blocks * KERNEL_BLOCK_SIZE;
-                    if (block_offset > bytes.len) {
-                        return UsbProvisionResult::Invalid;
-                    }
-                    let remaining = bytes[block_offset..<bytes.len];
-                    if (transfer_length > remaining.len) {
-                        return UsbProvisionResult::Invalid;
-                    }
-                    let block_bytes = remaining[0..<transfer_length];
-                    if (transfer_blocks == 1) {
-                        if (block_bytes.len < KERNEL_BLOCK_SIZE) {
-                            return UsbProvisionResult::Invalid;
-                        }
-                        match disk_write(guard,
-                                ((first_block + fallback_offset) * 2) as u32,
-                                block_bytes[0..<512]) {
-                            DiskIoResult::Err(single_error) => {
-                                return UsbProvisionResult::Invalid;
-                            }
-                            DiskIoResult::Ok => { }
-                        }
-                        match disk_write(guard,
-                                ((first_block + fallback_offset) * 2 + 1) as u32,
-                                block_bytes[512..<KERNEL_BLOCK_SIZE]) {
-                            DiskIoResult::Err(single_error) => {
-                                return UsbProvisionResult::Invalid;
-                            }
-                            DiskIoResult::Ok => { }
-                        }
-                        fallback_offset = fallback_offset + 1;
-                    } else {
-                        match disk_write_sectors(guard,
-                                ((first_block + fallback_offset) * 2) as u32,
-                                block_bytes) {
-                            DiskIoResult::Err(smaller_error) => {
-                                fallback_blocks = transfer_blocks / 2;
-                                if (fallback_blocks == 0) {
-                                    fallback_blocks = 1;
-                                }
-                            }
-                            DiskIoResult::Ok => {
-                                fallback_offset = fallback_offset +
-                                                   transfer_blocks;
-                            }
-                        }
-                    }
-                }
-            }
-            DiskIoResult::Ok => { }
         }
         first_block = first_block + batch;
     }
@@ -212,6 +229,33 @@ fn usb_provision_rootfs_verify(destination: KernelBlockDevice)
     return result;
 }
 
+// One read-back batch of usb_provision_rootfs_verify_locked into the guarded
+// batch buffer (#1159 (2)). False is Invalid.
+private fn usb_provision_read_batch(guard: borrow BlockDeviceGuard[&block_device_lock],
+                                    first_block: usize, batch: usize,
+                                    bytes: borrow [u8; LZ4_IMAGE_CHUNK_BYTES..]) -> bool {
+    let transfer_length: usize = batch * KERNEL_BLOCK_SIZE;
+    if (transfer_length > bytes.len) {
+        return false;
+    }
+    let mut transfer: []u8;
+    if (transfer_length >= 0 && transfer_length <
+        USB_PROVISION_BATCH_BOUND) {
+        let bounded_length:
+            {0..<USB_PROVISION_BATCH_BOUND as usize} = transfer_length;
+        transfer = bytes[0..<bounded_length];
+    } else {
+        return false;
+    }
+    match disk_read_sectors(guard, (first_block * 2) as u32, transfer) {
+        DiskIoResult::Err(error) => {
+            return false;
+        }
+        DiskIoResult::Ok => { }
+    }
+    return true;
+}
+
 private fn usb_provision_rootfs_verify_locked(guard: borrow BlockDeviceGuard[&block_device_lock],
                                               destination: KernelBlockDevice)
         -> UsbProvisionVerifyResult {
@@ -226,34 +270,18 @@ private fn usb_provision_rootfs_verify_locked(guard: borrow BlockDeviceGuard[&bl
     let mut first_block: usize = 0;
     while (first_block < USB_PROVISION_BLOCKS) {
         let batch: usize = KERNEL_BLOCK_BATCH;
-        let bytes = usb_provision_batch as []u8;
-        let transfer_length: usize = batch * KERNEL_BLOCK_SIZE;
-        if (transfer_length > bytes.len) {
+        if (usb_provision_read_batch(guard, first_block, batch,
+                guarded_ref(guard, usb_provision_buffers.batch) as [u8; LZ4_IMAGE_CHUNK_BYTES..]) == false) {
             return UsbProvisionVerifyResult::Invalid;
         }
-        let mut transfer: []u8;
-        if (transfer_length >= 0 && transfer_length <
-            USB_PROVISION_BATCH_BOUND) {
-            let bounded_length:
-                {0..<USB_PROVISION_BATCH_BOUND as usize} = transfer_length;
-            transfer = bytes[0..<bounded_length];
-        } else {
-            return UsbProvisionVerifyResult::Invalid;
-        }
-        match disk_read_sectors(guard, (first_block * 2) as u32, transfer) {
-            DiskIoResult::Err(error) => {
-                return UsbProvisionVerifyResult::Invalid;
-            }
-            DiskIoResult::Ok => { }
-        }
-        match usb_provision_expand(cursor) {
+        match usb_provision_expand(guard, cursor) {
             UsbProvisionChunkResult::Invalid => {
                 return UsbProvisionVerifyResult::Invalid;
             }
             UsbProvisionChunkResult::Next(next) => { cursor = next; }
         }
-        if (slice_eq(usb_provision_batch as []const u8,
-                     usb_provision_expanded as []const u8) == false) {
+        if (slice_eq(guarded_ref(guard, usb_provision_buffers.batch) as []const u8,
+                     guarded_ref(guard, usb_provision_buffers.expanded) as []const u8) == false) {
             return UsbProvisionVerifyResult::Different;
         }
         first_block = first_block + batch;

@@ -12318,6 +12318,44 @@ linear struct Owner746b[page: usize] {
       fn bad1159(g: borrow G1159[&m1159]) {
         sink1159(guarded_ref(g, st1159.rows)[0].bytes);
       }"));
+  (* 2026-11-08 #1159 (2): a guarded array as a borrowed slice argument. *)
+  Alcotest.test_case "guarded slice: borrowed arguments and slice_copy/slice_eq, accepted" `Quick
+    (expect_codegen_ok (guarded_ref_base ^ "
+      fn poke1159(out: borrow []u8) { if (out.len > 0) { out[0] = 1; } }
+      fn ok1159(g: borrow G1159[&m1159]) -> bool {
+        poke1159(guarded_ref(g, st1159.rows)[0].bytes as []u8);
+        poke1159(guarded_ref(g, st1159.rows)[1].bytes[1..<3]);
+        slice_copy(guarded_ref(g, st1159.rows)[0].bytes as []u8, \"abcd\" as []const u8);
+        return slice_eq(guarded_ref(g, st1159.rows)[0].bytes as []const u8,
+                        guarded_ref(g, st1159.rows)[1].bytes as []const u8);
+      }"));
+  Alcotest.test_case "guarded slice: bound to a local, rejected" `Quick
+    (expect_type_error "is read as a scalar or enum only"
+       (guarded_ref_base ^ "
+      fn bad1159(g: borrow G1159[&m1159]) {
+        let s: []u8 = guarded_ref(g, st1159.rows)[0].bytes as []u8;
+      }"));
+  Alcotest.test_case "guarded slice: into a parameter that is not borrowed, rejected" `Quick
+    (expect_type_error "is read as a scalar or enum only"
+       (guarded_ref_base ^ "
+      fn keep1159(s: []u8) {}
+      fn bad1159(g: borrow G1159[&m1159]) {
+        keep1159(guarded_ref(g, st1159.rows)[0].bytes as []u8);
+      }"));
+  Alcotest.test_case "guarded slice: the same field twice, one writable, rejected" `Quick
+    (expect_type_error "passed twice to one call, once writable"
+       (guarded_ref_base ^ "
+      fn bad1159(g: borrow G1159[&m1159]) {
+        slice_copy(guarded_ref(g, st1159.rows)[0].bytes as []u8,
+                   guarded_ref(g, st1159.rows)[0].bytes as []const u8);
+      }"));
+  Alcotest.test_case "guarded slice: a guard of another lock, rejected" `Quick
+    (expect_type_error "guarded_ref guard does not hold 'm1159'"
+       (guarded_ref_base ^ "
+      fn poke1159(out: borrow []u8) {}
+      fn bad1159(g: borrow G1159[&other1159]) {
+        poke1159(guarded_ref(g, st1159.rows)[0].bytes as []u8);
+      }"));
   Alcotest.test_case "guarded_ref needs a guarded_by field" `Quick
     (expect_type_error "declares no guarded_by lock"
        (guarded_ref_base ^ "

@@ -19,10 +19,10 @@ fn disk_status() -> DiskIoResult {
     return DiskIoResult::Err(-1);
 }
 
-fn disk_read_sectors(guard: borrow BlockDeviceGuard[&block_device_lock], sector: u32, buf: []u8) -> DiskIoResult {
+fn disk_read_sectors(guard: borrow BlockDeviceGuard[&block_device_lock], sector: u32, buf: borrow []u8) -> DiskIoResult {
     return disk_status();
 }
 
-fn disk_write_sectors(guard: borrow BlockDeviceGuard[&block_device_lock], sector: u32, buf: []u8) -> DiskIoResult {
+fn disk_write_sectors(guard: borrow BlockDeviceGuard[&block_device_lock], sector: u32, buf: borrow []u8) -> DiskIoResult {
     return disk_status();
 }

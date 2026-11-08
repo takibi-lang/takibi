@@ -1549,7 +1549,7 @@ fn msc_scsi_lba_cdb(cbw: borrow MscCbw[0], op: u8, sector: u32, sectors: usize) 
 // Reset + clear-halt on both bulk endpoints) followed by exactly one
 // retry of the same, side-effect-free-to-repeat command. An unobserved
 // transfer aborts instead; a BOT reset does not quiesce the host controller.
-fn disk_read_sectors(guard: borrow BlockDeviceGuard[&block_device_lock], sector: u32, buf: []u8) -> DiskIoResult {
+fn disk_read_sectors(guard: borrow BlockDeviceGuard[&block_device_lock], sector: u32, buf: borrow []u8) -> DiskIoResult {
     if (disk_io_ok(disk_status()) == false) {
         return DiskIoResult::Err(-1);
     }
@@ -1612,7 +1612,7 @@ fn disk_read(guard: borrow BlockDeviceGuard[&block_device_lock], sector: u32, bu
     return disk_read_sectors(guard, sector, buf[0..<MSC_SECTOR_SIZE]);
 }
 
-fn disk_write(guard: borrow BlockDeviceGuard[&block_device_lock], sector: u32, buf: [u8; MSC_SECTOR_SIZE..]) -> DiskIoResult {
+fn disk_write(guard: borrow BlockDeviceGuard[&block_device_lock], sector: u32, buf: borrow [u8; MSC_SECTOR_SIZE..]) -> DiskIoResult {
     return disk_write_sectors(guard, sector, buf[0..<MSC_SECTOR_SIZE]);
 }
 
@@ -1621,7 +1621,7 @@ fn disk_write(guard: borrow BlockDeviceGuard[&block_device_lock], sector: u32, b
 // provide ordinary, unaligned byte storage. A failed write is replayed once
 // with the same bytes and LBA range after a completed error. A transfer
 // without a matching event aborts before any replay.
-fn disk_write_sectors(guard: borrow BlockDeviceGuard[&block_device_lock], sector: u32, buf: []u8) -> DiskIoResult {
+fn disk_write_sectors(guard: borrow BlockDeviceGuard[&block_device_lock], sector: u32, buf: borrow []u8) -> DiskIoResult {
     if (disk_io_ok(disk_status()) == false) {
         return DiskIoResult::Err(-1);
     }

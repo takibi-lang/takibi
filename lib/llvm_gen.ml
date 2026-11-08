@@ -4320,8 +4320,9 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                           "slice cast source must be an array variable, an \
                            array-typed struct field, a string literal, or a \
                            slice"))
-                 | FieldGet _ ->
-                     (* GitHub issue #372: an array-typed struct field is a
+                 | FieldGet _ | Call ("guarded_ref", _) ->
+                     (* #1159 (2): a guarded_ref field is the field itself.
+                        GitHub issue #372: an array-typed struct field is a
                         place with the same static length a binding has, and
                         field_access_value has already produced its
                         elem-0 pointer above -- only the length is missing.

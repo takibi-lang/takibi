@@ -11,6 +11,9 @@
 //   0x00000003   three increments land in the global
 //   0x00001159   an element field written in place reads back
 //   0x00000042   an element byte written in place reads back
+//   0x00000007   slice_copy into a guarded buffer lands in the global (#1159 (2))
+//   0x00000001   slice_eq over two guarded buffers sees it
+//   0x00000009   a borrowed sub-slice written by a callee lands too
 
 struct DemoLock { private word: usize; }
 let mut demo_lock: DemoLock;
@@ -20,6 +23,8 @@ struct DemoRow { block: usize; bytes: [u8; 4]; }
 struct DemoState {
     private rows: [DemoRow; 2] guarded_by(demo_lock);
     private count: usize guarded_by(demo_lock);
+    private batch: [u8; 8] guarded_by(demo_lock);
+    private expanded: [u8; 8] guarded_by(demo_lock);
 }
 private let mut demo_state: DemoState;
 
@@ -45,6 +50,18 @@ fn demo_count(guard: borrow DemoGuard[&demo_lock]) -> usize {
     return guarded_ref(guard, demo_state.count);
 }
 
+// #1159 (2): a guarded array passed as a borrowed slice.
+fn demo_poke(out: borrow []u8) {
+    if (out.len > 1) { out[1] = 9; }
+}
+
+fn demo_slices(guard: borrow DemoGuard[&demo_lock]) {
+    guarded_ref(guard, demo_state.expanded)[3] = 7;
+    slice_copy(guarded_ref(guard, demo_state.batch) as []u8,
+               guarded_ref(guard, demo_state.expanded) as []const u8);
+    demo_poke(guarded_ref(guard, demo_state.expanded)[4..<8]);
+}
+
 fn app_main() -> i32 {
     let first = demo_take();
     uart_println_hex(demo_count(first) as i32);
@@ -60,6 +77,14 @@ fn app_main() -> i32 {
     uart_println_hex(guarded_ref(third, demo_state.rows)[1].block as i32);
     let byte: u8 = guarded_ref(third, demo_state.rows)[1].bytes[2];
     uart_println_hex(byte as i32);
+    demo_slices(third);
     demo_give(third);
+    let fourth = demo_take();
+    uart_println_hex(guarded_ref(fourth, demo_state.batch)[3] as i32);
+    let same: bool = slice_eq(guarded_ref(fourth, demo_state.batch)[0..<4],
+                              guarded_ref(fourth, demo_state.expanded)[0..<4]);
+    uart_println_hex(same as i32);
+    uart_println_hex(guarded_ref(fourth, demo_state.expanded)[5] as i32);
+    demo_give(fourth);
     return 0;
 }

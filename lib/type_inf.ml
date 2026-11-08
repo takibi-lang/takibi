@@ -3755,6 +3755,41 @@ let rec mark_guarded_ref_bases (e : Ast.expr) = match e.desc with
       mark_guarded_ref_bases b
   | _ -> ()
 
+(* 2026-11-08 #1159 (2): a guarded_ref place of array type may decay to a
+   slice, or be sub-sliced, as one call argument whose parameter is
+   `borrow`/`borrow mut` or an operand of slice_copy/slice_eq: the callee
+   cannot keep a borrow, so the slice ends with the call, inside the
+   caller's guard. Marking the place a base exempts it from the scalar
+   read rule; anywhere else the same place is still refused. *)
+let mark_guarded_slice_arg (a : Ast.expr) =
+  let a = match a.desc with Ast.Cast (Ast.TypeSlice _, inner) -> inner | _ -> a in
+  let place = match a.desc with Ast.SliceOf (b, _, _) -> b | _ -> a in
+  if guarded_ref_rooted place then begin
+    if not (List.memq place !guarded_ref_bases) then
+      guarded_ref_bases := place :: !guarded_ref_bases;
+    mark_guarded_ref_bases place
+  end
+
+(* Two guarded slice arguments of one call over the same guarded field,
+   one of them writable, would alias (#1159 (2)). *)
+let rec guarded_field_of (e : Ast.expr) = match e.desc with
+  | Ast.Call ("guarded_ref", [ _; { desc = Ast.FieldGet (r, f); _ } ]) ->
+      (* A record that is not a bare global is compared by field name
+         alone, the conservative side. *)
+      Some ((match r.desc with Ast.Var n -> n | _ -> "_") ^ "." ^ f)
+  | Ast.Index (b, _) | Ast.FieldGet (b, _) | Ast.SliceOf (b, _, _)
+  | Ast.Cast (_, b) -> guarded_field_of b
+  | _ -> None
+
+let check_guarded_slice_alias loc (args : (Ast.expr * bool) list) =
+  let fields = List.filter_map (fun (a, writable) ->
+    Option.map (fun f -> (f, writable)) (guarded_field_of a)) args in
+  List.iter (fun (f, w) ->
+    if w && List.length (List.filter (fun (g, _) -> g = f) fields) > 1 then
+      raise (TypeError (loc, Printf.sprintf
+        "guarded field '%s' is passed twice to one call, once writable: \
+         the two slices would alias" f))) fields
+
 (* GitHub issue #613: the compiler-declared, unindexed result of a
    compare-and-swap (Cas_result). *)
 let cas_result_ty () = TVariant (Atomic_spec.cas_result_type, [], [])
@@ -4513,6 +4548,28 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                        want_access
                  | _ ->
                      (match e.desc with
+                      | Ast.Call ("guarded_ref", [ _; ({ desc = Ast.FieldGet (_, f); _ } as place) ]) ->
+                          (* #1159 (2): a guarded array field as a slice,
+                             only where mark_guarded_slice_arg allowed it
+                             (a borrowed call argument). Its length is the
+                             field's declared one. *)
+                          if not (List.memq e !guarded_ref_bases) then
+                            raise (TypeError (e.loc,
+                              "a guarded_ref array becomes a slice only as a \
+                               borrow argument of a call or an operand of \
+                               slice_copy/slice_eq"));
+                          guarded_ref_permit := Some f;
+                          let place_ty = Fun.protect
+                              ~finally:(fun () -> guarded_ref_permit := None)
+                              (fun () -> place_undecayed_type senv eenv tyenv fenv place) in
+                          (match repr place_ty with
+                           | TArray (el_a, n) when n >= want_min ->
+                               unify_at e.loc el_a el_want;
+                               Hashtbl.replace slice_cast_len e.loc n;
+                               TSlice (el_want, n, want_access)
+                           | t' -> raise (TypeError (e.loc, Printf.sprintf
+                               "cannot cast guarded field of type '%s' to %s"
+                               (to_string t') (to_string tgt))))
                       | Ast.Var _ | Ast.FieldGet _ ->
                           (* GitHub issue #372: the length evidence is the
                              SOURCE NO_COPY's un-decayed declared type, which a
@@ -6241,6 +6298,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
          non-relational interval world. *)
       (match args with
        | [d; s] ->
+           mark_guarded_slice_arg d; mark_guarded_slice_arg s;
+           check_guarded_slice_alias e.loc [ (d, true); (s, false) ];
            let dt = infer_expr senv eenv tyenv fenv d in
            let st = infer_expr senv eenv tyenv fenv s in
            let ev = fresh () in
@@ -6295,6 +6354,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
          Total function -- length mismatch is false, not an error. *)
       (match args with
        | [a; b] ->
+           mark_guarded_slice_arg a; mark_guarded_slice_arg b;
            let at = infer_expr senv eenv tyenv fenv a in
            let bt = infer_expr senv eenv tyenv fenv b in
            let ev = fresh () in
@@ -6485,6 +6545,17 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            let modes = Option.value
              (StringMap.find_opt target !function_param_modes)
              ~default:(List.map (fun _ -> None) param_tys) in
+           (* #1159 (2): guarded slices only into borrowed parameters. *)
+           let borrowed = List.filter_map (fun ((arg : Ast.expr), mode) ->
+             match mode with
+             | Some (Ast.TypeBorrow t) ->
+                 mark_guarded_slice_arg arg;
+                 Some (arg, (match t with
+                   | Ast.TypeSlice (_, _, Ast.SliceReadonly) -> false
+                   | _ -> true))
+             | Some (Ast.TypeBorrowMut _) -> mark_guarded_slice_arg arg; Some (arg, true)
+             | _ -> None) (List.combine args modes) in
+           check_guarded_slice_alias e.loc borrowed;
            let mutable_places = List.filter_map (fun ((arg : Ast.expr), mode) ->
              match mode, arg.desc with
              | Some (Ast.TypeBorrowMut _), Ast.Var name -> Some (name, arg.loc)

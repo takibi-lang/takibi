@@ -567,3 +567,9 @@ entries below that date are history, left as written.
   argument (SPEC.md, Protocol Declarations), and xhci_ring_submit,
   xhci_input_submit/take/recover, xhci_tables_start and usb_await_event take
   it as a parameter. Five rows leave the allowlist.
+- 2026-11-08: the USB provisioning buffers (#1159 (2)). `usb_provision_batch`
+  and `usb_provision_expanded` are fields of `UsbProvisionBuffers`,
+  `guarded_by(block_device_lock)`, and reach slice_copy, slice_eq,
+  lz4_image_expand_chunk and the new per-batch helpers only as borrowed
+  slices of `guarded_ref`. disk_read_sectors, disk_write_sectors and
+  disk_write take their buffer as `borrow`. Two rows leave the allowlist.
