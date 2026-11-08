@@ -6572,7 +6572,7 @@ fn kernel_process_execution_reset() !{changes_witness_ProcessCurrent} {
 fn kernel_test_driver_phase_premise() -> bool !{unsafe} {
     // core-role: the boot fixtures run on the boot thread, which core 0 runs
     // (CONCURRENCY.md, Core roles: Test-driver phase).
-    if (cpu_id() != 0 ||
+    if (execution_cpu_index() != 0 ||
         atomic_word_load(&scheduled_process_boot_handed_off) != 0) {
         return false;
     }
