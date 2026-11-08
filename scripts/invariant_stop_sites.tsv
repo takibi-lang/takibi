@@ -122,3 +122,4 @@ kernel/kernel/process.tkb	kernel_process_stack_switch_complete	ladder	1	-	#850	a
 kernel/init/boot_prologue.tkb	set_once_unset_stop	ladder	1	-	#732	a SetOnce cell read before it was set (#1159): as boot_once_unwritten_stop, a Sealed index on the cell would make it a compile error
 kernel/kernel/syscall.tkb	kernel_syscall_ext2_configure	ladder	1	-	#1159	a second configure of the syscall filesystem finds its SetOnce claimed: boot configures it once, an order no type states yet
 kernel/mm/process_image.tkb	process_image_record_publish	ladder	1	-	#1159	a second publish of root 0's image record finds its SetOnce claimed: only the first ensure publishes it, an order no type states yet
+kernel/kernel/test_driver_phase.tkb	test_driver_phase_begin	unmodelled	1	-	#1462	the test-driver premise (CPU 0, not handed off, the boot thread current) is false at the one begin: a boot-order fact no model or type covers (TRUSTED_BASE, test-driver phase)
