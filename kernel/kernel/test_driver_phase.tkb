@@ -39,7 +39,8 @@ linear struct TestDriverPhase[phase: addr] {
 // does not hold.
 fn test_driver_phase_begin(premise: bool)
         -> TestDriverPhase[&test_driver_phase_ended] !{unsafe} {
-    if (premise == false) {
+    // A begin after an end would be a second phase.
+    if (premise == false || atomic_word_load(&test_driver_phase_ended) != 0) {
         kernel_invariant_stop();
     }
     let mut phase: TestDriverPhase[&test_driver_phase_ended] = { 1 };
