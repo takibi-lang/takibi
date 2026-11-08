@@ -560,6 +560,19 @@ interpretation, z3's Spacer) may propose an invariant; the proposal is
 re-checked as quantifier-free obligations like any other fact. The SMT-LIB
 files stay portable so a second solver can run the same corpus.
 
+Proposers come in a ladder, each rung cheaper than the next and tried in
+that order (docs/VERIFICATION_DESIGN.md, "Loop invariants"): a checked
+`noreturn` on a function, Houdini candidates over a loop's versioned
+locals, interval and linear abstract interpretation with widening, and
+z3's CHC engine Spacer. Two rungs exist today without the name: the
+checker's interval arithmetic is an interval abstract domain without
+widening, and the init checker's loop handling is Houdini over init
+intervals. Techniques that infer contracts rather than invariants
+(bi-abduction), prove termination, or mine invariants from executions are
+not adopted: boundary contracts stay explicit, kernel loops are
+intentionally infinite, and kernel execution logs cost more than the
+candidates are worth.
+
 There is no `solve` or `prove` surface form, and none is planned. A
 future `solve` would have to mean "prove the current pure goal from named
 assumptions"; it must not consume or invent `Delta` resources, recover

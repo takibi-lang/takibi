@@ -313,11 +313,31 @@ init_flow, init_pred and range_obligation, and inference adds about
 #935, #956, #961 and #983 were found. The six sites above save about
 50-70 B in total.
 
-When they come, the intended direction is: the compiler infers invariants
-by default (interval and linear abstract interpretation with widening; z3's
-CHC engine, Spacer, is a candidate where its cost fits the 5 s budget), and
-the programmer writes an invariant or a proof only where inference fails.
-This is evidence for #955 (proof assistants).
+When they come, the compiler infers invariants by default and the
+programmer writes an invariant or a proof only where inference fails. The
+inference is a ladder of proposers, each cheaper than the next, and every
+rung's output is written as quantifier-free obligations and re-checked by
+z3 like any other fact (TAKIBI_CORE.md section 5), so acceptance never
+depends on the engine:
+
+1. A checked `!{noreturn}` on Takibi functions (every path ends in a
+   `noreturn` call or a `while (true)` with no `break`), so a guard's false
+   side is a fact after a call to a fail helper. Measured first: the six
+   guards above each end in a fail helper that returns as far as the
+   checker knows.
+2. Wider Houdini candidates in init_flow: #978's keep-if-preserved fixpoint
+   over a candidate language of linear facts about versioned locals, not
+   only init intervals.
+3. Interval and linear abstract interpretation with widening, for an
+   invariant that is not among the body's own facts.
+4. z3's CHC engine, Spacer, as a proposer: the loop as CHC over LIA, the
+   returned inductive invariant translated to facts and re-checked at
+   machine width. `unknown` or a timeout here means no proposal, not a
+   build failure. The LIA-to-machine-width step is the defect class of
+   #935 and #983, which is why the re-check is not optional.
+
+A guard that only an inductive invariant no rung finds would discharge is
+evidence for #955 (proof assistants).
 
 ### Budget
 
@@ -372,10 +392,10 @@ re-checks pure arithmetic through #952's channel, and z3 never decides.
 Neither has a date; each starts from a real site that needs it.
 
 - **Sparse or quantified init through explicit lemmas (D, #109).**
-- **Loop-invariant inference** ("Loop invariants (deferred)" above), under
-  #1055's rule: an engine only proposes, and the proposal is re-checked as
-  quantifier-free obligations. The six guards of stage 2 item 2 are its first
-  candidates.
+- **Loop-invariant inference** ("Loop invariants (deferred)" above): the
+  proposer ladder, checked `noreturn` first, under #1055's rule that an
+  engine only proposes and the proposal is re-checked as quantifier-free
+  obligations. The six guards of stage 2 item 2 are its first candidates.
 
 ### Outside stage 3
 

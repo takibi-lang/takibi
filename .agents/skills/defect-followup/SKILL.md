@@ -49,6 +49,18 @@ answer on the diff and the tests actually run.
    row to the log on #1043 with the verdict and one line of reasoning; an
    uncertain verdict says so in its Notes cell. Record only; do not
    implement.
+10. **Formal method that would have found the missing fact.** Beyond a
+   solver re-check or a proof: which annotation-free technique on the
+   proposer ladder of #1456 would have inferred the invariant or contract
+   the defect lacked -- a checked `noreturn` on a function, a Houdini
+   candidate over a loop's versioned locals, interval or linear abstract
+   interpretation with widening, a CHC/Spacer-proposed inductive invariant,
+   or none (say why: a quantifier, a nonlinear term, a heap shape, a
+   protocol property)? Also say whether the defect is a case for a
+   technique the 2026-11-08 table on #13 did not adopt (bi-abduction,
+   termination analysis, dynamic invariant detection); that is the evidence
+   that reopens the row. Add one comment on #1456 with the defect, the rung
+   and the invariant in one line. Record only; do not implement.
 
 ## Ask the maintainer
 
