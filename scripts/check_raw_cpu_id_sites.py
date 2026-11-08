@@ -17,8 +17,10 @@ frozen with a kind:
 - FLIP: not yet reviewed; the flip moves the site into a region, shows it
   runs with IRQs masked or in interrupt context (where no switch happens),
   or shows a wrong CPU is harmless (a diagnostic), and then relabels it;
-- REVIEWED: read before the flip, and each call holds under preemption for
-  the reason the entry gives (#638 stage 9). A count change still refuses.
+- REVIEWED_SITES, keyed by file and function (#1474): read before the flip,
+  and each call holds under preemption for the reason the entry gives (#638
+  stage 9). A count change in that function, or a call in another function
+  of the file, is refused.
 
 A new call, a removed call, or a file whose count changed without its entry
 is refused, so the inventory stays current. It does not prove a site
@@ -37,44 +39,74 @@ KERNEL = ROOT / "kernel"
 
 MINT = "mint"
 FLIP = "flip"
-REVIEWED = "reviewed"
 
 CALL = re.compile(r"\bcpu_id\s*\(\s*\)")
 
-# file -> (count, kind, reason)
+# file -> (count, kind, reason): the calls of a file outside REVIEWED_SITES.
 LISTED = {
     "kernel/arch/arm64/kernel/exception_evidence.tkb": (9, FLIP, "not yet reviewed for migration"),
-    "kernel/arch/arm64/kernel/secondary.tkb": (3, REVIEWED, "#638 stage 9: kernel_tick_note runs from timer_irq_handler (interrupt context); kernel_secondary_main reads it during the secondary's PSCI bring-up, before it runs any task; kernel_idle_loop reads it on the idle stack, which has no current task, so the IRQ-return consult never switches it"),
-    "kernel/arch/arm64/kernel/timer.tkb": (1, REVIEWED, "#638 stage 9: read in interrupt context (an !{interrupt} root, entered with IRQs masked), where the IRQ-return consult has not run yet, so no switch falls before the read's use: timer_irq_handler elects core 0's SEV"),
-    "kernel/drivers/block/memory.tkb": (1, REVIEWED, "#638 stage 9: block_slot_acquire uses it only as the first slot to try; the slot is won by a compare-exchange, so a move makes the preference another CPU's and nothing else"),
     "kernel/fs/ext2/mutation_lock.tkb": (2, FLIP, "not yet reviewed for migration"),
-    "kernel/kernel/console_contention_evidence.tkb": (1, REVIEWED, "#638 stage 9: console_ddb_note_entry runs from kernel_ddb_enter, an !{interrupt} root entered with IRQs masked, before the IRQ-return consult"),
     "kernel/kernel/cpu_authority.tkb": (2, MINT, "the CpuHere mint itself and its availability test (#638 stage 4)"),
-    "kernel/kernel/irq_counts.tkb": (1, REVIEWED, "#638 stage 9: read in interrupt context (an !{interrupt} root, entered with IRQs masked), where the IRQ-return consult has not run yet, so no switch falls before the read's use: irq_count_record, called from the GIC dispatch"),
-    "kernel/kernel/log_storm_evidence.tkb": (1, REVIEWED, "#638 stage 9: log_storm_secondary_run runs only from kernel_idle_loop on a secondary, which has no current task, so the IRQ-return consult never switches it and the CPU it reads stays its own"),
-    "kernel/kernel/nic_irq_affinity.tkb": (1, REVIEWED, "#638 stage 9: read in interrupt context (an !{interrupt} root, entered with IRQs masked), where the IRQ-return consult has not run yet: nic_irq_handled, called by the platform dispatch before the EOI, counts the taking core"),
-    "kernel/kernel/pool_lock_wait.tkb": (1, REVIEWED, "#638 stage 9: picks the row a contended acquire is counted in; the add is atomic, so a move after the read only counts in another CPU's row (#1159), a diagnostic"),
     "kernel/kernel/process.tkb": (43, FLIP, "not yet reviewed for migration"),
-    "kernel/kernel/profile_samples.tkb": (1, REVIEWED, "#638 stage 9: read in interrupt context (an !{interrupt} root, entered with IRQs masked), where the IRQ-return consult has not run yet, so no switch falls before the read's use: profile_sample_irq, the PMU overflow handler"),
     "kernel/kernel/profile_session.tkb": (4, FLIP, "not yet reviewed for migration"),
-    "kernel/kernel/profile_timeline.tkb": (1, REVIEWED, "#638 stage 9: profile_timeline_note reads it after mutex_irq_save, with IRQs masked until its restore, so no tick switches the writer"),
     "kernel/kernel/protocol_trace.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/stall_probe.tkb": (3, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/syscall.tkb": (5, FLIP, "not yet reviewed for migration"),
-    "kernel/kernel/uart_irq_affinity.tkb": (3, REVIEWED, "#638 stage 9: read in interrupt context (an !{interrupt} root, entered with IRQs masked), where the IRQ-return consult has not run yet: uart_irq_serve and uart_irq_hang_poll; and #980 uart_irq_hang_arm compares the target with the caller only to refuse a self-hang, and its EL0 caller (/lib/hang-core) is pinned to one CPU, so a move resumes it on that same CPU"),
     "kernel/kernel/workload_evidence.tkb": (46, FLIP, "not yet reviewed for migration"),
-    "kernel/lib/diagnostic_ring.tkb": (1, REVIEWED, "#638 stage 9: read in interrupt context (an !{interrupt} root, entered with IRQs masked), where the IRQ-return consult has not run yet, so no switch falls before the read's use: diagnostic_trace_record is !{interrupt}, so every caller holds IRQs masked (#641 D1)"),
     "kernel/lib/occupancy.tkb": (6, FLIP, "not yet reviewed for migration"),
-    "kernel/lib/peer_tick_window.tkb": (1, REVIEWED, "#638 stage 9: peer_tick_window_peer's callers are the contention probes, run either by the boot thread from kernel_secondary_boot_report (its affinity mask names only core 0, #831, so a switch resumes it on core 0) or by a secondary's kernel_idle_loop (no current task, never switched)"),
     "kernel/mm/page.tkb": (1, FLIP, "#1079 page_reserve_cpu: read only under the page pool's IRQ-masking lock, and the kernel is not preemptible (KERNEL_PREEMPTIBLE == 0), so the CPU cannot change before the lock is given back; page_alloc has no CpuHere to take"),
-    "kernel/platform/qemu/init.tkb": (1, REVIEWED, "#638 stage 9: the definition of cpu_id() itself (the pattern matches its declaration), not a call"),
-    "kernel/platform/rpi5/init.tkb": (1, REVIEWED, "#638 stage 9: the definition of cpu_id() itself (the pattern matches its declaration), not a call"),
-    "kernel/platform/rpi5/intc.tkb": (1, REVIEWED, "#638 stage 9: gic_pmu_core_enable runs only in each core's bring-up (platform_irq_init on core 0, kernel_secondary_main on a peer), before that core runs any task"),
-    "kernel/platform/rpi5/xhci_irq_affinity.tkb": (1, REVIEWED, "#638 stage 9: read in interrupt context (an !{interrupt} root, entered with IRQs masked), where the IRQ-return consult has not run yet: xhci_irq_handled, called by the RPi5 dispatch before the EOI, counts the taking core"),
-    "kernel/printk/console_lock.tkb": (1, REVIEWED, "#638 stage 9: console_measure_note_acquire reads it under a borrowed ConsoleGuard, an IRQ-masking Mutex guard, so no tick switches the holder before the CPU bit is recorded"),
-    "kernel/printk/log.tkb": (4, REVIEWED, "#638 stage 9: kernel_log_core_here's writers run in preempt_off regions or boot probes; the reserve's CPU tag travels in its token; the console owner word is taken only on masked terminal or stopped-world paths; the peer probe runs in a secondary's idle loop (see the review comment in the file)"),
     "kernel/printk/log_ring_trace.tkb": (1, FLIP, "picks the buffer an event goes to; its slot is one fetch_add (#1159)"),
 }
+
+# "file::function" -> (count, reason): calls read before the flip that hold
+# under preemption for the reason given (#638 stage 9, #1474). Keyed by
+# function, so a new call in an already reviewed file is refused rather
+# than absorbed by the file's label.
+REVIEWED_SITES = {
+    "kernel/arch/arm64/kernel/secondary.tkb::kernel_idle_loop": (1, "#638 stage 9: kernel_tick_note runs from timer_irq_handler (interrupt context); kernel_secondary_main reads it during the secondary's PSCI bring-up, before it runs any task; kernel_idle_loop reads it on the idle stack, which has no current task, so the IRQ-return consult never switches it"),
+    "kernel/arch/arm64/kernel/secondary.tkb::kernel_secondary_main": (1, "#638 stage 9: kernel_tick_note runs from timer_irq_handler (interrupt context); kernel_secondary_main reads it during the secondary's PSCI bring-up, before it runs any task; kernel_idle_loop reads it on the idle stack, which has no current task, so the IRQ-return consult never switches it"),
+    "kernel/arch/arm64/kernel/secondary.tkb::kernel_tick_note": (1, "#638 stage 9: kernel_tick_note runs from timer_irq_handler (interrupt context); kernel_secondary_main reads it during the secondary's PSCI bring-up, before it runs any task; kernel_idle_loop reads it on the idle stack, which has no current task, so the IRQ-return consult never switches it"),
+    "kernel/arch/arm64/kernel/timer.tkb::timer_irq_handler": (1, "#638 stage 9: read in interrupt context (an !{interrupt} root, entered with IRQs masked), where the IRQ-return consult has not run yet, so no switch falls before the read's use: timer_irq_handler elects core 0's SEV"),
+    "kernel/drivers/block/memory.tkb::block_slot_acquire": (1, "#638 stage 9: block_slot_acquire uses it only as the first slot to try; the slot is won by a compare-exchange, so a move makes the preference another CPU's and nothing else"),
+    "kernel/kernel/console_contention_evidence.tkb::console_ddb_note_entry": (1, "#638 stage 9: console_ddb_note_entry runs from kernel_ddb_enter, an !{interrupt} root entered with IRQs masked, before the IRQ-return consult"),
+    "kernel/kernel/irq_counts.tkb::irq_count_record": (1, "#638 stage 9: read in interrupt context (an !{interrupt} root, entered with IRQs masked), where the IRQ-return consult has not run yet, so no switch falls before the read's use: irq_count_record, called from the GIC dispatch"),
+    "kernel/kernel/log_storm_evidence.tkb::log_storm_secondary_run": (1, "#638 stage 9: log_storm_secondary_run runs only from kernel_idle_loop on a secondary, which has no current task, so the IRQ-return consult never switches it and the CPU it reads stays its own"),
+    "kernel/kernel/nic_irq_affinity.tkb::nic_irq_handled": (1, "#638 stage 9: read in interrupt context (an !{interrupt} root, entered with IRQs masked), where the IRQ-return consult has not run yet: nic_irq_handled, called by the platform dispatch before the EOI, counts the taking core"),
+    "kernel/kernel/pool_lock_wait.tkb::pool_lock_wait_contended": (1, "#638 stage 9: picks the row a contended acquire is counted in; the add is atomic, so a move after the read only counts in another CPU's row (#1159), a diagnostic"),
+    "kernel/kernel/profile_samples.tkb::profile_sample_irq": (1, "#638 stage 9: read in interrupt context (an !{interrupt} root, entered with IRQs masked), where the IRQ-return consult has not run yet, so no switch falls before the read's use: profile_sample_irq, the PMU overflow handler"),
+    "kernel/kernel/profile_timeline.tkb::profile_timeline_note": (1, "#638 stage 9: profile_timeline_note reads it after mutex_irq_save, with IRQs masked until its restore, so no tick switches the writer"),
+    "kernel/kernel/uart_irq_affinity.tkb::uart_irq_hang_arm": (1, "#638 stage 9: read in interrupt context (an !{interrupt} root, entered with IRQs masked), where the IRQ-return consult has not run yet: uart_irq_serve and uart_irq_hang_poll; and #980 uart_irq_hang_arm compares the target with the caller only to refuse a self-hang, and its EL0 caller (/lib/hang-core) is pinned to one CPU, so a move resumes it on that same CPU"),
+    "kernel/kernel/uart_irq_affinity.tkb::uart_irq_hang_poll": (1, "#638 stage 9: read in interrupt context (an !{interrupt} root, entered with IRQs masked), where the IRQ-return consult has not run yet: uart_irq_serve and uart_irq_hang_poll; and #980 uart_irq_hang_arm compares the target with the caller only to refuse a self-hang, and its EL0 caller (/lib/hang-core) is pinned to one CPU, so a move resumes it on that same CPU"),
+    "kernel/kernel/uart_irq_affinity.tkb::uart_irq_serve": (1, "#638 stage 9: read in interrupt context (an !{interrupt} root, entered with IRQs masked), where the IRQ-return consult has not run yet: uart_irq_serve and uart_irq_hang_poll; and #980 uart_irq_hang_arm compares the target with the caller only to refuse a self-hang, and its EL0 caller (/lib/hang-core) is pinned to one CPU, so a move resumes it on that same CPU"),
+    "kernel/lib/diagnostic_ring.tkb::diagnostic_trace_record": (1, "#638 stage 9: read in interrupt context (an !{interrupt} root, entered with IRQs masked), where the IRQ-return consult has not run yet, so no switch falls before the read's use: diagnostic_trace_record is !{interrupt}, so every caller holds IRQs masked (#641 D1)"),
+    "kernel/lib/peer_tick_window.tkb::peer_tick_window_peer": (1, "#638 stage 9: peer_tick_window_peer's callers are the contention probes, run either by the boot thread from kernel_secondary_boot_report (its affinity mask names only core 0, #831, so a switch resumes it on core 0) or by a secondary's kernel_idle_loop (no current task, never switched)"),
+    "kernel/platform/qemu/init.tkb::cpu_id": (1, "#638 stage 9: the definition of cpu_id() itself (the pattern matches its declaration), not a call"),
+    "kernel/platform/rpi5/init.tkb::cpu_id": (1, "#638 stage 9: the definition of cpu_id() itself (the pattern matches its declaration), not a call"),
+    "kernel/platform/rpi5/intc.tkb::gic_pmu_core_enable": (1, "#638 stage 9: gic_pmu_core_enable runs only in each core's bring-up (platform_irq_init on core 0, kernel_secondary_main on a peer), before that core runs any task"),
+    "kernel/platform/rpi5/xhci_irq_affinity.tkb::xhci_irq_handled": (1, "#638 stage 9: read in interrupt context (an !{interrupt} root, entered with IRQs masked), where the IRQ-return consult has not run yet: xhci_irq_handled, called by the RPi5 dispatch before the EOI, counts the taking core"),
+    "kernel/printk/console_lock.tkb::console_measure_note_acquire": (1, "#638 stage 9: console_measure_note_acquire reads it under a borrowed ConsoleGuard, an IRQ-masking Mutex guard, so no tick switches the holder before the CPU bit is recorded"),
+    "kernel/printk/log.tkb::kernel_console_owner_word": (1, "#638 stage 9: kernel_log_core_here's writers run in preempt_off regions or boot probes; the reserve's CPU tag travels in its token; the console owner word is taken only on masked terminal or stopped-world paths; the peer probe runs in a secondary's idle loop (see the review comment in the file)"),
+    "kernel/printk/log.tkb::kernel_log_core_here": (1, "#638 stage 9: kernel_log_core_here's writers run in preempt_off regions or boot probes; the reserve's CPU tag travels in its token; the console owner word is taken only on masked terminal or stopped-world paths; the peer probe runs in a secondary's idle loop (see the review comment in the file)"),
+    "kernel/printk/log.tkb::kernel_log_peer_probe_step": (1, "#638 stage 9: kernel_log_core_here's writers run in preempt_off regions or boot probes; the reserve's CPU tag travels in its token; the console owner word is taken only on masked terminal or stopped-world paths; the peer probe runs in a secondary's idle loop (see the review comment in the file)"),
+    "kernel/printk/log.tkb::kernel_log_reserve": (1, "#638 stage 9: kernel_log_core_here's writers run in preempt_off regions or boot probes; the reserve's CPU tag travels in its token; the console owner word is taken only on masked terminal or stopped-world paths; the peer probe runs in a secondary's idle loop (see the review comment in the file)"),
+}
+
+FN = re.compile(r"\bfn\s+(\w+)")
+
+
+def per_function(text):
+    """Raw calls of one file by the function whose `fn` precedes them."""
+    code = code_only(text)
+    starts = [(match.start(), match.group(1)) for match in FN.finditer(code)]
+    found = {}
+    for call in CALL.finditer(code):
+        name = None
+        for position, candidate in starts:
+            if position > call.start():
+                break
+            name = candidate
+        found[name] = found.get(name, 0) + 1
+    return found
 
 
 def counts_of(texts):
@@ -86,10 +118,24 @@ def counts_of(texts):
     return found
 
 
-def problems_of(texts, listed):
-    found = counts_of(texts)
+def problems_of(texts, listed, reviewed=None):
+    reviewed = reviewed or {}
     problems = []
-    for relative, n in sorted(found.items()):
+    remainder = {}
+    seen_sites = set()
+    for relative, text in sorted(texts.items()):
+        for function, n in sorted(per_function(code_only(text)).items(), key=lambda kv: str(kv[0])):
+            site = f"{relative}::{function}"
+            if site in reviewed:
+                seen_sites.add(site)
+                if reviewed[site][0] != n:
+                    problems.append(
+                        f"{site}: {n} raw cpu_id() call(s), reviewed as "
+                        f"{reviewed[site][0]}: review the change and update the "
+                        "entry (#638, #1474)")
+            else:
+                remainder[relative] = remainder.get(relative, 0) + n
+    for relative, n in sorted(remainder.items()):
         if relative not in listed:
             problems.append(
                 f"{relative}: {n} raw cpu_id() call(s) and no entry: use a "
@@ -100,9 +146,13 @@ def problems_of(texts, listed):
                 f"{listed[relative][0]}: review the change and update the "
                 "entry (#638)")
     for relative in sorted(listed):
-        if relative not in found:
-            problems.append(f"{relative}: listed but has no raw cpu_id() "
-                            "call; remove its stale entry")
+        if relative not in remainder:
+            problems.append(f"{relative}: listed but has no unreviewed raw "
+                            "cpu_id() call; remove its stale entry")
+    for site in sorted(reviewed):
+        if site not in seen_sites:
+            problems.append(f"{site}: reviewed but has no raw cpu_id() call; "
+                            "remove its stale entry")
     return problems
 
 
@@ -122,7 +172,21 @@ def controls():
             sys.exit(f"ERROR raw-cpu-id-sites: control '{label}' was not refused")
     if problems_of({"k/b.tkb": "// cpu_id()\n/* cpu_id() */\n"}, {}):
         sys.exit("ERROR raw-cpu-id-sites: control: a comment was refused")
-    return len(cases) + 2
+    # #1474: a reviewed function is matched by name and count; a new call in
+    # another function of the same file is not absorbed by the review.
+    two = {"k/a.tkb": one["k/a.tkb"] + "fn g() -> usize { return cpu_id(); }\n"}
+    seen = {"k/a.tkb::f": (1, "x")}
+    if problems_of(one, {}, seen):
+        sys.exit("ERROR raw-cpu-id-sites: control: a reviewed site was refused")
+    reviewed_cases = {
+        "new function in a reviewed file": (two, {}, seen),
+        "reviewed function grew": ({"k/a.tkb": "fn f() -> usize { let a = cpu_id(); return cpu_id(); }\n"}, {}, seen),
+        "stale reviewed site": ({}, {}, seen),
+    }
+    for label, (texts, listed, reviewed) in reviewed_cases.items():
+        if not problems_of(texts, listed, reviewed):
+            sys.exit(f"ERROR raw-cpu-id-sites: control '{label}' was not refused")
+    return len(cases) + 3 + len(reviewed_cases)
 
 
 def main():
@@ -132,19 +196,24 @@ def main():
         if "build" in path.parts:
             continue
         texts[str(path.relative_to(ROOT))] = path.read_text()
-    problems = problems_of(texts, LISTED)
+    problems = problems_of(texts, LISTED, REVIEWED_SITES)
     for relative, (n, kind, reason) in LISTED.items():
-        if kind not in (MINT, FLIP, REVIEWED) or not reason.strip() or n < 1:
+        if kind not in (MINT, FLIP) or not reason.strip() or n < 1:
             problems.append(f"{relative}: entry ({n}, {kind!r}, {reason!r}) is malformed")
+    for site, (n, reason) in REVIEWED_SITES.items():
+        if "::" not in site or not reason.strip() or n < 1:
+            problems.append(f"{site}: reviewed entry ({n}, {reason!r}) is malformed")
     if problems:
         for problem in problems:
             print(f"ERROR raw-cpu-id-sites: {problem}")
         sys.exit(1)
     flip = sum(n for n, kind, _ in LISTED.values() if kind == FLIP)
+    reviewed = sum(n for n, _ in REVIEWED_SITES.values())
     report_pass("raw-cpu-id-sites",
-                f"{sum(n for n, _, _ in LISTED.values())} raw cpu_id() calls "
-                f"in {len(LISTED)} files, {flip} on the #638 flip worklist; "
-                f"{count} controls", files=len(texts))
+                f"{sum(n for n, _, _ in LISTED.values()) + reviewed} raw cpu_id() "
+                f"calls, {flip} on the #638 flip worklist, {reviewed} reviewed in "
+                f"{len(REVIEWED_SITES)} functions; {count} controls",
+                files=len(texts))
 
 
 if __name__ == "__main__":

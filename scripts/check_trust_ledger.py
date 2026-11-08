@@ -270,7 +270,8 @@ def measure_tree():
     counts["per_cpu_ordinary_arrays"] = len(per_cpu.LISTED)
     counts["per_cpu_stores"] = sum(1 for e in found.values() if e in stores)
     counts["raw_cpu_id_calls"] = sum(
-        n for n, kind, _ in cpu_id.LISTED.values() if kind != cpu_id.MINT)
+        n for n, kind, _ in cpu_id.LISTED.values() if kind != cpu_id.MINT) + sum(
+        n for n, _ in cpu_id.REVIEWED_SITES.values())
 
     counts["trust_build_checks"] = len(tsv_rows(TRUST_CHECKS))
     counts["tla_review_stamps"] = len(STAMP.findall(
