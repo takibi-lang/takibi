@@ -3241,6 +3241,39 @@
       "changes": {
         "frame_lines": "#638 stage 9 root review: user_memory.tkb's two boot-probe accessors hold a PreemptOff span around their activate and access (16 lines, no new raw site)"
       }
+    },
+    {
+      "date": "2026-11-08",
+      "head": "15dc24a3",
+      "counts": {
+        "raw_mint_files": 14,
+        "frame_lines": 12217,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 200,
+        "raw_deref_io": 7,
+        "raw_deref_builtin_region": 113,
+        "raw_deref_generated": 0,
+        "unsafe_blocks": 148,
+        "extern_fns": 73,
+        "invariant_stop_sites": 135,
+        "static_assert_premises": 19,
+        "assembly_lines": 2845,
+        "per_cpu_ordinary_arrays": 54,
+        "per_cpu_stores": 7,
+        "raw_cpu_id_calls": 147,
+        "trust_build_checks": 17,
+        "tla_review_stamps": 146,
+        "judge_defects_range": 1,
+        "judge_defects_init": 0,
+        "judge_defects_region_overlay": 0,
+        "unprotected_globals": 90,
+        "frame_api_ratchet": 7
+      },
+      "changes": {
+        "unsafe_blocks": "#638 stage 9 (c): protocol-trace's ext2 read helper passes its path bytes to openat (the probe's raw ABI input, as its write helper does)",
+        "unprotected_globals": "SetOnce: #1159 (c2cbf5a8, 05a056cb, already on main), the xHCI and virtio-blk one-shot claims leave the allowlist",
+        "static_assert_premises": "preempt_off: #638 stage 9 lock-holder review (d59dbb20, already on main), page/terminal/terminal_echo_ring asserts retired to their IRQ masks"
+      }
     }
   ]
 }
