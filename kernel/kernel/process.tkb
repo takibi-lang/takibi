@@ -36,9 +36,10 @@ use "kernel/lib/locked_cell.tkb";
 //   (issue #452), and execution_state is per-core,
 //   indexed by cpu_id(). Parent/sibling walks and all Ready/Running/Blocked
 //   transitions take the run lock; the crash trace uses per-core storage and an atomic global sequence.
-//   What remains unsynchronized is named by this file's
-//   process_execution_model_assumption: one core cannot preempt a lifecycle
-//   operation with another process's operation on that same core.
+//   Preemption of a lifecycle operation on one core is covered by #1323's
+//   PreemptOff spans; the #638 stage 9 review of what was left (the exec
+//   commit, last_exited_child_pid) is the comment where this file's
+//   KERNEL_PREEMPTIBLE assert stood, near kernel_process_last_exited_child_pid.
 // - scheduled_process_spare_lock takes a real lock as of issue #451. It
 //   returns a linear STRUCT carrying the interrupt state its release
 //   restores, where it used to return an erased `linear view` that emitted
@@ -14087,16 +14088,25 @@ fn kernel_process_clone_evidence(current_authority: borrow ProcessCurrent[curren
 // What remains is preemption on ONE core. The lifecycle spans the #1323
 // inventory found (reserved successor, exit tail, block tail, clone window,
 // switch tail, the migrate and core 0 leaves) hold a PreemptOff span since
-// #1323. GitHub issue #638 stage 9 review (2026-11-08): two items of that
-// inventory are still open, and they are what this assert now names: the exec
-// commit (old image teardown to kernel_syscall_child_exec_enter), held by a
-// reading only and owed a re-read with migration running; and
-// last_exited_child_pid, per-CPU, written at exit and read by a test_driver
-// fixture.
-fn process_execution_model_assumption() {
-    static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "the exec commit (no span, by a reading) and the per-CPU last_exited_child_pid are reviewed before the flip (GitHub issues #1323, #638)");
-}
+// #1323. GitHub issue #638 stage 9 review (2026-11-08) of the two items that
+// inventory left open:
+// - last_exited_child_pid (per-CPU) holds. kernel_process_child_exit writes
+//   it inside the exit tail's PreemptOff span, and its one reader,
+//   kernel_process_child_exec_reap, runs from kernel_syscall_clone_parent_return
+//   before the resume that ends that span (the count stands in for the token
+//   across the action table), so the reader runs on the writer's CPU.
+// - The exec commit holds without a span. kernel_process_child_exec_prepare
+//   takes child_space from kernel_process_current_root, the root the
+//   process's own record names; the teardown, the map and the final
+//   process_image_activate_root all act on that root (the target root is a
+//   parameter since #981, with no per-CPU copy), so a switch anywhere in it
+//   resumes on the same root, the kernel_process_reap_zombie verdict of the
+//   root review. The one activation of another root inside it,
+//   process_image_clone_vm_reap's, holds its own span since that review.
+// With both read, nothing named here rests on KERNEL_PREEMPTIBLE: the
+// lifecycle spans are #1323's tokens and execution_state's fields are
+// scripts/per_cpu_carried_fields.tsv rows (#1331). The assert that stood
+// here is retired; kernel/EXECUTION_MODEL exempts the file for that reason.
 
 
 // GitHub issue #437: collect every child of the current process that has
