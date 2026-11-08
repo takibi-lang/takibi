@@ -1501,7 +1501,8 @@ fn tcp_connection_pin_cost(owner: borrow TcpConnectionOwner[p, connection])
 // peers pin immutable handles only after the round's release publication.
 struct PinSharingCell { unused: usize; }
 private let mut pin_sharing_pool: RegionPool(PinSharingCell);
-private let mut pin_sharing_page: usize;
+// GitHub issue #1159: an AtomicWord; core 0 sets it before the cycles.
+private let mut pin_sharing_page: AtomicWord;
 private let mut pin_sharing_handles: [RegionHandle(PinSharingCell); 32];
 
 must_use variant PinSharingSetupResult { NoMemory; InvalidLayout; Ready; }
@@ -1527,7 +1528,7 @@ fn pin_sharing_setup() -> PinSharingSetupResult !{unsafe} {
         PageRunAllocResult::Allocated(owner) => { owner }
     };
     let base: usize = page_run_physical_address(run);
-    pin_sharing_page = base;
+    atomic_word_store(&pin_sharing_page, base);
     let RegionBytes::Assumed(chunk) = page_run_into_region(run) else {};
     let guard = pin_sharing_lock();
     match region_pool_grow(guard, chunk) {
@@ -1620,7 +1621,7 @@ fn pin_sharing_cleanup() -> PinSharingCleanupResult !{unsafe} {
             let count: usize = region_count(bytes);
             region_release(bytes);
             pin_sharing_unlock(guard);
-            if (count != PAGE_SIZE || base != pin_sharing_page) {
+            if (count != PAGE_SIZE || base != atomic_word_load(&pin_sharing_page)) {
                 return PinSharingCleanupResult::InvalidChunk;
             }
             page_run_transferred_release_physical(base, 1);

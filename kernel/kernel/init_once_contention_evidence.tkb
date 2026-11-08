@@ -26,7 +26,9 @@ private let mut init_once_probe_release: AtomicWord;
 private let mut init_once_probe_won: PeerTally;
 // Per core: the last phase sequence it served.
 private let mut init_once_probe_served: PeerTally;
-private let mut init_once_probe_naive_complete: usize;
+// GitHub issue #1159: an AtomicWord read and stored separately, so the
+// check-then-set race the naive phase measures is kept, on whole words.
+private let mut init_once_probe_naive_complete: AtomicWord;
 
 // Armed for `cpu` only while it still has work (GitHub issue #860).
 fn init_once_contention_is_armed(cpu: usize) -> bool !{unsafe} {
@@ -59,10 +61,10 @@ fn init_once_contention_secondary_run(cpu: usize) !{unsafe} {
     peer_tally_enter(&init_once_probe_won, cpu);
     let phase: usize = atomic_word_load(&init_once_probe_phase);
     if (phase == 1) {
-        let saw_free: bool = init_once_probe_naive_complete == 0;
+        let saw_free: bool = atomic_word_load(&init_once_probe_naive_complete) == 0;
         init_once_probe_wait_release();
         if (saw_free) {
-            init_once_probe_naive_complete = 1;
+            atomic_word_store(&init_once_probe_naive_complete, 1);
             peer_tally_set(&init_once_probe_won, cpu, 1);
         }
     } else if (phase == 2) {
@@ -115,16 +117,16 @@ fn init_once_contention_probe() -> bool !{unsafe} {
                   "init-once contention evidence requires one peer");
     let online: usize = kernel_online_core_count();
     peer_tally_reset(&init_once_probe_served, online);
-    init_once_probe_naive_complete = 0;
+    atomic_word_store(&init_once_probe_naive_complete, 0);
     init_once_probe_prepare(1, online);
-    let primary_saw_free: bool = init_once_probe_naive_complete == 0;
+    let primary_saw_free: bool = atomic_word_load(&init_once_probe_naive_complete) == 0;
     if (online < 2 || init_once_probe_wait_arrived(online) == false) {
         init_once_probe_abandon("secondary-never-arrived" as *u8);
         return false;
     }
     atomic_word_store(&init_once_probe_release, 1);
     if (primary_saw_free) {
-        init_once_probe_naive_complete = 1;
+        atomic_word_store(&init_once_probe_naive_complete, 1);
         peer_tally_set(&init_once_probe_won, 0, 1);
     }
     if (peer_tally_peers_left(&init_once_probe_won,

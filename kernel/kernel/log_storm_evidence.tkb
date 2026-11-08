@@ -33,7 +33,8 @@ private let mut log_storm_registered: AtomicWord;
 private let mut log_storm_go: AtomicWord;
 private let mut log_storm_writers: AtomicWord;
 private let mut log_storm_done: AtomicWord;
-private let mut log_storm_last_round: [usize; KERNEL_MAX_CORES];
+// GitHub issue #1159: AtomicWords; each secondary stores its own element.
+private let mut log_storm_last_round: [AtomicWord; KERNEL_MAX_CORES];
 
 // Armed for `cpu` only while it still has work (GitHub issue #860).
 fn log_storm_is_armed(cpu: usize) -> bool {
@@ -41,7 +42,7 @@ fn log_storm_is_armed(cpu: usize) -> bool {
     let core: {0..<KERNEL_MAX_CORES as usize} = cpu;
     let round: usize = atomic_word_load(&log_storm_round);
     return atomic_word_load(&log_storm_armed) == 1 && round != 0 &&
-           log_storm_last_round[core] != round;
+           atomic_word_load(&log_storm_last_round[core]) != round;
 }
 
 private fn log_storm_write_share(round: usize) -> bool !{unsafe} {
@@ -91,8 +92,8 @@ fn log_storm_secondary_run() !{unsafe} {
     if (raw == 0 || raw >= KERNEL_MAX_CORES) { return; } // core-role: core 0 coordinates the storm; secondaries join
     let core: {0..<KERNEL_MAX_CORES as usize} = raw;
     let round: usize = atomic_word_load(&log_storm_round);
-    if (round == 0 || log_storm_last_round[core] == round) { return; }
-    log_storm_last_round[core] = round;
+    if (round == 0 || atomic_word_load(&log_storm_last_round[core]) == round) { return; }
+    atomic_word_store(&log_storm_last_round[core], round);
     let slot: usize = atomic_word_fetch_add(&log_storm_registered, 1);
     if (log_storm_wait_word(&log_storm_go, round) == false) { return; }
     if (atomic_word_load(&log_storm_go) != round ||

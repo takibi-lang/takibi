@@ -2530,10 +2530,11 @@ private fn kernel_log_storm_write_here(round: usize, index: usize) -> bool !{uns
 
 // Per-CPU bit masks of the storm indices the last verification found. Core 0
 // is the only verifier.
-private let mut kernel_log_storm_found: [usize; KERNEL_MAX_CORES];
+// GitHub issue #1159: AtomicWords, read by the report.
+private let mut kernel_log_storm_found: [AtomicWord; KERNEL_MAX_CORES];
 
 fn kernel_log_storm_found_mask(cpu: {0..<KERNEL_MAX_CORES as usize}) -> usize {
-    return kernel_log_storm_found[cpu];
+    return atomic_word_load(&kernel_log_storm_found[cpu]);
 }
 
 private fn kernel_log_storm_number(seq: usize, from: usize, width: usize) -> usize !{unsafe} {
@@ -2569,8 +2570,9 @@ private fn kernel_log_storm_check(seq: usize, cpu: usize, length: usize,
     let index: usize = kernel_log_storm_number(seq, 18, 2);
     if (index >= KERNEL_LOG_STORM_PER_WRITER) { return 2; }
     let bit: usize = 1 << index;
-    if ((kernel_log_storm_found[safe_cpu] & bit) != 0) { return 2; }
-    kernel_log_storm_found[safe_cpu] = kernel_log_storm_found[safe_cpu] | bit;
+    let found: usize = atomic_word_load(&kernel_log_storm_found[safe_cpu]);
+    if ((found & bit) != 0) { return 2; }
+    atomic_word_store(&kernel_log_storm_found[safe_cpu], found | bit);
     return 0;
 }
 
@@ -2586,7 +2588,7 @@ fn kernel_log_storm_verify(start: usize, end: usize, round: usize)
     let mut lost: usize = 0;
     let mut first_lost: usize = 0;
     let mut malformed: usize = 0;
-    for cpu: usize in 0..<KERNEL_MAX_CORES { kernel_log_storm_found[cpu] = 0; }
+    for cpu: usize in 0..<KERNEL_MAX_CORES { atomic_word_store(&kernel_log_storm_found[cpu], 0); }
     let mut seq: usize = start;
     for step: usize in 0..<KERNEL_LOG_SLOT_COUNT {
         if (seq < end) {

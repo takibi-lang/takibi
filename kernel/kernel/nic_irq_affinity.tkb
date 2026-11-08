@@ -42,7 +42,8 @@ private let mut nic_irq_pin: AtomicWord;
 // NIC interrupts each core handled, for the boot fixture.
 private let mut nic_irq_taken: [AtomicWord; KERNEL_MAX_CORES];
 // The fixture's snapshot of nic_irq_taken at the start of a phase.
-private let mut nic_irq_phase_start: [usize; KERNEL_MAX_CORES];
+// GitHub issue #1159: AtomicWords; only core 0's fixture writes or reads them.
+private let mut nic_irq_phase_start: [AtomicWord; KERNEL_MAX_CORES];
 // The NIC SPI the fixture pinned, so unpinning can route it again.
 private let mut nic_irq_evidence_intid: AtomicWord;
 
@@ -83,12 +84,12 @@ fn nic_irq_handled(intid: u32) !{unsafe} {
 
 private fn nic_irq_phase_mark() !{unsafe} {
     for core: usize in 0..<KERNEL_MAX_CORES {
-        nic_irq_phase_start[core] = atomic_word_load(&nic_irq_taken[core]);
+        atomic_word_store(&nic_irq_phase_start[core], atomic_word_load(&nic_irq_taken[core]));
     }
 }
 
 private fn nic_irq_phase_taken(core: {0..<KERNEL_MAX_CORES as usize}) -> usize !{unsafe} {
-    return atomic_word_load(&nic_irq_taken[core]) - nic_irq_phase_start[core];
+    return atomic_word_load(&nic_irq_taken[core]) - atomic_word_load(&nic_irq_phase_start[core]);
 }
 
 // The boot fixture's first phase: every NIC interrupt goes to one non-zero

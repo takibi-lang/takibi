@@ -297,7 +297,7 @@ struct no_copy TcpPoolCostMailbox {
     done: AtomicWord;
     ticks: AtomicWord;
     completed: AtomicWord;
-    padding: [usize; 8];
+    padding: [AtomicWord; 8];
 }
 private let mut tcp_pool_cost_mailboxes: [TcpPoolCostMailbox; KERNEL_MAX_CORES];
 private let mut tcp_pool_cost_round: AtomicWord;

@@ -515,8 +515,7 @@ fn main() !{unsafe} {
     boot_phase_end(phase);
     kernel_secondary_boot_report();
 
-    kernel_test_init_script = true;
-    kernel_test_driver_run();
+    kernel_test_driver_run(true);
 
     // GitHub issue #454: the last flush point the issue names. Nothing after
     // this line runs, so a byte still in the transmit queue would never leave

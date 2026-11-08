@@ -1502,9 +1502,10 @@ fn kernel_test_common_probes() !{unsafe} {
 // Platform entry files provide hardware setup and only their platform-specific
 // network/storage fixtures. All common user-space scenarios and their order live
 // in this driver.
-let mut kernel_test_init_script: bool;
 
-fn kernel_test_driver_run() {
+// kernel_test_init_script: main's choice of init script (GitHub issue #1159:
+// a parameter, not a global).
+fn kernel_test_driver_run(kernel_test_init_script: bool) {
     console_measure_begin();
     // GitHub issue #414: the same baseline idea, one layer up, and
     // deliberately taken BEFORE the probes rather than after them like the

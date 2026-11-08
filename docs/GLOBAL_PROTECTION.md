@@ -637,3 +637,13 @@ entries below that date are history, left as written.
   would have no reader, so there is none. DDB may still see a record a
   stopped writer half stored, as before, but each word is whole. Two rows
   leave the allowlist.
+- 2026-11-08: fixture words that fit `AtomicWord` (#1159 survey of the
+  retain-fixture rows). `nic_irq_phase_start`, `log_storm_last_round` and
+  `kernel_log_storm_found` are `[AtomicWord; KERNEL_MAX_CORES]`;
+  `init_once_probe_naive_complete` is an `AtomicWord` read and stored
+  separately, so the naive phase still races check-then-set, on whole
+  words; `pin_sharing_page` is an `AtomicWord`; `TcpPoolCostMailbox`'s
+  never-touched padding is `[AtomicWord; 8]`, so the record is
+  `composite`. `kernel_test_init_script`, which both mains set to true just
+  before the call, is a parameter of kernel_test_driver_run. Seven rows
+  leave the allowlist.
