@@ -30430,7 +30430,54 @@ let valued_refused ?(proto = valued_protocol) ?(use = valued_consumer) fragment 
       then Alcotest.failf "no entry contains %S: %s" fragment
           (String.concat " | " (List.map snd errors))
 
+(* 2026-11-08 #1159 (1a): a borrowed guard as an action argument, so the
+   lowering reaches a guarded_by field with guarded_ref. *)
+let guarded_protocol =
+  sealed_protocol
+  |> replace_once ~sub:"observe completion(InFlight[req])"
+       ~by:"observe completion(InFlight[req], g: borrow G1159a[&m1159a])"
+  |> replace_once ~sub:"private let mut space: usize = 1;"
+       ~by:"private let mut space: usize = 1;\n\
+            struct Lock1159a { private word: usize; }\n\
+            let mut m1159a: Lock1159a;\n\
+            let mut other1159a: Lock1159a;\n\
+            linear struct G1159a[lock: addr] { private held: usize; }\n\
+            fn g1159a_take() -> G1159a[&m1159a] { let mut g: G1159a[&m1159a] = { 1 }; return g; }\n\
+            fn g1159a_give(g: sink G1159a[&m1159a]) { let h: usize = g.held; }\n\
+            struct St1159a { private seen: usize guarded_by(m1159a); }\n\
+            private let mut st1159a: St1159a;"
+  |> replace_once ~sub:"fn completion(s: borrow Ring_InFlight[b, o, n, r]) -> Ring_completion_Raw {"
+       ~by:"fn completion(s: borrow Ring_InFlight[b, o, n, r], g: borrow G1159a[&m1159a]) -> Ring_completion_Raw {\n\
+            \    guarded_ref(g, st1159a.seen) = guarded_ref(g, st1159a.seen) + 1;"
+
+let guarded_consumer =
+  sealed_consumer
+  |> replace_once ~sub:"let ready = Ring_init(memory);"
+       ~by:"let ready = Ring_init(memory);\n    let g = g1159a_take();"
+  |> replace_once ~sub:"match Ring_completion(flight) {" ~by:"match Ring_completion(flight, g) {"
+  |> replace_once ~sub:"region_release(Ring_release(back));"
+       ~by:"region_release(Ring_release(back));\n                    g1159a_give(g);"
+  |> replace_once ~sub:"let h = Ring_halt(u, c);"
+       ~by:"let h = Ring_halt(u, c);\n                            g1159a_give(g);"
+  |> replace_once ~sub:"region_release(Ring_release(again));"
+       ~by:"region_release(Ring_release(again));\n            g1159a_give(g);"
+
 let protocol_value_tests = [
+  Alcotest.test_case "action values: a borrowed guard reaches guarded_ref, accepted" `Quick
+    (fun () -> ignore (infer_sealed ~proto:guarded_protocol ~use:guarded_consumer ()));
+  Alcotest.test_case "action values: a guard of another lock is refused in the lowering" `Quick
+    (valued_refused ~use:guarded_consumer
+       ~proto:(guarded_protocol
+               |> replace_once ~sub:"g: borrow G1159a[&m1159a]) -> Ring_completion_Raw"
+                    ~by:"g: borrow G1159a[&other1159a]) -> Ring_completion_Raw"
+               |> replace_once ~sub:"completion(InFlight[req], g: borrow G1159a[&m1159a])"
+                    ~by:"completion(InFlight[req], g: borrow G1159a[&other1159a])")
+       "guarded_ref guard does not hold 'm1159a'");
+  Alcotest.test_case "action values: an owned guard is refused" `Quick
+    (valued_refused ~use:guarded_consumer
+       ~proto:(replace_once ~sub:"completion(InFlight[req], g: borrow G1159a[&m1159a])"
+                 ~by:"completion(InFlight[req], g: G1159a[&m1159a])" guarded_protocol)
+       "borrowed guard");
   Alcotest.test_case "action values: passed to the lowering, accepted" `Quick
     (fun () -> ignore (infer_sealed ~proto:valued_protocol ~use:valued_consumer ()));
   Alcotest.test_case "action values: the wrapper passes them unchanged" `Quick

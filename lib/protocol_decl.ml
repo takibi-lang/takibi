@@ -319,8 +319,13 @@ let validate (d : protocol_decl) : t =
       match v.pv_type with
       | TypeBool | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeUsize
       | TypeI8 | TypeI16 | TypeI32 | TypeI64 | TypeIsize -> ()
-      | _ -> fail v.pv_loc "value argument '%s' of '%s' must have a scalar type"
-               v.pv_name n) vs)
+      (* 2026-11-08 #1159 (1a): a borrowed guard, `g: borrow G[&L]`, so a
+         lowering can reach guarded_by(L) fields with guarded_ref. It is
+         borrowed, so the caller keeps it and holds L for the whole
+         action; guarded_ref itself checks the guard's index. *)
+      | TypeBorrow (TypeIndexed (_, [ StaticGlobal _ ])) -> ()
+      | _ -> fail v.pv_loc "value argument '%s' of '%s' must have a scalar type, \
+               or be a borrowed guard `borrow G[&L]`" v.pv_name n) vs)
     (List.filter_map (function
       | PTransition (n, input, _, vs, alts, _, _) ->
           Some (n, input, vs, List.map (fun a -> a.pa_state) alts, false)
@@ -897,6 +902,8 @@ let rec type_source loc = function
   | TypeU64 -> "u64" | TypeIsize -> "isize" | TypeUsize -> "usize"
   | TypeNamed n -> n
   | TypeArray (t, k) -> Printf.sprintf "[%s; %d]" (type_source loc t) k
+  | TypeBorrow t -> "borrow " ^ type_source loc t
+  | TypeIndexed (n, [ StaticGlobal (g, _) ]) -> Printf.sprintf "%s[&%s]" n g
   | _ -> fail loc "unsupported region element type in a protocol declaration"
 
 let generated_file = Ast.protocol_file
@@ -1273,7 +1280,14 @@ let check_lowering (prog : toplevel list) (d : protocol_decl) (p : t) =
         let head = List.filteri (fun i _ -> i < nf - nv) f.params in
         let tail = List.filteri (fun i _ -> i >= nf - nv) f.params in
         let values_ok = nf >= nv && List.for_all2 (fun (_, t) v ->
-            t = Some v.pv_type) tail vs in
+            (* Compared as source text: a guard's `&L` carries its use
+               location, which differs between the declaration and the
+               lowering (#1159 (1a)). *)
+            match t with
+            | Some t ->
+                (try type_source d.proto_loc t = type_source d.proto_loc v.pv_type
+                 with Types.TypeError _ -> false)
+            | None -> false) tail vs in
         let param_ok = values_ok && match head with
           | [ (_, Some (TypeBorrowMut (TypeIndexed (name, args)))) ] when mut_release ->
               name = owner && List.length args = arity

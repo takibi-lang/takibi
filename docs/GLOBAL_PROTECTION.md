@@ -558,3 +558,12 @@ entries below that date are history, left as written.
   `xhci_input_published_at`, `xhci_foreign_events`, `xhci_last_evt_dw3`:
   each is written or read inside a protocol lowering or usb_await_event,
   which holds no guard and whose value arguments are scalars only.
+- 2026-11-08: the xHCI words reached from protocol lowerings (#1159 (1a)).
+  `xhci_await_cc`, `xhci_cmd_completions`, `xhci_input_published_at`
+  (fields of `XhciRingWords`) and `xhci_last_evt_dw3`,
+  `xhci_foreign_events` (fields of `XhciEventSeen`) are
+  `guarded_by(block_device_lock)`. `xhci_ring_event`, `xhci_input_publish`
+  and `xhci_input_used` take the borrowed `BlockDeviceGuard` as an action
+  argument (SPEC.md, Protocol Declarations), and xhci_ring_submit,
+  xhci_input_submit/take/recover, xhci_tables_start and usb_await_event take
+  it as a parameter. Five rows leave the allowlist.

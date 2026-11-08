@@ -48,7 +48,8 @@ protocol XhciRing[inst: usize] retains region(Trb)[b, XHCI_RING_TRBS] tx {
         -> InFlight[fresh req];
     observe xhci_ring_event(InFlight[req], timeout: usize, trb_type: u32,
                             first: usize, last: usize, slot: u32,
-                            endpoint: u32)
+                            endpoint: u32,
+                            device: borrow BlockDeviceGuard[&block_device_lock])
         -> Completed[req] completes | Silent;
     transition xhci_ring_complete(InFlight[req], Completed[req]) -> Ready;
     observe xhci_ring_reset_seen(InFlight[req]) -> Quiet[req] quiesces | Live;
@@ -62,9 +63,17 @@ private region let mut xhci_ep0_ring: [Trb; 16] align(64);
 private region let mut xhci_bulk_in_ring: [Trb; 16] align(64);
 private region let mut xhci_bulk_out_ring: [Trb; 16] align(64);
 
-private let mut xhci_await_cc: u32 = 0;
-// Command Completion Events observed on the Command ring (xhci_input_used).
-private let mut xhci_cmd_completions: usize = 0;
+// GitHub issue #1159 (1a): the transport words the actions share --
+// the completion code the last event carried, the Command Completion
+// Events observed on the Command ring, and that count when the input
+// context was last published -- are reached only with the block device
+// guard, which xhci_ring_submit and the input context's actions take.
+struct XhciRingWords {
+    private await_cc: u32 guarded_by(block_device_lock);
+    private cmd_completions: usize guarded_by(block_device_lock);
+    private input_published_at: usize guarded_by(block_device_lock);
+}
+private let mut xhci_ring_words: XhciRingWords;
 private let mut xhci_rings_claimed: bool = false;
 // Set by xhci_halt_and_reset when HCHalted and HCRST are confirmed, and
 // cleared when the controller runs again.
@@ -79,11 +88,12 @@ fn xhci_ring_publish(s: borrow XhciRing_InFlight[b, o, 16, r],
 // field (action value arguments are scalars).
 fn xhci_ring_event(s: borrow XhciRing_InFlight[b, o, 16, r], timeout: usize,
                    trb_type: u32, first: usize, last: usize, slot: u32,
-                   endpoint: u32)
+                   endpoint: u32, device: borrow BlockDeviceGuard[&block_device_lock])
         -> XhciRing_xhci_ring_event_Raw !{unsafe} {
     let mut want: XhciEventWant = { trb_type, first, last, slot, endpoint };
-    xhci_await_cc = usb_await_event(want, timeout);
-    if (xhci_await_cc == 0) { return XhciRing_xhci_ring_event_Raw::Silent; }
+    let cc: u32 = usb_await_event(device, want, timeout);
+    guarded_ref(device, xhci_ring_words.await_cc) = cc;
+    if (cc == 0) { return XhciRing_xhci_ring_event_Raw::Silent; }
     return XhciRing_xhci_ring_event_Raw::Completed;
 }
 fn xhci_ring_complete(s: borrow XhciRing_InFlight[b, o, 16, r]) {}
@@ -391,7 +401,7 @@ fn xhci_ring_close(i: usize, from: usize, cycle: u32,
 // GitHub issue #783: the ring's owner is taken once for the whole TD
 // rather than once per TRB (the removed xhci_ring_put) and again to
 // publish.
-fn xhci_ring_submit(i: usize, target: usize, value: u32, first: usize,
+fn xhci_ring_submit(device: borrow BlockDeviceGuard[&block_device_lock], i: usize, target: usize, value: u32, first: usize,
                     last: usize, timeout: usize, count: usize,
                     td: borrow [Trb; 3..]) -> u32 !{unsafe} {
     match xhci_ring_take(i) {
@@ -424,14 +434,15 @@ fn xhci_ring_submit(i: usize, target: usize, value: u32, first: usize,
                         XhciRing_xhci_ring_publish_Result::InFlight(flight) => {
                             match XhciRing_xhci_ring_event(flight, timeout,
                                     want.trb_type, want.first, want.last,
-                                    want.slot, want.endpoint) {
+                                    want.slot, want.endpoint, device) {
                                 XhciRing_xhci_ring_event_Outcome::Completed(done) => {
                                     if (i == XHCI_RING_CMD) {
-                                        xhci_cmd_completions = xhci_cmd_completions + 1;
+                                        guarded_ref(device, xhci_ring_words.cmd_completions) =
+                                            guarded_ref(device, xhci_ring_words.cmd_completions) + 1;
                                     }
                                     let back = XhciRing_xhci_ring_complete(flight, done);
                                     xhci_ring_park(i, XhciRingHeld::Ready(back));
-                                    return xhci_await_cc;
+                                    return guarded_ref(device, xhci_ring_words.await_cc);
                                 }
                                 XhciRing_xhci_ring_event_Outcome::Silent => {
                                     xhci_ring_park(i, XhciRingHeld::InFlight(flight));
@@ -514,8 +525,10 @@ protocol XhciInput[inst: usize] retains region(CtxWord)[b, XHCI_INPUT_WORDS] tx 
     state Ready access write addressed;
     state Read[req] device;
     init Ready;
-    transition xhci_input_publish(Ready) -> Read[fresh req];
-    observe xhci_input_used(Read[req]) -> InputDone[req] completes | InputPending;
+    transition xhci_input_publish(Ready, device: borrow BlockDeviceGuard[&block_device_lock])
+        -> Read[fresh req];
+    observe xhci_input_used(Read[req], device: borrow BlockDeviceGuard[&block_device_lock])
+        -> InputDone[req] completes | InputPending;
     transition xhci_input_done(Read[req], InputDone[req]) -> Ready;
     observe xhci_input_reset(Read[req]) -> InputQuiet[req] quiesces | InputLive;
     transition xhci_input_reclaim(Read[req], InputQuiet[req]) -> Ready;
@@ -529,7 +542,6 @@ private region let mut xhci_scratchpad_buf0: [u8; 4096] align(4096);
 private region let mut xhci_scratchpad_buf1: [u8; 4096] align(4096);
 private region let mut xhci_input_ctx: [CtxWord; 528] align(64);
 
-private let mut xhci_input_published_at: usize = 0;
 
 // Lowerings. Publishing a session table rings nothing: the register
 // writes that follow point the controller at it, before Run.
@@ -555,11 +567,15 @@ fn xhci_scratch_buf_reset(s: borrow XhciScratchBuf_Live[b, o, 4096, r])
     return XhciScratchBuf_xhci_scratch_buf_reset_Raw::BufLive;
 }
 fn xhci_scratch_buf_reclaim(s: borrow XhciScratchBuf_Live[b, o, 4096, r]) {}
-fn xhci_input_publish(s: borrow XhciInput_Read[b, o, 528, r]) {
-    xhci_input_published_at = xhci_cmd_completions;
+fn xhci_input_publish(s: borrow XhciInput_Read[b, o, 528, r],
+                      device: borrow BlockDeviceGuard[&block_device_lock]) {
+    guarded_ref(device, xhci_ring_words.input_published_at) =
+        guarded_ref(device, xhci_ring_words.cmd_completions);
 }
-fn xhci_input_used(s: borrow XhciInput_Read[b, o, 528, r]) -> XhciInput_xhci_input_used_Raw {
-    if (xhci_cmd_completions != xhci_input_published_at) {
+fn xhci_input_used(s: borrow XhciInput_Read[b, o, 528, r],
+                   device: borrow BlockDeviceGuard[&block_device_lock]) -> XhciInput_xhci_input_used_Raw {
+    if (guarded_ref(device, xhci_ring_words.cmd_completions) !=
+            guarded_ref(device, xhci_ring_words.input_published_at)) {
         return XhciInput_xhci_input_used_Raw::InputDone;
     }
     return XhciInput_xhci_input_used_Raw::InputPending;
@@ -770,7 +786,7 @@ private fn xhci_scratch_buf_restart(i: usize) -> usize !{unsafe} {
 
 // The input context back to Ready: on its command's completion, or on the
 // confirmed reset. False while the controller may still read it.
-private fn xhci_input_recover() -> bool {
+private fn xhci_input_recover(device: borrow BlockDeviceGuard[&block_device_lock]) -> bool {
     let guard = xhci_ring_lock(&xhci_input_slot.mutex);
     let taken = place_take(guard, &xhci_input_slot.mutex, xhci_input_slot.value);
     xhci_ring_unlock(guard, &xhci_input_slot.mutex);
@@ -783,7 +799,7 @@ private fn xhci_input_recover() -> bool {
                     return true;
                 }
                 XhciInputHeld::Read(read) => {
-                    match XhciInput_xhci_input_used(read) {
+                    match XhciInput_xhci_input_used(read, device) {
                         XhciInput_xhci_input_used_Outcome::InputDone(done) => {
                             let ready = XhciInput_xhci_input_done(read, done);
                             xhci_input_park(XhciInputHeld::Ready(ready));
@@ -822,7 +838,7 @@ private fn xhci_tables_fail() -> XhciTableAddresses {
 
 // The session tables for a new controller session: claimed at the first
 // one, otherwise reclaimed on the confirmed reset; written and published.
-fn xhci_tables_start(evt_ring_dma: usize) -> XhciTableAddresses !{unsafe} {
+fn xhci_tables_start(device: borrow BlockDeviceGuard[&block_device_lock], evt_ring_dma: usize) -> XhciTableAddresses !{unsafe} {
     if (xhci_tables_claimed == false) {
         xhci_tables_claimed = true;
         let RegionOf(u8)::Taken(b0) = region_of(xhci_scratchpad_buf0) else {
@@ -852,7 +868,7 @@ fn xhci_tables_start(evt_ring_dma: usize) -> XhciTableAddresses !{unsafe} {
     let buf1: usize = xhci_scratch_buf_restart(1);
     let array: usize = xhci_scratch_array_restart(buf0, buf1);
     let erst: usize = xhci_erst_restart(evt_ring_dma);
-    let input_ok: bool = xhci_input_recover();
+    let input_ok: bool = xhci_input_recover(device);
     if (buf0 == 0 || buf1 == 0 || array == 0 || erst == 0 || input_ok == false) {
         return xhci_tables_fail();
     }
@@ -866,8 +882,8 @@ variant XhciInputTake {
 }
 
 // The input context's Ready owner for the next command.
-fn xhci_input_take() -> XhciInputTake {
-    if (xhci_input_recover() == false) { return XhciInputTake::Unavailable; }
+fn xhci_input_take(device: borrow BlockDeviceGuard[&block_device_lock]) -> XhciInputTake {
+    if (xhci_input_recover(device) == false) { return XhciInputTake::Unavailable; }
     let guard = xhci_ring_lock(&xhci_input_slot.mutex);
     let taken = place_take(guard, &xhci_input_slot.mutex, xhci_input_slot.value);
     xhci_ring_unlock(guard, &xhci_input_slot.mutex);
@@ -899,8 +915,9 @@ fn xhci_input_get(r: borrow XhciInput_Ready[b, o, 528], i: usize @ k) -> u32
 
 // Publish the input context for the command about to be issued and keep
 // it in its slot; answers its bus address.
-fn xhci_input_submit(r: XhciInput_Ready[b, o, 528]) -> usize !{unsafe} {
-    match XhciInput_xhci_input_publish(r) {
+fn xhci_input_submit(device: borrow BlockDeviceGuard[&block_device_lock],
+                     r: XhciInput_Ready[b, o, 528]) -> usize !{unsafe} {
+    match XhciInput_xhci_input_publish(r, device) {
         XhciInput_xhci_input_publish_Result::Read(read) => {
             let mut span: DmaDeviceSpan = XhciInput_Read_span(read);
             let dma: usize = rp1_span_bus_address(span);

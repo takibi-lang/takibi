@@ -4652,6 +4652,13 @@ position; `protocol` itself is the one contextual keyword.
   value argument on an observation with a `snapshot` outcome. Use them for
   a per-action value and a state field (#1395) for a value that must
   survive into later actions.
+  A value argument may instead be a borrowed guard, `g: borrow G[&L]`
+  (2026-11-08, #1159 (1a)), so the lowering reaches `guarded_by(L)` fields
+  with `guarded_ref(g, ...)`. Being borrowed, the caller still holds it, so
+  L is held for the whole action; `guarded_ref` checks that the guard's
+  index is `&L`. An owned or `sink` guard is rejected. In the kernel,
+  `xhci_ring_event`, `xhci_input_publish` and `xhci_input_used` take
+  `borrow BlockDeviceGuard[&block_device_lock]` this way.
 - `property disjoint;` checks that CPU and device authority never overlap,
   `property prepared_before_read;` that the device never reads an unwritten
   cell. At least one is required.

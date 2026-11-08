@@ -112,7 +112,6 @@ let mut xhci_dcbaa: [u32; 65 * 2] align(64);
 // The four producer rings (Command, EP0, bulk IN/OUT) are owners of the
 // XhciRing device protocol in usb_xhci_rings.tkb (GitHub issue #720).
 
-let mut xhci_last_evt_dw3: u32 = 0;
 
 // GitHub issue #1159: what disk_initialize learns about the device (its
 // slot, the MSC configuration and the bulk endpoints) is written and read
@@ -357,8 +356,17 @@ fn xhci_event_dequeue_release(dequeue_dma: usize) {
 // in xhci_foreign_events. Advances ERDP past everything consumed, which
 // the controller requires to keep delivering events. Returns the
 // completion code (DWORD2 bits 31:24), or 0 if no matching event turned up.
-let mut xhci_foreign_events: usize = 0;
-fn usb_await_event(want: XhciEventWant, timeout_ms: usize) -> u32 !{unsafe} {
+// GitHub issue #1159 (1a): what usb_await_event records -- the matched
+// event's DWORD3 (xhci_enable_slot reads the slot id from it) and the count
+// of skipped events of the wanted type -- is reached only with the block
+// device guard, which the ring's event action passes it.
+struct XhciEventSeen {
+    private last_dw3: u32 guarded_by(block_device_lock);
+    private foreign: usize guarded_by(block_device_lock);
+}
+private let mut xhci_event_seen: XhciEventSeen;
+fn usb_await_event(guard: borrow BlockDeviceGuard[&block_device_lock], want: XhciEventWant,
+                   timeout_ms: usize) -> u32 !{unsafe} {
     for scan: usize in 0..<8 {
         let mut seen: bool = false;
         let mut dw0: u32 = 0;
@@ -395,11 +403,12 @@ fn usb_await_event(want: XhciEventWant, timeout_ms: usize) -> u32 !{unsafe} {
         }
 
         if (xhci_event_matches(want, dw0, dw1, dw3)) {
-            xhci_last_evt_dw3 = dw3;
+            guarded_ref(guard, xhci_event_seen.last_dw3) = dw3;
             return (dw2 >> 24) & 0xFF;
         }
         if (((dw3 >> 10) & 0x3F) == want.trb_type) {
-            xhci_foreign_events = xhci_foreign_events + 1;
+            guarded_ref(guard, xhci_event_seen.foreign) =
+                guarded_ref(guard, xhci_event_seen.foreign) + 1;
         }
     }
     return 0;
@@ -473,7 +482,7 @@ private fn usb_ctrl_xfer(guard: borrow BlockDeviceGuard[&block_device_lock], bm_
         td[1] = status;
         td[2] = status;
     }
-    return xhci_ring_submit(XHCI_RING_EP0, guarded_ref(guard, xhci_msc_device.slot_id), 1, first_idx, idx,
+    return xhci_ring_submit(guard, XHCI_RING_EP0, guarded_ref(guard, xhci_msc_device.slot_id), 1, first_idx, idx,
                             1000, count, td as [Trb; 3..]);
 }
 
@@ -527,7 +536,7 @@ private fn usb_bulk_xfer(guard: borrow BlockDeviceGuard[&block_device_lock], dir
     td[0] = normal;
     td[1] = normal;
     td[2] = normal;
-    return xhci_ring_submit(ring, guarded_ref(guard, xhci_msc_device.slot_id), dci as u32, trb_idx, trb_idx,
+    return xhci_ring_submit(guard, ring, guarded_ref(guard, xhci_msc_device.slot_id), dci as u32, trb_idx, trb_idx,
                             5000, 1, td as [Trb; 3..]);
 }
 
@@ -572,7 +581,7 @@ fn xhci_run_command(guard: borrow BlockDeviceGuard[&block_device_lock], dw0: u32
     td[0] = command;
     td[1] = command;
     td[2] = command;
-    return xhci_ring_submit(XHCI_RING_CMD, 0, 0, cmd_idx, cmd_idx, 1000, 1,
+    return xhci_ring_submit(guard, XHCI_RING_CMD, 0, 0, cmd_idx, cmd_idx, 1000, 1,
                             td as [Trb; 3..]);
 }
 
@@ -947,7 +956,7 @@ fn xhci_setup_rings_and_start(guard: borrow BlockDeviceGuard[&block_device_lock]
 
     // The scratchpad buffers and array, the ERST and the input context:
     // device-protocol owners in usb_xhci_rings.tkb (GitHub issue #720).
-    let mut tables: XhciTableAddresses = xhci_tables_start(evt_ring_dma);
+    let mut tables: XhciTableAddresses = xhci_tables_start(guard, evt_ring_dma);
     if (tables.ok == false) {
         return false;
     }
@@ -1022,12 +1031,12 @@ fn xhci_enable_slot(guard: borrow BlockDeviceGuard[&block_device_lock]) -> bool 
     td[0] = enable_slot;
     td[1] = enable_slot;
     td[2] = enable_slot;
-    let enable_cc: u32 = xhci_ring_submit(XHCI_RING_CMD, 0, 0, 0, 0, 1000, 1,
+    let enable_cc: u32 = xhci_ring_submit(guard, XHCI_RING_CMD, 0, 0, 0, 0, 1000, 1,
                                           td as [Trb; 3..]);
     if (enable_cc == 0) {
         return false;
     }
-    guarded_ref(guard, xhci_msc_device.slot_id) = ((xhci_last_evt_dw3 >> 24) & 0xFF) as usize;
+    guarded_ref(guard, xhci_msc_device.slot_id) = ((guarded_ref(guard, xhci_event_seen.last_dw3) >> 24) & 0xFF) as usize;
     return true;
 }
 
@@ -1123,7 +1132,7 @@ fn xhci_address_device(guard: borrow BlockDeviceGuard[&block_device_lock]) -> Xh
 
     // The input context is built here, right before the command that reads
     // it, so it is never held across a loop or an early return.
-    let XhciInputTake::Ready(input) = xhci_input_take() else {
+    let XhciInputTake::Ready(input) = xhci_input_take(guard) else {
         XhciInputTake::Unavailable => { return XhciAddressOutcome::Completion(0); }
     };
     xhci_input_set(input, 0, 0);
@@ -1137,7 +1146,7 @@ fn xhci_address_device(guard: borrow BlockDeviceGuard[&block_device_lock]) -> Xh
     xhci_input_set(input, 2 * ctx + 2, ((ep0_ring_dma & 0xFFFFFFFF) | 1) as u32);
     xhci_input_set(input, 2 * ctx + 3, ((ep0_ring_dma >> 32) & 0xFFFFFFFF) as u32);
     xhci_input_set(input, 2 * ctx + 4, 8);
-    let input_ctx_dma: usize = xhci_input_submit(input);
+    let input_ctx_dma: usize = xhci_input_submit(guard, input);
     let mut address_device: Trb = {
         (input_ctx_dma & 0xFFFFFFFF) as u32, ((input_ctx_dma >> 32) & 0xFFFFFFFF) as u32,
         0, (1 | (11 << 10) | (guarded_ref(guard, xhci_msc_device.slot_id) << 24)) as u32
@@ -1150,7 +1159,7 @@ fn xhci_address_device(guard: borrow BlockDeviceGuard[&block_device_lock]) -> Xh
     td[0] = address_device;
     td[1] = address_device;
     td[2] = address_device;
-    let addr_cc: u32 = xhci_ring_submit(XHCI_RING_CMD, 0, 0, 1, 1, 1000, 1,
+    let addr_cc: u32 = xhci_ring_submit(guard, XHCI_RING_CMD, 0, 0, 1, 1, 1000, 1,
                                         td as [Trb; 3..]);
     if (addr_cc != 1) {
         // usb_await_event() answers 0 when nothing arrived at all, and 0 is
@@ -1266,7 +1275,7 @@ fn xhci_configure_endpoint(guard: borrow BlockDeviceGuard[&block_device_lock], i
     let in_ctx_word: usize = (in_idx + 2) * ctx;
     let out_ctx_word: usize = (out_idx + 2) * ctx;
 
-    let XhciInputTake::Ready(input) = xhci_input_take() else {
+    let XhciInputTake::Ready(input) = xhci_input_take(guard) else {
         XhciInputTake::Unavailable => { return XhciConfigureOutcome::Transfer(0); }
     };
 
@@ -1299,7 +1308,7 @@ fn xhci_configure_endpoint(guard: borrow BlockDeviceGuard[&block_device_lock], i
     let out_add_bit: u32 = (1 << (out_idx + 1)) as u32;
     xhci_input_set(input, 1, 1 | in_add_bit | out_add_bit);
 
-    let input_ctx_dma: usize = xhci_input_submit(input);
+    let input_ctx_dma: usize = xhci_input_submit(guard, input);
     let mut configure: Trb = {
         (input_ctx_dma & 0xFFFFFFFF) as u32, ((input_ctx_dma >> 32) & 0xFFFFFFFF) as u32,
         0, (1 | (12 << 10) | (guarded_ref(guard, xhci_msc_device.slot_id) << 24)) as u32
@@ -1308,7 +1317,7 @@ fn xhci_configure_endpoint(guard: borrow BlockDeviceGuard[&block_device_lock], i
     td[0] = configure;
     td[1] = configure;
     td[2] = configure;
-    let ce_cc: u32 = xhci_ring_submit(XHCI_RING_CMD, 0, 0, 2, 2, 1000, 1,
+    let ce_cc: u32 = xhci_ring_submit(guard, XHCI_RING_CMD, 0, 0, 2, 2, 1000, 1,
                                       td as [Trb; 3..]);
     if (ce_cc != 1) {
         return XhciConfigureOutcome::Transfer(ce_cc);
