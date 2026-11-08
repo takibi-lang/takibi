@@ -2486,7 +2486,19 @@ private fn kernel_log_storm_digits(value: usize, width: usize) !{unsafe} {
 
 // One storm line from this CPU. False when this CPU is in the middle of a
 // line of its own or reporting a fatal error; nothing is staged then.
+// One CPU's whole storm line inside one preempt_off region, so the element
+// chosen at the top is the one every byte lands in (#638 stage 9: this was the
+// file's KERNEL_PREEMPTIBLE assert). The else arm (no region available, as
+// in the fragment pair above) writes the same line.
 fn kernel_log_storm_write(round: usize, index: usize) -> bool !{unsafe} {
+    preempt_off (cpu) {
+        return kernel_log_storm_write_here(round, index);
+    } else {
+        return kernel_log_storm_write_here(round, index);
+    }
+}
+
+private fn kernel_log_storm_write_here(round: usize, index: usize) -> bool !{unsafe} {
     let core: {0..<KERNEL_MAX_CORES as usize} = kernel_log_core_here();
     if (kernel_log_core_state[core].emergency || kernel_log_core_state[core].active) {
         return false;
@@ -2661,12 +2673,15 @@ fn kernel_boot_log_resource_exhausted(resource: *u8, capacity: usize) {
 // cuts (kernel_log_cut_line) rather than continues; the thread goes on as a new
 // record wherever it lands. A piece whose thread moved stays staged until
 // another writer comes to that CPU; DDB shows it. The reservation token never
-// outlives one call; the staged line does. The assertion is what remains: the
-// storm fixture holds one CPU's element across a whole line
-// (kernel_log_storm_write).
+// outlives one call; the staged line does. The storm fixture, which holds one
+// CPU's element across a whole line, does so inside a preempt_off region
+// (kernel_log_storm_write, #638 stage 9). What still rests on the assertion:
+// the file's other raw cpu_id() reads (scripts/check_raw_cpu_id_sites.py, FLIP
+// rows not yet reviewed): the emergency entry and the boot probes choose an
+// element outside any region, and the record tag and the commit pick a CPU.
 fn kernel_log_execution_model_assumption() {
     static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "kernel_log_storm_write keeps one element across a line without a region");
+                  "log.tkb's raw cpu_id() reads outside a region (the emergency entry, the boot probes, the record tag) are reviewed at the flip (GitHub issue #638)");
 }
 
 // Encode within the available room before publishing. Every CPU holds the

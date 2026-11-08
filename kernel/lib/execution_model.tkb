@@ -101,10 +101,17 @@ const KERNEL_PREEMPTIBLE: usize = 0;
 // mask interrupts (their wrappers declare `may_block`, which keeps every
 // `!{interrupt}` root away from them). That is safe only while an interrupt
 // cannot switch a holder off its core: with a preemptible kernel a second
-// task on the same core would spin on a holder that cannot run. Making the
-// kernel preemptible needs those wrappers to disable preemption first, as
-// Linux's spin_lock does.
+// task on the same core would spin on a holder that cannot run.
+// GitHub issue #638 stage 9 review (2026-11-08): the short-hold half is done.
+// Since #1350 the rank-39 pools and the object refcount hold the preempt
+// count from before the acquire to after the release (preempt_lock_raise,
+// scripts/check_lock_rank_wrappers.py), Linux's spin_lock shape. What still
+// rests on this assert is the may_block half (the TaskMutex holders: tcp,
+// pipe, ext2 mutation lock): their waiter spins at count zero, so the tick
+// switches it to the holder, live at up to a tick per contention. Whether the
+// flip pays that or takes the waiter-yields TaskMutex first is the flip's
+// decision.
 fn unmasked_pool_locks_assume_no_preemption() {
     static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "the unmasked pool locks (#966) assume an interrupt never switches a holder off its core; disable preemption in their wrappers first");
+                  "a may_block unmasked lock's same-core waiter spins until the tick switches it to the holder (the short-hold pools hold the count since #1350); lifted at the flip, with the waiter-yields TaskMutex decision (GitHub issue #638)");
 }

@@ -42,12 +42,13 @@
 use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/execution_model.tkb";
 
-// The phase is the boot core's alone and is not preempted: a boot write is
-// one store, and a second writer would need a second phase token.
-fn boot_once_execution_model_assumption() {
-    static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "a boot write must finish before anything else runs on the boot core");
-}
+// The phase is the boot core's alone: a boot write is one release store, and
+// a second writer would need a second phase token. GitHub issue #638 stage 9:
+// this no longer rests on KERNEL_PREEMPTIBLE. The phase ends (boot_phase_end)
+// before PSCI CPU_ON and before the first process exists, so while a
+// BootPhase lives a tick has no task to switch to; and a single store cannot
+// be split by a switch anyway. The assert that stood here is retired;
+// kernel/EXECUTION_MODEL exempts the file (its one global is an AtomicWord).
 
 generic struct BootOnce(T: type) {
     // First, on purpose: see "WHY THE VALUE IS THE FIRST FIELD" above.

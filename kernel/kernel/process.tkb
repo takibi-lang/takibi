@@ -14084,13 +14084,18 @@ fn kernel_process_clone_evidence(current_authority: borrow ProcessCurrent[curren
 // by one caller, kernel_process_execution_reset, while scheduling is disabled,
 // and its own mask names only the CPU that asked (#831).
 //
-// What remains is preemption on ONE core. Several lifecycle operations compose
-// short guarded transitions with caller-local work outside the run lock. They
-// rely on a syscall or lifecycle path running to completion before another
-// process on the same core enters one of those spans.
+// What remains is preemption on ONE core. The lifecycle spans the #1323
+// inventory found (reserved successor, exit tail, block tail, clone window,
+// switch tail, the migrate and core 0 leaves) hold a PreemptOff span since
+// #1323. GitHub issue #638 stage 9 review (2026-11-08): two items of that
+// inventory are still open, and they are what this assert now names: the exec
+// commit (old image teardown to kernel_syscall_child_exec_enter), held by a
+// reading only and owed a re-read with migration running; and
+// last_exited_child_pid, per-CPU, written at exit and read by a test_driver
+// fixture.
 fn process_execution_model_assumption() {
     static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "process lifecycle operations contain caller-local spans outside the run lock; kernel preemption could interleave two processes on one core");
+                  "the exec commit (no span, by a reading) and the per-CPU last_exited_child_pid are reviewed before the flip (GitHub issues #1323, #638)");
 }
 
 
