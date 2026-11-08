@@ -47,7 +47,7 @@ LISTED = {
     "kernel/arch/arm64/kernel/exception_evidence.tkb": (9, FLIP, "not yet reviewed for migration"),
     "kernel/fs/ext2/mutation_lock.tkb": (2, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/cpu_authority.tkb": (2, MINT, "the CpuHere mint itself and its availability test (#638 stage 4)"),
-    "kernel/kernel/process.tkb": (43, FLIP, "not yet reviewed for migration"),
+    "kernel/kernel/process.tkb": (30, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/profile_session.tkb": (4, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/protocol_trace.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/stall_probe.tkb": (3, FLIP, "not yet reviewed for migration"),
@@ -63,6 +63,15 @@ LISTED = {
 # function, so a new call in an already reviewed file is refused rather
 # than absorbed by the file's label.
 REVIEWED_SITES = {
+    "kernel/kernel/process.tkb::kernel_process_affinity_set": (1, "#638 stage 9: read while the process-run lock is held (an IRQ-masking Mutex guard), so no tick switches the task before the answer is used under that lock; the new mask is stored in the same hold, so a move after it can only resume the task on a CPU the new mask allows, where leaving again is a harmless reschedule"),
+    "kernel/kernel/process.tkb::kernel_process_block_current": (1, "#638 stage 9: read while the process-run lock is held (an IRQ-masking Mutex guard), so no tick switches the task before the answer is used under that lock, inside the block tail's PreemptOff span (#1323)"),
+    "kernel/kernel/process.tkb::kernel_process_child_exit": (3, "#638 stage 9: read while the process-run lock is held (an IRQ-masking Mutex guard), so no tick switches the task before the answer is used under that lock (exit_guard), inside the exit tail's span (#1323)"),
+    "kernel/kernel/process.tkb::kernel_process_clone_unselectable_locked": (1, "#638 stage 9: read while the process-run lock is held (an IRQ-masking Mutex guard), so no tick switches the task before the answer is used under that lock"),
+    "kernel/kernel/process.tkb::kernel_process_migrate_current": (2, "#638 stage 9: called only from kernel_syscall_migrate_return inside a PreemptOff span, and the second read is under the run lock"),
+    "kernel/kernel/process.tkb::kernel_process_schedule": (1, "#638 stage 9: read while the process-run lock is held (an IRQ-masking Mutex guard), so no tick switches the task before the answer is used under that lock, inside the switch tail's PreemptOff span (#1323)"),
+    "kernel/kernel/process.tkb::kernel_process_tick_leave_excluded": (1, "#638 stage 9: an !{interrupt} root, read under the run lock in the tick"),
+    "kernel/kernel/process.tkb::kernel_process_tick_wake_if_due": (1, "#638 stage 9: an !{interrupt} root (the timer tick), entered with IRQs masked"),
+    "kernel/kernel/process.tkb::scheduled_process_record_locked": (2, "#638 stage 9: read while the process-run lock is held (an IRQ-masking Mutex guard), so no tick switches the task before the answer is used under that lock (the function borrows the ProcessRunGuard; the CPU is a diagnostic word)"),
     "kernel/arch/arm64/kernel/secondary.tkb::kernel_idle_loop": (1, "#638 stage 9: kernel_tick_note runs from timer_irq_handler (interrupt context); kernel_secondary_main reads it during the secondary's PSCI bring-up, before it runs any task; kernel_idle_loop reads it on the idle stack, which has no current task, so the IRQ-return consult never switches it"),
     "kernel/arch/arm64/kernel/secondary.tkb::kernel_secondary_main": (1, "#638 stage 9: kernel_tick_note runs from timer_irq_handler (interrupt context); kernel_secondary_main reads it during the secondary's PSCI bring-up, before it runs any task; kernel_idle_loop reads it on the idle stack, which has no current task, so the IRQ-return consult never switches it"),
     "kernel/arch/arm64/kernel/secondary.tkb::kernel_tick_note": (1, "#638 stage 9: kernel_tick_note runs from timer_irq_handler (interrupt context); kernel_secondary_main reads it during the secondary's PSCI bring-up, before it runs any task; kernel_idle_loop reads it on the idle stack, which has no current task, so the IRQ-return consult never switches it"),
