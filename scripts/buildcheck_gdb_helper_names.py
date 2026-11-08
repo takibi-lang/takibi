@@ -1077,7 +1077,7 @@ CONTROLS = [
      "pool_slot"),
     # A member chain rooted at a global, resolved type by type: "pid" is a
     # member of other structs, but not of the snapshot.
-    ("kernel_state.gdb", '"ddb_snapshot.sequence"', '"ddb_snapshot.pid"',
+    ("kernel_state.gdb", '"ddb_state.snapshot.sequence"', '"ddb_state.snapshot.pid"',
      "pid"),
     ("kernel_peer_exit_check.py", '"struct ProcessRecord"',
      '"struct IntrusiveSlot$ProcessRecord"', "IntrusiveSlot$ProcessRecord"),
@@ -1139,8 +1139,8 @@ CONTROLS += [
     ("run_kernel_churn_gdb_qemutest.py", "layout['asidstate_next']",
      "layout['asidstate_next_asid']", "next_asid"),
     # gdb.execute in a heredoc's python block, from adjacent literals.
-    ("run_kernel_ddb_qemutest.sh", '"ddb_snapshot_published_sequence + 1")',
-     '"ddb_snapshot_published_seq + 1")', "ddb_snapshot_published_seq"),
+    ("run_kernel_ddb_qemutest.sh", '"ddb_snapshot_published_sequence.value + 1")',
+     '"ddb_snapshot_published_seq.value + 1")', "ddb_snapshot_published_seq"),
     # -ex "python <statement>".
     ("run_kernel_oops_qemutest.sh",
      "kernel_world_stop.claimed.value')) == 2",

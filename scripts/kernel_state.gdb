@@ -319,14 +319,14 @@ def _tk_read_crash():
 
 def _tk_collect_kernel(pid_argument):
     published_before = _tk_int(_tk_eval(
-        "ddb_snapshot_published_sequence"))
+        "ddb_snapshot_published_sequence.value"))
     if published_before == 0:
         return [
             "takibi-kernel: ddb status=unpublished",
             *_tk_read_crash(),
         ]
 
-    snapshot = _tk_eval("ddb_snapshot")
+    snapshot = _tk_eval("ddb_state.snapshot")
     sequence_before = _tk_int(snapshot["sequence"])
     if published_before != sequence_before:
         return [
@@ -397,8 +397,8 @@ def _tk_collect_kernel(pid_argument):
     }
 
     published_after = _tk_int(_tk_eval(
-        "ddb_snapshot_published_sequence"))
-    sequence_after = _tk_int(_tk_eval("ddb_snapshot.sequence"))
+        "ddb_snapshot_published_sequence.value"))
+    sequence_after = _tk_int(_tk_eval("ddb_state.snapshot.sequence"))
     if (published_after != published_before
             or sequence_after != sequence_before):
         return [

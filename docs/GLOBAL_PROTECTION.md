@@ -587,3 +587,16 @@ entries below that date are history, left as written.
   reads them with an acquire load. `crash_report_claim_waits`, an empty
   noinline function, is the breakpoint the oops lane waits on in place of
   the removed `crash_report_owner_address`. Five rows leave the allowlist.
+- 2026-11-08: the DDB records (#1159 (3D)). `ddb_snapshot` and
+  `ddb_wait_test_records` are fields of `DdbState`,
+  `guarded_by(kernel_world_stop)`, reached as `guarded_ref(stopped, ...)`
+  with the borrowed `MachineStopped` that kernel_ddb_enter_stopped holds and
+  now passes to every DDB render and stack helper. A whole process record
+  is copied out with slice_copy (`ddb_snapshot_record`,
+  `ddb_wait_test_copy`). `ddb_snapshot_published_sequence`, the external
+  debugger's publication word, is an `AtomicWord` (release stores as
+  before). GDB reads `ddb_state.snapshot` and
+  `ddb_snapshot_published_sequence.value`. Three rows leave the allowlist.
+  Two guarded_ref gaps were closed on the way: an array field below a
+  struct-typed guarded field was refused as "a call's result", and a
+  struct-element guarded array cast to a slice was taken for a byte view.

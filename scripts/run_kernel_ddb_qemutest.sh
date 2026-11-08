@@ -188,12 +188,12 @@ _tk_replaced_test_publication_reads = 0
 def _tk_eval_replaced_test(expression):
     global _tk_replaced_test_publication_reads
     value = _tk_eval_before_replaced_test(expression)
-    if expression == "ddb_snapshot_published_sequence":
+    if expression == "ddb_snapshot_published_sequence.value":
         _tk_replaced_test_publication_reads += 1
         if _tk_replaced_test_publication_reads == 2:
             gdb.execute(
-                "set ddb_snapshot_published_sequence = "
-                "ddb_snapshot_published_sequence + 1")
+                "set ddb_snapshot_published_sequence.value = "
+                "ddb_snapshot_published_sequence.value + 1")
             value = _tk_eval_before_replaced_test(expression)
     return value
 _tk_eval = _tk_eval_replaced_test
@@ -214,22 +214,22 @@ timeout "${GDB_BATCH_TIMEOUT:-600}" gdb-multiarch -q -batch "$ELF" \
     -ex "set logging overwrite on" \
     -ex "set logging redirect on" \
     -ex "set logging enabled on" \
-    -ex 'set $saved_published = ddb_snapshot_published_sequence' \
+    -ex 'set $saved_published = ddb_snapshot_published_sequence.value' \
     -ex "source $GDB_REPLACED_TEST" \
-    -ex 'set ddb_snapshot_published_sequence = $saved_published' \
-    -ex 'set ddb_snapshot_published_sequence = 0' \
+    -ex 'set ddb_snapshot_published_sequence.value = $saved_published' \
+    -ex 'set ddb_snapshot_published_sequence.value = 0' \
     -ex "takibi-kernel 1" \
-    -ex 'set ddb_snapshot_published_sequence = ddb_snapshot.sequence + 1' \
+    -ex 'set ddb_snapshot_published_sequence.value = ddb_state.snapshot.sequence + 1' \
     -ex "takibi-kernel 1" \
-    -ex 'set ddb_snapshot_published_sequence = $saved_published' \
-    -ex 'set $saved_root_live = ddb_snapshot.root_live' \
-    -ex 'set ddb_snapshot.root_live = 2' \
+    -ex 'set ddb_snapshot_published_sequence.value = $saved_published' \
+    -ex 'set $saved_root_live = ddb_state.snapshot.root_live' \
+    -ex 'set ddb_state.snapshot.root_live = 2' \
     -ex "takibi-kernel 1" \
-    -ex 'set ddb_snapshot.root_live = $saved_root_live' \
-    -ex 'set $saved_truncated = ddb_snapshot.process_truncated' \
-    -ex 'set ddb_snapshot.process_truncated = 1' \
+    -ex 'set ddb_state.snapshot.root_live = $saved_root_live' \
+    -ex 'set $saved_truncated = ddb_state.snapshot.process_truncated' \
+    -ex 'set ddb_state.snapshot.process_truncated = 1' \
     -ex "takibi-kernel 999999" \
-    -ex 'set ddb_snapshot.process_truncated = $saved_truncated' \
+    -ex 'set ddb_state.snapshot.process_truncated = $saved_truncated' \
     -ex "set logging enabled off" \
     -ex "detach" >"$GDB_VIEW_LOG" 2>&1
 if ! grep -q '^takibi-kernel: ddb status=replaced ' "$GDB_INVALID_LOG" ||

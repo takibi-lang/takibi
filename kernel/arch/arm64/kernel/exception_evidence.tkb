@@ -270,13 +270,22 @@ struct DdbSnapshot {
     trace: [usize; KERNEL_CRASH_TRACE_WORDS];
 }
 
-private let mut ddb_snapshot: DdbSnapshot;
+// GitHub issue #1159 (3D): the snapshot and the wait-test records are written
+// and read only while the world is stopped for DDB, so they are
+// guarded_by(kernel_world_stop) and reached as guarded_ref with the borrowed
+// MachineStopped. GDB reads them as ddb_state.snapshot (first, so its address
+// is unchanged) and ddb_state.wait_test.
+struct DdbState {
+    private snapshot: DdbSnapshot guarded_by(kernel_world_stop);
+    private wait_test: [ProcessDdbRecord; DDB_PROCESS_RECORDS] guarded_by(kernel_world_stop);
+}
+private let mut ddb_state: DdbState;
 // External debuggers cannot assume that halting the CPU happened after the
 // last field above was captured. Zero means unpublished/in progress; the
 // completed sequence is stored with release ordering only after every bounded
 // sub-snapshot is present. A reader accepts the object only when this equals
 // ddb_snapshot.sequence before and after its read.
-private let mut ddb_snapshot_published_sequence: usize;
+private let mut ddb_snapshot_published_sequence: AtomicWord;
 let mut kernel_ddb_breakpoint_test_enabled: bool;
 let mut kernel_ddb_memory_fault_test_enabled: bool;
 let mut kernel_ddb_backtrace_test_enabled: bool;
@@ -335,9 +344,6 @@ fn kernel_ddb_breakpoint_test_checkpoint() {
     if (kernel_ddb_breakpoint_test_enabled) { kernel_ddb_breakpoint(); }
 }
 
-private fn ddb_snapshot_published_sequence_address() -> usize {
-    return (&ddb_snapshot_published_sequence) as usize;
-}
 
 fn ddb_puts(text: *u8) !{unsafe} {
     while (*text != 0) {
@@ -810,16 +816,16 @@ private fn ddb_render_user_memory(stopped: borrow MachineStopped[&kernel_world_s
     let mut l2: usize = 0;
     let mut found: bool = false;
     for index: usize in 0..<DDB_PROCESS_RECORDS {
-        if (index < ddb_snapshot.process_count &&
-                ddb_snapshot.processes[index].pid == pid) {
-            root = ddb_snapshot.processes[index].root_slot;
-            l2 = ddb_snapshot.process_l2[index];
+        if (index < guarded_ref(stopped, ddb_state.snapshot).process_count &&
+                guarded_ref(stopped, ddb_state.snapshot).processes[index].pid == pid) {
+            root = guarded_ref(stopped, ddb_state.snapshot).processes[index].root_slot;
+            l2 = guarded_ref(stopped, ddb_state.snapshot).process_l2[index];
             found = true;
         }
     }
     if (found == false) {
         ddb_puts("ddb: xu pid not captured");
-        if (ddb_snapshot.process_truncated != 0) {
+        if (guarded_ref(stopped, ddb_state.snapshot).process_truncated != 0) {
             ddb_puts(" (snapshot truncated)");
         }
         ddb_puts("\n");
@@ -871,9 +877,9 @@ private fn ddb_render_user_memory(stopped: borrow MachineStopped[&kernel_world_s
     }
 }
 
-private fn ddb_render_regs() !{unsafe} {
+private fn ddb_render_regs(stopped: borrow MachineStopped[&kernel_world_stop]) !{unsafe} {
     let frame: *ExceptionFrame = unsafe {
-        ddb_snapshot.frame_sp as *ExceptionFrame
+        guarded_ref(stopped, ddb_state.snapshot).frame_sp as *ExceptionFrame
     };
     ddb_puts("ddb: x0="); ddb_put_hex(frame.x0);
     ddb_puts(" x1="); ddb_put_hex(frame.x1);
@@ -1224,8 +1230,8 @@ private fn ddb_stopped_unwind_root(core: usize) -> DdbStoppedRootResult
 // GitHub issue #874: the pid a CPU has claimed but not yet made current, 0
 // when none or when its root is not settled. The debugger's own CPU is not
 // in the pen, so its own value is read directly.
-private fn ddb_claimed_pid(core: usize) -> usize !{unsafe} {
-    if (core == (ddb_snapshot.cpu & 0xFF)) {
+private fn ddb_claimed_pid(stopped: borrow MachineStopped[&kernel_world_stop], core: usize) -> usize !{unsafe} {
+    if (core == (guarded_ref(stopped, ddb_state.snapshot).cpu & 0xFF)) {
         return kernel_process_claimed_pid_or_zero();
     }
     if (core >= KERNEL_MAX_CORES) { return 0; }
@@ -1272,37 +1278,37 @@ fn kernel_ddb_stopped_roots_probe() -> bool !{unsafe} {
     return valid;
 }
 
-private fn ddb_current_unwind_root() -> DdbUnwindRoot !{unsafe} {
+private fn ddb_current_unwind_root(stopped: borrow MachineStopped[&kernel_world_stop]) -> DdbUnwindRoot !{unsafe} {
     let frame: *ExceptionFrame = unsafe {
-        ddb_snapshot.frame_sp as *ExceptionFrame
+        guarded_ref(stopped, ddb_state.snapshot).frame_sp as *ExceptionFrame
     };
     let run_bottom: usize =
-        (ddb_snapshot.frame_sp / KERNEL_STACK_RUN_BYTES) *
+        (guarded_ref(stopped, ddb_state.snapshot).frame_sp / KERNEL_STACK_RUN_BYTES) *
         KERNEL_STACK_RUN_BYTES;
     let mut root: DdbUnwindRoot = {
         1,
-        ddb_snapshot.cpu,
+        guarded_ref(stopped, ddb_state.snapshot).cpu,
         kernel_process_leveled_frame_pid_or_zero(
-            frame_ref_from_entry(ddb_snapshot.frame_sp,
+            frame_ref_from_entry(guarded_ref(stopped, ddb_state.snapshot).frame_sp,
                                  kernel_process_stopped_entry_generation())),
         frame.elr_el1,
         frame.x29,
-        ddb_snapshot.frame_sp + EXC_CONTEXT_SIZE,
+        guarded_ref(stopped, ddb_state.snapshot).frame_sp + EXC_CONTEXT_SIZE,
         run_bottom + KERNEL_PROCESS_STACK_SIZE,
         run_bottom + KERNEL_STACK_RUN_BYTES
     };
     return root;
 }
 
-private fn ddb_render_backtrace_current() !{unsafe} {
+private fn ddb_render_backtrace_current(stopped: borrow MachineStopped[&kernel_world_stop]) !{unsafe} {
     let frame: *ExceptionFrame = unsafe {
-        ddb_snapshot.frame_sp as *ExceptionFrame
+        guarded_ref(stopped, ddb_state.snapshot).frame_sp as *ExceptionFrame
     };
     if ((frame.spsr_el1 & 0xF) == 0) {
-        let mut root: DdbUnwindRoot = ddb_current_unwind_root();
+        let mut root: DdbUnwindRoot = ddb_current_unwind_root(stopped);
         ddb_puts("ddb: bt source=cpu cpu=");
-        ddb_put_udec(ddb_snapshot.cpu & 0xFF);
-        ddb_puts(" pid="); ddb_put_udec(ddb_snapshot.process_pid);
+        ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).cpu & 0xFF);
+        ddb_puts(" pid="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).process_pid);
         ddb_puts(" stack="); ddb_put_hex(root.stack_bottom);
         ddb_puts(".."); ddb_put_hex(root.stack_top);
         ddb_puts("\n");
@@ -1311,7 +1317,7 @@ private fn ddb_render_backtrace_current() !{unsafe} {
         ddb_bt_stop("user-boundary", frame.x29);
         return;
     }
-    ddb_walk_backtrace(ddb_current_unwind_root(), DDB_BACKTRACE_FRAMES);
+    ddb_walk_backtrace(ddb_current_unwind_root(stopped), DDB_BACKTRACE_FRAMES);
 }
 
 // GitHub issue #505: a CPU that is not the one running the debugger.
@@ -1320,11 +1326,11 @@ private fn ddb_render_backtrace_current() !{unsafe} {
 // root moved" are different findings -- the first is a CPU that never
 // acknowledged, the second is one whose record changed under the read -- and
 // reading either as a historical trace is exactly what this must not do.
-private fn ddb_render_backtrace_cpu(core: usize) !{unsafe} {
-    if (core == (ddb_snapshot.cpu & 0xFF)) {
+private fn ddb_render_backtrace_cpu(stopped: borrow MachineStopped[&kernel_world_stop], core: usize) !{unsafe} {
+    if (core == (guarded_ref(stopped, ddb_state.snapshot).cpu & 0xFF)) {
         // The debugger's own CPU has a better root than the holding pen's:
         // the exception frame DDB was entered through.
-        ddb_render_backtrace_current();
+        ddb_render_backtrace_current(stopped);
         return;
     }
     match ddb_stopped_unwind_root(core) {
@@ -1364,29 +1370,29 @@ private fn ddb_render_backtrace_cpu(core: usize) !{unsafe} {
 // GitHub issue #874: a Running pid on no CPU's root may have been taken by
 // an idle CPU that has not made it current yet. Its stack is still that
 // CPU's idle stack, so the root to walk is the CPU's, named as a claim.
-private fn ddb_render_backtrace_claimed(pid: usize) -> bool !{unsafe} {
+private fn ddb_render_backtrace_claimed(stopped: borrow MachineStopped[&kernel_world_stop], pid: usize) -> bool !{unsafe} {
     if (pid == 0) { return false; }
     for core: usize in 0..<KERNEL_MAX_CORES {
-        if (ddb_claimed_pid(core) == pid) {
+        if (ddb_claimed_pid(stopped, core) == pid) {
             ddb_puts("ddb: bt pid="); ddb_put_udec(pid);
             ddb_puts(" claimed by cpu="); ddb_put_udec(core);
             ddb_puts(", not yet current\n");
-            ddb_render_backtrace_cpu(core);
+            ddb_render_backtrace_cpu(stopped, core);
             return true;
         }
     }
     return false;
 }
 
-private fn ddb_render_backtrace_process(pid: usize) !{unsafe} {
-    if (pid == ddb_snapshot.process_pid) {
-        ddb_render_backtrace_current();
+private fn ddb_render_backtrace_process(stopped: borrow MachineStopped[&kernel_world_stop], pid: usize) !{unsafe} {
+    if (pid == guarded_ref(stopped, ddb_state.snapshot).process_pid) {
+        ddb_render_backtrace_current(stopped);
         return;
     }
     for index: usize in 0..<DDB_PROCESS_RECORDS {
-        if (index < ddb_snapshot.process_count &&
-                ddb_snapshot.processes[index].pid == pid) {
-            let mut record: ProcessDdbRecord = ddb_snapshot.processes[index];
+        if (index < guarded_ref(stopped, ddb_state.snapshot).process_count &&
+                guarded_ref(stopped, ddb_state.snapshot).processes[index].pid == pid) {
+            let mut record: ProcessDdbRecord = ddb_snapshot_record(stopped, index);
             if (record.state == 2) {
                 // GitHub issue #505: this used to end here. A running
                 // process's saved_sp is historical, so the answer is not that
@@ -1399,17 +1405,17 @@ private fn ddb_render_backtrace_process(pid: usize) !{unsafe} {
                         DdbStoppedRootResult::Changed => { }
                         DdbStoppedRootResult::Root(root) => {
                             if (root.pid == pid) {
-                                ddb_render_backtrace_cpu(core);
+                                ddb_render_backtrace_cpu(stopped, core);
                                 return;
                             }
                         }
                     }
                 }
-                if (pid == ddb_snapshot.process_pid) {
-                    ddb_render_backtrace_current();
+                if (pid == guarded_ref(stopped, ddb_state.snapshot).process_pid) {
+                    ddb_render_backtrace_current(stopped);
                     return;
                 }
-                if (ddb_render_backtrace_claimed(pid)) { return; }
+                if (ddb_render_backtrace_claimed(stopped, pid)) { return; }
                 ddb_puts("ddb: bt pid running on no stopped cpu\n");
                 return;
             }
@@ -1434,7 +1440,7 @@ private fn ddb_render_backtrace_process(pid: usize) !{unsafe} {
             }
             let mut root: DdbUnwindRoot = {
                 2,
-                ddb_snapshot.cpu,
+                guarded_ref(stopped, ddb_state.snapshot).cpu,
                 pid,
                 frame.elr_el1,
                 frame.x29,
@@ -1447,7 +1453,7 @@ private fn ddb_render_backtrace_process(pid: usize) !{unsafe} {
         }
     }
     ddb_puts("ddb: bt pid not captured");
-    if (ddb_snapshot.process_truncated != 0) {
+    if (guarded_ref(stopped, ddb_state.snapshot).process_truncated != 0) {
         ddb_puts(" (snapshot truncated)");
     }
     ddb_puts("\n");
@@ -1477,8 +1483,8 @@ private fn ddb_bt_test_stopped_check(label: *u8, before: usize,
     }
 }
 
-private fn ddb_render_backtrace_test() !{unsafe} {
-    let mut valid: DdbUnwindRoot = ddb_current_unwind_root();
+private fn ddb_render_backtrace_test(stopped: borrow MachineStopped[&kernel_world_stop]) !{unsafe} {
+    let mut valid: DdbUnwindRoot = ddb_current_unwind_root(stopped);
     let test_pc: usize = kernel_generated_text_start;
     let mut unsupported: DdbUnwindRoot = {
         valid.source, valid.cpu, valid.pid, 0, valid.fp, valid.stack_floor,
@@ -1531,10 +1537,10 @@ private fn ddb_render_backtrace_test() !{unsafe} {
     // its root walked. The window is too short to stop in on purpose, so
     // the claim is written into CPU 1's settled root while it is held in
     // the pen, and put back.
-    if (KERNEL_MAX_CORES > 1 && (ddb_snapshot.cpu & 0xFF) != 1) {
+    if (KERNEL_MAX_CORES > 1 && (guarded_ref(stopped, ddb_state.snapshot).cpu & 0xFF) != 1) {
         let held: usize = ddb_stopped_root[1].claimed;
         ddb_stopped_root[1].claimed = DDB_BT_TEST_CLAIMED_PID;
-        if (ddb_render_backtrace_claimed(DDB_BT_TEST_CLAIMED_PID) == false) {
+        if (ddb_render_backtrace_claimed(stopped, DDB_BT_TEST_CLAIMED_PID) == false) {
             ddb_puts("ddb: bt test claimed pid not found\n");
         }
         ddb_stopped_root[1].claimed = held;
@@ -1637,33 +1643,33 @@ private fn ddb_command_trace(command: DdbTraceCommand) {
     ddb_puts("\n");
 }
 
-private fn ddb_render_trace() !{unsafe} {
-    ddb_puts("ddb: trace count="); ddb_put_udec(ddb_snapshot.trace_count);
+private fn ddb_render_trace(stopped: borrow MachineStopped[&kernel_world_stop]) !{unsafe} {
+    ddb_puts("ddb: trace count="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).trace_count);
     ddb_puts("\n");
     for item: usize in 0..<KERNEL_CRASH_TRACE_EVENTS {
-        if (item < ddb_snapshot.trace_count) {
+        if (item < guarded_ref(stopped, ddb_state.snapshot).trace_count) {
             let base: usize = item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
-            ddb_puts("ddb: trace seq="); ddb_put_udec(ddb_snapshot.trace[
+            ddb_puts("ddb: trace seq="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).trace[
                 base + KERNEL_PROCESS_TRACE_SEQUENCE_WORD]);
-            ddb_puts(" cpu="); ddb_put_udec(ddb_snapshot.trace[
+            ddb_puts(" cpu="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).trace[
                 base + KERNEL_PROCESS_TRACE_CPU_WORD]);
-            ddb_puts(" event="); ddb_put_udec(ddb_snapshot.trace[
+            ddb_puts(" event="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).trace[
                 base + KERNEL_PROCESS_TRACE_EVENT_WORD]);
-            ddb_puts(" pid="); ddb_put_udec(ddb_snapshot.trace[
+            ddb_puts(" pid="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).trace[
                 base + KERNEL_PROCESS_TRACE_PID_WORD]);
-            ddb_puts(" gen="); ddb_put_udec(ddb_snapshot.trace[
+            ddb_puts(" gen="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).trace[
                 base + KERNEL_PROCESS_TRACE_GENERATION_WORD]);
-            ddb_puts(" peer="); ddb_put_udec(ddb_snapshot.trace[
+            ddb_puts(" peer="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).trace[
                 base + KERNEL_PROCESS_TRACE_PEER_PID_WORD]);
-            ddb_puts(" state="); ddb_put_udec(ddb_snapshot.trace[
+            ddb_puts(" state="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).trace[
                 base + KERNEL_PROCESS_TRACE_STATE_WORD]);
-            ddb_puts(" wait="); ddb_put_udec(ddb_snapshot.trace[
+            ddb_puts(" wait="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).trace[
                 base + KERNEL_PROCESS_TRACE_WAIT_REASON_WORD]);
-            ddb_puts(" root="); ddb_put_udec(ddb_snapshot.trace[
+            ddb_puts(" root="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).trace[
                 base + KERNEL_PROCESS_TRACE_ROOT_WORD]);
-            ddb_puts(" sp="); ddb_put_hex(ddb_snapshot.trace[
+            ddb_puts(" sp="); ddb_put_hex(guarded_ref(stopped, ddb_state.snapshot).trace[
                 base + KERNEL_PROCESS_TRACE_SAVED_SP_WORD]);
-            ddb_puts(" aux="); ddb_put_hex(ddb_snapshot.trace[
+            ddb_puts(" aux="); ddb_put_hex(guarded_ref(stopped, ddb_state.snapshot).trace[
                 base + KERNEL_PROCESS_TRACE_AUX_WORD]);
             ddb_puts("\n");
         }
@@ -1811,22 +1817,22 @@ private fn ddb_render_log_test() !{unsafe} {
                                          seq + 1, 0));
 }
 
-private fn ddb_render_oops() !{unsafe} {
+private fn ddb_render_oops(stopped: borrow MachineStopped[&kernel_world_stop]) !{unsafe} {
     let frame: *ExceptionFrame = unsafe {
-        ddb_snapshot.frame_sp as *ExceptionFrame
+        guarded_ref(stopped, ddb_state.snapshot).frame_sp as *ExceptionFrame
     };
-    ddb_puts("ddb: break seq="); ddb_put_udec(ddb_snapshot.sequence);
-    ddb_puts(" cpu="); ddb_put_udec(ddb_snapshot.cpu & 0xFF);
+    ddb_puts("ddb: break seq="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).sequence);
+    ddb_puts(" cpu="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).cpu & 0xFF);
     ddb_puts(" elr="); ddb_put_hex(frame.elr_el1);
     ddb_puts(" sp_el0="); ddb_put_hex(frame.sp_el0);
     ddb_puts("\n");
 }
 
 private fn ddb_render_current(stopped: borrow MachineStopped[&kernel_world_stop]) !{unsafe} {
-    ddb_puts("ddb: current pid="); ddb_put_udec(ddb_snapshot.process_pid);
-    ddb_puts(" parent="); ddb_put_udec(ddb_snapshot.parent_pid);
-    ddb_puts(" state="); ddb_put_udec(ddb_snapshot.process_state);
-    ddb_puts(" wait="); ddb_put_udec(ddb_snapshot.wait_reason);
+    ddb_puts("ddb: current pid="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).process_pid);
+    ddb_puts(" parent="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).parent_pid);
+    ddb_puts(" state="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).process_state);
+    ddb_puts(" wait="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).wait_reason);
     ddb_puts("\n");
     // GitHub issue #573: every online CPU's activity word. The world is
     // stopped while DDB runs, so each word is still what its CPU was doing.
@@ -1845,19 +1851,19 @@ private fn ddb_render_current(stopped: borrow MachineStopped[&kernel_world_stop]
     }
 }
 
-private fn ddb_render_intr() !{unsafe} {
-    ddb_puts("ddb: intr cpu="); ddb_put_udec(ddb_snapshot.cpu & 0xFF);
+private fn ddb_render_intr(stopped: borrow MachineStopped[&kernel_world_stop]) !{unsafe} {
+    ddb_puts("ddb: intr cpu="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).cpu & 0xFF);
     ddb_puts(" entry=");
-    if (ddb_snapshot.entry_kind == 1) { ddb_puts("irq"); }
-    else if (ddb_snapshot.entry_kind == 2) { ddb_puts("brk"); }
+    if (guarded_ref(stopped, ddb_state.snapshot).entry_kind == 1) { ddb_puts("irq"); }
+    else if (guarded_ref(stopped, ddb_state.snapshot).entry_kind == 2) { ddb_puts("brk"); }
     else { ddb_puts("unknown"); }
-    ddb_puts(" source="); ddb_put_udec(ddb_snapshot.entry_source);
-    ddb_puts(" live_daif="); ddb_put_hex(ddb_snapshot.live_daif);
-    ddb_puts(" saved_daif="); ddb_put_hex(ddb_snapshot.saved_daif);
+    ddb_puts(" source="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).entry_source);
+    ddb_puts(" live_daif="); ddb_put_hex(guarded_ref(stopped, ddb_state.snapshot).live_daif);
+    ddb_puts(" saved_daif="); ddb_put_hex(guarded_ref(stopped, ddb_state.snapshot).saved_daif);
     ddb_puts("\n");
-    if (ddb_snapshot.esr_valid != 0) {
-        ddb_puts("ddb: intr esr="); ddb_put_hex(ddb_snapshot.esr_el1);
-        ddb_puts(" far="); ddb_put_hex(ddb_snapshot.far_el1);
+    if (guarded_ref(stopped, ddb_state.snapshot).esr_valid != 0) {
+        ddb_puts("ddb: intr esr="); ddb_put_hex(guarded_ref(stopped, ddb_state.snapshot).esr_el1);
+        ddb_puts(" far="); ddb_put_hex(guarded_ref(stopped, ddb_state.snapshot).far_el1);
         ddb_puts("\n");
     } else {
         ddb_puts("ddb: intr esr=unavailable far=unavailable\n");
@@ -1903,15 +1909,15 @@ private fn ddb_render_blk_timeout(label: *u8,
     ddb_puts(" used-at-reset="); ddb_put_udec(shot.used_at_reset);
 }
 
-private fn ddb_render_sched() !{unsafe} {
+private fn ddb_render_sched(stopped: borrow MachineStopped[&kernel_world_stop]) !{unsafe} {
     let mut ready: usize = 0;
     let mut running: usize = 0;
     let mut blocked: usize = 0;
     let mut exited: usize = 0;
     let mut constructing: usize = 0;
     for index: usize in 0..<DDB_PROCESS_RECORDS {
-        if (index < ddb_snapshot.process_count) {
-            let state: usize = ddb_snapshot.processes[index].state;
+        if (index < guarded_ref(stopped, ddb_state.snapshot).process_count) {
+            let state: usize = guarded_ref(stopped, ddb_state.snapshot).processes[index].state;
             if (state == 1) { ready = ready + 1; }
             else if (state == 2) { running = running + 1; }
             else if (state == 3) { blocked = blocked + 1; }
@@ -1920,9 +1926,9 @@ private fn ddb_render_sched() !{unsafe} {
         }
     }
     ddb_puts("ddb: sched enabled=");
-    ddb_put_udec(ddb_snapshot.scheduler_enabled);
-    ddb_puts(" pending="); ddb_put_udec(ddb_snapshot.reschedule_pending);
-    ddb_puts(" current="); ddb_put_udec(ddb_snapshot.process_pid);
+    ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).scheduler_enabled);
+    ddb_puts(" pending="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).reschedule_pending);
+    ddb_puts(" current="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).process_pid);
     ddb_puts(" ready="); ddb_put_udec(ready);
     ddb_puts(" running="); ddb_put_udec(running);
     ddb_puts(" blocked="); ddb_put_udec(blocked);
@@ -1930,7 +1936,7 @@ private fn ddb_render_sched() !{unsafe} {
     if (constructing != 0) {
         ddb_puts(" constructing="); ddb_put_udec(constructing);
     }
-    ddb_puts(" truncated="); ddb_put_udec(ddb_snapshot.process_truncated);
+    ddb_puts(" truncated="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).process_truncated);
     ddb_puts("\n");
     let (refused_invalid, refused_busy, refused_partial, retry_busy,
          retry_partial) = kernel_process_start_refusals();
@@ -1961,15 +1967,15 @@ private fn ddb_render_sched() !{unsafe} {
         ddb_render_blk_timeout(" last", blk_last);
         ddb_puts("\n");
     }
-    ddb_render_wait();
+    ddb_render_wait(stopped);
 }
 
-private fn ddb_render_vm() !{unsafe} {
-    ddb_puts("ddb: vm pid="); ddb_put_udec(ddb_snapshot.process_pid);
-    ddb_puts(" root="); ddb_put_udec(ddb_snapshot.root_slot);
-    ddb_puts(" live="); ddb_put_udec(ddb_snapshot.root_live);
-    ddb_puts(" asid="); ddb_put_udec(ddb_snapshot.root_asid);
-    ddb_puts(" l1="); ddb_put_hex(ddb_snapshot.root_l1);
+private fn ddb_render_vm(stopped: borrow MachineStopped[&kernel_world_stop]) !{unsafe} {
+    ddb_puts("ddb: vm pid="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).process_pid);
+    ddb_puts(" root="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).root_slot);
+    ddb_puts(" live="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).root_live);
+    ddb_puts(" asid="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).root_asid);
+    ddb_puts(" l1="); ddb_put_hex(guarded_ref(stopped, ddb_state.snapshot).root_l1);
     ddb_puts("\n");
     // What accumulates over a long boot rather than per process: the ASID
     // counter's generations and the page allocator's occupancy.
@@ -1993,15 +1999,15 @@ private fn ddb_render_vm() !{unsafe} {
     ddb_puts("\n");
 }
 
-private fn ddb_render_fds() !{unsafe} {
-    ddb_puts("ddb: fds pid="); ddb_put_udec(ddb_snapshot.process_pid);
+private fn ddb_render_fds(stopped: borrow MachineStopped[&kernel_world_stop]) !{unsafe} {
+    ddb_puts("ddb: fds pid="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).process_pid);
     ddb_puts(" slots="); ddb_put_udec(CRASH_FD_SNAPSHOT_SLOTS);
     ddb_puts("\n");
     for fd: usize in 0..<CRASH_FD_SNAPSHOT_SLOTS {
-        if (ddb_snapshot.fd_kind[fd] != 0) {
+        if (guarded_ref(stopped, ddb_state.snapshot).fd_kind[fd] != 0) {
             ddb_puts("ddb: fd="); ddb_put_udec(fd);
-            ddb_puts(" kind="); ddb_put_udec(ddb_snapshot.fd_kind[fd]);
-            ddb_puts(" object="); ddb_put_udec(ddb_snapshot.fd_object[fd]);
+            ddb_puts(" kind="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).fd_kind[fd]);
+            ddb_puts(" object="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).fd_object[fd]);
             ddb_puts("\n");
         }
     }
@@ -2171,6 +2177,27 @@ private fn ddb_render_command(record: ProcessDdbRecord) !{unsafe} {
     if (record.command_length > DDB_COMMAND_BYTES) { ddb_puts("+"); }
 }
 
+// GitHub issue #1159 (3D): one record of the guarded snapshot or of the
+// wait-test records, copied out under the stop with slice_copy (a guarded
+// field is otherwise read only as scalars).
+private fn ddb_snapshot_record(stopped: borrow MachineStopped[&kernel_world_stop],
+                               index: {0..<DDB_PROCESS_RECORDS as usize}) -> ProcessDdbRecord {
+    let mut one: [ProcessDdbRecord; 1];
+    zero_fill(one as []ProcessDdbRecord);
+    slice_copy(one as []ProcessDdbRecord,
+               guarded_ref(stopped, ddb_state.snapshot).processes[index..<index + 1]);
+    return one[0];
+}
+
+private fn ddb_wait_test_copy(stopped: borrow MachineStopped[&kernel_world_stop],
+                              index: {0..<DDB_PROCESS_RECORDS as usize}) -> ProcessDdbRecord {
+    let mut one: [ProcessDdbRecord; 1];
+    zero_fill(one as []ProcessDdbRecord);
+    slice_copy(one as []ProcessDdbRecord,
+               guarded_ref(stopped, ddb_state.wait_test)[index..<index + 1]);
+    return one[0];
+}
+
 private fn ddb_render_process(
         record: ProcessDdbRecord, uart_rx_queued: usize,
         uart_tx_queued: usize, uart_tx_low_water: usize, uart_tx_state: usize,
@@ -2204,17 +2231,17 @@ private fn ddb_render_process(
     ddb_puts("\n");
 }
 
-private fn ddb_render_ps() !{unsafe} {
-    ddb_puts("ddb: ps count="); ddb_put_udec(ddb_snapshot.process_count);
-    ddb_puts(" truncated="); ddb_put_udec(ddb_snapshot.process_truncated);
+private fn ddb_render_ps(stopped: borrow MachineStopped[&kernel_world_stop]) !{unsafe} {
+    ddb_puts("ddb: ps count="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).process_count);
+    ddb_puts(" truncated="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).process_truncated);
     ddb_puts("\n");
     for index: usize in 0..<DDB_PROCESS_RECORDS {
-        if (index < ddb_snapshot.process_count) {
+        if (index < guarded_ref(stopped, ddb_state.snapshot).process_count) {
             ddb_puts("ddb: ps");
-            ddb_render_process(ddb_snapshot.processes[index],
-                ddb_snapshot.uart_rx_queued, ddb_snapshot.uart_tx_queued,
-                ddb_snapshot.uart_tx_low_water, ddb_snapshot.uart_tx_state,
-                ddb_snapshot.net_rx_frame, ddb_snapshot.net_rx_connection);
+            ddb_render_process(ddb_snapshot_record(stopped, index),
+                guarded_ref(stopped, ddb_state.snapshot).uart_rx_queued, guarded_ref(stopped, ddb_state.snapshot).uart_tx_queued,
+                guarded_ref(stopped, ddb_state.snapshot).uart_tx_low_water, guarded_ref(stopped, ddb_state.snapshot).uart_tx_state,
+                guarded_ref(stopped, ddb_state.snapshot).net_rx_frame, guarded_ref(stopped, ddb_state.snapshot).net_rx_connection);
         }
     }
 }
@@ -2253,35 +2280,35 @@ struct DdbStackRenderResult {
     audit: DdbStackAudit;
 }
 
-private fn ddb_stack_process(pid: usize) -> DdbStackProcessResult {
+private fn ddb_stack_process(stopped: borrow MachineStopped[&kernel_world_stop], pid: usize) -> DdbStackProcessResult {
     for index: usize in 0..<DDB_PROCESS_RECORDS {
-        if (index < ddb_snapshot.process_count &&
-                ddb_snapshot.processes[index].pid == pid) {
+        if (index < guarded_ref(stopped, ddb_state.snapshot).process_count &&
+                guarded_ref(stopped, ddb_state.snapshot).processes[index].pid == pid) {
             for other: usize in 0..<DDB_PROCESS_RECORDS {
-                if (other > index && other < ddb_snapshot.process_count &&
-                        ddb_snapshot.processes[other].pid == pid) {
+                if (other > index && other < guarded_ref(stopped, ddb_state.snapshot).process_count &&
+                        guarded_ref(stopped, ddb_state.snapshot).processes[other].pid == pid) {
                     return DdbStackProcessResult::Duplicate;
                 }
             }
             return DdbStackProcessResult::Found(
-                ddb_snapshot.processes[index]);
+                ddb_snapshot_record(stopped, index));
         }
     }
     return DdbStackProcessResult::Missing;
 }
 
-private fn ddb_stack_root(core: usize) -> DdbStoppedRootResult !{unsafe} {
-    if (core == (ddb_snapshot.cpu & 0xFF)) {
-        return DdbStoppedRootResult::Root(ddb_current_unwind_root());
+private fn ddb_stack_root(stopped: borrow MachineStopped[&kernel_world_stop], core: usize) -> DdbStoppedRootResult !{unsafe} {
+    if (core == (guarded_ref(stopped, ddb_state.snapshot).cpu & 0xFF)) {
+        return DdbStoppedRootResult::Root(ddb_current_unwind_root(stopped));
     }
     return ddb_stopped_unwind_root(core);
 }
 
-private fn ddb_render_stack_root(
+private fn ddb_render_stack_root(stopped: borrow MachineStopped[&kernel_world_stop], 
         core: usize, audit: DdbStackAudit)
         -> DdbStackRenderResult !{unsafe} {
     let mut next: DdbStackAudit = audit;
-    match ddb_stack_root(core) {
+    match ddb_stack_root(stopped, core) {
         DdbStoppedRootResult::NotStopped => {
             ddb_puts("ddb: stack cpu="); ddb_put_udec(core);
             ddb_puts(" status=not-stopped\n");
@@ -2296,7 +2323,7 @@ private fn ddb_render_stack_root(
                 ddb_puts(" status=idle\n");
                 // GitHub issue #874: an idle CPU may hold a claim. It is not
                 // a root (the stack is the CPU's own), so it is not counted.
-                let claimed: usize = ddb_claimed_pid(core);
+                let claimed: usize = ddb_claimed_pid(stopped, core);
                 if (claimed != 0) {
                     ddb_puts("ddb: stack cpu="); ddb_put_udec(core);
                     ddb_puts(" claimed pid="); ddb_put_udec(claimed);
@@ -2311,7 +2338,7 @@ private fn ddb_render_stack_root(
             ddb_puts(" pid="); ddb_put_udec(root.pid);
             ddb_puts(" stack="); ddb_put_hex(root.stack_bottom);
             ddb_puts(".."); ddb_put_hex(root.stack_top);
-            match ddb_stack_process(root.pid) {
+            match ddb_stack_process(stopped, root.pid) {
                 DdbStackProcessResult::Missing => {
                     next.missing = next.missing + 1;
                     ddb_puts(" owner=unknown record=missing\n");
@@ -2378,26 +2405,26 @@ private fn ddb_stack_audit_pair(
     return next;
 }
 
-private fn ddb_render_stacks() !{unsafe} {
+private fn ddb_render_stacks(stopped: borrow MachineStopped[&kernel_world_stop]) !{unsafe} {
     let online: usize = kernel_online_core_count();
     ddb_puts("ddb: stacks cpus="); ddb_put_udec(online);
-    ddb_puts(" processes="); ddb_put_udec(ddb_snapshot.process_count);
-    ddb_puts(" truncated="); ddb_put_udec(ddb_snapshot.process_truncated);
+    ddb_puts(" processes="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).process_count);
+    ddb_puts(" truncated="); ddb_put_udec(guarded_ref(stopped, ddb_state.snapshot).process_truncated);
     ddb_puts("\n");
     let mut audit: DdbStackAudit = { 0, 0, 0, 0, 0, 0, 0, 0 };
     let mut first_result: DdbStackRenderResult =
-        ddb_render_stack_root(0, audit);
+        ddb_render_stack_root(stopped, 0, audit);
     audit = first_result.audit;
     let mut first: DdbStackRootSummary = first_result.root;
     let mut second_result: DdbStackRenderResult =
-        ddb_render_stack_root(1, audit);
+        ddb_render_stack_root(stopped, 1, audit);
     audit = second_result.audit;
     let mut second: DdbStackRootSummary = second_result.root;
     audit = ddb_stack_audit_pair(first, second, audit);
     let mut third: DdbStackRootSummary = { false, 0, 0, 0 };
     if (online > 2) {
         let mut third_result: DdbStackRenderResult =
-            ddb_render_stack_root(2, audit);
+            ddb_render_stack_root(stopped, 2, audit);
         audit = third_result.audit;
         third = third_result.root;
         audit = ddb_stack_audit_pair(first, third, audit);
@@ -2405,7 +2432,7 @@ private fn ddb_render_stacks() !{unsafe} {
     }
     if (online > 3) {
         let mut fourth_result: DdbStackRenderResult =
-            ddb_render_stack_root(3, audit);
+            ddb_render_stack_root(stopped, 3, audit);
         audit = fourth_result.audit;
         let mut fourth: DdbStackRootSummary = fourth_result.root;
         audit = ddb_stack_audit_pair(first, fourth, audit);
@@ -2606,20 +2633,20 @@ private fn ddb_render_wait_from(
     ddb_puts("\n");
 }
 
-private fn ddb_render_wait() !{unsafe} {
-    ddb_render_wait_from(ddb_snapshot.processes as []ProcessDdbRecord,
-                         ddb_snapshot.process_count,
-                         ddb_snapshot.process_truncated,
-                         ddb_snapshot.process_pid,
-                         ddb_snapshot.process_state,
-                         ddb_snapshot.wait_reason,
-                         ddb_snapshot.uart_rx_queued,
-                         ddb_snapshot.uart_tx_queued,
-                         ddb_snapshot.uart_tx_low_water,
-                         ddb_snapshot.uart_tx_state,
-                         ddb_snapshot.net_rx_frame,
-                         ddb_snapshot.net_rx_connection,
-                         ddb_snapshot.net_rx_capability);
+private fn ddb_render_wait(stopped: borrow MachineStopped[&kernel_world_stop]) !{unsafe} {
+    ddb_render_wait_from(guarded_ref(stopped, ddb_state.snapshot).processes as []ProcessDdbRecord,
+                         guarded_ref(stopped, ddb_state.snapshot).process_count,
+                         guarded_ref(stopped, ddb_state.snapshot).process_truncated,
+                         guarded_ref(stopped, ddb_state.snapshot).process_pid,
+                         guarded_ref(stopped, ddb_state.snapshot).process_state,
+                         guarded_ref(stopped, ddb_state.snapshot).wait_reason,
+                         guarded_ref(stopped, ddb_state.snapshot).uart_rx_queued,
+                         guarded_ref(stopped, ddb_state.snapshot).uart_tx_queued,
+                         guarded_ref(stopped, ddb_state.snapshot).uart_tx_low_water,
+                         guarded_ref(stopped, ddb_state.snapshot).uart_tx_state,
+                         guarded_ref(stopped, ddb_state.snapshot).net_rx_frame,
+                         guarded_ref(stopped, ddb_state.snapshot).net_rx_connection,
+                         guarded_ref(stopped, ddb_state.snapshot).net_rx_capability);
 }
 
 // Issue #524's topology, rendered from records this file wrote rather than
@@ -2629,87 +2656,86 @@ private fn ddb_render_wait() !{unsafe} {
 //
 // Held in a static rather than on the stack: DDB runs on the interrupted
 // stack, and 32 records is two kilobytes of it.
-private let mut ddb_wait_test_records: [ProcessDdbRecord; DDB_PROCESS_RECORDS];
 
-private fn ddb_wait_test_record(index: {0..<DDB_PROCESS_RECORDS as usize},
+private fn ddb_wait_test_record(stopped: borrow MachineStopped[&kernel_world_stop], index: {0..<DDB_PROCESS_RECORDS as usize},
                                 pid: usize, ppid: usize,
                                 state: usize, reason: usize) {
-    ddb_wait_test_records[index].pid = pid;
-    ddb_wait_test_records[index].ppid = ppid;
-    ddb_wait_test_records[index].state = state;
-    ddb_wait_test_records[index].wait_reason = reason;
-    ddb_wait_test_records[index].saved_sp = 0;
-    ddb_wait_test_records[index].stack_bottom = 0;
-    ddb_wait_test_records[index].stack_top = 0;
-    ddb_wait_test_records[index].root_slot = 0;
-    ddb_wait_test_records[index].stack_owner_cpu = KERNEL_MAX_CORES;
-    ddb_wait_test_records[index].affinity_mask = 0;
-    ddb_wait_test_records[index].core0_for_call = false;
-    ddb_wait_test_records[index].tick_wake_core = 0;
-    ddb_wait_test_records[index].tick_wake_due = 0;
+    guarded_ref(stopped, ddb_state.wait_test)[index].pid = pid;
+    guarded_ref(stopped, ddb_state.wait_test)[index].ppid = ppid;
+    guarded_ref(stopped, ddb_state.wait_test)[index].state = state;
+    guarded_ref(stopped, ddb_state.wait_test)[index].wait_reason = reason;
+    guarded_ref(stopped, ddb_state.wait_test)[index].saved_sp = 0;
+    guarded_ref(stopped, ddb_state.wait_test)[index].stack_bottom = 0;
+    guarded_ref(stopped, ddb_state.wait_test)[index].stack_top = 0;
+    guarded_ref(stopped, ddb_state.wait_test)[index].root_slot = 0;
+    guarded_ref(stopped, ddb_state.wait_test)[index].stack_owner_cpu = KERNEL_MAX_CORES;
+    guarded_ref(stopped, ddb_state.wait_test)[index].affinity_mask = 0;
+    guarded_ref(stopped, ddb_state.wait_test)[index].core0_for_call = false;
+    guarded_ref(stopped, ddb_state.wait_test)[index].tick_wake_core = 0;
+    guarded_ref(stopped, ddb_state.wait_test)[index].tick_wake_due = 0;
     for byte: usize in 0..<DDB_COMMAND_BYTES {
-        ddb_wait_test_records[index].command[byte] = 0;
+        guarded_ref(stopped, ddb_state.wait_test)[index].command[byte] = 0;
     }
-    ddb_wait_test_records[index].command_length = 0;
+    guarded_ref(stopped, ddb_state.wait_test)[index].command_length = 0;
 }
 
-private fn ddb_render_wait_test() !{unsafe} {
+private fn ddb_render_wait_test(stopped: borrow MachineStopped[&kernel_world_stop]) !{unsafe} {
     for index: usize in 0..<DDB_PROCESS_RECORDS {
-        ddb_wait_test_record(index, 0, 0, 0, 0);
+        ddb_wait_test_record(stopped, index, 0, 0, 0, 0);
     }
     // #524 itself: grandparent and parent both blocked collecting a child,
     // and the child is the current process, running and waiting for a network
     // event that only an interrupt can deliver.
-    ddb_wait_test_record(0, 1, 0, 3, 2);
-    ddb_wait_test_record(1, 2, 1, 3, 2);
-    ddb_wait_test_record(2, 3, 2, 2, 3);
+    ddb_wait_test_record(stopped, 0, 1, 0, 3, 2);
+    ddb_wait_test_record(stopped, 1, 2, 1, 3, 2);
+    ddb_wait_test_record(stopped, 2, 3, 2, 2, 3);
     // A parent whose child is not in the snapshot -- gone, recycled, or cut
     // off by truncation. Reported as unknown rather than attached to whatever
     // now answers to that number.
-    ddb_wait_test_record(3, 9, 0, 3, 2);
+    ddb_wait_test_record(stopped, 3, 9, 0, 3, 2);
     // The remaining event vocabularies, so every name this view can print is
     // printed by something a lane compares.
     // Parented at 0, which no record in this snapshot claims, so they add
     // event nodes without adding children to the chain above.
-    ddb_wait_test_record(4, 10, 0, 3, 1);
-    ddb_wait_test_record(5, 11, 0, 3, 4);
-    ddb_wait_test_record(6, 12, 0, 3, 5);
+    ddb_wait_test_record(stopped, 4, 10, 0, 3, 1);
+    ddb_wait_test_record(stopped, 5, 11, 0, 3, 4);
+    ddb_wait_test_record(stopped, 6, 12, 0, 3, 5);
     // Blocked on nothing recorded.
-    ddb_wait_test_record(7, 13, 0, 3, 0);
-    ddb_wait_test_record(8, 14, 0, 3, 6);
-    ddb_wait_test_record(9, 15, 0, 3, 3);
+    ddb_wait_test_record(stopped, 7, 13, 0, 3, 0);
+    ddb_wait_test_record(stopped, 8, 14, 0, 3, 6);
+    ddb_wait_test_record(stopped, 9, 15, 0, 3, 3);
     // #876: a NetRx waiter queued on core 1's tick-wake list, retried every
     // tick (due 1). The current process (pid 3) is on no list.
-    ddb_wait_test_records[9].tick_wake_core = 2;
-    ddb_wait_test_records[9].tick_wake_due = 1;
-    ddb_render_wait_from(ddb_wait_test_records as []ProcessDdbRecord,
+    guarded_ref(stopped, ddb_state.wait_test)[9].tick_wake_core = 2;
+    guarded_ref(stopped, ddb_state.wait_test)[9].tick_wake_due = 1;
+    ddb_render_wait_from(guarded_ref(stopped, ddb_state.wait_test) as []ProcessDdbRecord,
                          10, 1, 3, 2, 3, 1, 320, 256, 5, 0, 2, 0);
     // #887: a command line longer than the copied prefix, holding an
     // argument separator and a byte the quoting must not pass through.
     let command: [const u8; DDB_COMMAND_BYTES..] =
         bs"/bin/peer-read\0a\"b\0-x\0mo";
     for byte: usize in 0..<DDB_COMMAND_BYTES {
-        ddb_wait_test_records[4].command[byte] = command[byte];
+        guarded_ref(stopped, ddb_state.wait_test)[4].command[byte] = command[byte];
     }
-    ddb_wait_test_records[4].command_length = 40;
+    guarded_ref(stopped, ddb_state.wait_test)[4].command_length = 40;
     ddb_puts("ddb: waittest ps");
-    ddb_render_process(ddb_wait_test_records[4], 1, 320, 256, 5, 0, 2);
+    ddb_render_process(ddb_wait_test_copy(stopped, 4), 1, 320, 256, 5, 0, 2);
 }
 
-private fn ddb_render_proc(pid: usize) !{unsafe} {
+private fn ddb_render_proc(stopped: borrow MachineStopped[&kernel_world_stop], pid: usize) !{unsafe} {
     for index: usize in 0..<DDB_PROCESS_RECORDS {
-        if (index < ddb_snapshot.process_count &&
-                ddb_snapshot.processes[index].pid == pid) {
+        if (index < guarded_ref(stopped, ddb_state.snapshot).process_count &&
+                guarded_ref(stopped, ddb_state.snapshot).processes[index].pid == pid) {
             ddb_puts("ddb: proc");
-            ddb_render_process(ddb_snapshot.processes[index],
-                ddb_snapshot.uart_rx_queued, ddb_snapshot.uart_tx_queued,
-                ddb_snapshot.uart_tx_low_water, ddb_snapshot.uart_tx_state,
-                ddb_snapshot.net_rx_frame, ddb_snapshot.net_rx_connection);
+            ddb_render_process(ddb_snapshot_record(stopped, index),
+                guarded_ref(stopped, ddb_state.snapshot).uart_rx_queued, guarded_ref(stopped, ddb_state.snapshot).uart_tx_queued,
+                guarded_ref(stopped, ddb_state.snapshot).uart_tx_low_water, guarded_ref(stopped, ddb_state.snapshot).uart_tx_state,
+                guarded_ref(stopped, ddb_state.snapshot).net_rx_frame, guarded_ref(stopped, ddb_state.snapshot).net_rx_connection);
             return;
         }
     }
     ddb_puts("ddb: proc pid not captured");
-    if (ddb_snapshot.process_truncated != 0) { ddb_puts(" (snapshot truncated)"); }
+    if (guarded_ref(stopped, ddb_state.snapshot).process_truncated != 0) { ddb_puts(" (snapshot truncated)"); }
     ddb_puts("\n");
 }
 
@@ -2753,17 +2779,15 @@ private fn kernel_ddb_enter_stopped(
         stopped_world: borrow MachineStopped[&kernel_world_stop],
         frame_sp: usize, entry_kind: usize, entry_source: usize)
         !{interrupt, unsafe} {
-    unsafe {
-        atomic_store_release(ddb_snapshot_published_sequence_address(), 0);
-    }
-    ddb_snapshot.sequence = ddb_snapshot.sequence + 1;
+    atomic_word_store(&ddb_snapshot_published_sequence, 0);
+    guarded_ref(stopped_world, ddb_state.snapshot).sequence = guarded_ref(stopped_world, ddb_state.snapshot).sequence + 1;
     // The logical core, not MPIDR: RPi5 numbers cores in Aff1 and keeps Aff0
     // zero, so `MPIDR & 0xFF` named core 0 for every core. Hidden while only
     // core 0 entered DDB; #830 lets any core enter.
-    ddb_snapshot.cpu = cpu_id();
-    ddb_snapshot.entry_kind = entry_kind;
-    ddb_snapshot.entry_source = entry_source;
-    ddb_snapshot.live_daif = mrs_daif();
+    guarded_ref(stopped_world, ddb_state.snapshot).cpu = cpu_id();
+    guarded_ref(stopped_world, ddb_state.snapshot).entry_kind = entry_kind;
+    guarded_ref(stopped_world, ddb_state.snapshot).entry_source = entry_source;
+    guarded_ref(stopped_world, ddb_state.snapshot).live_daif = mrs_daif();
     // An IRQ may interrupt the EL0 synchronous handler after it unmasks IRQs
     // but before it has finished consuming ESR_EL1. A guarded DDB read then
     // takes a nested Current-EL data abort and replaces ESR_EL1/FAR_EL1. Keep
@@ -2772,48 +2796,48 @@ private fn kernel_ddb_enter_stopped(
     let outer_esr_el1: usize = mrs_esr_el1();
     let outer_far_el1: usize = mrs_far_el1();
     let entry_frame: *ExceptionFrame = unsafe { frame_sp as *ExceptionFrame };
-    ddb_snapshot.saved_daif = entry_frame.spsr_el1 & 0x3C0;
-    ddb_snapshot.esr_valid = 0;
-    ddb_snapshot.esr_el1 = 0;
-    ddb_snapshot.far_el1 = 0;
+    guarded_ref(stopped_world, ddb_state.snapshot).saved_daif = entry_frame.spsr_el1 & 0x3C0;
+    guarded_ref(stopped_world, ddb_state.snapshot).esr_valid = 0;
+    guarded_ref(stopped_world, ddb_state.snapshot).esr_el1 = 0;
+    guarded_ref(stopped_world, ddb_state.snapshot).far_el1 = 0;
     if (entry_kind == 2) {
-        ddb_snapshot.esr_valid = 1;
-        ddb_snapshot.esr_el1 = mrs_esr_el1();
-        ddb_snapshot.far_el1 = mrs_far_el1();
+        guarded_ref(stopped_world, ddb_state.snapshot).esr_valid = 1;
+        guarded_ref(stopped_world, ddb_state.snapshot).esr_el1 = mrs_esr_el1();
+        guarded_ref(stopped_world, ddb_state.snapshot).far_el1 = mrs_far_el1();
     }
-    ddb_snapshot.scheduler_enabled = kernel_process_ddb_scheduler_enabled();
-    ddb_snapshot.reschedule_pending = kernel_process_ddb_reschedule_pending();
-    ddb_snapshot.frame_sp = frame_sp;
+    guarded_ref(stopped_world, ddb_state.snapshot).scheduler_enabled = kernel_process_ddb_scheduler_enabled();
+    guarded_ref(stopped_world, ddb_state.snapshot).reschedule_pending = kernel_process_ddb_reschedule_pending();
+    guarded_ref(stopped_world, ddb_state.snapshot).frame_sp = frame_sp;
     if (kernel_process_stopped_metadata_busy(stopped_world)) {
         ddb_puts("ddb: process metadata unavailable reason=pool-busy\n");
     }
     let mut current_record = kernel_process_current_stopped_record(stopped_world);
-    ddb_snapshot.process_pid = current_record.pid;
-    ddb_snapshot.parent_pid = current_record.ppid;
-    ddb_snapshot.process_state = current_record.state;
-    ddb_snapshot.wait_reason = current_record.wait_reason;
-    ddb_snapshot.root_slot = process_slot_address(kernel_process_stopped_current_slot());
+    guarded_ref(stopped_world, ddb_state.snapshot).process_pid = current_record.pid;
+    guarded_ref(stopped_world, ddb_state.snapshot).parent_pid = current_record.ppid;
+    guarded_ref(stopped_world, ddb_state.snapshot).process_state = current_record.state;
+    guarded_ref(stopped_world, ddb_state.snapshot).wait_reason = current_record.wait_reason;
+    guarded_ref(stopped_world, ddb_state.snapshot).root_slot = process_slot_address(kernel_process_stopped_current_slot());
     let mut vm: AddressSpaceDiagnosticSnapshot =
-        ddb_vm_snapshot_stopped(stopped_world, scheduled_process_address_space_root_stopped(stopped_world, root_slot_of_key(ddb_snapshot.root_slot)), ddb_snapshot.process_pid);
-    ddb_snapshot.root_live = 0;
-    if (vm.live) { ddb_snapshot.root_live = 1; }
-    ddb_snapshot.root_l1 = vm.l1_physical;
-    ddb_snapshot.root_asid = vm.asid;
+        ddb_vm_snapshot_stopped(stopped_world, scheduled_process_address_space_root_stopped(stopped_world, root_slot_of_key(guarded_ref(stopped_world, ddb_state.snapshot).root_slot)), guarded_ref(stopped_world, ddb_state.snapshot).process_pid);
+    guarded_ref(stopped_world, ddb_state.snapshot).root_live = 0;
+    if (vm.live) { guarded_ref(stopped_world, ddb_state.snapshot).root_live = 1; }
+    guarded_ref(stopped_world, ddb_state.snapshot).root_l1 = vm.l1_physical;
+    guarded_ref(stopped_world, ddb_state.snapshot).root_asid = vm.asid;
     for fd: usize in 0..<CRASH_FD_SNAPSHOT_SLOTS {
-        ddb_snapshot.fd_kind[fd] = 0;
-        ddb_snapshot.fd_object[fd] = 0;
-        match kernel_fd_table_stopped_entry(stopped_world, ddb_snapshot.root_slot, fd) {
+        guarded_ref(stopped_world, ddb_state.snapshot).fd_kind[fd] = 0;
+        guarded_ref(stopped_world, ddb_state.snapshot).fd_object[fd] = 0;
+        match kernel_fd_table_stopped_entry(stopped_world, guarded_ref(stopped_world, ddb_state.snapshot).root_slot, fd) {
             FdDiagnosticResult::Ready(entry) => {
-                ddb_snapshot.fd_kind[fd] = diagnostic_fd_kind_code(entry.kind);
-                ddb_snapshot.fd_object[fd] = entry.object;
+                guarded_ref(stopped_world, ddb_state.snapshot).fd_kind[fd] = diagnostic_fd_kind_code(entry.kind);
+                guarded_ref(stopped_world, ddb_state.snapshot).fd_object[fd] = entry.object;
             }
             FdDiagnosticResult::Busy => {
-                ddb_snapshot.fd_kind[fd] = 7;
+                guarded_ref(stopped_world, ddb_state.snapshot).fd_kind[fd] = 7;
                 ddb_puts("ddb: fd unavailable fd="); ddb_put_udec(fd);
                 ddb_puts(" reason=pool-busy\n");
             }
             FdDiagnosticResult::Stale => {
-                ddb_snapshot.fd_kind[fd] = 8;
+                guarded_ref(stopped_world, ddb_state.snapshot).fd_kind[fd] = 8;
                 ddb_puts("ddb: fd unavailable fd="); ddb_put_udec(fd);
                 ddb_puts(" reason=stale-context\n");
             }
@@ -2821,42 +2845,38 @@ private fn kernel_ddb_enter_stopped(
     }
     let mut process_copy: ProcessDdbCopyResult =
         kernel_process_ddb_copy(stopped_world,
-            ddb_snapshot.processes as []ProcessDdbRecord);
-    ddb_snapshot.process_count = process_copy.count;
-    ddb_snapshot.process_truncated = 0;
-    if (process_copy.truncated) { ddb_snapshot.process_truncated = 1; }
-    ddb_snapshot.uart_rx_queued = kernel_uart_rx_queued_hint();
-    ddb_snapshot.uart_tx_queued = kernel_log_tx_queue_count();
-    ddb_snapshot.uart_tx_low_water = kernel_log_tx_writer_low_water();
-    ddb_snapshot.uart_tx_state = kernel_log_tx_ddb_state();
+            guarded_ref(stopped_world, ddb_state.snapshot).processes as []ProcessDdbRecord);
+    guarded_ref(stopped_world, ddb_state.snapshot).process_count = process_copy.count;
+    guarded_ref(stopped_world, ddb_state.snapshot).process_truncated = 0;
+    if (process_copy.truncated) { guarded_ref(stopped_world, ddb_state.snapshot).process_truncated = 1; }
+    guarded_ref(stopped_world, ddb_state.snapshot).uart_rx_queued = kernel_uart_rx_queued_hint();
+    guarded_ref(stopped_world, ddb_state.snapshot).uart_tx_queued = kernel_log_tx_queue_count();
+    guarded_ref(stopped_world, ddb_state.snapshot).uart_tx_low_water = kernel_log_tx_writer_low_water();
+    guarded_ref(stopped_world, ddb_state.snapshot).uart_tx_state = kernel_log_tx_ddb_state();
     // GitHub issue #959: the driver's lock-free reading; DDB takes no lock
     // and no ring owner (#920).
     let frame_pending: NetPendingState =
         kernel_net_rx_frame_pending(stopped_world);
-    ddb_snapshot.net_rx_frame = net_pending_state_code(frame_pending);
+    guarded_ref(stopped_world, ddb_state.snapshot).net_rx_frame = net_pending_state_code(frame_pending);
     let connection_pending = kernel_tcp_ddb_connection_pending();
-    ddb_snapshot.net_rx_connection = net_pending_state_code(connection_pending);
-    ddb_snapshot.net_rx_capability =
+    guarded_ref(stopped_world, ddb_state.snapshot).net_rx_connection = net_pending_state_code(connection_pending);
+    guarded_ref(stopped_world, ddb_state.snapshot).net_rx_capability =
         net_pending_state_code(network_capability_ddb_stored());
     for index: usize in 0..<DDB_PROCESS_RECORDS {
-        ddb_snapshot.process_l2[index] = 0;
-        if (index < ddb_snapshot.process_count) {
+        guarded_ref(stopped_world, ddb_state.snapshot).process_l2[index] = 0;
+        if (index < guarded_ref(stopped_world, ddb_state.snapshot).process_count) {
             let mut process_vm: AddressSpaceDiagnosticSnapshot =
                 ddb_vm_snapshot_stopped(stopped_world,
-                    scheduled_process_address_space_root_stopped(stopped_world, root_slot_of_key(ddb_snapshot.processes[index].root_slot)),
-                    ddb_snapshot.processes[index].pid);
+                    scheduled_process_address_space_root_stopped(stopped_world, root_slot_of_key(guarded_ref(stopped_world, ddb_state.snapshot).processes[index].root_slot)),
+                    guarded_ref(stopped_world, ddb_state.snapshot).processes[index].pid);
             if (process_vm.live) {
-                ddb_snapshot.process_l2[index] = process_vm.l2_physical;
+                guarded_ref(stopped_world, ddb_state.snapshot).process_l2[index] = process_vm.l2_physical;
             }
         }
     }
-    ddb_snapshot.trace_count = kernel_process_crash_trace_copy(
-        ddb_snapshot.trace as []usize);
-    unsafe {
-        atomic_store_release(
-            ddb_snapshot_published_sequence_address(),
-            ddb_snapshot.sequence);
-    }
+    guarded_ref(stopped_world, ddb_state.snapshot).trace_count = kernel_process_crash_trace_copy(
+        guarded_ref(stopped_world, ddb_state.snapshot).trace as []usize);
+    atomic_word_store(&ddb_snapshot_published_sequence, guarded_ref(stopped_world, ddb_state.snapshot).sequence);
     // GitHub issue #454: the debugger is a terminal path, so the console
     // stands down to its pre-queue behaviour here. Everything queued reaches
     // the wire first -- ddb_puts writes through uart_debug_putc, which spins
@@ -2883,7 +2903,7 @@ private fn kernel_ddb_enter_stopped(
     ddb_puts("ddb: world-stop complete mask=");
     ddb_put_hex(machine_stopped_mask(stopped_world));
     ddb_puts("\n");
-    ddb_render_oops();
+    ddb_render_oops(stopped_world);
     let mut line: [u8; CRASH_CONSOLE_LINE_BYTES];
     let mut length: usize = 0;
     let mut stopped: bool = true;
@@ -2905,25 +2925,25 @@ private fn kernel_ddb_enter_stopped(
             ddb_puts("ddb: continuing\n");
             stopped = false;
         } else if (ddb_command_is(line as []u8, length, bs"oops")) {
-            ddb_render_oops();
+            ddb_render_oops(stopped_world);
         } else if (ddb_command_is(line as []u8, length, bs"regs")) {
-            ddb_render_regs();
+            ddb_render_regs(stopped_world);
         } else if (ddb_command_is(line as []u8, length, bs"current")) {
             ddb_render_current(stopped_world);
         } else if (ddb_command_is(line as []u8, length, bs"intr")) {
-            ddb_render_intr();
+            ddb_render_intr(stopped_world);
         } else if (ddb_command_is(line as []u8, length, bs"sched")) {
-            ddb_render_sched();
+            ddb_render_sched(stopped_world);
         } else if (ddb_command_is(line as []u8, length, bs"vm")) {
-            ddb_render_vm();
+            ddb_render_vm(stopped_world);
         } else if (ddb_command_is(line as []u8, length, bs"fds")) {
-            ddb_render_fds();
+            ddb_render_fds(stopped_world);
         } else if (ddb_command_is(line as []u8, length, bs"ps")) {
-            ddb_render_ps();
+            ddb_render_ps(stopped_world);
         } else if (ddb_command_is(line as []u8, length, bs"stacks")) {
-            ddb_render_stacks();
+            ddb_render_stacks(stopped_world);
         } else if (ddb_command_is(line as []u8, length, bs"wait")) {
-            ddb_render_wait();
+            ddb_render_wait(stopped_world);
         } else if (ddb_command_is(line as []u8, length, bs"events")) {
             ddb_render_events();
         } else if (ddb_command_is(line as []u8, length, bs"unimpl")) {
@@ -2933,13 +2953,13 @@ private fn kernel_ddb_enter_stopped(
         } else {
             match ddb_parse_backtrace(line as []u8, length) {
                 DdbBacktraceCommand::Current => {
-                    ddb_render_backtrace_current();
+                    ddb_render_backtrace_current(stopped_world);
                 }
                 DdbBacktraceCommand::Cpu(core) => {
-                    ddb_render_backtrace_cpu(core);
+                    ddb_render_backtrace_cpu(stopped_world, core);
                 }
                 DdbBacktraceCommand::Process(pid) => {
-                    ddb_render_backtrace_process(pid);
+                    ddb_render_backtrace_process(stopped_world, pid);
                 }
                 DdbBacktraceCommand::Invalid => {
                     ddb_puts("ddb: usage: bt [PID|cpu N]\n");
@@ -2970,15 +2990,15 @@ private fn kernel_ddb_enter_stopped(
                     }
                     DdbUserMemoryCommand::NotUserMemory => {
                      match crash_console_parse_proc(line as []u8, length) {
-                    CrashConsolePidResult::Parsed(pid) => { ddb_render_proc(pid); }
+                    CrashConsolePidResult::Parsed(pid) => { ddb_render_proc(stopped_world, pid); }
                     CrashConsolePidResult::Invalid => {
                     if (ddb_command_is(line as []u8, length, bs"trace")) {
-                        ddb_render_trace();
+                        ddb_render_trace(stopped_world);
                     } else if (ddb_command_starts_with(line as []u8, length, bs"trace ")) {
                         ddb_command_trace(ddb_parse_trace(line as []u8, length));
                     } else if (kernel_ddb_backtrace_test_enabled &&
                             ddb_command_is(line as []u8, length, bs"bttest")) {
-                        ddb_render_backtrace_test();
+                        ddb_render_backtrace_test(stopped_world);
                     } else if (kernel_ddb_memory_fault_test_enabled &&
                             ddb_command_is(line as []u8, length, bs"xkfault")) {
                         // Test-only bypass of the ordinary-RAM classifier:
@@ -3013,7 +3033,7 @@ private fn kernel_ddb_enter_stopped(
                         // Test-only: issue #524's topology from records this
                         // file wrote, so the presentation is compared by a
                         // lane instead of waiting for the stall to recur.
-                        ddb_render_wait_test();
+                        ddb_render_wait_test(stopped_world);
                     } else if (ddb_command_is(line as []u8, length, bs"help")) {
                         ddb_puts("commands: oops regs intr sched current vm fds ps stacks wait proc PID bt [PID|cpu N] trace [on|off|all|omit EVENT|pid PID|pid none] events unimpl log xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] profile stop|dump help continue\n");
                     } else {

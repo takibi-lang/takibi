@@ -7180,6 +7180,9 @@ and check_array_field_base_has_address ~fname senv eenv tyenv fenv
   match strip_singleton base_ty with
   | TStruct _ | TIndexedStruct _ ->
       (match base.desc with
+       (* #1159: guarded_ref is the guarded field itself, a place with an
+          address, not a call's temporary. *)
+       | Ast.Call ("guarded_ref", _) -> ()
        | Ast.Call _ ->
            raise (TypeError (base.loc, Printf.sprintf
              "cannot use array field '.%s' of a call's result: it is a \
@@ -7333,6 +7336,9 @@ and byte_view_source senv eenv tyenv fenv (e : Ast.expr) (src_ty : ty) : bool =
   pointee_known
   && (match e.desc with
       | Ast.StringLit _ -> false
+      (* #1159 (2): a guarded array field is an array place, not a byte
+         view of a pointer; the slice cast's own guarded_ref case types it. *)
+      | Ast.Call ("guarded_ref", _) -> false
       | Ast.Var _ | Ast.FieldGet _ ->
           (match repr (place_undecayed_type senv eenv tyenv fenv e) with
            | TArray _ -> false

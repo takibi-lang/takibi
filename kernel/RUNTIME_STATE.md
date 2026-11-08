@@ -148,7 +148,7 @@ also be snapshotted and printed without a crash by
 row formatter, and neither prints from a scheduler or interrupt writer.
 
 `exception_evidence.tkb`'s per-core crash snapshots/capture guards and the
-machine-global `ddb_snapshot`. Core 0 records into element 0 like every
+machine-global `ddb_state.snapshot` (guarded_by(kernel_world_stop), #1159). Core 0 records into element 0 like every
 other core; the GDB scripts read `crash_snapshot_per_core` by name (#822).
 
 **Why global:** the terminal crash record must survive the failing context,
@@ -169,7 +169,7 @@ not the same claim as a single reader.**
 | DDB's guarded-read arming (#456) | its WRITER is the one core inspecting, which the world-stop token guarantees, but its READER is whichever core takes a data abort. A peer's real fault at DDB's armed address was answered by DDB's read |
 | the stopped-peer unwind roots (#505) | each core publishes its own as it enters the world-stop holding pen, which is the only moment its interrupted frame is addressable |
 
-`ddb_snapshot` itself stays machine-global on purpose: it has exactly one
+`ddb_state.snapshot` itself stays machine-global on purpose: it has exactly one
 writer and the complete world-stop token is what says so.
 
 ### VM / address-space (`kernel/mm/`, `kernel/arch/arm64/mm/`)

@@ -12356,6 +12356,19 @@ linear struct Owner746b[page: usize] {
       fn bad1159(g: borrow G1159[&other1159]) {
         poke1159(guarded_ref(g, st1159.rows)[0].bytes as []u8);
       }"));
+  (* #1159 (3D): a struct-typed guarded field, its array field indexed, and
+     its struct-element array passed as a borrowed slice. *)
+  Alcotest.test_case "guarded_ref: an array field below a struct field, accepted" `Quick
+    (expect_codegen_ok (guarded_ref_base ^ "
+      struct Snap1159 { n: usize; rows: [Row1159; 2]; }
+      struct Ddb1159 { private snap: Snap1159 guarded_by(m1159); }
+      private let mut ddb1159: Ddb1159;
+      fn walk1159(rows: borrow [Row1159; 2..]) -> usize { return rows[1].block; }
+      fn ok1159(g: borrow G1159[&m1159]) -> usize {
+        guarded_ref(g, ddb1159.snap).rows[1].block = 4;
+        return walk1159(guarded_ref(g, ddb1159.snap).rows as []Row1159)
+          + guarded_ref(g, ddb1159.snap).rows[0].block;
+      }"));
   Alcotest.test_case "guarded_ref needs a guarded_by field" `Quick
     (expect_type_error "declares no guarded_by lock"
        (guarded_ref_base ^ "
