@@ -535,3 +535,11 @@ entries below that date are history, left as written.
   mutator that logs or fences takes the guard as a parameter, and the boot
   fixture takes the lock around its mutation checks, so
   buildcheck_ext2_mutation_guard.py exempts no file.
+- 2026-11-08: the xHCI doorbell and await timeout (#1159 step A).
+  `xhci_doorbell_target`, `xhci_doorbell_value` and `xhci_await_timeout`
+  leave the allowlist: they belong to one submission, so they are value
+  arguments of the `XhciRing` actions (`xhci_ring_publish(Ready, target,
+  doorbell)`, `xhci_ring_event(InFlight[req], timeout)`; SPEC.md, Protocol
+  Declarations), passed by `xhci_ring_submit` to the generated wrappers and
+  by them to the lowerings, with no global and no owner field (no owner
+  copy, unlike #1395 state data).

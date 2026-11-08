@@ -37,12 +37,17 @@ const XHCI_RING_BULK_OUT: usize = 3;
 protocol XhciRing[inst: usize] retains region(Trb)[b, XHCI_RING_TRBS] tx {
     // The producer's enqueue index and cycle state travel with the owner
     // (GitHub issue #1395): carried across publish and completion, set
-    // only by this file (xhci_ring_set_cursor, xhci_ring_restart).
+    // only by this file (xhci_ring_set_cursor, xhci_ring_restart). What a
+    // publication rings and how long its event is awaited belong to that
+    // one submission, not to the ring, so they are the actions' value
+    // arguments (GitHub issue #1159), passed by xhci_ring_submit.
     state Ready access write addressed { enq: usize = 0; cycle: u32 = 1; }
     state InFlight[req] device { enq: usize = 0; cycle: u32 = 1; }
     init Ready;
-    transition xhci_ring_publish(Ready) -> InFlight[fresh req];
-    observe xhci_ring_event(InFlight[req]) -> Completed[req] completes | Silent;
+    transition xhci_ring_publish(Ready, target: usize, doorbell: u32)
+        -> InFlight[fresh req];
+    observe xhci_ring_event(InFlight[req], timeout: usize)
+        -> Completed[req] completes | Silent;
     transition xhci_ring_complete(InFlight[req], Completed[req]) -> Ready;
     observe xhci_ring_reset_seen(InFlight[req]) -> Quiet[req] quiesces | Live;
     transition xhci_ring_reclaim(InFlight[req], Quiet[req]) -> Ready;
@@ -55,11 +60,8 @@ private region let mut xhci_ep0_ring: [Trb; 16] align(64);
 private region let mut xhci_bulk_in_ring: [Trb; 16] align(64);
 private region let mut xhci_bulk_out_ring: [Trb; 16] align(64);
 
-// What the next publication rings and waits for (set by xhci_ring_submit).
-private let mut xhci_doorbell_target: usize = 0;
-private let mut xhci_doorbell_value: u32 = 0;
+// What the next publication waits for (set by xhci_ring_submit).
 private let mut xhci_await_want: XhciEventWant = { 0, 0, 0, 0, 0 };
-private let mut xhci_await_timeout: usize = 0;
 private let mut xhci_await_cc: u32 = 0;
 // Command Completion Events observed on the Command ring (xhci_input_used).
 private let mut xhci_cmd_completions: usize = 0;
@@ -69,12 +71,13 @@ private let mut xhci_rings_claimed: bool = false;
 let mut xhci_rings_quiesced: bool = false;
 
 // The doorbell: runs after the clean and the state change.
-fn xhci_ring_publish(s: borrow XhciRing_InFlight[b, o, 16, r]) {
-    xhci_ring_doorbell(xhci_doorbell_target, xhci_doorbell_value);
+fn xhci_ring_publish(s: borrow XhciRing_InFlight[b, o, 16, r],
+                     target: usize, doorbell: u32) {
+    xhci_ring_doorbell(target, doorbell);
 }
-fn xhci_ring_event(s: borrow XhciRing_InFlight[b, o, 16, r])
+fn xhci_ring_event(s: borrow XhciRing_InFlight[b, o, 16, r], timeout: usize)
         -> XhciRing_xhci_ring_event_Raw !{unsafe} {
-    xhci_await_cc = usb_await_event(xhci_await_want, xhci_await_timeout);
+    xhci_await_cc = usb_await_event(xhci_await_want, timeout);
     if (xhci_await_cc == 0) { return XhciRing_xhci_ring_event_Raw::Silent; }
     return XhciRing_xhci_ring_event_Raw::Completed;
 }
@@ -405,8 +408,6 @@ fn xhci_ring_submit(i: usize, target: usize, value: u32, first: usize,
                             XhciRing_Ready_write(ready, at, td[k]);
                         }
                     }
-                    xhci_doorbell_target = target;
-                    xhci_doorbell_value = value;
                     let base: usize = xhci_ring_base_dma(ready);
                     if (i == XHCI_RING_CMD) {
                         xhci_await_want = xhci_event_want_command(base + first * 16);
@@ -415,10 +416,9 @@ fn xhci_ring_submit(i: usize, target: usize, value: u32, first: usize,
                             base + first * 16, base + last * 16,
                             target as u32, value);
                     }
-                    xhci_await_timeout = timeout;
-                    match XhciRing_xhci_ring_publish(ready) {
+                    match XhciRing_xhci_ring_publish(ready, target, value) {
                         XhciRing_xhci_ring_publish_Result::InFlight(flight) => {
-                            match XhciRing_xhci_ring_event(flight) {
+                            match XhciRing_xhci_ring_event(flight, timeout) {
                                 XhciRing_xhci_ring_event_Outcome::Completed(done) => {
                                     if (i == XHCI_RING_CMD) {
                                         xhci_cmd_completions = xhci_cmd_completions + 1;
