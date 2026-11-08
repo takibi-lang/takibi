@@ -2681,7 +2681,7 @@ fn kernel_boot_log_resource_exhausted(resource: *u8, capacity: usize) {
 // element outside any region, and the record tag and the commit pick a CPU.
 fn kernel_log_execution_model_assumption() {
     static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "log.tkb's raw cpu_id() reads outside a region (the emergency entry, the boot probes, the record tag) are reviewed at the flip (GitHub issue #638)");
+                  "log.tkb's raw CPU-id reads outside a region (the emergency entry, the boot probes, the record tag) are reviewed at the flip (GitHub issue #638)");
 }
 
 // Encode within the available room before publishing. Every CPU holds the
