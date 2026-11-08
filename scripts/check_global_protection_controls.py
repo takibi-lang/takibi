@@ -85,6 +85,18 @@ def main():
     expect("unknown class is refused",
            refused(lambda: g.parse_table(table(row("kernel/a.tkb", "x", "locked")), "t")))
 
+    # 2026-11-08 #1159 (3A): a listed scalar is debugger_set; an aggregate
+    # or an unlisted name is not.
+    arms = table(row("kernel/a.tkb", "arm"), row("kernel/a.tkb", "free"),
+                 ("kernel/a.tkb", "1", "big", "private", "-", "Rec", "none"))
+    armed = g.globals_of([("t", arms)], debugger_set={"arm", "big"})
+    expect("a listed scalar is debugger_set",
+           armed[("kernel/a.tkb", "arm")]["protection"] == "debugger_set")
+    expect("an unlisted scalar stays unprotected",
+           armed[("kernel/a.tkb", "free")]["protection"] == "none")
+    expect("a listed aggregate stays unprotected",
+           armed[("kernel/a.tkb", "big")]["protection"] == "none")
+
     # GitHub issue #1201: the --drop/--prune rewrite.
     moved = table(row("kernel/a.tkb", "x"), row("kernel/a.tkb", "w", "atomic"),
                   row("kernel/b.tkb", "x", "atomic"))

@@ -49,6 +49,11 @@ from pass_line import report_pass
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ALLOWLIST = ROOT / "scripts" / "global_protection_allowlist.tsv"
+# 2026-11-08 #1159 (3A): a scalar global that only a debugger writes is
+# protected by having no program writer, which buildcheck_unread_globals.py
+# refuses for every row of this table. Listing it is what grants the class.
+DEBUGGER_SET = ROOT / "scripts" / "debugger_set_globals.tsv"
+DEBUGGER_SET_TYPES = {"bool", "u8", "u16", "u32", "u64", "usize"}
 FORMAT = 3
 USES_MARK = "# uses"
 WRITE_KINDS = {"write", "atomic_store"}
@@ -56,7 +61,8 @@ READ_BY = re.compile(r"read-by ([^\s:,]+(?:,[^\s:,]+)*): \S")
 HEADER = "# takibi globals, format "
 COLUMNS = ("file", "line", "name", "visibility", "qualifier", "type", "protection")
 PROTECTED = {"atomic", "lock", "per_cpu", "region", "place", "dma_fixed",
-             "protocol", "boot_once", "set_once", "stop", "composite", "slot_owned"}
+             "protocol", "boot_once", "set_once", "stop", "composite", "slot_owned",
+             "debugger_set"}
 UNPROTECTED = {"none"}
 
 
@@ -113,12 +119,23 @@ def unprotected(row):
     return row["protection"] in UNPROTECTED or row["qualifier"] == "scratch"
 
 
-def globals_of(tables):
-    """(file, name) -> row, the union over both kernels."""
+def debugger_set_names(path=DEBUGGER_SET):
+    lines = path.read_text(encoding="utf-8").splitlines()[1:]
+    return {line.split("\t")[0] for line in lines if line.strip()}
+
+
+def globals_of(tables, debugger_set=None):
+    """(file, name) -> row, the union over both kernels. A scalar row named
+    in scripts/debugger_set_globals.tsv is classified `debugger_set`."""
+    if debugger_set is None:
+        debugger_set = debugger_set_names()
     found = {}
     for origin, text in tables:
         for row in parse_table(text, origin):
             if production(row["file"]):
+                if (row["name"] in debugger_set and row["protection"] in UNPROTECTED
+                        and row["type"] in DEBUGGER_SET_TYPES):
+                    row = dict(row, protection="debugger_set")
                 found.setdefault((row["file"], row["name"]), row)
     if not found:
         raise TableError("no production globals in the tables")

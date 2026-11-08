@@ -573,3 +573,9 @@ entries below that date are history, left as written.
   lz4_image_expand_chunk and the new per-batch helpers only as borrowed
   slices of `guarded_ref`. disk_read_sectors, disk_write_sectors and
   disk_write take their buffer as `borrow`. Two rows leave the allowlist.
+- 2026-11-08: debugger-set arms (#1159 (3A)). A scalar global (bool or an
+  unsigned integer) listed in scripts/debugger_set_globals.tsv is class
+  `debugger_set`: only a debugger writes it, and
+  buildcheck_unread_globals.py refuses a program write to any listed name.
+  The seven `kernel_ddb_*` arms and `diagnostic_trace_test_enabled` leave
+  the allowlist. An aggregate stays unprotected even when listed.
