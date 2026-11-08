@@ -2878,13 +2878,18 @@ fn process_image_gap_is_unmapped(pages: borrow ProcessImagePages[image]) -> bool
 //
 // The pool initializer is shared but not concurrent: secondary-core startup
 // calls process_image_pool_init_before_secondary() before PSCI can make core 1
-// visible. Every per-operation and diagnostic scalar above is per-core.
-// Within one core those operation records still assume a kernel path runs to
-// completion before another process can overwrite the same slot.
-fn process_image_execution_model_assumption() {
-    static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "process_image's operation records assume a kernel path runs to completion on its core; review at the preemption flip (GitHub issue #638)");
-}
+// visible.
+//
+// GitHub issue #638 stage 9 review (2026-11-08): nothing here rests on
+// KERNEL_PREEMPTIBLE any more, so the assert that stood here is retired and
+// kernel/EXECUTION_MODEL exempts the file. Each global, as it is now:
+// - process_image_staging: owned_by a linear ProcessImageSlot, which a
+//   switched-away holder keeps, so no other task reaches its element.
+// - process_image_slot_words and the counts: AtomicWord.
+// - process_image_pool and mmap_region_pool: rank-39 pool locks whose
+//   wrappers hold the preempt count across the hold (preempt_lock_raise, #1350).
+// - process_image_root0_record: SetOnce.
+// - process_image_zero_page: never written (zero at boot), only compared.
 
 // Samples allocator metadata while holding only this pool allocation guard.
 fn process_image_pool_space_stats() -> (usize, usize, usize, usize) !{unsafe} {
