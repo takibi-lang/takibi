@@ -610,3 +610,9 @@ entries below that date are history, left as written.
 - 2026-11-08: `virtio_blk_used_claimed` is `SetOnce(bool)`, as the xHCI
   claims (#1159). A region gone at the first claim publishes false, and
   later calls answer the published value. One row leaves the allowlist.
+- 2026-11-08: `xhci_init_description` is `XhciInitRecord.description`,
+  `guarded_by(block_device_lock)` (#1159, coordinator call (a): the boot
+  report's caller may block). disk_initialize writes it under its guard;
+  usb_disk_init_last_report takes the guard, and
+  kernel_boot_log_usb_init_failure takes and gives back the block device
+  before it logs. One row leaves the allowlist.

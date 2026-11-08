@@ -152,7 +152,14 @@ fn kernel_test_platform_network(phase: borrow TestDriverPhase[driver]) {
 // no UART dependency, and a hardware test reading this log learns whether
 // to look at the controller, the port, the descriptor, or the drive.
 fn kernel_boot_log_usb_init_failure() {
-    match usb_disk_init_last_report() {
+    // The record is read under the block device guard (#1159), taken and
+    // given back before any line is written.
+    let slot: BlockSlot[0] = block_slot_acquire();
+    let guard = block_device_take(slot);
+    let report: UsbInitReportResult = usb_disk_init_last_report(guard);
+    block_device_give(guard);
+    block_slot_release(slot);
+    match report {
         UsbInitReportResult::NotRun => {
             kernel_boot_log("usb msc: initialization failed stage=not-run\n");
         }

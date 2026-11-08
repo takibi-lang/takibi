@@ -1478,10 +1478,13 @@ fn usb_disk_initialize_stages(guard: borrow BlockDeviceGuard[&block_device_lock]
 // callers that have nothing to do with USB, and matching a must_use outcome
 // consumes it, so the detail is written down at the one place that holds it
 // rather than recomputed by whoever wants to print it.
-private let mut xhci_init_description: UsbInitDescription;
+// GitHub issue #1159: written by disk_initialize and read by the report,
+// both under block_device_lock.
+struct XhciInitRecord { private description: UsbInitDescription guarded_by(block_device_lock); }
+private let mut xhci_init_record: XhciInitRecord;
 private let mut xhci_init_attempted: AtomicWord;
 
-// NotRun is not a formality: xhci_init_description is BSS until the first
+// NotRun is not a formality: xhci_init_record.description is BSS until the first
 // bring-up writes it, and its stage is a pointer. A caller that asks before
 // disk_initialize() has ever run gets a case to handle instead of a null to
 // walk.
@@ -1490,11 +1493,19 @@ must_use variant UsbInitReportResult {
     Report(UsbInitDescription);
 }
 
-fn usb_disk_init_last_report() -> UsbInitReportResult {
+fn usb_disk_init_last_report(guard: borrow BlockDeviceGuard[&block_device_lock]) -> UsbInitReportResult {
     if (atomic_word_load(&xhci_init_attempted) == 0) {
         return UsbInitReportResult::NotRun;
     }
-    return UsbInitReportResult::Report(xhci_init_description);
+    let mut description: UsbInitDescription = {
+        guarded_ref(guard, xhci_init_record.description).failed,
+        guarded_ref(guard, xhci_init_record.description).stage,
+        guarded_ref(guard, xhci_init_record.description).has_code,
+        guarded_ref(guard, xhci_init_record.description).code,
+        guarded_ref(guard, xhci_init_record.description).attempts,
+        guarded_ref(guard, xhci_init_record.description).last_code
+    };
+    return UsbInitReportResult::Report(description);
 }
 
 // The Media Access Interface entry point, unchanged for its callers: the
@@ -1503,7 +1514,12 @@ fn usb_disk_init_last_report() -> UsbInitReportResult {
 fn disk_initialize(guard: borrow BlockDeviceGuard[&block_device_lock]) -> DiskIoResult {
     let mut description: UsbInitDescription =
         usb_init_outcome_describe(usb_disk_initialize_stages(guard));
-    xhci_init_description = description;
+    guarded_ref(guard, xhci_init_record.description).failed = description.failed;
+    guarded_ref(guard, xhci_init_record.description).stage = description.stage;
+    guarded_ref(guard, xhci_init_record.description).has_code = description.has_code;
+    guarded_ref(guard, xhci_init_record.description).code = description.code;
+    guarded_ref(guard, xhci_init_record.description).attempts = description.attempts;
+    guarded_ref(guard, xhci_init_record.description).last_code = description.last_code;
     atomic_word_store(&xhci_init_attempted, 1);
     if (description.failed) {
         return DiskIoResult::Err(-1);

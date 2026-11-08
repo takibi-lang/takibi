@@ -93,6 +93,5 @@ kernel/platform/rpi5/usb_xhci.tkb	rp1_xhci_db	read-by rpi5_xhci_attach_bootstrap
 kernel/platform/rpi5/usb_xhci.tkb	rp1_xhci_op	read-by xhci_address_device,xhci_halt_and_reset: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
 kernel/platform/rpi5/usb_xhci.tkb	rp1_xhci_rt	read-by xhci_irq_handler,xhci_setup_rings_and_start: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
 kernel/platform/rpi5/usb_xhci.tkb	xhci_dcbaa	read-by xhci_address_device,xhci_dcbaa_clean: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after; the controller reads it by DMA
-kernel/platform/rpi5/usb_xhci.tkb	xhci_init_description	read-by usb_disk_init_last_report: 2026-10-31 boot: set by disk_initialize on core 0 and read-only after
 kernel/printk/log.tkb	kernel_log_core_state	read-by kernel_log_raw_staged_length,scripts/kernel_console.gdb: 2026-11-01 partition: own element in a preempt_off region (or where no task can switch), an owner word keeps two writers' text apart; other CPUs read it only under the world stop
 kernel/printk/log.tkb	kernel_log_storm_found	read-by kernel_log_storm_check,kernel_log_storm_found_mask: 2026-10-31 retain-fixture: core 0 verifier after every writer of the round finished
