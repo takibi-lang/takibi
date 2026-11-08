@@ -16,10 +16,12 @@
 // Current limitations (2026-11-06):
 // - One window at a time, over the whole machine; a second opener overwrites
 //   the first. /bin/protocol-trace is the only caller, once per boot.
-// - The switch is taken only at the spin's PC, so this says nothing about
-//   preempting any real handler. A scratch window over real syscalls held on
-//   QEMU and RPi5 (#638 comments of 2026-11-04/05, not a soak); the lasting
-//   evidence is stage 9's to produce.
+// - The spin window switches only at the spin's PC. The real window (#638
+//   stage 9 (c), maintainer option A1, 2026-11-07) admits any PC of the
+//   opener's syscalls: /bin/protocol-trace opens it around a loop of ext2
+//   reads on one CPU, beside a child spinning at EL0, and checks every read's
+//   bytes. One CPU only: a real handler moved across CPUs is not exercised
+//   here. Not a soak: one window per boot.
 // - Nothing resets the priority mask on an El1 resume (maintainer,
 //   2026-11-05): the scenario checks the shadow after its cross-CPU take,
 //   the consult refuses a tick that interrupted a masked shadow, and every
@@ -39,6 +41,10 @@ fn el1_preempt_window_premise() {
 private let mut el1_preempt_window_pid: AtomicWord;
 // EL1 ticks that switched.
 private let mut el1_preempt_switches: AtomicWord;
+// 1 while the open window is the real one: any PC of the opener's syscalls.
+private let mut el1_preempt_window_real: AtomicWord;
+// el1_preempt_switches when the real window opened.
+private let mut el1_preempt_real_base: AtomicWord;
 // EL1 ticks inside the window that the count refused.
 private let mut el1_preempt_count_refusals: AtomicWord;
 // Resumes of an El1 frame through el0_irq_entry's return.
@@ -60,12 +66,29 @@ fn el1_preempt_window_close() {
     atomic_word_store(&el1_preempt_window_pid, 0);
 }
 
+// The real window (#638 stage 9 (c)): every tick of `pid`'s syscalls is a
+// candidate, still only at count zero (the caller's consult). It stays open
+// across its switches until el1_preempt_real_close.
+fn el1_preempt_real_open(pid: usize) {
+    atomic_word_store(&el1_preempt_real_base, atomic_word_load(&el1_preempt_switches));
+    atomic_word_store(&el1_preempt_window_real, 1);
+    atomic_word_store(&el1_preempt_window_pid, pid);
+}
+
+// Close it; the switches taken while it was open.
+fn el1_preempt_real_close() -> usize {
+    atomic_word_store(&el1_preempt_window_pid, 0);
+    atomic_word_store(&el1_preempt_window_real, 0);
+    return atomic_word_load(&el1_preempt_switches) - atomic_word_load(&el1_preempt_real_base);
+}
+
 // The window of `pid`, with this PC inside the spin. Nothing else about the
 // tick is decided here; the count is the caller's consult.
 fn el1_preempt_window_admits(pid: usize, pc: usize) -> bool {
     if (atomic_word_load(&el1_preempt_window_pid) != pid || pid == 0) {
         return false;
     }
+    if (atomic_word_load(&el1_preempt_window_real) != 0) { return true; }
     return pc >= el1_preempt_spin_begin_address() &&
            pc < el1_preempt_spin_end_address();
 }
@@ -92,7 +115,9 @@ fn el1_preempt_irq_return_resumes_read() -> usize {
 
 // The tick switched: the window is spent, and this CPU's entry owes the hook.
 fn el1_preempt_switch_note(frame_sp: usize) {
-    el1_preempt_window_close();
+    if (atomic_word_load(&el1_preempt_window_real) == 0) {
+        el1_preempt_window_close();
+    }
     atomic_word_fetch_add(&el1_preempt_switches, 1);
     preempt_off (cpu) {
         el1_switch_pending[cpu].frame_sp = frame_sp;

@@ -8251,6 +8251,17 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             return syscall_finish_current(frame, SyscallAction::Resume(
                 kernel_process_el1_preempt_scenario(x1)), current_authority);
         }
+        // /bin/protocol-trace's real EL1 preemption window (#638 stage 9 (c)):
+        // 26 opens it for the caller; 27 closes it, x1 = 1 when every read the
+        // caller checked was intact, and answers the switches taken.
+        if (x0 == 26) {
+            return syscall_finish_current(frame, SyscallAction::Resume(
+                kernel_process_el1_preempt_real_open()), current_authority);
+        }
+        if (x0 == 27) {
+            return syscall_finish_current(frame, SyscallAction::Resume(
+                kernel_process_el1_preempt_real_close(x1)), current_authority);
+        }
         // /bin/protocol-trace's log-ring window (GitHub issue #656).
         if (x0 == 22) {
             if (log_storm_trace_probe()) {

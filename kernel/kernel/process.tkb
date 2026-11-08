@@ -8800,6 +8800,25 @@ fn kernel_process_el1_preempt_consult(
     return true;
 }
 
+// #638 stage 9 (c): /bin/protocol-trace's real window, opened for the
+// calling process and closed by the same, which then reports whether a tick
+// switched it inside one of its own syscalls.
+fn kernel_process_el1_preempt_real_open() -> usize {
+    let ProcessCurrentRead::Running(current_task) = kernel_process_current_read() else {
+        ProcessCurrentRead::Idle => { return 0xFFFFFFFFFFFFFFFF; }
+    };
+    el1_preempt_real_open(scheduled_process_pid_of_handle(current_task));
+    return 1;
+}
+
+fn kernel_process_el1_preempt_real_close(answers_ok: usize) -> usize {
+    let switches: usize = el1_preempt_real_close();
+    if (switches != 0 && answers_ok == 1) {
+        kernel_boot_log("scheduler: el1 preempt real: an ext2 read syscall preempted at EL1 and resumed, every answer intact\n");
+    }
+    return switches;
+}
+
 const EL1_PREEMPT_SPIN_ROUNDS: usize = 100000;
 
 // Spin in the window until a switch has come and gone, or four seconds pass.

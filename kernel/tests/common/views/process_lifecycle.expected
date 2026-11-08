@@ -6,6 +6,7 @@ scheduler: el1 frame resumed by a real eret: pc, stack, level, registers as save
 process fanout: 3 siblings, wait4 by pid collects the middle one, each status its own
 crash trace: ring wrap oldest-to-newest ok
 scheduler: el1 preempt: 2 real switches, resumed through the el0 irq return and taken on another cpu
+scheduler: el1 preempt real: an ext2 read syscall preempted at EL1 and resumed, every answer intact
 resources: every pooled record resolved to the slot its handle named
 resources: page mappings within the address spaces that exist
 resources: shared-object refs within the descriptor slots that exist

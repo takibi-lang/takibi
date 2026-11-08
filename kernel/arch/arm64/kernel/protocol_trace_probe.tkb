@@ -32,6 +32,15 @@ const PROTOCOL_TRACE_OPEN_TAG: usize = 16;
 const PROTOCOL_TRACE_CLOSE_TAG: usize = 17;
 const LOG_RING_TRACE_TAG: usize = 22;
 const PROTOCOL_TRACE_EL1_PREEMPT_TAG: usize = 25;
+const PROTOCOL_TRACE_EL1_REAL_OPEN_TAG: usize = 26;
+const PROTOCOL_TRACE_EL1_REAL_CLOSE_TAG: usize = 27;
+const OPENAT_SYSCALL: usize = 56;
+const CLOSE_SYSCALL: usize = 57;
+const READ_SYSCALL: usize = 63;
+const AT_FDCWD: usize = 0xFFFFFFFFFFFFFF9C;
+// Reads per attempt and attempts: enough EL1 time for ticks to land in.
+const PROTOCOL_TRACE_REAL_READS: usize = 200;
+const PROTOCOL_TRACE_REAL_ATTEMPTS: usize = 20;
 const KILL_SYSCALL: usize = 129;
 const SIGKILL_NUMBER: usize = 9;
 const PROTOCOL_TRACE_ERROR_FLOOR: usize = 0xFFFFFFFFFFFFF000;
@@ -151,6 +160,74 @@ private fn protocol_trace_el1_preempt() {
     }
 }
 
+// The first bytes of one ext2 file into `buffer`; the count read.
+private fn protocol_trace_read_file(path: borrow []const u8, buffer: *u8,
+                                    size: usize) -> usize !{unsafe} {
+    let fd: usize = svc5(OPENAT_SYSCALL, AT_FDCWD, (unsafe { path as *u8 }) as usize, 0, 0, 0);
+    if (fd >= PROTOCOL_TRACE_ERROR_FLOOR) { return PROTOCOL_TRACE_ERROR_FLOOR; }
+    let got: usize = svc5(READ_SYSCALL, fd, buffer as usize, size, 0, 0);
+    svc5(CLOSE_SYSCALL, fd, 0, 0, 0, 0);
+    return got;
+}
+
+/* GitHub issue #638 stage 9 (c), maintainer option A1: the lasting evidence
+ * that a real handler can be preempted. With a child spinning at EL0 on the
+ * same CPU, the kernel's real window lets a tick switch this process at any
+ * PC of its own syscalls (count zero), here an ext2 openat/read/close loop.
+ * Every read must return the bytes the first one did. One CPU only. */
+private fn protocol_trace_el1_real() !{unsafe} {
+    if (protocol_trace_pin(2) != 0) {
+        protocol_trace_fail(bs"protocol-trace: cpu 1 alone was refused\n");
+    }
+    if (protocol_trace_reach(1) == false) {
+        protocol_trace_fail(bs"protocol-trace: never reached cpu 1\n");
+    }
+    let mut first: [u8; 64];
+    let mut again: [u8; 64];
+    let path = bs"/etc/init.sh\0";
+    let expected: usize = protocol_trace_read_file(path, first as *u8, 64);
+    if (expected == 0 || expected >= PROTOCOL_TRACE_ERROR_FLOOR) {
+        protocol_trace_fail(bs"protocol-trace: el1 real: /etc/init.sh did not read\n");
+    }
+    let child: usize = svc5(CLONE_SYSCALL, CLONE_FORK_SIGCHLD, 0, 0, 0, 0);
+    if (child == 0) {
+        while (true) { }
+    }
+    if (child >= PROTOCOL_TRACE_ERROR_FLOOR) {
+        protocol_trace_fail(bs"protocol-trace: fork failed\n");
+    }
+    let mut switches: usize = 0;
+    for attempt: usize in 0..<PROTOCOL_TRACE_REAL_ATTEMPTS {
+        if (switches == 0) {
+            if (svc5(WORKLOAD_PROGRESS_SYSCALL, PROTOCOL_TRACE_EL1_REAL_OPEN_TAG,
+                     0, 0, 0, 0) != 1) {
+                protocol_trace_fail(bs"protocol-trace: el1 real: the window did not open\n");
+            }
+            for round: usize in 0..<PROTOCOL_TRACE_REAL_READS {
+                for index: usize in 0..<64 { again[index] = 0; }
+                let got: usize = protocol_trace_read_file(path, again as *u8, 64);
+                if (got != expected) {
+                    protocol_trace_fail(bs"protocol-trace: el1 real: a read returned another length\n");
+                }
+                for index: usize in 0..<64 {
+                    if (again[index] != first[index]) {
+                        protocol_trace_fail(bs"protocol-trace: el1 real: a read returned other bytes\n");
+                    }
+                }
+            }
+            switches = svc5(WORKLOAD_PROGRESS_SYSCALL, PROTOCOL_TRACE_EL1_REAL_CLOSE_TAG,
+                            1, 0, 0, 0);
+        }
+    }
+    svc5(KILL_SYSCALL, child, SIGKILL_NUMBER, 0, 0, 0);
+    if (svc5(WAIT4_SYSCALL, child, 0, 0, 0, 0) != child) {
+        protocol_trace_fail(bs"protocol-trace: el1 real: wait4 did not reap the child\n");
+    }
+    if (switches == 0) {
+        protocol_trace_fail(bs"protocol-trace: el1 real: no tick switched inside a read\n");
+    }
+}
+
 fn protocol_trace_probe() {
     let mut opened: bool = false;
     // GitHub issue #665: yield once whether or not the window is deferred.
@@ -187,6 +264,13 @@ fn protocol_trace_probe() {
     if (svc5(WORKLOAD_PROGRESS_SYSCALL, PROTOCOL_TRACE_CLOSE_TAG,
              0, 0, 0, 0) != 1) {
         protocol_trace_fail(bs"protocol-trace: the window did not close\n");
+    }
+    protocol_trace_el1_real();
+    if (protocol_trace_pin(1) != 0) {
+        protocol_trace_fail(bs"protocol-trace: cpu 0 alone was refused\n");
+    }
+    if (protocol_trace_reach(0) == false) {
+        protocol_trace_fail(bs"protocol-trace: never reached cpu 0\n");
     }
     // GitHub issue #656: the log ring's window, also from CPU 0 -- a storm
     // round with a syslog read inside it, which the kernel prints for
