@@ -52,7 +52,7 @@ LISTED = {
     "kernel/kernel/protocol_trace.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/stall_probe.tkb": (3, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/syscall.tkb": (5, FLIP, "not yet reviewed for migration"),
-    "kernel/kernel/workload_evidence.tkb": (46, FLIP, "not yet reviewed for migration"),
+    "kernel/kernel/workload_evidence.tkb": (29, FLIP, "not yet reviewed for migration"),
     "kernel/lib/occupancy.tkb": (6, FLIP, "not yet reviewed for migration"),
     "kernel/mm/page.tkb": (1, FLIP, "#1079 page_reserve_cpu: read only under the page pool's IRQ-masking lock, and the kernel is not preemptible (KERNEL_PREEMPTIBLE == 0), so the CPU cannot change before the lock is given back; page_alloc has no CpuHere to take"),
     "kernel/printk/log_ring_trace.tkb": (1, FLIP, "picks the buffer an event goes to; its slot is one fetch_add (#1159)"),
@@ -63,6 +63,12 @@ LISTED = {
 # function, so a new call in an already reviewed file is refused rather
 # than absorbed by the file's label.
 REVIEWED_SITES = {
+    "kernel/kernel/workload_evidence.tkb::workload_busy_note_selected_locked": (5, "#638 stage 9: the function borrows the ProcessRunGuard (an IRQ-masking Mutex guard), so no tick switches the task while it reads and uses the CPU"),
+    "kernel/kernel/workload_evidence.tkb::workload_busy_note_tick_locked": (1, "#638 stage 9: the function borrows the ProcessRunGuard (an IRQ-masking Mutex guard), so no tick switches the task while it reads and uses the CPU"),
+    "kernel/kernel/workload_evidence.tkb::workload_busy_record_progress_locked": (8, "#638 stage 9: the function borrows the ProcessRunGuard (an IRQ-masking Mutex guard), so no tick switches the task while it reads and uses the CPU"),
+    "kernel/kernel/workload_evidence.tkb::workload_profile_irq_enter": (1, "#638 stage 9: called only from the IRQ dispatch and irq_finish, !{interrupt} roots entered with IRQs masked"),
+    "kernel/kernel/workload_evidence.tkb::workload_profile_irq_exit": (1, "#638 stage 9: called only from the IRQ dispatch and irq_finish, !{interrupt} roots entered with IRQs masked"),
+    "kernel/kernel/workload_evidence.tkb::workload_profile_transition_masked": (1, "#638 stage 9: read after its own irq_save and used before the restore, so no tick switches the task in between"),
     "kernel/kernel/process.tkb::kernel_process_affinity_set": (1, "#638 stage 9: read while the process-run lock is held (an IRQ-masking Mutex guard), so no tick switches the task before the answer is used under that lock; the new mask is stored in the same hold, so a move after it can only resume the task on a CPU the new mask allows, where leaving again is a harmless reschedule"),
     "kernel/kernel/process.tkb::kernel_process_block_current": (1, "#638 stage 9: read while the process-run lock is held (an IRQ-masking Mutex guard), so no tick switches the task before the answer is used under that lock, inside the block tail's PreemptOff span (#1323)"),
     "kernel/kernel/process.tkb::kernel_process_child_exit": (3, "#638 stage 9: read while the process-run lock is held (an IRQ-masking Mutex guard), so no tick switches the task before the answer is used under that lock (exit_guard), inside the exit tail's span (#1323)"),
