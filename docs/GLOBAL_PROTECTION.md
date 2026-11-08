@@ -608,6 +608,5 @@ entries below that date are history, left as written.
   borrowed `BlockDeviceGuard` as an action argument, and the restart, start
   and halt paths pass it down. Five rows leave the allowlist.
 - 2026-11-08: `virtio_blk_used_claimed` is `SetOnce(bool)`, as the xHCI
-  claims (#1159). A region already gone at the first claim now stops
-  (an invariant breach) instead of answering false. One row leaves the
-  allowlist.
+  claims (#1159). A region gone at the first claim publishes false, and
+  later calls answer the published value. One row leaves the allowlist.
