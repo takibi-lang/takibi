@@ -16,7 +16,9 @@ frozen with a kind:
 - MINT: the authority's own file;
 - FLIP: not yet reviewed; the flip moves the site into a region, shows it
   runs with IRQs masked or in interrupt context (where no switch happens),
-  or shows a wrong CPU is harmless (a diagnostic), and then relabels it.
+  or shows a wrong CPU is harmless (a diagnostic), and then relabels it;
+- REVIEWED: read before the flip, and each call holds under preemption for
+  the reason the entry gives (#638 stage 9). A count change still refuses.
 
 A new call, a removed call, or a file whose count changed without its entry
 is refused, so the inventory stays current. It does not prove a site
@@ -35,6 +37,7 @@ KERNEL = ROOT / "kernel"
 
 MINT = "mint"
 FLIP = "flip"
+REVIEWED = "reviewed"
 
 CALL = re.compile(r"\bcpu_id\s*\(\s*\)")
 
@@ -69,7 +72,7 @@ LISTED = {
     "kernel/platform/rpi5/intc.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/platform/rpi5/xhci_irq_affinity.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/printk/console_lock.tkb": (1, FLIP, "not yet reviewed for migration"),
-    "kernel/printk/log.tkb": (4, FLIP, "not yet reviewed for migration"),
+    "kernel/printk/log.tkb": (4, REVIEWED, "#638 stage 9: kernel_log_core_here's writers run in preempt_off regions or boot probes; the reserve's CPU tag travels in its token; the console owner word is taken only on masked terminal or stopped-world paths; the peer probe runs in a secondary's idle loop (see the review comment in the file)"),
     "kernel/printk/log_ring_trace.tkb": (1, FLIP, "picks the buffer an event goes to; its slot is one fetch_add (#1159)"),
 }
 
@@ -131,7 +134,7 @@ def main():
         texts[str(path.relative_to(ROOT))] = path.read_text()
     problems = problems_of(texts, LISTED)
     for relative, (n, kind, reason) in LISTED.items():
-        if kind not in (MINT, FLIP) or not reason.strip() or n < 1:
+        if kind not in (MINT, FLIP, REVIEWED) or not reason.strip() or n < 1:
             problems.append(f"{relative}: entry ({n}, {kind!r}, {reason!r}) is malformed")
     if problems:
         for problem in problems:

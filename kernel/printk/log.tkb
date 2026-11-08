@@ -1702,9 +1702,14 @@ private fn kernel_log_peer_console_probe_step(
 // A line this CPU had staged stays staged and unretained; DDB's `log` and
 // scripts/kernel_console.gdb show it.
 fn kernel_log_enter_emergency() {
-    let core: {0..<KERNEL_MAX_CORES as usize} = kernel_log_core_here();
-    kernel_log_core_state[core].emergency = true;
-    kernel_log_core_state[core].capturing = false;
+    // The mode is this CPU's: set in a region, so the element chosen is the
+    // one written (#638 stage 9). A stopping path that cannot mint one has
+    // IRQs masked, so no task switches there.
+    preempt_off (cpu) {
+        kernel_log_enter_emergency_here();
+    } else {
+        kernel_log_enter_emergency_here();
+    }
     // Terminal stack guards can park without entering crash_console_run.
     // Take the console at emergency priority, from whichever core this is
     // (#830), so neither the last line nor its prompt depends on an
@@ -1717,6 +1722,12 @@ fn kernel_log_enter_emergency() {
         KernelLogTxStandDown::Took(found) => { }
         KernelLogTxStandDown::Outranked => { }
     }
+}
+
+private fn kernel_log_enter_emergency_here() {
+    let core: {0..<KERNEL_MAX_CORES as usize} = kernel_log_core_here();
+    kernel_log_core_state[core].emergency = true;
+    kernel_log_core_state[core].capturing = false;
 }
 
 private fn kernel_log_snapshot_push(snapshot: borrow &mut KernelLogSnapshot, value: u8) {
@@ -2673,16 +2684,27 @@ fn kernel_boot_log_resource_exhausted(resource: *u8, capacity: usize) {
 // cuts (kernel_log_cut_line) rather than continues; the thread goes on as a new
 // record wherever it lands. A piece whose thread moved stays staged until
 // another writer comes to that CPU; DDB shows it. The reservation token never
-// outlives one call; the staged line does. The storm fixture, which holds one
-// CPU's element across a whole line, does so inside a preempt_off region
-// (kernel_log_storm_write, #638 stage 9). What still rests on the assertion:
-// the file's other raw cpu_id() reads (scripts/check_raw_cpu_id_sites.py, FLIP
-// rows not yet reviewed): the emergency entry and the boot probes choose an
-// element outside any region, and the record tag and the commit pick a CPU.
-fn kernel_log_execution_model_assumption() {
-    static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "log.tkb's raw CPU-id reads outside a region (the emergency entry, the boot probes, the record tag) are reviewed at the flip (GitHub issue #638)");
-}
+// outlives one call; the staged line does.
+//
+// GitHub issue #638 stage 9 review (2026-11-08): nothing in this file rests on
+// KERNEL_PREEMPTIBLE any more, so its assert is retired and
+// kernel/EXECUTION_MODEL exempts the file. The four raw CPU-id reads
+// (scripts/check_raw_cpu_id_sites.py, now a reviewed row):
+// - kernel_log_core_here picks this CPU's KernelLogCoreState. Its writers run
+//   in a preempt_off region (the fragment pair, the capture byte, the storm
+//   writer, the emergency entry) or in the boot probes, before any process
+//   exists. Its one unlocked reader outside a region, uart_putc's emergency
+//   test, can only find another CPU's mode set if that CPU stopped with IRQs
+//   masked, where no task runs.
+// - kernel_log_reserve tags the record with the reserving CPU. The tag
+//   travels in the LogReservation token, and every later compare-swap uses
+//   the token's copy, so a move only makes the tag name where the record
+//   began: a diagnostic.
+// - kernel_console_owner_word names the CPU in the console owner word.
+//   Every taker is a terminal or stopped-world path (emergency, panic, the
+//   debugger's stop) with IRQs masked.
+// - kernel_log_peer_probe_step runs in a secondary's idle loop, which has no
+//   current task, so the IRQ-return consult never switches it.
 
 // Encode within the available room before publishing. Every CPU holds the
 // console guard across the room query, encoding, enqueue and FIFO drain.
