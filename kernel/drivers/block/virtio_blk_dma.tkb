@@ -17,20 +17,32 @@
 
 use "kernel/lib/task_mutex.tkb";
 use "kernel/drivers/virtio_used.tkb";
+use "kernel/lib/set_once.tkb";
 
 // The used ring's own backing global (modern transport, GitHub issue #740).
 private region let mut virtio_blk_used_ring: [VirtqUsedRing; 1] align(64);
-private let mut virtio_blk_used_claimed: bool = false;
+// GitHub issue #1159: claimed once per boot, by the SetOnce claim's winner.
+private let mut virtio_blk_used_claimed: SetOnce(bool);
 
-// The used ring parked Ready in its slot, once per boot.
+// The used ring parked Ready in its slot, once per boot. The region can be
+// gone at the first claim only if something else took it: an invariant
+// breach, which stops rather than leaving the claim unpublished.
 fn virtio_blk_used_claim() -> bool {
-    if (virtio_blk_used_claimed) { return true; }
-    let RegionOf(VirtqUsedRing)::Taken(memory) = region_of(virtio_blk_used_ring) else {
-        RegionOf(VirtqUsedRing)::Gone => { return false; }
-    };
-    virtio_used_claim(VIRTIO_USED_BLK, memory);
-    virtio_blk_used_claimed = true;
-    return true;
+    match set_once_claim(&virtio_blk_used_claimed) {
+        SetOnceBegin::Taken => { return true; }
+        SetOnceBegin::Claimed(claim) => {
+            let RegionOf(VirtqUsedRing)::Taken(memory) = region_of(virtio_blk_used_ring) else {
+                RegionOf(VirtqUsedRing)::Gone => {
+                    set_once_publish(&virtio_blk_used_claimed, claim, false);
+                    kernel_invariant_stop();
+                    return false;
+                }
+            };
+            virtio_used_claim(VIRTIO_USED_BLK, memory);
+            set_once_publish(&virtio_blk_used_claimed, claim, true);
+            return true;
+        }
+    }
 }
 
 // The descriptor still exposes one status byte at offset 1024.

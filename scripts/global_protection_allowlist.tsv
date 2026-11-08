@@ -20,7 +20,6 @@ kernel/drivers/block/virtio_blk.tkb	virtio_blk_queue	read-by virtio_blk_submit_o
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_regs	read-by virtio_blk_capacity_sectors,virtio_blk_init,virtio_blk_submit_owned: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_timeout_first	read-by virtio_blk_timeout_first_snapshot: 2026-10-31 lock: written under block_device_lock on the first timeout; DDB reads it with the world stopped and may catch a stopped writer mid-record, a diagnostic
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_timeout_last	read-by virtio_blk_timeout_last_snapshot: 2026-10-31 lock: as virtio_blk_timeout_first, for the latest timeout
-kernel/drivers/block/virtio_blk_dma.tkb	virtio_blk_used_claimed	read-by virtio_blk_used_claim: 2026-10-31 lock: one-shot reached from virtio_blk_init only
 kernel/drivers/net/rp1_gem.tkb	gem	read-by gem_halt,gem_irq_handler,gem_mdio_read: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
 kernel/drivers/net/rp1_gem.tkb	rp1_clocks	read-by net_init: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
 kernel/drivers/net/rp1_gem.tkb	rp1_gpio_ctrl	read-by gem_phy_reset: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
