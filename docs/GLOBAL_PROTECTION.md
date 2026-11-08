@@ -506,12 +506,12 @@ entries below that date are history, left as written.
   `kept_len` field of its `GemPkt`/`VirtioPkt` `Filled` owner (#1395's state
   data), recorded by the keeping completion (`*_note_kept_len`) and read by
   `net_packet_kept_claim` (`*_kept_len`).
-- 2026-11-08 (#1159): three boot-discovered addresses to `SetOnce`:
+- 2026-11-08 (#1159): two boot-discovered addresses to `SetOnce`:
   `virtio_blk.tkb`'s `virtio_blk_base` (now private, read through
-  `virtio_blk_base_get`), `rp1_gem.tkb`'s `gem_rx_ring_cpu_address`, and
-  `virtio_net.tkb`'s used-ring addresses, split into one cell per queue and
-  read through `virtio_net_used_address` (the native TX fixture too). An
-  unset cell reads as 0, as before. test_driver's `boot_execution` and
+  `virtio_blk_base_get`), `rp1_gem.tkb`'s `gem_rx_ring_cpu_address`.
+  An unset cell reads as 0, as before. `virtio_net.tkb`'s used-ring
+  addresses stay listed: the native TX fixture reads them directly, and a
+  public accessor returning the address is refused by check_frame_api.py. test_driver's `boot_execution` and
   `boot_exec_windows` stay listed: one is written in two steps, the other is
   a buffer the loader fills, so neither is a single set.
 

@@ -2989,10 +2989,10 @@
     },
     {
       "date": "2026-11-08",
-      "head": "56df921a",
+      "head": "26178625",
       "counts": {
         "raw_mint_files": 14,
-        "frame_lines": 12223,
+        "frame_lines": 12200,
         "device_semantics_files": 4,
         "raw_deref_plain": 200,
         "raw_deref_io": 7,
@@ -3011,12 +3011,12 @@
         "judge_defects_range": 1,
         "judge_defects_init": 0,
         "judge_defects_region_overlay": 0,
-        "unprotected_globals": 145,
+        "unprotected_globals": 146,
         "frame_api_ratchet": 7
       },
       "changes": {
-        "frame_lines": "#1159 N1: SetOnce cells and their accessors in rp1_gem.tkb and virtio_net.tkb (frame files)",
-        "unprotected_globals": "SetOnce: #1159 virtio_blk_base, gem_rx_ring_cpu_address and virtio_net's used-ring addresses"
+        "frame_lines": "#1159 N1: the SetOnce cell and its claim in rp1_gem.tkb (a frame file)",
+        "unprotected_globals": "SetOnce: #1159 virtio_blk_base and gem_rx_ring_cpu_address"
       }
     }
   ]
