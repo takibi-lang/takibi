@@ -579,3 +579,11 @@ entries below that date are history, left as written.
   buildcheck_unread_globals.py refuses a program write to any listed name.
   The seven `kernel_ddb_*` arms and `diagnostic_trace_test_enabled` leave
   the allowlist. An aggregate stays unprotected even when listed.
+- 2026-11-08: the crash-path words (#1159 (3B)). `crash_console_owner`,
+  `crash_report_owner`, `crash_fault_order`, `crash_report_contended` and
+  `crash_report_abandoned` are `AtomicWord`s reached by the atomic_word_*
+  operations, with the same orderings the raw intrinsics had; their address
+  helpers and `unsafe` blocks are gone. The contended/abandoned summary now
+  reads them with an acquire load. `crash_report_claim_waits`, an empty
+  noinline function, is the breakpoint the oops lane waits on in place of
+  the removed `crash_report_owner_address`. Five rows leave the allowlist.

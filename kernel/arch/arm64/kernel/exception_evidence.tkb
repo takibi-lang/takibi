@@ -116,11 +116,8 @@ private fn crash_snapshot_here() -> *CrashSnapshot {
 // is the release store on `valid` below, not this. A reader that has acquired
 // a published record has already acquired everything written before it,
 // including this.
-private let mut crash_fault_order: usize;
+private let mut crash_fault_order: AtomicWord;
 
-private fn crash_fault_order_address() -> usize {
-    return (&crash_fault_order) as usize;
-}
 
 // `valid` is the publication word. A reader must not assemble a record from
 // a core that is still writing one, so it is stored with release after the
@@ -154,11 +151,8 @@ const CRASH_CONSOLE_LINE_BYTES: usize = 32;
 // exist.
 const CRASH_CONSOLE_FREE: usize = 0;
 const CRASH_CONSOLE_CLAIMED: usize = 1;
-private let mut crash_console_owner: usize;
+private let mut crash_console_owner: AtomicWord;
 
-private fn crash_console_owner_address() -> usize {
-    return (&crash_console_owner) as usize;
-}
 
 // GitHub issue #486: the two-core lane's first run shredded both reports into
 // each other, byte by byte, because two cores rendered to one UART at once.
@@ -183,11 +177,8 @@ private fn crash_console_owner_address() -> usize {
 // rather than guessed, and it is the loop the lane would fail again if it
 // stopped being enough.
 const CRASH_REPORT_SPIN_TURNS: usize = 50000000;
-private let mut crash_report_owner: usize;
+private let mut crash_report_owner: AtomicWord;
 
-private fn crash_report_owner_address() -> usize {
-    return (&crash_report_owner) as usize;
-}
 
 // How many claims found the word held, and how many gave up waiting. The
 // summary line reports both, because "the reports came out clean" and "no two
@@ -197,48 +188,41 @@ private fn crash_report_owner_address() -> usize {
 // the lane asserts `abandoned=0`, so an increment lost to two cores racing
 // would hide exactly the event the assertion exists to catch. Relaxed is
 // enough -- these are read once, after both cores have stopped.
-private let mut crash_report_contended: usize;
-private let mut crash_report_abandoned: usize;
+private let mut crash_report_contended: AtomicWord;
+private let mut crash_report_abandoned: AtomicWord;
 
-private fn crash_report_contended_address() -> usize {
-    return (&crash_report_contended) as usize;
-}
 
-private fn crash_report_abandoned_address() -> usize {
-    return (&crash_report_abandoned) as usize;
-}
 
-private fn crash_report_claim() !{unsafe} {
+// One turn of a claim that found the word held. Empty and not inlined: it is
+// the breakpoint scripts/run_kernel_oops_qemutest.sh waits on to know a core
+// is spinning here (the word's address helper served before #1159 (3B)).
+private noinline fn crash_report_claim_waits() {}
+
+private fn crash_report_claim() {
     let mut waited: bool = false;
     for turn: usize in 0..<CRASH_REPORT_SPIN_TURNS {
         // Read before swapping: a swap every turn writes the word from every
         // waiting core and keeps the line moving between them, which is the
         // shape kernel/lib/spinlock.tkb's own acquire already avoids.
-        if (unsafe { atomic_load_acquire(crash_report_owner_address()) }
+        if (atomic_word_load(&crash_report_owner)
                 == CRASH_CONSOLE_FREE) {
-            if (unsafe { atomic_swap_acquire(crash_report_owner_address(),
-                                             CRASH_CONSOLE_CLAIMED) }
+            if (atomic_word_swap(&crash_report_owner, CRASH_CONSOLE_CLAIMED)
                     == CRASH_CONSOLE_FREE) {
                 if (waited) {
-                    unsafe {
-                        atomic_fetch_add_relaxed(
-                            crash_report_contended_address(), 1);
-                    }
+                    atomic_word_fetch_add(&crash_report_contended, 1);
                 }
                 return;
             }
         }
         waited = true;
+        crash_report_claim_waits();
     }
-    unsafe {
-        atomic_fetch_add_relaxed(crash_report_contended_address(), 1);
-        atomic_fetch_add_relaxed(crash_report_abandoned_address(), 1);
-    }
+    atomic_word_fetch_add(&crash_report_contended, 1);
+    atomic_word_fetch_add(&crash_report_abandoned, 1);
 }
 
-private fn crash_report_release() !{unsafe} {
-    unsafe { atomic_store_release(crash_report_owner_address(),
-                                  CRASH_CONSOLE_FREE); }
+private fn crash_report_release() {
+    atomic_word_store(&crash_report_owner, CRASH_CONSOLE_FREE);
 }
 
 // Resumable DDB state is intentionally smaller than CrashSnapshot. It is
@@ -3216,11 +3200,11 @@ private fn crash_snapshot_render_every_core() !{unsafe} {
     ddb_puts("oops: cores reported=");
     ddb_put_udec(rendered);
     ddb_puts(" faults=");
-    ddb_put_udec(unsafe { atomic_load_acquire(crash_fault_order_address()) });
+    ddb_put_udec(atomic_word_load(&crash_fault_order));
     ddb_puts(" contended=");
-    ddb_put_udec(crash_report_contended);
+    ddb_put_udec(atomic_word_load(&crash_report_contended));
     ddb_puts(" abandoned=");
-    ddb_put_udec(crash_report_abandoned);
+    ddb_put_udec(atomic_word_load(&crash_report_abandoned));
     ddb_puts("\n");
 }
 
@@ -3739,8 +3723,8 @@ private fn crash_snapshot_publish() !{unsafe} {
     crash_report_release();
 }
 
-private fn crash_console_claim() -> bool !{unsafe} {
-    return unsafe { atomic_swap_acquire(crash_console_owner_address(), CRASH_CONSOLE_CLAIMED) } == CRASH_CONSOLE_FREE;
+private fn crash_console_claim() -> bool {
+    return atomic_word_swap(&crash_console_owner, CRASH_CONSOLE_CLAIMED) == CRASH_CONSOLE_FREE;
 }
 
 private fn crash_snapshot_park() {
@@ -3765,7 +3749,7 @@ private fn crash_snapshot_capture(slot: usize, frame_sp: usize, origin: usize, c
     unsafe { atomic_store_release(crash_snapshot_valid_address(cpu_id()), 0); }
     crash_snapshot_here().sequence = crash_snapshot_here().sequence + 1;
     crash_snapshot_here().fault_order =
-        unsafe { atomic_fetch_add_relaxed(crash_fault_order_address(), 1) } + 1;
+        atomic_word_fetch_add(&crash_fault_order, 1) + 1;
     // The logical core, not MPIDR (see kernel_ddb_enter_stopped, #830).
     crash_snapshot_here().cpu = cpu_id();
     crash_snapshot_here().vector_slot = slot;
