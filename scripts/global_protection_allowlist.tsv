@@ -30,16 +30,8 @@ kernel/drivers/net/virtio_net.tkb	virtio_net_regs	read-by net_init,virtio_net_ir
 kernel/drivers/net/virtio_net.tkb	virtio_net_used_addr	read-by kernel_net_rx_frame_pending: 2026-10-31 boot: written by virtio_queue_setup; DDB reads it stopped
 kernel/drivers/serial/pl011.tkb	uart	read-by uart_rx_ready,uart_isr_getc,uart_debug_putc: 2026-10-31 handle: one handle word attached once at boot before its interrupt or first use; only registers change after
 kernel/drivers/virtio_used.tkb	virtio_used_reset_confirmed	read-by virtio_used_quiet: 2026-10-31 lock: set just before its one read in virtio_used_reclaim_after_reset; the block driver is the only caller, under block_device_lock or on core 0 at boot
-kernel/init/ext2_fixture.tkb	ext2_release_fenced	read-by ext2_release_case,ext2_release_failure_check: 2026-10-31 retain-fixture: the boot ext2 fixture, core 0 before userspace
-kernel/init/ext2_fixture.tkb	ext2_release_first	read-by ext2_release_names_are,ext2_release_run: 2026-10-31 retain-fixture: the boot ext2 fixture's inode, core 0 before userspace
-kernel/init/ext2_fixture.tkb	ext2_release_second	read-by ext2_release_names_are,ext2_release_setup: 2026-10-31 retain-fixture: as ext2_release_first
-kernel/init/ext2_fixture.tkb	ext2_write_fixture_bitmap	read-by ext2_io_bitmap_matches,ext2_write_indirect_check: 2026-10-31 retain-fixture: the boot ext2 fixture's own checks, core 0 before userspace
-kernel/init/ext2_fixture.tkb	ext2_write_fixture_readback	read-by ext2_io_file_is,ext2_exhaustion_mode: 2026-10-31 retain-fixture: the boot ext2 fixture's read-back comparisons, core 0 before userspace
-kernel/init/ext2_fixture.tkb	ext2_write_fixture_source	read-by ext2_io_file_is,ext2_release_full_file: 2026-10-31 retain-fixture: the boot ext2 fixture compares what it wrote against this, core 0 before userspace
 kernel/init/test_driver.tkb	boot_exec_windows	read-by kernel_test_driver_run: 2026-10-31 boot: the loader check's windows, core 0 once before any exec
 kernel/init/test_driver.tkb	boot_execution	read-by kernel_process_child_exec_prepare_with,kernel_exec_primary_is_busybox_extras: 2026-10-31 boot: written by the boot thread before PID 1 runs, read-only for every later exec; BootOnce would fit but reads as a two-field record
-kernel/init/test_driver.tkb	ext2_read_fixture	read-by ext2_create_check,ext2_io_file_is: 2026-10-31 retain-fixture: the boot ext2 fixture reads file bytes here and compares them, core 0 before userspace
-kernel/init/test_driver.tkb	ext2_symlink_fixture	read-by kernel_ext2_fixture_run: 2026-10-31 retain-fixture: the boot ext2 fixture's symlink target buffer
 kernel/init/test_driver.tkb	init_boot_fixture_status	read-by kernel_init_script_success_evidence: 2026-10-31 retain-fixture: stored when PID 1 reaps the fixture child, printed after by PID 1
 kernel/init/test_driver.tkb	kernel_test_init_script	read-by kernel_test_driver_run: 2026-10-31 retain-fixture: main's choice of init script, one read on the boot path
 kernel/init/test_driver.tkb	rootfs_metadata	read-by kernel_test_driver_run: 2026-10-31 retain-boot: the boot read of the image's metadata; the exec plan borrows this permanent buffer afterward

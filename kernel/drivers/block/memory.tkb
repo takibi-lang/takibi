@@ -320,7 +320,7 @@ private fn block_fault_hits(
 // counts what reached a device, so the figure #208 is judged by moves with
 // the cache; the hits are counted beside it.
 fn block_read(device: KernelBlockDevice, block: usize,
-              destination: [u8; KERNEL_BLOCK_SIZE..])
+              destination: borrow [u8; KERNEL_BLOCK_SIZE..])
         -> BlockIoResult !{unsafe} {
     if (block >= device.length / KERNEL_BLOCK_SIZE) {
         return BlockIoResult::Invalid;
@@ -333,7 +333,7 @@ fn block_read(device: KernelBlockDevice, block: usize,
 
 private inline fn block_read_with(slot: borrow BlockSlot[0],
                                   device: KernelBlockDevice, block: usize,
-                                  destination: [u8; KERNEL_BLOCK_SIZE..])
+                                  destination: borrow [u8; KERNEL_BLOCK_SIZE..])
         -> BlockIoResult !{unsafe} {
     match block_cache_read(slot, device.backend, block, destination) {
         BlockCacheReadResult::Hit => { return BlockIoResult::Ok; }
@@ -425,7 +425,7 @@ private fn block_run_hit_here(slot: borrow BlockSlot[0],
 // Copy (device, block) out of this slot's run, if it holds it.
 private fn block_run_take(slot: borrow BlockSlot[0], device: KernelBlockDevice,
                           block: usize,
-                          destination: [u8; KERNEL_BLOCK_SIZE..]) -> bool {
+                          destination: borrow [u8; KERNEL_BLOCK_SIZE..]) -> bool {
     if (block_run_hit_here(slot, device, block) == false) { return false; }
     let here: {0..<KERNEL_MAX_CORES as usize} = block_slot_number(slot);
     let offset: usize = block - block_run_first[slot.index];
@@ -559,7 +559,7 @@ fn block_forget_all() !{unsafe} {
 
 private fn block_read_device(slot: borrow BlockSlot[0],
                              device: KernelBlockDevice, block: usize,
-                             destination: [u8; KERNEL_BLOCK_SIZE..])
+                             destination: borrow [u8; KERNEL_BLOCK_SIZE..])
         -> BlockIoResult {
     let guard = block_device_take(slot);
     let result: BlockIoResult =
@@ -583,7 +583,7 @@ private fn block_read_device_locked(
         slot: borrow BlockSlot[0],
         guard: borrow BlockDeviceGuard[&block_device_lock],
         device: KernelBlockDevice, block: usize,
-        destination: [u8; KERNEL_BLOCK_SIZE..]) -> BlockIoResult !{unsafe} {
+        destination: borrow [u8; KERNEL_BLOCK_SIZE..]) -> BlockIoResult !{unsafe} {
     if (block >= device.length / KERNEL_BLOCK_SIZE) {
         return BlockIoResult::Invalid;
     }

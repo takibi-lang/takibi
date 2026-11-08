@@ -616,3 +616,16 @@ entries below that date are history, left as written.
   usb_disk_init_last_report takes the guard, and
   kernel_boot_log_usb_init_failure takes and gives back the block device
   before it logs. One row leaves the allowlist.
+- 2026-11-08: the boot ext2 fixture's buffers and release words (#1159).
+  ext2_fixture.tkb's `ext2_write_fixture_source/readback/bitmap`,
+  `ext2_release_first/second/fenced` and test_driver.tkb's
+  `ext2_read_fixture` and `ext2_symlink_fixture` (used only by the fixture)
+  are fields of `Ext2FixtureState`, `guarded_by(ext2_mutation_lock)`, and
+  are reached only as `guarded_ref(guard, ...)` with the mutation guard the
+  fixture already holds around its mutation checks. The TestDriverPhase
+  token names the fixture's premise more exactly, but its end flag is
+  private to test_driver_phase.tkb, so it cannot be a guarded_by lock.
+  The ext2 and block entry points the buffers reach (ext2_read_small_file,
+  ext2_read_fast_symlink, ext2_block_bitmap_snapshot,
+  ext2_resize/replace/write_regular_file*, block_read and its callees) take
+  their buffer as `borrow`. Eight rows leave the allowlist.

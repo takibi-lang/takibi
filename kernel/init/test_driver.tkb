@@ -35,8 +35,6 @@ use "kernel/arch/arm64/kernel/exception_evidence.tkb";
 use "kernel/arch/arm64/kernel/vector_table.tkb";
 use "kernel/kernel/cpu_authority.tkb";
 
-let mut ext2_read_fixture: [u8; 32];
-let mut ext2_symlink_fixture: [u8; 64];
 // GitHub issue #249: the mounted ext2 filesystem, saved once at boot
 // (wherever fn main() already successfully mounts it) so
 // the exec prepare below -- which runs later, on a syscall's
