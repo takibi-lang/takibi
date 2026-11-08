@@ -183,7 +183,7 @@ fn xhci_receive_configuration(guard: borrow BlockDeviceGuard[&block_device_lock]
                                            0, span_length);
             let completion: u32 = usb_ctrl_in(guard, 0x80, 6, 0x0200, 0, span);
             if (completion == 0) {
-                match msc_abort_unobserved_transfer() {
+                match msc_abort_unobserved_transfer(guard) {
                     MscTimeoutResult::RestartRequired => {
                         let restored = dma_finish_owned_rx(device, XhciControlReceive);
                         xhci_control_put(XhciControlReceiveAuthority::Cpu(restored));
@@ -219,7 +219,7 @@ fn msc_data_receive_once(guard: borrow BlockDeviceGuard[&block_device_lock], len
                                            0, span_length);
             let completion: u32 = usb_bulk_in(guard, span);
             if (completion == 0) {
-                match msc_abort_unobserved_transfer() {
+                match msc_abort_unobserved_transfer(guard) {
                     MscTimeoutResult::RestartRequired => {
                         let restored = dma_finish_owned_rx(device, MscDataReceive);
                         msc_data_put(MscDataReceiveAuthority::Cpu(restored));
@@ -252,7 +252,7 @@ fn msc_csw_receive_once(guard: borrow BlockDeviceGuard[&block_device_lock]) -> M
             let mut span = dma_device_span(device, MscCswReceive, 0, 13);
             let completion: u32 = usb_bulk_in(guard, span);
             if (completion == 0) {
-                match msc_abort_unobserved_transfer() {
+                match msc_abort_unobserved_transfer(guard) {
                     MscTimeoutResult::RestartRequired => {
                         let restored = dma_finish_owned_rx(device, MscCswReceive);
                         msc_csw_put(MscCswReceiveAuthority::Cpu(restored));
@@ -355,7 +355,7 @@ fn msc_cbw_send_once(guard: borrow BlockDeviceGuard[&block_device_lock]) -> MscD
             let mut span = dma_device_span(device, MscCbwTransmit, 0, 31);
             let completion: u32 = usb_bulk_out(guard, span);
             if (completion == 0) {
-                match msc_abort_unobserved_transfer() {
+                match msc_abort_unobserved_transfer(guard) {
                     MscTimeoutResult::RestartRequired => {
                         let restored = dma_finish_owned_tx(device, MscCbwTransmit);
                         msc_cbw_put(MscCbwTransmitAuthority::Cpu(restored));
@@ -388,7 +388,7 @@ fn msc_data_send_once(guard: borrow BlockDeviceGuard[&block_device_lock], length
                                            0, span_length);
             let completion: u32 = usb_bulk_out(guard, span);
             if (completion == 0) {
-                match msc_abort_unobserved_transfer() {
+                match msc_abort_unobserved_transfer(guard) {
                     MscTimeoutResult::RestartRequired => {
                         let restored = dma_finish_owned_tx(device, MscDataTransmit);
                         msc_data_out_put(MscDataTransmitAuthority::Cpu(restored));

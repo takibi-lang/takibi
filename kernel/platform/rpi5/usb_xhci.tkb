@@ -750,10 +750,10 @@ must_use variant MscTimeoutResult {
 // Reset the host controller before another command can reuse a DMA range.
 // A failed halt/reset is conservatively treated as unproven quiescence, so
 // this boot must never reinitialize the controller.
-fn msc_abort_unobserved_transfer() -> MscTimeoutResult {
+fn msc_abort_unobserved_transfer(guard: borrow BlockDeviceGuard[&block_device_lock]) -> MscTimeoutResult {
     atomic_word_fetch_add(&msc_command_timeouts, 1);
     atomic_word_store(&xhci_ready, 0);
-    if (xhci_halt_and_reset()) {
+    if (xhci_halt_and_reset(guard)) {
         return MscTimeoutResult::RestartRequired;
     }
     atomic_word_store(&xhci_controller_unusable, 1);
@@ -880,7 +880,7 @@ fn msc_run_command(guard: borrow BlockDeviceGuard[&block_device_lock], cbw: sink
 // own proven Steps 5-10 (see that file's header comment for the full
 // investigation history behind every constant/mask below). ------------
 
-fn xhci_halt_and_reset() -> bool !{unsafe} {
+fn xhci_halt_and_reset(guard: borrow BlockDeviceGuard[&block_device_lock]) -> bool !{unsafe} {
     let usbcmd_before: u32 = rp1_xhci_op.usbcmd;
     rp1_xhci_op.usbcmd = usbcmd_before & 0xFFFFFFFE;
 
@@ -916,7 +916,7 @@ fn xhci_halt_and_reset() -> bool !{unsafe} {
     }
     // A confirmed halt and HCRST is the quiescence the producer rings'
     // reset observation trusts (usb_xhci_rings.tkb).
-    if (hcrst_confirmed) { xhci_rings_quiesced = true; }
+    if (hcrst_confirmed) { xhci_rings_set_quiesced(guard, true); }
     return hcrst_confirmed;
 }
 
@@ -944,13 +944,13 @@ fn xhci_setup_rings_and_start(guard: borrow BlockDeviceGuard[&block_device_lock]
 
     // The event ring: back from the controller only on a confirmed reset,
     // zeroed and published again.
-    let evt_ring_dma: usize = xhci_events_start();
+    let evt_ring_dma: usize = xhci_events_start(guard);
     if (evt_ring_dma == 0) {
         return false;
     }
     // The producer rings: back from the controller only on a confirmed
     // reset, zeroed, each Link TRB pointing at its ring's start.
-    if (xhci_rings_restart() == false) {
+    if (xhci_rings_restart(guard) == false) {
         return false;
     }
 
@@ -1006,7 +1006,7 @@ fn xhci_setup_rings_and_start(guard: borrow BlockDeviceGuard[&block_device_lock]
     rp1_xhci_op.crcr_lo = ((cmd_ring_dma & 0xFFFFFFC0) | 1) as u32;
     rp1_xhci_op.crcr_hi = ((cmd_ring_dma >> 32) & 0xFFFFFFFF) as u32;
     rp1_xhci_op.config = 1; // MaxSlotsEn=1
-    xhci_rings_quiesced = false;
+    xhci_rings_set_quiesced(guard, false);
     let usbcmd_fresh: u32 = rp1_xhci_op.usbcmd;
     rp1_xhci_op.usbcmd = usbcmd_fresh | 1 | (1 << 2); // Run/Stop | INTE
 
@@ -1055,7 +1055,7 @@ fn xhci_address_device(guard: borrow BlockDeviceGuard[&block_device_lock]) -> Xh
     let slot: {0..<65 as usize} = slot_id;
     // The output device context: the controller's for the session
     // (XhciOutput in usb_xhci_rings.tkb).
-    let device_ctx_dma: usize = xhci_output_start();
+    let device_ctx_dma: usize = xhci_output_start(guard);
     if (device_ctx_dma == 0) {
         return XhciAddressOutcome::Completion(0);
     }
@@ -1350,7 +1350,7 @@ fn usb_disk_initialize_stages(guard: borrow BlockDeviceGuard[&block_device_lock]
     if (max_ports < XHCI_MSC_PORT) {
         return UsbInitOutcome::PortAbsent(max_ports);
     }
-    if (xhci_halt_and_reset() == false) {
+    if (xhci_halt_and_reset(guard) == false) {
         return UsbInitOutcome::Reset;
     }
     if (xhci_setup_rings_and_start(guard) == false) {

@@ -11,7 +11,7 @@
 //     STALL included, xHCI 1.2 4.11.3.1) means the controller has stopped
 //     at a TRB whose Cycle bit it does not own;
 //   - xhci_ring_reset_seen: xhci_halt_and_reset confirmed HCHalted and
-//     HCRST since the ring was published (xhci_rings_quiesced), after which
+//     HCRST since the ring was published (xhci_reset_state.quiesced), after which
 //     no ring is fetched (xHCI 1.2, 5.4.1.1).
 // The Ready state is `addressed`: a ring's own address goes into its Link
 // TRB and into CRCR or an endpoint context while the CPU still writes the
@@ -27,6 +27,7 @@
 use "kernel/lib/mutex.tkb";
 use "kernel/lib/task_mutex.tkb";
 use "kernel/drivers/dma_address.tkb";
+use "kernel/lib/set_once.tkb";
 
 const XHCI_RING_TRBS: usize = 16;
 const XHCI_RING_CMD: usize = 0;
@@ -52,7 +53,7 @@ protocol XhciRing[inst: usize] retains region(Trb)[b, XHCI_RING_TRBS] tx {
                             device: borrow BlockDeviceGuard[&block_device_lock])
         -> Completed[req] completes | Silent;
     transition xhci_ring_complete(InFlight[req], Completed[req]) -> Ready;
-    observe xhci_ring_reset_seen(InFlight[req]) -> Quiet[req] quiesces | Live;
+    observe xhci_ring_reset_seen(InFlight[req], device: borrow BlockDeviceGuard[&block_device_lock]) -> Quiet[req] quiesces | Live;
     transition xhci_ring_reclaim(InFlight[req], Quiet[req]) -> Ready;
     property disjoint;
     model cells 2;
@@ -74,10 +75,17 @@ struct XhciRingWords {
     private input_published_at: usize guarded_by(block_device_lock);
 }
 private let mut xhci_ring_words: XhciRingWords;
-private let mut xhci_rings_claimed: bool = false;
+// GitHub issue #1159: each region is claimed once per boot; the first
+// caller wins the SetOnce claim and the rest take the reclaim path.
+private let mut xhci_rings_claimed: SetOnce(bool);
 // Set by xhci_halt_and_reset when HCHalted and HCRST are confirmed, and
-// cleared when the controller runs again.
-let mut xhci_rings_quiesced: bool = false;
+// cleared when the controller runs again (GitHub issue #1159: reached only
+// with the block device guard, which every reset observation takes).
+struct XhciResetState { private quiesced: bool guarded_by(block_device_lock); }
+private let mut xhci_reset_state: XhciResetState;
+fn xhci_rings_set_quiesced(device: borrow BlockDeviceGuard[&block_device_lock], quiesced: bool) {
+    guarded_ref(device, xhci_reset_state.quiesced) = quiesced;
+}
 
 // The doorbell: runs after the clean and the state change.
 fn xhci_ring_publish(s: borrow XhciRing_InFlight[b, o, 16, r],
@@ -97,9 +105,10 @@ fn xhci_ring_event(s: borrow XhciRing_InFlight[b, o, 16, r], timeout: usize,
     return XhciRing_xhci_ring_event_Raw::Completed;
 }
 fn xhci_ring_complete(s: borrow XhciRing_InFlight[b, o, 16, r]) {}
-fn xhci_ring_reset_seen(s: borrow XhciRing_InFlight[b, o, 16, r])
+fn xhci_ring_reset_seen(s: borrow XhciRing_InFlight[b, o, 16, r],
+        device: borrow BlockDeviceGuard[&block_device_lock])
         -> XhciRing_xhci_ring_reset_seen_Raw {
-    if (xhci_rings_quiesced) { return XhciRing_xhci_ring_reset_seen_Raw::Quiet; }
+    if (guarded_ref(device, xhci_reset_state.quiesced)) { return XhciRing_xhci_ring_reset_seen_Raw::Quiet; }
     return XhciRing_xhci_ring_reset_seen_Raw::Live;
 }
 fn xhci_ring_reclaim(s: borrow XhciRing_InFlight[b, o, 16, r]) {}
@@ -187,8 +196,12 @@ private fn xhci_ring_claim(i: usize, memory: region(Trb)[b, 16]) {
 
 // The four rings, claimed once per boot.
 private fn xhci_rings_claim() -> bool {
-    if (xhci_rings_claimed) { return true; }
-    xhci_rings_claimed = true;
+    match set_once_claim(&xhci_rings_claimed) {
+        SetOnceBegin::Taken => { return true; }
+        SetOnceBegin::Claimed(claim) => {
+            set_once_publish(&xhci_rings_claimed, claim, true);
+        }
+    }
     let RegionOf(Trb)::Taken(cmd) = region_of(xhci_cmd_ring) else {
         RegionOf(Trb)::Gone => { return false; }
     };
@@ -288,7 +301,7 @@ fn xhci_ring_set_cursor(i: usize, enq: usize, cycle: u32) -> bool {
     }
 }
 
-private fn xhci_ring_restart(i: usize) -> bool !{unsafe} {
+private fn xhci_ring_restart(device: borrow BlockDeviceGuard[&block_device_lock], i: usize) -> bool !{unsafe} {
     match xhci_ring_take(i) {
         Place::Empty => { return false; }
         Place::Full(held) => {
@@ -301,7 +314,7 @@ private fn xhci_ring_restart(i: usize) -> bool !{unsafe} {
                     return true;
                 }
                 XhciRingHeld::InFlight(flight) => {
-                    match XhciRing_xhci_ring_reset_seen(flight) {
+                    match XhciRing_xhci_ring_reset_seen(flight, device) {
                         XhciRing_xhci_ring_reset_seen_Outcome::Quiet(quiet) => {
                             let mut ready = XhciRing_xhci_ring_reclaim(flight, quiet);
                             xhci_ring_format(ready);
@@ -321,12 +334,12 @@ private fn xhci_ring_restart(i: usize) -> bool !{unsafe} {
 }
 
 // All four rings, after a confirmed halt and reset (or at first claim).
-fn xhci_rings_restart() -> bool !{unsafe} {
+fn xhci_rings_restart(device: borrow BlockDeviceGuard[&block_device_lock]) -> bool !{unsafe} {
     if (xhci_rings_claim() == false) { return false; }
-    let cmd_ok: bool = xhci_ring_restart(XHCI_RING_CMD);
-    let ep0_ok: bool = xhci_ring_restart(XHCI_RING_EP0);
-    let in_ok: bool = xhci_ring_restart(XHCI_RING_BULK_IN);
-    let out_ok: bool = xhci_ring_restart(XHCI_RING_BULK_OUT);
+    let cmd_ok: bool = xhci_ring_restart(device, XHCI_RING_CMD);
+    let ep0_ok: bool = xhci_ring_restart(device, XHCI_RING_EP0);
+    let in_ok: bool = xhci_ring_restart(device, XHCI_RING_BULK_IN);
+    let out_ok: bool = xhci_ring_restart(device, XHCI_RING_BULK_OUT);
     return cmd_ok && ep0_ok && in_ok && out_ok;
 }
 
@@ -463,7 +476,7 @@ fn xhci_ring_submit(device: borrow BlockDeviceGuard[&block_device_lock], i: usiz
 // Table, are given to the controller for a whole session: each is written
 // while Ready, published once at start (generated clean, or prepare for
 // the device-written scratchpad buffers), and comes back only on the
-// confirmed halt and reset (xhci_rings_quiesced), like a producer ring
+// confirmed halt and reset (xhci_reset_state.quiesced), like a producer ring
 // with no event. The input context is published before each Address
 // Device or Configure Endpoint command and comes back on that command's
 // completion: xhci_input_used trusts that the first Command Completion
@@ -493,7 +506,7 @@ protocol XhciErst[inst: usize] retains region(ErstEntry)[b, XHCI_ERST_ENTRIES] t
     state Live[req] device;
     init Ready;
     transition xhci_erst_publish(Ready) -> Live[fresh req];
-    observe xhci_erst_reset(Live[req]) -> ErstQuiet[req] quiesces | ErstLive;
+    observe xhci_erst_reset(Live[req], device: borrow BlockDeviceGuard[&block_device_lock]) -> ErstQuiet[req] quiesces | ErstLive;
     transition xhci_erst_reclaim(Live[req], ErstQuiet[req]) -> Ready;
     property disjoint;
     model cells 2;
@@ -504,7 +517,7 @@ protocol XhciScratchArray[inst: usize] retains region(XhciPtr)[b, XHCI_SCRATCH_E
     state Live[req] device;
     init Ready;
     transition xhci_scratch_array_publish(Ready) -> Live[fresh req];
-    observe xhci_scratch_array_reset(Live[req]) -> ArrayQuiet[req] quiesces | ArrayLive;
+    observe xhci_scratch_array_reset(Live[req], device: borrow BlockDeviceGuard[&block_device_lock]) -> ArrayQuiet[req] quiesces | ArrayLive;
     transition xhci_scratch_array_reclaim(Live[req], ArrayQuiet[req]) -> Ready;
     property disjoint;
     model cells 2;
@@ -515,7 +528,7 @@ protocol XhciScratchBuf[inst: usize] retains region(u8)[b, XHCI_SCRATCH_BYTES] r
     state Live[req] device;
     init Ready;
     transition xhci_scratch_buf_publish(Ready) -> Live[fresh req];
-    observe xhci_scratch_buf_reset(Live[req]) -> BufQuiet[req] quiesces | BufLive;
+    observe xhci_scratch_buf_reset(Live[req], device: borrow BlockDeviceGuard[&block_device_lock]) -> BufQuiet[req] quiesces | BufLive;
     transition xhci_scratch_buf_reclaim(Live[req], BufQuiet[req]) -> Ready;
     property disjoint;
     model cells 2;
@@ -530,7 +543,7 @@ protocol XhciInput[inst: usize] retains region(CtxWord)[b, XHCI_INPUT_WORDS] tx 
     observe xhci_input_used(Read[req], device: borrow BlockDeviceGuard[&block_device_lock])
         -> InputDone[req] completes | InputPending;
     transition xhci_input_done(Read[req], InputDone[req]) -> Ready;
-    observe xhci_input_reset(Read[req]) -> InputQuiet[req] quiesces | InputLive;
+    observe xhci_input_reset(Read[req], device: borrow BlockDeviceGuard[&block_device_lock]) -> InputQuiet[req] quiesces | InputLive;
     transition xhci_input_reclaim(Read[req], InputQuiet[req]) -> Ready;
     property disjoint;
     model cells 2;
@@ -546,24 +559,27 @@ private region let mut xhci_input_ctx: [CtxWord; 528] align(64);
 // Lowerings. Publishing a session table rings nothing: the register
 // writes that follow point the controller at it, before Run.
 fn xhci_erst_publish(s: borrow XhciErst_Live[b, o, 4, r]) {}
-fn xhci_erst_reset(s: borrow XhciErst_Live[b, o, 4, r]) -> XhciErst_xhci_erst_reset_Raw {
-    if (xhci_rings_quiesced) { return XhciErst_xhci_erst_reset_Raw::ErstQuiet; }
+fn xhci_erst_reset(s: borrow XhciErst_Live[b, o, 4, r],
+        device: borrow BlockDeviceGuard[&block_device_lock]) -> XhciErst_xhci_erst_reset_Raw {
+    if (guarded_ref(device, xhci_reset_state.quiesced)) { return XhciErst_xhci_erst_reset_Raw::ErstQuiet; }
     return XhciErst_xhci_erst_reset_Raw::ErstLive;
 }
 fn xhci_erst_reclaim(s: borrow XhciErst_Live[b, o, 4, r]) {}
 fn xhci_scratch_array_publish(s: borrow XhciScratchArray_Live[b, o, 8, r]) {}
-fn xhci_scratch_array_reset(s: borrow XhciScratchArray_Live[b, o, 8, r])
+fn xhci_scratch_array_reset(s: borrow XhciScratchArray_Live[b, o, 8, r],
+        device: borrow BlockDeviceGuard[&block_device_lock])
         -> XhciScratchArray_xhci_scratch_array_reset_Raw {
-    if (xhci_rings_quiesced) {
+    if (guarded_ref(device, xhci_reset_state.quiesced)) {
         return XhciScratchArray_xhci_scratch_array_reset_Raw::ArrayQuiet;
     }
     return XhciScratchArray_xhci_scratch_array_reset_Raw::ArrayLive;
 }
 fn xhci_scratch_array_reclaim(s: borrow XhciScratchArray_Live[b, o, 8, r]) {}
 fn xhci_scratch_buf_publish(s: borrow XhciScratchBuf_Live[b, o, 4096, r]) {}
-fn xhci_scratch_buf_reset(s: borrow XhciScratchBuf_Live[b, o, 4096, r])
+fn xhci_scratch_buf_reset(s: borrow XhciScratchBuf_Live[b, o, 4096, r],
+        device: borrow BlockDeviceGuard[&block_device_lock])
         -> XhciScratchBuf_xhci_scratch_buf_reset_Raw {
-    if (xhci_rings_quiesced) { return XhciScratchBuf_xhci_scratch_buf_reset_Raw::BufQuiet; }
+    if (guarded_ref(device, xhci_reset_state.quiesced)) { return XhciScratchBuf_xhci_scratch_buf_reset_Raw::BufQuiet; }
     return XhciScratchBuf_xhci_scratch_buf_reset_Raw::BufLive;
 }
 fn xhci_scratch_buf_reclaim(s: borrow XhciScratchBuf_Live[b, o, 4096, r]) {}
@@ -581,8 +597,9 @@ fn xhci_input_used(s: borrow XhciInput_Read[b, o, 528, r],
     return XhciInput_xhci_input_used_Raw::InputPending;
 }
 fn xhci_input_done(s: borrow XhciInput_Read[b, o, 528, r]) {}
-fn xhci_input_reset(s: borrow XhciInput_Read[b, o, 528, r]) -> XhciInput_xhci_input_reset_Raw {
-    if (xhci_rings_quiesced) { return XhciInput_xhci_input_reset_Raw::InputQuiet; }
+fn xhci_input_reset(s: borrow XhciInput_Read[b, o, 528, r],
+        device: borrow BlockDeviceGuard[&block_device_lock]) -> XhciInput_xhci_input_reset_Raw {
+    if (guarded_ref(device, xhci_reset_state.quiesced)) { return XhciInput_xhci_input_reset_Raw::InputQuiet; }
     return XhciInput_xhci_input_reset_Raw::InputLive;
 }
 fn xhci_input_reclaim(s: borrow XhciInput_Read[b, o, 528, r]) {}
@@ -615,7 +632,7 @@ private let mut xhci_erst_slot: XhciErstSlot;
 private let mut xhci_scratch_array_slot: XhciScratchArraySlot;
 private let mut xhci_scratch_buf_slots: [XhciScratchBufSlot; 2];
 private let mut xhci_input_slot: XhciInputSlot;
-private let mut xhci_tables_claimed: bool = false;
+private let mut xhci_tables_claimed: SetOnce(bool);
 
 private fn xhci_input_lost(x: sink XhciInputHeld) { kernel_invariant_stop(); }
 // A displaced session-table owner: an invariant breach, as for a ring.
@@ -720,14 +737,14 @@ private fn xhci_scratch_array_fill(r: XhciScratchArray_Ready[b, o, 8], buf0: usi
 
 // A Live table back to Ready on a confirmed reset, then filled and
 // republished. Answers 0 when the controller may still use it.
-private fn xhci_erst_restart(evt_ring_dma: usize) -> usize !{unsafe} {
+private fn xhci_erst_restart(device: borrow BlockDeviceGuard[&block_device_lock], evt_ring_dma: usize) -> usize !{unsafe} {
     let guard = xhci_ring_lock(&xhci_erst_slot.mutex);
     let taken = place_take(guard, &xhci_erst_slot.mutex, xhci_erst_slot.value);
     xhci_ring_unlock(guard, &xhci_erst_slot.mutex);
     match taken {
         Place::Empty => { return 0; }
         Place::Full(live) => {
-            match XhciErst_xhci_erst_reset(live) {
+            match XhciErst_xhci_erst_reset(live, device) {
                 XhciErst_xhci_erst_reset_Outcome::ErstQuiet(q) => {
                     let ready = XhciErst_xhci_erst_reclaim(live, q);
                     return xhci_erst_fill(ready, evt_ring_dma);
@@ -740,7 +757,7 @@ private fn xhci_erst_restart(evt_ring_dma: usize) -> usize !{unsafe} {
         }
     }
 }
-private fn xhci_scratch_array_restart(buf0: usize, buf1: usize) -> usize !{unsafe} {
+private fn xhci_scratch_array_restart(device: borrow BlockDeviceGuard[&block_device_lock], buf0: usize, buf1: usize) -> usize !{unsafe} {
     let guard = xhci_ring_lock(&xhci_scratch_array_slot.mutex);
     let taken = place_take(guard, &xhci_scratch_array_slot.mutex,
                            xhci_scratch_array_slot.value);
@@ -748,7 +765,7 @@ private fn xhci_scratch_array_restart(buf0: usize, buf1: usize) -> usize !{unsaf
     match taken {
         Place::Empty => { return 0; }
         Place::Full(live) => {
-            match XhciScratchArray_xhci_scratch_array_reset(live) {
+            match XhciScratchArray_xhci_scratch_array_reset(live, device) {
                 XhciScratchArray_xhci_scratch_array_reset_Outcome::ArrayQuiet(q) => {
                     let ready = XhciScratchArray_xhci_scratch_array_reclaim(live, q);
                     return xhci_scratch_array_fill(ready, buf0, buf1);
@@ -761,7 +778,7 @@ private fn xhci_scratch_array_restart(buf0: usize, buf1: usize) -> usize !{unsaf
         }
     }
 }
-private fn xhci_scratch_buf_restart(i: usize) -> usize !{unsafe} {
+private fn xhci_scratch_buf_restart(device: borrow BlockDeviceGuard[&block_device_lock], i: usize) -> usize !{unsafe} {
     if (i >= 2) { return 0; }
     let guard = xhci_ring_lock(&xhci_scratch_buf_slots[i].mutex);
     let taken = place_take(guard, &xhci_scratch_buf_slots[i].mutex,
@@ -770,7 +787,7 @@ private fn xhci_scratch_buf_restart(i: usize) -> usize !{unsafe} {
     match taken {
         Place::Empty => { return 0; }
         Place::Full(live) => {
-            match XhciScratchBuf_xhci_scratch_buf_reset(live) {
+            match XhciScratchBuf_xhci_scratch_buf_reset(live, device) {
                 XhciScratchBuf_xhci_scratch_buf_reset_Outcome::BufQuiet(q) => {
                     let ready = XhciScratchBuf_xhci_scratch_buf_reclaim(live, q);
                     return xhci_scratch_buf_go(i, ready);
@@ -806,7 +823,7 @@ private fn xhci_input_recover(device: borrow BlockDeviceGuard[&block_device_lock
                             return true;
                         }
                         XhciInput_xhci_input_used_Outcome::InputPending => {
-                            match XhciInput_xhci_input_reset(read) {
+                            match XhciInput_xhci_input_reset(read, device) {
                                 XhciInput_xhci_input_reset_Outcome::InputQuiet(q) => {
                                     let ready = XhciInput_xhci_input_reclaim(read, q);
                                     xhci_input_park(XhciInputHeld::Ready(ready));
@@ -839,8 +856,15 @@ private fn xhci_tables_fail() -> XhciTableAddresses {
 // The session tables for a new controller session: claimed at the first
 // one, otherwise reclaimed on the confirmed reset; written and published.
 fn xhci_tables_start(device: borrow BlockDeviceGuard[&block_device_lock], evt_ring_dma: usize) -> XhciTableAddresses !{unsafe} {
-    if (xhci_tables_claimed == false) {
-        xhci_tables_claimed = true;
+    let mut first_tables: bool = false;
+    match set_once_claim(&xhci_tables_claimed) {
+        SetOnceBegin::Taken => {}
+        SetOnceBegin::Claimed(claim) => {
+            set_once_publish(&xhci_tables_claimed, claim, true);
+            first_tables = true;
+        }
+    }
+    if (first_tables) {
         let RegionOf(u8)::Taken(b0) = region_of(xhci_scratchpad_buf0) else {
             RegionOf(u8)::Gone => { return xhci_tables_fail(); }
         };
@@ -864,10 +888,10 @@ fn xhci_tables_start(device: borrow BlockDeviceGuard[&block_device_lock], evt_ri
         let mut started: XhciTableAddresses = { true, array, erst };
         return started;
     }
-    let buf0: usize = xhci_scratch_buf_restart(0);
-    let buf1: usize = xhci_scratch_buf_restart(1);
-    let array: usize = xhci_scratch_array_restart(buf0, buf1);
-    let erst: usize = xhci_erst_restart(evt_ring_dma);
+    let buf0: usize = xhci_scratch_buf_restart(device, 0);
+    let buf1: usize = xhci_scratch_buf_restart(device, 1);
+    let array: usize = xhci_scratch_array_restart(device, buf0, buf1);
+    let erst: usize = xhci_erst_restart(device, evt_ring_dma);
     let input_ok: bool = xhci_input_recover(device);
     if (buf0 == 0 || buf1 == 0 || array == 0 || erst == 0 || input_ok == false) {
         return xhci_tables_fail();
@@ -954,7 +978,7 @@ protocol XhciEvents[inst: usize] retains region(Trb)[b, XHCI_RING_TRBS] rx {
     init Ready;
     transition xhci_evt_publish(Ready) -> Live[fresh req];
     observe xhci_evt_poll(Live[req]) -> Event snapshot | NoEvent;
-    observe xhci_evt_reset(Live[req]) -> EvtQuiet[req] quiesces | EvtLive;
+    observe xhci_evt_reset(Live[req], device: borrow BlockDeviceGuard[&block_device_lock]) -> EvtQuiet[req] quiesces | EvtLive;
     transition xhci_evt_reclaim(Live[req], EvtQuiet[req]) -> Ready;
     property disjoint;
     model cells 2;
@@ -966,7 +990,7 @@ protocol XhciOutput[inst: usize] retains region(CtxWord)[b, XHCI_OUTPUT_WORDS] r
     init Ready;
     transition xhci_out_publish(Ready) -> Live[fresh req];
     observe xhci_out_read(Live[req]) -> OutWord snapshot;
-    observe xhci_out_reset(Live[req]) -> OutQuiet[req] quiesces | OutLive;
+    observe xhci_out_reset(Live[req], device: borrow BlockDeviceGuard[&block_device_lock]) -> OutQuiet[req] quiesces | OutLive;
     transition xhci_out_reclaim(Live[req], OutQuiet[req]) -> Ready;
     property disjoint;
     model cells 2;
@@ -996,8 +1020,9 @@ fn xhci_evt_poll_release(s: borrow mut XhciEvents_Live[b, o, 16, r]) !{unsafe} {
     let mut span: DmaDeviceSpan = XhciEvents_Live_span(s);
     xhci_event_dequeue_release(rp1_span_bus_address(span) + idx * 16);
 }
-fn xhci_evt_reset(s: borrow XhciEvents_Live[b, o, 16, r]) -> XhciEvents_xhci_evt_reset_Raw {
-    if (xhci_rings_quiesced) { return XhciEvents_xhci_evt_reset_Raw::EvtQuiet; }
+fn xhci_evt_reset(s: borrow XhciEvents_Live[b, o, 16, r],
+        device: borrow BlockDeviceGuard[&block_device_lock]) -> XhciEvents_xhci_evt_reset_Raw {
+    if (guarded_ref(device, xhci_reset_state.quiesced)) { return XhciEvents_xhci_evt_reset_Raw::EvtQuiet; }
     return XhciEvents_xhci_evt_reset_Raw::EvtLive;
 }
 fn xhci_evt_reclaim(s: borrow XhciEvents_Live[b, o, 16, r]) {}
@@ -1007,8 +1032,9 @@ fn xhci_out_read(s: borrow XhciOutput_Live[b, o, 512, r], value: CtxWord)
     return XhciOutput_xhci_out_read_Raw::OutWord;
 }
 fn xhci_out_read_release(s: borrow XhciOutput_Live[b, o, 512, r]) {}
-fn xhci_out_reset(s: borrow XhciOutput_Live[b, o, 512, r]) -> XhciOutput_xhci_out_reset_Raw {
-    if (xhci_rings_quiesced) { return XhciOutput_xhci_out_reset_Raw::OutQuiet; }
+fn xhci_out_reset(s: borrow XhciOutput_Live[b, o, 512, r],
+        device: borrow BlockDeviceGuard[&block_device_lock]) -> XhciOutput_xhci_out_reset_Raw {
+    if (guarded_ref(device, xhci_reset_state.quiesced)) { return XhciOutput_xhci_out_reset_Raw::OutQuiet; }
     return XhciOutput_xhci_out_reset_Raw::OutLive;
 }
 fn xhci_out_reclaim(s: borrow XhciOutput_Live[b, o, 512, r]) {}
@@ -1025,8 +1051,8 @@ struct XhciOutputSlot {
 }
 private let mut xhci_events_slot: XhciEventsSlot;
 private let mut xhci_output_slot: XhciOutputSlot;
-private let mut xhci_events_claimed: bool = false;
-private let mut xhci_output_claimed: bool = false;
+private let mut xhci_events_claimed: SetOnce(bool);
+private let mut xhci_output_claimed: SetOnce(bool);
 
 variant XhciLostLive {
     Events(exists b: addr. exists o: usize. exists r: usize. XhciEvents_Live[b, o, 16, r]);
@@ -1073,9 +1099,16 @@ private fn xhci_events_go(r: XhciEvents_Ready[b, o, 16]) -> usize !{unsafe} {
 // The event ring for a new controller session: claimed at the first one,
 // otherwise reclaimed on the confirmed reset. 0 while the controller may
 // still write it.
-fn xhci_events_start() -> usize !{unsafe} {
-    if (xhci_events_claimed == false) {
-        xhci_events_claimed = true;
+fn xhci_events_start(device: borrow BlockDeviceGuard[&block_device_lock]) -> usize !{unsafe} {
+    let mut first_events: bool = false;
+    match set_once_claim(&xhci_events_claimed) {
+        SetOnceBegin::Taken => {}
+        SetOnceBegin::Claimed(claim) => {
+            set_once_publish(&xhci_events_claimed, claim, true);
+            first_events = true;
+        }
+    }
+    if (first_events) {
         let RegionOf(Trb)::Taken(memory) = region_of(xhci_evt_ring) else {
             RegionOf(Trb)::Gone => { return 0; }
         };
@@ -1087,7 +1120,7 @@ fn xhci_events_start() -> usize !{unsafe} {
     match taken {
         Place::Empty => { return 0; }
         Place::Full(live) => {
-            match XhciEvents_xhci_evt_reset(live) {
+            match XhciEvents_xhci_evt_reset(live, device) {
                 XhciEvents_xhci_evt_reset_Outcome::EvtQuiet(q) => {
                     return xhci_events_go(XhciEvents_xhci_evt_reclaim(live, q));
                 }
@@ -1157,9 +1190,16 @@ private fn xhci_output_go(r: XhciOutput_Ready[b, o, 512]) -> usize !{unsafe} {
 
 // The output device context for a new Address Device: published once per
 // controller session; 0 while the controller may still write it.
-fn xhci_output_start() -> usize !{unsafe} {
-    if (xhci_output_claimed == false) {
-        xhci_output_claimed = true;
+fn xhci_output_start(device: borrow BlockDeviceGuard[&block_device_lock]) -> usize !{unsafe} {
+    let mut first_output: bool = false;
+    match set_once_claim(&xhci_output_claimed) {
+        SetOnceBegin::Taken => {}
+        SetOnceBegin::Claimed(claim) => {
+            set_once_publish(&xhci_output_claimed, claim, true);
+            first_output = true;
+        }
+    }
+    if (first_output) {
         let RegionOf(CtxWord)::Taken(memory) = region_of(xhci_device_ctx) else {
             RegionOf(CtxWord)::Gone => { return 0; }
         };
@@ -1171,7 +1211,7 @@ fn xhci_output_start() -> usize !{unsafe} {
     match taken {
         Place::Empty => { return 0; }
         Place::Full(live) => {
-            match XhciOutput_xhci_out_reset(live) {
+            match XhciOutput_xhci_out_reset(live, device) {
                 XhciOutput_xhci_out_reset_Outcome::OutQuiet(q) => {
                     return xhci_output_go(XhciOutput_xhci_out_reclaim(live, q));
                 }

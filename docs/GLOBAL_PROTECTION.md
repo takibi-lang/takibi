@@ -600,3 +600,10 @@ entries below that date are history, left as written.
   Two guarded_ref gaps were closed on the way: an array field below a
   struct-typed guarded field was refused as "a call's result", and a
   struct-element guarded array cast to a slice was taken for a byte view.
+- 2026-11-08: the xHCI one-shot claims and the reset flag (#1159). The
+  four `*_claimed` flags (rings, tables, events, output) are `SetOnce(bool)`:
+  the first caller wins the claim and takes the region, the rest reclaim.
+  `xhci_rings_quiesced` is `XhciResetState.quiesced`,
+  `guarded_by(block_device_lock)`: the seven reset observations take the
+  borrowed `BlockDeviceGuard` as an action argument, and the restart, start
+  and halt paths pass it down. Five rows leave the allowlist.
