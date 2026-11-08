@@ -55,13 +55,16 @@ struct ProfileTimelineCore {
 
 private let mut profile_timeline_cores:
     [ProfileTimelineCore; KERNEL_MAX_CORES];
-private let mut profile_timeline_active: bool = false;
-private let mut profile_timeline_pid_a: usize;
-private let mut profile_timeline_pid_b: usize;
+// GitHub issue #1159: written only by start/finish under the workload
+// interval's MachineStopped (StopCell), read freely.
+private let mut profile_timeline_active: StopCell(bool);
+private let mut profile_timeline_pid_a: StopCell(usize);
+private let mut profile_timeline_pid_b: StopCell(usize);
 
 private fn profile_timeline_pid_relevant(pid: usize) -> bool {
     return pid != 0 &&
-           (pid == profile_timeline_pid_a || pid == profile_timeline_pid_b);
+           (pid == stop_cell_get(&profile_timeline_pid_a) ||
+            pid == stop_cell_get(&profile_timeline_pid_b));
 }
 
 private fn profile_timeline_core_reset(
@@ -80,7 +83,7 @@ private fn profile_timeline_note(kind: ProfileTimelineKind, pid: usize,
     // Test activation inside the same masked region as publication. A stop
     // SGI between an earlier test and this mask could close the interval,
     // then resume this writer into an already reported buffer.
-    if (profile_timeline_active == false) {
+    if (stop_cell_get(&profile_timeline_active) == false) {
         mutex_irq_restore(irq_was_masked);
         return;
     }
@@ -112,13 +115,14 @@ private fn profile_timeline_note(kind: ProfileTimelineKind, pid: usize,
     mutex_irq_restore(irq_was_masked);
 }
 
-fn profile_timeline_start(pid_a: usize, pid_b: usize) {
+fn profile_timeline_start(stopped: borrow MachineStopped[&kernel_world_stop],
+                          pid_a: usize, pid_b: usize) {
     for cpu: usize in 0..<KERNEL_MAX_CORES {
         profile_timeline_core_reset(cpu);
     }
-    profile_timeline_pid_a = pid_a;
-    profile_timeline_pid_b = pid_b;
-    profile_timeline_active = true;
+    stop_cell_set(&profile_timeline_pid_a, stopped, pid_a);
+    stop_cell_set(&profile_timeline_pid_b, stopped, pid_b);
+    stop_cell_set(&profile_timeline_active, stopped, true);
 }
 
 // A clipped profiling interval needs explicit scheduler boundaries even when
@@ -167,7 +171,9 @@ fn profile_timeline_interval_finish_cpu(
     profile_timeline_cores[cpu].stored = slot + 1;
 }
 
-fn profile_timeline_finish() { profile_timeline_active = false; }
+fn profile_timeline_finish(stopped: borrow MachineStopped[&kernel_world_stop]) {
+    stop_cell_set(&profile_timeline_active, stopped, false);
+}
 
 fn profile_timeline_schedule(from_pid: usize, to_pid: usize) {
     if (profile_timeline_pid_relevant(from_pid) == false &&

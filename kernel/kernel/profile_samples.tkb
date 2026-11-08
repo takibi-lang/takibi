@@ -83,7 +83,9 @@ struct ProfileSampleCore {
 }
 
 private let mut profile_sample_cores: [ProfileSampleCore; KERNEL_MAX_CORES];
-private let mut profile_sample_active: bool = false;
+// GitHub issue #1159: written only by start/finish under the workload
+// interval's MachineStopped (StopCell), read freely.
+private let mut profile_sample_active: StopCell(bool);
 // Set once, at the first profile_sample_start, from ID_AA64DFR0_EL1. A CPU
 // with no PMUv3 reports an empty profile instead of executing an msr that
 // would fault.
@@ -95,10 +97,10 @@ private let mut profile_sample_checked: AtomicWord;
 // counter past it with the overflow status set counted and overflowed into
 // an interrupt that was never delivered, which is a routing question and
 // not a PMU one.
-private let mut profile_sample_end_counter: usize = 0;
-private let mut profile_sample_end_pending: usize = 0;
-private let mut profile_sample_end_state: usize = 0;
-private let mut profile_sample_end_gic: usize = 0;
+private let mut profile_sample_end_counter: StopCell(usize);
+private let mut profile_sample_end_pending: StopCell(usize);
+private let mut profile_sample_end_state: StopCell(usize);
+private let mut profile_sample_end_gic: StopCell(usize);
 
 private fn profile_sample_core_reset(cpu: {0..<KERNEL_MAX_CORES as usize}) {
     profile_sample_cores[cpu].stored = 0;
@@ -127,7 +129,7 @@ private fn profile_sample_store(cpu: {0..<KERNEL_MAX_CORES as usize},
 // Begin sampling on the calling core. Called from the same IRQ-masked
 // critical section that opens the measured interval, so the first sample
 // and the interval's own start timestamp cannot straddle a tick.
-fn profile_sample_start() {
+fn profile_sample_start(stopped: borrow MachineStopped[&kernel_world_stop]) {
     // GitHub issue #497: a DDB profile session owns the PMU while it exists.
     if (profile_session_exists()) { return; }
     for cpu: usize in 0..<KERNEL_MAX_CORES {
@@ -140,25 +142,25 @@ fn profile_sample_start() {
         }
     }
     if (atomic_word_load(&profile_sample_available) == 0) { return; }
-    profile_sample_active = true;
+    stop_cell_set(&profile_sample_active, stopped, true);
     pmu_sample_start(PROFILE_SAMPLE_PERIOD_CYCLES);
 }
 
 // Whether the busy-pair interval holds the PMU (profile_session.tkb refuses
 // to start, and leaves the counter alone, while it does).
 fn profile_sample_interval_active() -> bool {
-    return profile_sample_active;
+    return stop_cell_get(&profile_sample_active);
 }
 
 // End sampling. Runs on the interval's own end boundary, before anything is
 // reported, so no sample can land after the summary that counts it.
-fn profile_sample_finish() {
-    if (profile_sample_active == false) { return; }
-    profile_sample_active = false;
-    profile_sample_end_counter = pmu_sample_counter();
-    profile_sample_end_pending = pmu_sample_pending();
-    profile_sample_end_state = pmu_sample_state();
-    profile_sample_end_gic = platform_pmu_irq_debug();
+fn profile_sample_finish(stopped: borrow MachineStopped[&kernel_world_stop]) {
+    if (stop_cell_get(&profile_sample_active) == false) { return; }
+    stop_cell_set(&profile_sample_active, stopped, false);
+    stop_cell_set(&profile_sample_end_counter, stopped, pmu_sample_counter());
+    stop_cell_set(&profile_sample_end_pending, stopped, pmu_sample_pending());
+    stop_cell_set(&profile_sample_end_state, stopped, pmu_sample_state());
+    stop_cell_set(&profile_sample_end_gic, stopped, platform_pmu_irq_debug());
     pmu_sample_stop();
 }
 
@@ -172,7 +174,7 @@ fn profile_sample_irq(frame: borrow FrameRef[process, level]) !{interrupt, unsaf
         return;
     }
     if (pmu_sample_pending() != 1) { return; }
-    if (profile_sample_active == false) {
+    if (stop_cell_get(&profile_sample_active) == false) {
         // An overflow armed before the interval ended, delivered after.
         // Silence it rather than rearming it.
         pmu_sample_stop();
@@ -264,15 +266,15 @@ fn profile_sample_report() {
         // Absent on a healthy boot, so no view has to match it, and the
         // one boot that needs it does not need a second one to get it.
         kernel_boot_log("profile: sample-idle name=busy-pair counter=0x");
-        uart_put_hex_digits(profile_sample_end_counter);
+        uart_put_hex_digits(stop_cell_get(&profile_sample_end_counter));
         kernel_boot_log(" pending=");
-        uart_put_udec(profile_sample_end_pending);
+        uart_put_udec(stop_cell_get(&profile_sample_end_pending));
         kernel_boot_log(" reload=");
         uart_put_udec(PROFILE_SAMPLE_PERIOD_CYCLES);
         kernel_boot_log(" pmu=0x");
-        uart_put_hex_digits(profile_sample_end_state);
+        uart_put_hex_digits(stop_cell_get(&profile_sample_end_state));
         kernel_boot_log(" gic=0x");
-        uart_put_hex_digits(profile_sample_end_gic);
+        uart_put_hex_digits(stop_cell_get(&profile_sample_end_gic));
         kernel_boot_log("\n");
     }
 }

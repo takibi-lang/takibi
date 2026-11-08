@@ -3070,6 +3070,30 @@ fn set_once_get(T: type, cell: &mut SetOnce(T)) -> T {
   private let mut other1159: SetOnce(usize);
 "
 
+(* GitHub issue #1159 (2026-11-08): kernel/lib/occupancy.tkb's StopCell,
+   inlined with a minimal MachineStopped. *)
+let stop_cell_base = "
+  struct WorldStop { private word: usize; }
+  let mut kernel_world_stop: WorldStop;
+  linear struct MachineStopped[stop: addr] { private owner: usize; }
+  generic struct StopCell(T: type) { private value: T; }
+  fn stop_cell_set(T: type, cell: &mut StopCell(T),
+                   stopped: borrow MachineStopped[&kernel_world_stop], value: T) {
+      (*cell).value = value;
+  }
+  fn stop_cell_get(T: type, cell: &mut StopCell(T)) -> T {
+      return (*cell).value;
+  }
+"
+
+let stop_cell_user = "
+  private let mut on1159: StopCell(bool);
+  fn arm1159(s: borrow MachineStopped[&kernel_world_stop]) {
+    stop_cell_set(&on1159, s, true);
+  }
+  fn test1159() -> bool { return stop_cell_get(&on1159); }
+"
+
 let issue370_cell_fixture = {|
   linear struct CellOwner[p: addr] { private value: usize; }
   struct BrandCell[p: addr] {
@@ -12562,6 +12586,27 @@ linear struct Owner746b[page: usize] {
           SetOnceBegin::Claimed(c) => { set_once_publish(&other1159, c, v); }
         }
       }"));
+  Alcotest.test_case "StopCell is set under a borrowed machine stop" `Quick
+    (fun () -> ignore (infer_files ["occupancy.tkb", stop_cell_base;
+                                    "user.tkb", stop_cell_user]));
+  Alcotest.test_case "StopCell set without a machine stop does not compile" `Quick
+    (expect_type_error_files "Undefined function: stop_cell_set"
+       ["occupancy.tkb", stop_cell_base;
+        "user.tkb", "private let mut on1159: StopCell(bool);
+          fn arm1159() { stop_cell_set(&on1159, true); }"]);
+  Alcotest.test_case "StopCell set rejects a stop of another domain" `Quick
+    (expect_type_error_files "static value mismatch: &other_stop1159 vs &kernel_world_stop"
+       ["occupancy.tkb", stop_cell_base;
+        "user.tkb", "private let mut on1159: StopCell(bool);
+          let mut other_stop1159: WorldStop;
+          fn arm1159(s: borrow MachineStopped[&other_stop1159]) {
+            stop_cell_set(&on1159, s, true);
+          }"]);
+  Alcotest.test_case "StopCell's value is private to its file" `Quick
+    (expect_type_error_files "is private to 'occupancy.tkb'"
+       ["occupancy.tkb", stop_cell_base;
+        "user.tkb", "private let mut on1159: StopCell(bool);
+          fn poke1159() { on1159.value = true; }"]);
   Alcotest.test_case "CPU authority needs one private bounded index field" `Quick
     (expect_type_error "must have exactly one private field"
        "struct cpu_authority Loose704 { id: usize; }");

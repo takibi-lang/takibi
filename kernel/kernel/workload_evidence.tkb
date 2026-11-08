@@ -417,7 +417,7 @@ private fn workload_busy_wait_end(worker: {0..<2 as usize}) {
 // `previous` is what this CPU ran until this pick.
 private fn workload_busy_wait_note_selected(core: usize, previous: usize,
                                             pid: usize) {
-    if (workload_profile_active == false) { return; }
+    if (stop_cell_get(&workload_profile_active) == false) { return; }
     for worker: usize in 0..<2 {
         let worker_pid: usize = workload_busy_worker_pid(worker);
         if (worker_pid != 0) {
@@ -440,7 +440,7 @@ private fn workload_busy_wait_note_selected(core: usize, previous: usize,
 // holds no lock and so takes the run lock here -- only while the window is
 // open, which is the only time there is anything to count.
 fn workload_busy_note_tick() {
-    if (workload_profile_active == false) { return; }
+    if (stop_cell_get(&workload_profile_active) == false) { return; }
     let guard = process_run_lock();
     workload_busy_note_tick_locked(guard);
     process_run_unlock(guard);
@@ -448,7 +448,7 @@ fn workload_busy_note_tick() {
 
 // Every timer tick, through workload_busy_note_tick.
 fn workload_busy_note_tick_locked(guard: borrow ProcessRunGuard[lock]) {
-    if (workload_profile_active == false) { return; }
+    if (stop_cell_get(&workload_profile_active) == false) { return; }
     let core: usize = cpu_id();
     for worker: usize in 0..<2 {
         if (workload_busy_waits[worker].waiting &&
@@ -640,7 +640,9 @@ struct WorkloadProfileCore {
 }
 
 private let mut workload_profile_cores: [WorkloadProfileCore; KERNEL_MAX_CORES];
-private let mut workload_profile_active: bool = false;
+// GitHub issue #1159: written only by workload_profile_start/_finish under
+// the interval's MachineStopped (StopCell), read freely by the hooks.
+private let mut workload_profile_active: StopCell(bool);
 
 private fn workload_profile_core_reset(cpu: {0..<KERNEL_MAX_CORES as usize}) {
     workload_profile_cores[cpu].mode = WorkloadCpuMode::Idle;
@@ -696,7 +698,7 @@ private fn workload_profile_transition_masked(next: WorkloadCpuMode) {
     // a timer IRQ can charge from the same last_tick before this transition
     // stores its new boundary, making the classified total exceed wall time.
     let before_irq_masked: usize = irq_save();
-    if (workload_profile_active == false) {
+    if (stop_cell_get(&workload_profile_active) == false) {
         mutex_irq_restore(before_irq_masked);
         return;
     }
@@ -712,7 +714,7 @@ private fn workload_profile_transition_masked(next: WorkloadCpuMode) {
 }
 
 private fn workload_profile_transition(next: WorkloadCpuMode) {
-    if (workload_profile_active == false) { return; }
+    if (stop_cell_get(&workload_profile_active) == false) { return; }
     // EL1 syscall handling deliberately unmasks IRQs before entering Takibi
     // code (user_entry.S), so these transitions are not inherently atomic.
     // Save and restore DAIF.I rather than unconditionally enabling it: the
@@ -734,7 +736,7 @@ fn workload_profile_interrupt_wait() !{may_block} {
 }
 
 fn workload_profile_irq_enter() {
-    if (workload_profile_active == false) { return; }
+    if (stop_cell_get(&workload_profile_active) == false) { return; }
     let cpu: usize = cpu_id();
     if (cpu >= kernel_online_core_count() || cpu >= KERNEL_MAX_CORES) { return; }
     let bounded_cpu: {0..<KERNEL_MAX_CORES as usize} = cpu;
@@ -746,7 +748,7 @@ fn workload_profile_irq_enter() {
 }
 
 fn workload_profile_irq_exit() {
-    if (workload_profile_active == false) { return; }
+    if (stop_cell_get(&workload_profile_active) == false) { return; }
     let cpu: usize = cpu_id();
     if (cpu >= kernel_online_core_count() || cpu >= KERNEL_MAX_CORES) { return; }
     let bounded_cpu: {0..<KERNEL_MAX_CORES as usize} = cpu;
@@ -760,7 +762,7 @@ private fn workload_profile_current_cpu() -> usize {
     // Callers hold their local IRQ mask from this activation check through
     // the last counter write. A future world-stop close can therefore wait
     // for a complete update, rather than resume a half-finished one later.
-    if (workload_profile_active == false) { return KERNEL_MAX_CORES; }
+    if (stop_cell_get(&workload_profile_active) == false) { return KERNEL_MAX_CORES; }
     let cpu: usize = cpu_id();
     if (cpu >= kernel_online_core_count() || cpu >= KERNEL_MAX_CORES) {
         return KERNEL_MAX_CORES;
@@ -781,7 +783,7 @@ private fn workload_profile_selected_pid(
 // syscall is the direct witness for that CPU; retain it so a later world-stop
 // profile boundary does not attribute the whole interval to nobody.
 private fn workload_profile_capture_current_pid(pid: usize) {
-    if (workload_profile_active) { return; }
+    if (stop_cell_get(&workload_profile_active)) { return; }
     let raw_cpu: usize = cpu_id();
     if (raw_cpu >= KERNEL_MAX_CORES) { return; }
     let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
@@ -926,9 +928,9 @@ private fn workload_profile_start(
         workload_profile_cores[current_cpu].selected_pid = pid;
         workload_profile_cores[current_cpu].has_selected_pid = true;
     }
-    workload_profile_active = true;
+    stop_cell_set(&workload_profile_active, stopped, true);
     profile_timeline_start(
-        workload_busy_pair.a_pid, workload_busy_pair.b_pid);
+        stopped, workload_busy_pair.a_pid, workload_busy_pair.b_pid);
     // GitHub issue #572: the per-worker totals belong to THIS window, and
     // each core's interval opens here against whatever it is running. They
     // used to be derived at the end instead, which is the premise #580
@@ -947,7 +949,7 @@ private fn workload_profile_start(
     // The flat PC profile shares this interval exactly: same IRQ-masked
     // boundary, same start timestamp, so a sample outside the interval the
     // artifact reports cannot exist.
-    profile_sample_start();
+    profile_sample_start(stopped);
 }
 
 private fn workload_profile_finish(
@@ -998,9 +1000,9 @@ private fn workload_profile_finish(
     }
     workload_busy_wait_end(0);
     workload_busy_wait_end(1);
-    profile_timeline_finish();
-    workload_profile_active = false;
-    profile_sample_finish();
+    profile_timeline_finish(stopped);
+    stop_cell_set(&workload_profile_active, stopped, false);
+    profile_sample_finish(stopped);
 }
 
 private fn workload_profile_note_selected(pid: usize) {

@@ -56,7 +56,7 @@ READ_BY = re.compile(r"read-by ([^\s:,]+(?:,[^\s:,]+)*): \S")
 HEADER = "# takibi globals, format "
 COLUMNS = ("file", "line", "name", "visibility", "qualifier", "type", "protection")
 PROTECTED = {"atomic", "lock", "per_cpu", "region", "place", "dma_fixed",
-             "protocol", "boot_once", "set_once", "composite", "slot_owned"}
+             "protocol", "boot_once", "set_once", "stop", "composite", "slot_owned"}
 UNPROTECTED = {"none"}
 
 

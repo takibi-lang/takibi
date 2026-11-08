@@ -474,6 +474,31 @@ fn machine_stop_keep_forever(machine: sink MachineStopped[id]) {
     cpu_participants_end(machine.participants);
 }
 
+// GitHub issue #1159 (2026-11-08 decision): a shared word written only while
+// the whole machine is stopped and read by anyone, with no lock and no atomic.
+// The value is private to this file, so stop_cell_set is its only writer, and
+// it needs a borrowed complete stop: every other CPU is parked in the pen and
+// this CPU has IRQs masked, so no reader runs concurrently with the write.
+// Unlike stopped_read (a stop holder reading other CPUs' per_cpu elements),
+// the readers here hold nothing. The protection table classifies
+// StopCell(T) as `stop`. An unwritten cell reads as its zero value.
+// Current limitations (2026-11-08): a reader on another CPU may still hold a
+// value it loaded before the stop began; a caller that needs "no reader saw
+// the old value" must re-test it inside its own IRQ-masked section, as
+// profile_timeline_note does.
+generic struct StopCell(T: type) {
+    private value: T;
+}
+
+fn stop_cell_set(T: type, cell: &mut StopCell(T),
+                 stopped: borrow MachineStopped[&kernel_world_stop], value: T) {
+    (*cell).value = value;
+}
+
+fn stop_cell_get(T: type, cell: &mut StopCell(T)) -> T {
+    return (*cell).value;
+}
+
 fn machine_stopped_mask(machine: borrow MachineStopped[id]) -> usize {
     let mut mask: usize = 0;
     for cpu: usize in 0..<KERNEL_MAX_CORES {

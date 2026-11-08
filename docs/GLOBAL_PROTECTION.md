@@ -64,6 +64,7 @@ Tried in this order; an array `[T; N]` takes the class of `T`.
 | `atomic` (enum) | `Atomic(E)`: one AtomicWord holding a u8 enum's code, through `atomic_enum_store` / `atomic_enum_load` (#1159) |
 | `boot_once` | `BootOnce(T)`: written under one `BootPhase`, read after by `boot_once_get` |
 | `set_once` | `SetOnce(T)` (kernel/lib/set_once.tkb, #1159): published once with the linear claim `set_once_claim`'s compare-exchange hands out, read by `set_once_get`, at any time and with no lock |
+| `stop` | `StopCell(T)` (kernel/lib/occupancy.tkb, #1159): written only by `stop_cell_set`, which takes `borrow MachineStopped[&kernel_world_stop]`; read by `stop_cell_get`, a plain load, by anyone |
 | `per_cpu` | a `struct per_cpu` store |
 | `dma_fixed` | a `struct dma_fixed` record |
 | `protocol` | a struct a `protocol` declaration generated |
@@ -514,4 +515,15 @@ entries below that date are history, left as written.
   public accessor returning the address is refused by check_frame_api.py. test_driver's `boot_execution` and
   `boot_exec_windows` stay listed: one is written in two steps, the other is
   a buffer the loader fills, so neither is a single set.
+- 2026-11-08 (#1159, the StopCell decision): words written only under the
+  workload interval's complete stop move to `StopCell(T)`:
+  profile_samples.tkb's `profile_sample_active` and the four
+  `profile_sample_end_*` captures, profile_timeline.tkb's
+  `profile_timeline_active` and `_pid_a`/`_pid_b`, workload_evidence.tkb's
+  `workload_profile_active`. `profile_sample_start/_finish` and
+  `profile_timeline_start/_finish` take the interval's `borrow
+  MachineStopped`, which their one caller already held. While the stop is
+  held every other CPU is in the pen and this CPU has IRQs masked, so no
+  read is concurrent with the write. `profile_timeline_cores` stays listed
+  (an own-element partition, a per_cpu store candidate).
 
