@@ -88,7 +88,13 @@ use "kernel/lib/execution_model.tkb";
 // No initialisation: a global's .bss zero is already SPIN_LOCK_FREE, and
 // task_mutex_init FORCE-FREES, which on two cores releases a lock the other
 // core holds. scripts/check_lock_discipline.py's RULE 1 is that defect.
-private let mut ext2_mutation_lock: TaskMutex;
+//
+// Not private (GitHub issue #1159, 2026-11-08): Ext2MutationGuard is indexed
+// by this lock's address, as ProcessRunGuard is by
+// scheduled_process_run_lock's, so every file that names the guard type
+// names `&ext2_mutation_lock`. Naming it mints nothing: the guard's field is
+// private to this file, so ext2_mutation_take is still the only source.
+let mut ext2_mutation_lock: TaskMutex;
 
 // `[lock: addr]` names the one lock it came from, and linear, so no path out
 // of a mutation -- and the mutating syscall arms have a dozen each -- can
@@ -110,7 +116,7 @@ linear struct Ext2MutationGuard[lock: addr] {
 // overlap a mutation that also ran only on core 0.
 private let mut ext2_readers: AtomicWord;
 
-fn ext2_mutation_take() -> Ext2MutationGuard[ext2_mutation]
+fn ext2_mutation_take() -> Ext2MutationGuard[&ext2_mutation_lock]
         !{acquires_lock_20_ext2_mutation, lock_guard_20_ext2_mutation,
           unsafe} {
     static_assert(KERNEL_PREEMPTIBLE == 0,
@@ -123,7 +129,7 @@ fn ext2_mutation_take() -> Ext2MutationGuard[ext2_mutation]
     // count and gone to core 0.
     dsb_ish();
     while (atomic_word_load(&ext2_readers) != 0) { }
-    let mut guard: Ext2MutationGuard[ext2_mutation] = { cpu_id() };
+    let mut guard: Ext2MutationGuard[&ext2_mutation_lock] = { cpu_id() };
     return guard;
 }
 
@@ -131,11 +137,11 @@ fn ext2_mutation_take() -> Ext2MutationGuard[ext2_mutation]
 // only: the lock without the wait, which is what ext2_mutation_take was
 // before #559. `unsafe` so any other use is visible in the trusted base.
 fn ext2_mutation_take_without_readers_unchecked()
-        -> Ext2MutationGuard[ext2_mutation]
+        -> Ext2MutationGuard[&ext2_mutation_lock]
         !{acquires_lock_20_ext2_mutation, lock_guard_20_ext2_mutation,
           unsafe} {
     task_mutex_acquire(&ext2_mutation_lock);
-    let mut guard: Ext2MutationGuard[ext2_mutation] = { cpu_id() };
+    let mut guard: Ext2MutationGuard[&ext2_mutation_lock] = { cpu_id() };
     return guard;
 }
 
@@ -160,7 +166,7 @@ fn ext2_read_leave() !{unsafe} {
         atomic_word_fetch_add(&ext2_readers, 0xFFFFFFFFFFFFFFFF);
 }
 
-fn ext2_mutation_give(guard: sink Ext2MutationGuard[ext2_mutation]) {
+fn ext2_mutation_give(guard: sink Ext2MutationGuard[&ext2_mutation_lock]) {
     task_mutex_release(&ext2_mutation_lock);
 }
 
