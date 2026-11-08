@@ -51,7 +51,7 @@ LISTED = {
     "kernel/kernel/console_contention_evidence.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/cpu_authority.tkb": (2, MINT, "the CpuHere mint itself and its availability test (#638 stage 4)"),
     "kernel/kernel/irq_counts.tkb": (1, FLIP, "not yet reviewed for migration"),
-    "kernel/kernel/log_storm_evidence.tkb": (1, FLIP, "not yet reviewed for migration"),
+    "kernel/kernel/log_storm_evidence.tkb": (1, REVIEWED, "#638 stage 9: log_storm_secondary_run runs only from kernel_idle_loop on a secondary, which has no current task, so the IRQ-return consult never switches it and the CPU it reads stays its own"),
     "kernel/kernel/nic_irq_affinity.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/pool_lock_wait.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/process.tkb": (43, FLIP, "not yet reviewed for migration"),
