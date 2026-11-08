@@ -112,20 +112,26 @@ let mut xhci_dcbaa: [u32; 65 * 2] align(64);
 // The four producer rings (Command, EP0, bulk IN/OUT) are owners of the
 // XhciRing device protocol in usb_xhci_rings.tkb (GitHub issue #720).
 
-let mut xhci_slot_id: usize = 0;
 let mut xhci_last_evt_dw3: u32 = 0;
 
-let mut xhci_msc_config_value: u32 = 0;
-let mut xhci_msc_interface_num: u32 = 0;
-let mut xhci_msc_bulk_in_ep: u32 = 0;
-let mut xhci_msc_bulk_in_mps: u32 = 0;
-let mut xhci_msc_bulk_in_burst: u32 = 0;
-let mut xhci_msc_bulk_out_ep: u32 = 0;
-let mut xhci_msc_bulk_out_mps: u32 = 0;
-let mut xhci_msc_bulk_out_burst: u32 = 0;
-
-let mut xhci_bulk_in_dci: usize = 0;
-let mut xhci_bulk_out_dci: usize = 0;
+// GitHub issue #1159: what disk_initialize learns about the device (its
+// slot, the MSC configuration and the bulk endpoints) is written and read
+// only under block_device_lock, so every access is guarded_ref with the
+// BlockDeviceGuard and the compiler checks the lock is held.
+struct XhciMscDevice {
+    private slot_id: usize guarded_by(block_device_lock);
+    private msc_config_value: u32 guarded_by(block_device_lock);
+    private msc_interface_num: u32 guarded_by(block_device_lock);
+    private msc_bulk_in_ep: u32 guarded_by(block_device_lock);
+    private msc_bulk_in_mps: u32 guarded_by(block_device_lock);
+    private msc_bulk_in_burst: u32 guarded_by(block_device_lock);
+    private msc_bulk_out_ep: u32 guarded_by(block_device_lock);
+    private msc_bulk_out_mps: u32 guarded_by(block_device_lock);
+    private msc_bulk_out_burst: u32 guarded_by(block_device_lock);
+    private bulk_in_dci: usize guarded_by(block_device_lock);
+    private bulk_out_dci: usize guarded_by(block_device_lock);
+}
+private let mut xhci_msc_device: XhciMscDevice;
 
 // Command Ring producer state. Bring-up (xhci_enable_slot/
 // xhci_address_device/xhci_configure_endpoint) uses fixed TRB[0]/[1]/[2]
@@ -467,7 +473,7 @@ private fn usb_ctrl_xfer(guard: borrow BlockDeviceGuard[&block_device_lock], bm_
         td[1] = status;
         td[2] = status;
     }
-    return xhci_ring_submit(XHCI_RING_EP0, xhci_slot_id, 1, first_idx, idx,
+    return xhci_ring_submit(XHCI_RING_EP0, guarded_ref(guard, xhci_msc_device.slot_id), 1, first_idx, idx,
                             1000, count, td as [Trb; 3..]);
 }
 
@@ -481,10 +487,10 @@ private fn usb_ctrl_xfer(guard: borrow BlockDeviceGuard[&block_device_lock], bm_
 // through usb_bulk_in, an OUT one through usb_bulk_out.
 private fn usb_bulk_xfer(guard: borrow BlockDeviceGuard[&block_device_lock], dir_in: bool, buf_dma: usize, length: u32) -> u32 !{unsafe} {
     let mut ring: usize = XHCI_RING_BULK_OUT;
-    let mut dci: usize = xhci_bulk_out_dci;
+    let mut dci: usize = guarded_ref(guard, xhci_msc_device.bulk_out_dci);
     if (dir_in) {
         ring = XHCI_RING_BULK_IN;
-        dci = xhci_bulk_in_dci;
+        dci = guarded_ref(guard, xhci_msc_device.bulk_in_dci);
     }
     let XhciRingCursor::Known(cursor) = xhci_ring_cursor(ring) else {
         XhciRingCursor::Busy => { return 0; }
@@ -521,7 +527,7 @@ private fn usb_bulk_xfer(guard: borrow BlockDeviceGuard[&block_device_lock], dir
     td[0] = normal;
     td[1] = normal;
     td[2] = normal;
-    return xhci_ring_submit(ring, xhci_slot_id, dci as u32, trb_idx, trb_idx,
+    return xhci_ring_submit(ring, guarded_ref(guard, xhci_msc_device.slot_id), dci as u32, trb_idx, trb_idx,
                             5000, 1, td as [Trb; 3..]);
 }
 
@@ -552,7 +558,7 @@ private fn usb_bulk_xfer(guard: borrow BlockDeviceGuard[&block_device_lock], dir
 fn xhci_run_command(guard: borrow BlockDeviceGuard[&block_device_lock], dw0: u32, dw1: u32, dw2: u32, trb_type: u32,
                     dci: usize) -> u32 !{unsafe} {
     let dci_u32: u32 = dci as u32;
-    let slot_u32: u32 = xhci_slot_id as u32;
+    let slot_u32: u32 = guarded_ref(guard, xhci_msc_device.slot_id) as u32;
     let XhciRingCursor::Known(cursor) = xhci_ring_cursor(XHCI_RING_CMD) else {
         XhciRingCursor::Busy => { return 0; }
     };
@@ -614,7 +620,7 @@ fn xhci_recover_bulk_stall(guard: borrow BlockDeviceGuard[&block_device_lock], d
 // data stage) -- best-effort override of any inherited device state,
 // same reasoning as RPi3's own msc_bulk_only_reset.
 fn msc_bulk_only_reset(guard: borrow BlockDeviceGuard[&block_device_lock]) -> bool {
-    return usb_ctrl_no_data(guard, 0x21, 0xFF, 0, xhci_msc_interface_num) == 1;
+    return usb_ctrl_no_data(guard, 0x21, 0xFF, 0, guarded_ref(guard, xhci_msc_device.msc_interface_num)) == 1;
 }
 
 // Full USB Mass Storage BOT reset recovery, in the order the BOT spec
@@ -644,8 +650,8 @@ fn msc_bulk_only_reset(guard: borrow BlockDeviceGuard[&block_device_lock]) -> bo
 // transport breakdown).
 fn msc_recover_transport(guard: borrow BlockDeviceGuard[&block_device_lock]) -> bool {
     msc_bulk_only_reset(guard);
-    usb_ctrl_no_data(guard, 0x02, 1, 0, xhci_msc_bulk_in_ep);
-    usb_ctrl_no_data(guard, 0x02, 1, 0, xhci_msc_bulk_out_ep);
+    usb_ctrl_no_data(guard, 0x02, 1, 0, guarded_ref(guard, xhci_msc_device.msc_bulk_in_ep));
+    usb_ctrl_no_data(guard, 0x02, 1, 0, guarded_ref(guard, xhci_msc_device.msc_bulk_out_ep));
     return true;
 }
 
@@ -768,7 +774,7 @@ private fn msc_csw_receive_attempt(guard: borrow BlockDeviceGuard[&block_device_
         // Retry this CSW, not a fresh CBW: the device still owes the CSW
         // for the command it accepted. Real hardware needs up to eight
         // bounded STALL recoveries after a WRITE(10).
-        xhci_recover_bulk_stall(guard, true, xhci_msc_bulk_in_ep, xhci_bulk_in_dci);
+        xhci_recover_bulk_stall(guard, true, guarded_ref(guard, xhci_msc_device.msc_bulk_in_ep), guarded_ref(guard, xhci_msc_device.bulk_in_dci));
         delay_us(50000);
         return msc_csw_receive_attempt(guard, remaining_stall_retries - 1);
     }
@@ -1021,7 +1027,7 @@ fn xhci_enable_slot(guard: borrow BlockDeviceGuard[&block_device_lock]) -> bool 
     if (enable_cc == 0) {
         return false;
     }
-    xhci_slot_id = ((xhci_last_evt_dw3 >> 24) & 0xFF) as usize;
+    guarded_ref(guard, xhci_msc_device.slot_id) = ((xhci_last_evt_dw3 >> 24) & 0xFF) as usize;
     return true;
 }
 
@@ -1033,10 +1039,11 @@ fn xhci_enable_slot(guard: borrow BlockDeviceGuard[&block_device_lock]) -> bool 
 // device back in the Default state a port reset produces.
 fn xhci_address_device(guard: borrow BlockDeviceGuard[&block_device_lock]) -> XhciAddressOutcome !{unsafe} {
     let dcbaa_base: usize = (xhci_dcbaa as *u8) as usize;
-    if (xhci_slot_id >= 65) {
-        return XhciAddressOutcome::SlotIdOutOfRange(xhci_slot_id as u32);
+    let slot_id: usize = guarded_ref(guard, xhci_msc_device.slot_id);
+    if (slot_id >= 65) {
+        return XhciAddressOutcome::SlotIdOutOfRange(slot_id as u32);
     }
-    let slot: {0..<65 as usize} = xhci_slot_id;
+    let slot: {0..<65 as usize} = slot_id;
     // The output device context: the controller's for the session
     // (XhciOutput in usb_xhci_rings.tkb).
     let device_ctx_dma: usize = xhci_output_start();
@@ -1133,7 +1140,7 @@ fn xhci_address_device(guard: borrow BlockDeviceGuard[&block_device_lock]) -> Xh
     let input_ctx_dma: usize = xhci_input_submit(input);
     let mut address_device: Trb = {
         (input_ctx_dma & 0xFFFFFFFF) as u32, ((input_ctx_dma >> 32) & 0xFFFFFFFF) as u32,
-        0, (1 | (11 << 10) | (xhci_slot_id << 24)) as u32
+        0, (1 | (11 << 10) | (guarded_ref(guard, xhci_msc_device.slot_id) << 24)) as u32
     };
 
     // The port reset above queues its own async Port Status Change
@@ -1206,19 +1213,19 @@ fn xhci_configure(guard: borrow BlockDeviceGuard[&block_device_lock]) -> XhciCon
             return XhciConfigureOutcome::Malformed;
         }
         UsbConfigParseResult::Parsed(found) => {
-            xhci_msc_config_value = found.config_value;
-            xhci_msc_interface_num = found.interface_num;
-            xhci_msc_bulk_in_ep = found.bulk_in_ep;
-            xhci_msc_bulk_in_mps = found.bulk_in_mps;
-            xhci_msc_bulk_in_burst = found.bulk_in_burst;
-            xhci_msc_bulk_out_ep = found.bulk_out_ep;
-            xhci_msc_bulk_out_mps = found.bulk_out_mps;
-            xhci_msc_bulk_out_burst = found.bulk_out_burst;
+            guarded_ref(guard, xhci_msc_device.msc_config_value) = found.config_value;
+            guarded_ref(guard, xhci_msc_device.msc_interface_num) = found.interface_num;
+            guarded_ref(guard, xhci_msc_device.msc_bulk_in_ep) = found.bulk_in_ep;
+            guarded_ref(guard, xhci_msc_device.msc_bulk_in_mps) = found.bulk_in_mps;
+            guarded_ref(guard, xhci_msc_device.msc_bulk_in_burst) = found.bulk_in_burst;
+            guarded_ref(guard, xhci_msc_device.msc_bulk_out_ep) = found.bulk_out_ep;
+            guarded_ref(guard, xhci_msc_device.msc_bulk_out_mps) = found.bulk_out_mps;
+            guarded_ref(guard, xhci_msc_device.msc_bulk_out_burst) = found.bulk_out_burst;
         }
     }
 
-    let in_num: usize = (xhci_msc_bulk_in_ep & 0x0F) as usize;
-    let out_num: usize = (xhci_msc_bulk_out_ep & 0x0F) as usize;
+    let in_num: usize = (guarded_ref(guard, xhci_msc_device.msc_bulk_in_ep) & 0x0F) as usize;
+    let out_num: usize = (guarded_ref(guard, xhci_msc_device.msc_bulk_out_ep) & 0x0F) as usize;
     if (in_num > 0 && out_num > 0) {
         return xhci_configure_endpoint(guard, in_num, out_num);
     }
@@ -1276,11 +1283,11 @@ fn xhci_configure_endpoint(guard: borrow BlockDeviceGuard[&block_device_lock], i
     let slot_dw0: u32 = xhci_input_get(input, ctx);
     xhci_input_set(input, ctx, (slot_dw0 & 0x07FFFFFF) | (((max_idx + 1) as u32) << 27));
 
-    xhci_input_set(input, in_ctx_word + 1, (6 << 3) | (3 << 1) | ((xhci_msc_bulk_in_burst & 0xFF) << 8) | ((xhci_msc_bulk_in_mps & 0xFFFF) << 16));
+    xhci_input_set(input, in_ctx_word + 1, (6 << 3) | (3 << 1) | ((guarded_ref(guard, xhci_msc_device.msc_bulk_in_burst) & 0xFF) << 8) | ((guarded_ref(guard, xhci_msc_device.msc_bulk_in_mps) & 0xFFFF) << 16));
     xhci_input_set(input, in_ctx_word + 2, ((bulk_in_ring_dma & 0xFFFFFFFF) | 1) as u32);
     xhci_input_set(input, in_ctx_word + 3, ((bulk_in_ring_dma >> 32) & 0xFFFFFFFF) as u32);
 
-    xhci_input_set(input, out_ctx_word + 1, (2 << 3) | (3 << 1) | ((xhci_msc_bulk_out_burst & 0xFF) << 8) | ((xhci_msc_bulk_out_mps & 0xFFFF) << 16));
+    xhci_input_set(input, out_ctx_word + 1, (2 << 3) | (3 << 1) | ((guarded_ref(guard, xhci_msc_device.msc_bulk_out_burst) & 0xFF) << 8) | ((guarded_ref(guard, xhci_msc_device.msc_bulk_out_mps) & 0xFFFF) << 16));
     xhci_input_set(input, out_ctx_word + 2, ((bulk_out_ring_dma & 0xFFFFFFFF) | 1) as u32);
     xhci_input_set(input, out_ctx_word + 3, ((bulk_out_ring_dma >> 32) & 0xFFFFFFFF) as u32);
 
@@ -1295,7 +1302,7 @@ fn xhci_configure_endpoint(guard: borrow BlockDeviceGuard[&block_device_lock], i
     let input_ctx_dma: usize = xhci_input_submit(input);
     let mut configure: Trb = {
         (input_ctx_dma & 0xFFFFFFFF) as u32, ((input_ctx_dma >> 32) & 0xFFFFFFFF) as u32,
-        0, (1 | (12 << 10) | (xhci_slot_id << 24)) as u32
+        0, (1 | (12 << 10) | (guarded_ref(guard, xhci_msc_device.slot_id) << 24)) as u32
     };
     let mut td: [Trb; 3];
     td[0] = configure;
@@ -1307,13 +1314,13 @@ fn xhci_configure_endpoint(guard: borrow BlockDeviceGuard[&block_device_lock], i
         return XhciConfigureOutcome::Transfer(ce_cc);
     }
 
-    let setcfg_cc: u32 = usb_ctrl_no_data(guard, 0x00, 9, xhci_msc_config_value, 0);
+    let setcfg_cc: u32 = usb_ctrl_no_data(guard, 0x00, 9, guarded_ref(guard, xhci_msc_device.msc_config_value), 0);
     if (setcfg_cc != 1) {
         return XhciConfigureOutcome::Transfer(setcfg_cc);
     }
 
-    xhci_bulk_in_dci = in_idx + 1;
-    xhci_bulk_out_dci = out_idx + 1;
+    guarded_ref(guard, xhci_msc_device.bulk_in_dci) = in_idx + 1;
+    guarded_ref(guard, xhci_msc_device.bulk_out_dci) = out_idx + 1;
     return XhciConfigureOutcome::Ok;
 }
 

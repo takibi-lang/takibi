@@ -46,7 +46,9 @@ protocol XhciRing[inst: usize] retains region(Trb)[b, XHCI_RING_TRBS] tx {
     init Ready;
     transition xhci_ring_publish(Ready, target: usize, doorbell: u32)
         -> InFlight[fresh req];
-    observe xhci_ring_event(InFlight[req], timeout: usize)
+    observe xhci_ring_event(InFlight[req], timeout: usize, trb_type: u32,
+                            first: usize, last: usize, slot: u32,
+                            endpoint: u32)
         -> Completed[req] completes | Silent;
     transition xhci_ring_complete(InFlight[req], Completed[req]) -> Ready;
     observe xhci_ring_reset_seen(InFlight[req]) -> Quiet[req] quiesces | Live;
@@ -60,8 +62,6 @@ private region let mut xhci_ep0_ring: [Trb; 16] align(64);
 private region let mut xhci_bulk_in_ring: [Trb; 16] align(64);
 private region let mut xhci_bulk_out_ring: [Trb; 16] align(64);
 
-// What the next publication waits for (set by xhci_ring_submit).
-private let mut xhci_await_want: XhciEventWant = { 0, 0, 0, 0, 0 };
 private let mut xhci_await_cc: u32 = 0;
 // Command Completion Events observed on the Command ring (xhci_input_used).
 private let mut xhci_cmd_completions: usize = 0;
@@ -75,9 +75,14 @@ fn xhci_ring_publish(s: borrow XhciRing_InFlight[b, o, 16, r],
                      target: usize, doorbell: u32) {
     xhci_ring_doorbell(target, doorbell);
 }
-fn xhci_ring_event(s: borrow XhciRing_InFlight[b, o, 16, r], timeout: usize)
+// The event awaited is the publication's XhciEventWant, passed field by
+// field (action value arguments are scalars).
+fn xhci_ring_event(s: borrow XhciRing_InFlight[b, o, 16, r], timeout: usize,
+                   trb_type: u32, first: usize, last: usize, slot: u32,
+                   endpoint: u32)
         -> XhciRing_xhci_ring_event_Raw !{unsafe} {
-    xhci_await_cc = usb_await_event(xhci_await_want, timeout);
+    let mut want: XhciEventWant = { trb_type, first, last, slot, endpoint };
+    xhci_await_cc = usb_await_event(want, timeout);
     if (xhci_await_cc == 0) { return XhciRing_xhci_ring_event_Raw::Silent; }
     return XhciRing_xhci_ring_event_Raw::Completed;
 }
@@ -409,16 +414,17 @@ fn xhci_ring_submit(i: usize, target: usize, value: u32, first: usize,
                         }
                     }
                     let base: usize = xhci_ring_base_dma(ready);
-                    if (i == XHCI_RING_CMD) {
-                        xhci_await_want = xhci_event_want_command(base + first * 16);
-                    } else {
-                        xhci_await_want = xhci_event_want_transfer(
+                    let mut want: XhciEventWant = xhci_event_want_command(base + first * 16);
+                    if (i != XHCI_RING_CMD) {
+                        want = xhci_event_want_transfer(
                             base + first * 16, base + last * 16,
                             target as u32, value);
                     }
                     match XhciRing_xhci_ring_publish(ready, target, value) {
                         XhciRing_xhci_ring_publish_Result::InFlight(flight) => {
-                            match XhciRing_xhci_ring_event(flight, timeout) {
+                            match XhciRing_xhci_ring_event(flight, timeout,
+                                    want.trb_type, want.first, want.last,
+                                    want.slot, want.endpoint) {
                                 XhciRing_xhci_ring_event_Outcome::Completed(done) => {
                                     if (i == XHCI_RING_CMD) {
                                         xhci_cmd_completions = xhci_cmd_completions + 1;

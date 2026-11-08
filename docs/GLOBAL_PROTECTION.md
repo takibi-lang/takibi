@@ -543,3 +543,18 @@ entries below that date are history, left as written.
   Declarations), passed by `xhci_ring_submit` to the generated wrappers and
   by them to the lowerings, with no global and no owner field (no owner
   copy, unlike #1395 state data).
+- 2026-11-08: the xHCI device words and the awaited event (#1159 step B).
+  The slot id, the MSC configuration (config value, interface, bulk
+  endpoint addresses, max packet sizes, bursts) and the bulk DCIs that
+  disk_initialize learns are private fields of `XhciMscDevice`, each
+  `guarded_by(block_device_lock)` and reached only as `guarded_ref(guard,
+  xhci_msc_device.f)`: every writer and reader already held
+  `BlockDeviceGuard`. `xhci_await_want` is gone: the publication's
+  `XhciEventWant` is passed field by field as value arguments of
+  `xhci_ring_event`. Twelve rows leave the allowlist. The uses table now
+  records a store through `guarded_ref` as a write of the global (it was
+  a load, which buildcheck_unread_globals.py reported as never written).
+  Still allow-listed: `xhci_await_cc`, `xhci_cmd_completions`,
+  `xhci_input_published_at`, `xhci_foreign_events`, `xhci_last_evt_dw3`:
+  each is written or read inside a protocol lowering or usb_await_event,
+  which holds no guard and whose value arguments are scalars only.

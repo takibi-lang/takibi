@@ -25029,7 +25029,8 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
           }
           fn adds() { atomic_word_fetch_add(&w, 1); }
           fn used() -> usize { return atomic_word_fetch_add(&w, 1); }
-          fn loads() -> usize { return atomic_word_load(&w); }" in
+          fn loads() -> usize { return atomic_word_load(&w); }
+          fn guarded_store(g: usize) { guarded_ref(g, s.a) = 1; }" in
        Lexing.set_filename lexbuf "a.tkb";
        let prog = Parser.program Lexer.read lexbuf in
        let path = Filename.temp_file "takibi-uses-" ".tsv" in
@@ -25054,7 +25055,9 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
        check "a multi-line store is an atomic_store" "w" "atomic_store" "stores";
        check "a whole-statement add is an atomic_store" "w" "atomic_store" "adds";
        check "a used add stays an address" "w" "address" "used";
-       check "a load is an atomic_load" "w" "atomic_load" "loads");
+       check "a load is an atomic_load" "w" "atomic_load" "loads";
+       (* #1159: a store through guarded_ref is a write, not a load. *)
+       check "a guarded_ref store is a write" "s" "write" "guarded_store");
 
   (* GitHub issue #1265: fields.tsv counts reads and writes by field name. *)
   Alcotest.test_case "issue #1265: the fields table counts a field's reads and writes and marks hardware layouts" `Quick

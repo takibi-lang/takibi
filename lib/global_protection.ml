@@ -175,6 +175,9 @@ let write_uses (out : out_channel) (prog : toplevel list) =
   let rec root (e : expr) = match e.desc with
     | Var n -> Some (n, e)
     | FieldGet (b, _) | Index (b, _) | SliceOf (b, _, _) -> root b
+    (* `guarded_ref(g, r.f)` (#1159) is the place r.f itself, so an
+       assignment through it is a write of r's root, not a load. *)
+    | Call ("guarded_ref", [ _; p ]) -> root p
     | _ -> None in
   (* Declared types, to tell a scalar path from one that decays to a pointer.
      Anything not resolved here (a generic field, a named alias) stays `read`,
@@ -269,6 +272,7 @@ let write_uses (out : out_channel) (prog : toplevel list) =
     | FieldGet (b, _) -> lvalue_parts fn locals b
     | Index (b, i) -> lvalue_parts fn locals b; sub i
     | SliceOf (b, lo, hi) -> lvalue_parts fn locals b; sub lo; sub hi
+    | Call ("guarded_ref", [ _; p ]) -> lvalue_parts fn locals p
     | _ -> ()
   and stmts fn locals (ss : stmt list) =
     ignore (List.fold_left (fun locals s -> stmt fn locals s) locals ss)
@@ -336,7 +340,9 @@ let write_fields (out : out_channel) (prog : toplevel list) =
   let rec expr (e : expr) = match e.desc with
     | FieldGet (b, f) -> bump reads f; expr b
     | OffsetOf (_, f) -> bump reads f
-    | Assign ({ desc = FieldGet (b, f); _ }, rhs) ->
+    | Assign ({ desc = FieldGet (b, f); _ }, rhs)
+    (* `guarded_ref(g, r.f) = v` (#1159) writes f in place. *)
+    | Assign ({ desc = Call ("guarded_ref", [ _; { desc = FieldGet (b, f); _ } ]); _ }, rhs) ->
         bump writes f; expr b; expr rhs
     | Assign (lhs, rhs) -> expr lhs; expr rhs
     | AddrOf a | Bnot a | Deref a | Cast (_, a) | Unsafe a | VariantCtor (_, _, a) -> expr a
