@@ -1025,3 +1025,16 @@ hardware reset semantics and the concrete device/slot association remain
 trusted. See TRUSTED_BASE.md and RESET_CONFIRMATION_SPACE.md for the exact
 boundary and linked-space measurement. The parent global migration is larger
 than this one removed flag.
+## 2026-11-09 online prefix
+
+`secondary.tkb`'s private `kernel_online_cores` uses the existing `AtomicWord`
+class, removing its untyped allowance. CPU 0 still clears it to one and admits
+only a successful CPU_ON whose core equals the current prefix end below the
+maximum. Reads outside one through the maximum still return one. The compiled
+boot caller chain and bounded source controls retain the single-writer premise;
+acquire/release accesses do not make comparison plus store a multiwriter update.
+The target handshake and world-stop possible-participant mask stay independent.
+The one-time actual-source host probe checked sequential policy, not cross-core
+ordering or hardware completion; it is diagnostic evidence, not a maintained
+regression. Maintained source-policy controls and both compiled kernel caller
+tables hold the changed contract.

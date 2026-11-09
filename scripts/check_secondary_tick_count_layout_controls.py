@@ -24,7 +24,8 @@ def run(edit=None):
     with tempfile.TemporaryDirectory() as raw:
         root = pathlib.Path(raw)
         for name in (SECONDARY, ATOMIC, READER, f"scripts/{CHECK}",
-                     "scripts/pass_line.py", "scripts/source_scan.py"):
+                     "scripts/pass_line.py", "scripts/source_scan.py",
+                     "scripts/layout_text.py", "scripts/allowed_callers.tsv"):
             (root / name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(REPO / name, root / name)
         if edit:
@@ -52,6 +53,40 @@ def main():
         failures.append("a two-field AtomicWord passed")
     if run((READER, "{8 * core}", "{4 * core}")) == 0:
         failures.append("a 4-byte stride in the reader passed")
+    # Mutate the real prefix implementation, not a hand-written arithmetic
+    # clone. Each shape changes admission or removes its atomic boundary.
+    from check_secondary_tick_count_layout import ONLINE_CALLERS, online_problems
+    from source_scan import code_only
+    source = code_only((REPO / SECONDARY).read_text())
+    callers = (REPO / "scripts/allowed_callers.tsv").read_text()
+    for old, new in (
+            ("kernel_online_cores: AtomicWord", "kernel_online_cores: io usize"),
+            ("status == 0 &&", "status != 0 &&"),
+            ("atomic_word_store(&kernel_online_cores, online + 1);", "kernel_online_cores = online + 1;"),
+            ("core == online &&", "core >= online &&"),
+            ("online < KERNEL_MAX_CORES", "online <= KERNEL_MAX_CORES"),
+            ("online >= 1 &&", "online >= 0 &&"),
+            ("online <= KERNEL_MAX_CORES", "online <= KERNEL_MAX_CORES + 1"),
+            ("atomic_word_store(&kernel_online_cores, 1);", "atomic_word_store(&kernel_online_cores, 0);"),
+            ("return 1;", "return 0;"),
+            ("atomic_word_store(&kernel_online_cores, online + 1);", "atomic_word_store(&kernel_online_cores, online + 2);")):
+        CASES.note()
+        changed = replace_once(source, old, new, "online prefix control")
+        if not online_problems(changed, callers):
+            failures.append(f"online prefix mutation accepted: {old}")
+    CASES.note()
+    changed = source.replace("atomic_word_load(&kernel_online_cores)", "kernel_online_cores as usize")
+    if not online_problems(changed, callers):
+        failures.append("plain online prefix loads accepted")
+    CASES.note()
+    if not online_problems(source + "\nfn extra_writer() { atomic_word_store(&kernel_online_cores, 1); }", callers):
+        failures.append("extra online prefix writer accepted")
+    for helper, allowed in ONLINE_CALLERS.items():
+        CASES.note()
+        changed = callers.replace("\t" + helper + "\t" + allowed + "\t",
+                                  "\t" + helper + "\t" + allowed + ",kernel/arch/arm64/kernel/secondary.tkb:kernel_idle_loop\t")
+        if changed == callers or not online_problems(source, changed):
+            failures.append(f"broadened boot caller row accepted: {helper}")
     if failures:
         for line in failures:
             print(f"FAIL secondary-tick-count-layout controls: {line}", file=sys.stderr)
@@ -59,7 +94,7 @@ def main():
     report_pass("secondary-tick-count-layout controls",
                 f"{CASES.ran} cases -- the real tree passes; a resized array, "
                 "another element type, a wider AtomicWord and a 4-byte stride "
-                "are refused", cases=CASES.ran)
+                "and online prefix predicate/access/caller mutations are refused", cases=CASES.ran)
     return 0
 
 

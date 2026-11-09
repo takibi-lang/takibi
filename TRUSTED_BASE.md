@@ -218,6 +218,20 @@ rules globally.
   write compiles after the end on that path. Trusted: that nothing mints a
   second phase, and that the secondaries see the boot writes because the
   boot core's stores precede the PSCI call that starts them.
+- The scheduler online prefix (GitHub issue #1159). The private
+  `kernel_online_cores` in `secondary.tkb` is an `AtomicWord`, loaded acquire
+  and stored release. Its comparison and following store are not one atomic
+  read-modify-write: CPU 0 remains the sole writer, in the serial boot
+  report/attempt chain. `scripts/allowed_callers.tsv` and the existing
+  compiled caller check close that chain on both platforms, including
+  function-value references. `scripts/check_secondary_tick_count_layout.py`
+  holds the private cell, exact clear/note/count bodies, closed caller rows
+  and absence of extra aliases/writes in the declaring file. These are bounded
+  build checks; the boot entry's CPU-0 selection, MMU-before-main ordering
+  and one execution of main remain trusted. An acquire reading a release
+  orders earlier boot-core writes; it proves neither target handshake nor
+  CPU_ON hardware completion. Scheduling keeps the conservative contiguous
+  prefix, separately from the world-stop possible-participant mask.
 - The test-driver phase (GitHub issue #1462). `test_driver_phase_begin`
   (`kernel/kernel/test_driver_phase.tkb`) is `!{unsafe}` and is called once,
   in `kernel_test_driver_run`, with `kernel_test_driver_phase_premise()`

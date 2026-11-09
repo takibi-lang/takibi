@@ -25,3 +25,4 @@ check_virtio_queue_mints.py	block queue container and integer addresses confined
 check_exception_cpu_snapshots.py	exact exception publisher/reader adapters, terminal flag and nested-array alias closure	#1159 stronger scoped exception authority and compiler writer/reader association
 buildcheck_global_protection.py	single private exception publication admission requires source closure and compiled callers on both platforms	#1159 compiler protection provenance for coherent published CPU records
 check_root_held_entries.py	RootHeld constructor/adapter source association and explicit image-target propagation	#1472 indexed root-owner entry APIs replace this bounded source policy; no general lifetime proof
+check_secondary_tick_count_layout.py	private online-prefix atomic accesses, exact clear/admission/fallback and closed boot caller rows	#1008 module visibility and typed boot writer authority
