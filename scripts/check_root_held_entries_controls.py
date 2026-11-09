@@ -14,6 +14,23 @@ def main():
     assert problems({**sources, PROCESS: replace_once(
         sources[PROCESS], 'private fn scheduled_process_running_state(',
         'fn scheduled_process_running_state(')})
+    caller_text = Path('scripts/allowed_callers.tsv').read_text()
+    owned = next(line for line in caller_text.splitlines(True)
+                 if line.startswith('root-held-owned\t'))
+    slot = next(line for line in caller_text.splitlines(True)
+                if line.startswith('root-held-fixture-scheduled_process_probe_root_slot\t'))
+    release = next(line for line in caller_text.splitlines(True)
+                   if line.startswith('root-held-fixture-scheduled_process_probe_slot_release\t'))
+    caller_mutations = [
+        replace_once(caller_text, owned, ''),
+        replace_once(caller_text, slot, replace_once(slot, '\t#1472\t', ',kernel/kernel/process.tkb:unreviewed\t#1472\t')),
+        replace_once(caller_text, release, replace_once(release, '\t#1472\t', ',kernel/mm/address_space.tkb:process_address_space_probe\t#1472\t')),
+    ]
+    for changed in caller_mutations:
+        assert problems(sources, changed)
+    fields = slot.split('\t')
+    fields[2] = ','.join(reversed(fields[2].split(',')))
+    assert not problems(sources, replace_once(caller_text, slot, '\t'.join(fields)))
     original = sources[CANONICAL]
     mutations = [
         replace_once(original, 'private affine view RootHeld', 'affine view RootHeld'),
@@ -60,7 +77,7 @@ def main():
         assert problems({**sources, IMAGE: changed})
     report_pass('root-held-entries controls',
                 'production and prose pass; constructor/storage/escape and extra-call/alias/rebinding bypasses fail',
-                controls=len(mutations) + len(image_mutations) + 2)
+                controls=len(mutations) + len(image_mutations) + len(caller_mutations) + 2)
     return 0
 
 

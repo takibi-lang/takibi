@@ -1220,3 +1220,11 @@ installation, while pair mapping carries the same target through both ELF
 plans. `ProcessImagePages.root` retains that target for install, unmap and
 mapping inspection. Activation authority does not substitute the current
 root for this explicit image-loading target.
+
+The boot root fixtures retain real owners and Running reservations. Their
+owner/slot adapters and the legacy fixture slot-release entry have exact
+compiled caller sets: ordinary code cannot decode a retained owner to a slot,
+free it through that fixture entry, then reuse the owner for activation. The
+source policy also holds those table premises closed. This is confined caller
+evidence, not a general proof of record reclamation or arbitrary changes in
+the reviewed allocator and fixture bodies.

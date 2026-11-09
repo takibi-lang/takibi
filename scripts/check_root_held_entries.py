@@ -39,6 +39,45 @@ ADAPTERS = {
     'address_space_activate_owned_root':
         'address_space_activate_held(held,scheduled_process_address_space_root_owned(owner))',
 }
+# Exact compiled caller premises of this bounded entry policy.
+ROOT_CALLERS = {'address_space_activate_held': frozenset({'kernel/mm/address_space.tkb:address_space_activate_boot_root',
+                                           'kernel/mm/address_space.tkb:address_space_activate_owned_root'}),
+ 'address_space_commit_held': frozenset({'kernel/mm/address_space.tkb:address_space_commit_activation',
+                                         'kernel/mm/address_space.tkb:address_space_commit_boot_activation',
+                                         'kernel/mm/address_space.tkb:address_space_commit_current_activation'}),
+ 'address_space_install_here': frozenset({'kernel/mm/address_space.tkb:address_space_activate_held',
+                                          'kernel/mm/address_space.tkb:address_space_commit_held'}),
+ 'address_space_prepare_held': frozenset({'kernel/mm/address_space.tkb:address_space_prepare_activation',
+                                          'kernel/mm/address_space.tkb:address_space_prepare_boot_activation',
+                                          'kernel/mm/address_space.tkb:address_space_prepare_current_activation'}),
+ 'mmu_activate_root': frozenset({'kernel/arch/arm64/mm/mmu.tkb:kernel_mmu_activate',
+                                 'kernel/mm/address_space.tkb:address_space_install_here'}),
+ 'root_held_boot': frozenset({'kernel/mm/address_space.tkb:address_space_activate_boot_root',
+                              'kernel/mm/address_space.tkb:address_space_commit_boot_activation',
+                              'kernel/mm/address_space.tkb:address_space_prepare_boot_activation'}),
+ 'root_held_current': frozenset({'kernel/mm/address_space.tkb:address_space_commit_current_activation',
+                                 'kernel/mm/address_space.tkb:address_space_prepare_current_activation'}),
+ 'root_held_owned': frozenset({'kernel/mm/address_space.tkb:address_space_activate_owned_root',
+                               'kernel/mm/address_space.tkb:address_space_commit_activation',
+                               'kernel/mm/address_space.tkb:address_space_prepare_activation'}),
+ 'scheduled_process_probe_root_acquire': frozenset({'kernel/mm/address_space.tkb:process_address_space_probe',
+                                                    'kernel/mm/process_image.tkb:process_image_clone_growth_probe'}),
+ 'scheduled_process_probe_root_release': frozenset({'kernel/mm/address_space.tkb:process_address_space_probe',
+                                                    'kernel/mm/process_image.tkb:process_image_clone_growth_probe'}),
+ 'scheduled_process_probe_root_slot': frozenset({'kernel/mm/address_space.tkb:process_address_space_probe',
+                                                 'kernel/mm/process_image.tkb:process_image_clone_growth_probe'}),
+ 'scheduled_process_probe_slot_release': frozenset({'kernel/init/test_driver.tkb:kernel_record_absent_publish_probe',
+                                                    'kernel/kernel/fd_table.tkb:unified_fd_table_probe',
+                                                    'kernel/kernel/fd_table.tkb:unified_object_ref_ceiling_probe',
+                                                    'kernel/kernel/process.tkb:kernel_stack_guard_probe',
+                                                    'kernel/kernel/process.tkb:scheduled_process_probe_root_release',
+                                                    'kernel/kernel/syscall.tkb:kernel_syscall_cow_read_probe',
+                                                    'kernel/mm/address_space.tkb:address_space_probe_root_acquire',
+                                                    'kernel/mm/address_space.tkb:address_space_probe_root_release',
+                                                    'kernel/mm/user_memory.tkb:user_memory_root_isolation_probe'}),
+ 'scheduled_process_running_state': frozenset({'kernel/kernel/process.tkb:scheduled_process_finish_clone',
+                                               'kernel/kernel/process.tkb:scheduled_process_running_take'})}
+
 MINT = re.compile(r'\bview\s+RootHeld\s*\[')
 BINDING = re.compile(r'\blet\s+(?:mut\s+)?\w+\s*:\s*RootHeld\s*\[')
 
@@ -142,8 +181,28 @@ def problems_in(path, source):
     return tuple(found)
 
 
-def problems(sources):
+@per_file
+def caller_problems(text):
+    seen = {}
     found = []
+    for line in text.splitlines():
+        fields = line.split('\t')
+        if len(fields) != 5 or fields[1] not in ROOT_CALLERS:
+            continue
+        helper = fields[1]
+        if helper in seen:
+            found.append(f'{helper}: duplicate RootHeld caller premise')
+        seen[helper] = frozenset(fields[2].split(','))
+    for helper, expected in ROOT_CALLERS.items():
+        if seen.get(helper) != expected:
+            found.append(f'{helper}: exact RootHeld/fixture callers must be retained')
+    return tuple(found)
+
+
+def problems(sources, caller_text=None):
+    if caller_text is None:
+        caller_text = Path('scripts/allowed_callers.tsv').read_text()
+    found = list(caller_problems(caller_text))
     if CANONICAL not in sources:
         found.append('missing RootHeld entry module')
     if IMAGE not in sources:
