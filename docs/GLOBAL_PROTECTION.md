@@ -863,7 +863,7 @@ text/data/BSS remain 811080/4600/1302528 bytes; RPi5 text grows
 4196036 -> 4196068 bytes (+32), with data/BSS unchanged at 5576/1929216.
 The reservation boundaries stay 0x40208000 and 0x7e0000. No allocation,
 pool metadata, retained lifetime or device capacity changes. The compiler
-facts report 21 handle globals and 44 unprotected globals instead of 65.
+facts classify the 21 reviewed handle globals as protected handles.
 
 The static workload is the existing device-map bootstrap/DTB attachment
 before CPU_ON, plus the single-core DMA fake transport and the two native

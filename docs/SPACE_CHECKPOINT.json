@@ -8,6 +8,6 @@
     "docs/GLOBAL_PROTECTION.md",
     "kernel/MEMORY_MAP.md"
   ],
-  "assessment": "QEMU text/data/BSS unchanged811080/4600/1302528. RPi5 text+32 bytes4196036->4196068, data/BSS5576/1929216 unchanged. Both usable_ram_start boundaries unchanged.21 genuine handle globals now protected, unprotected65->44. No handle layout, allocation, metadata pool or retention change. MMIO primitive/backend lowering unchanged; sampled UART FIFO/TX accessor instruction bytes identical on both targets. Adopt bounded boot-code cost; no per-MMIO check or new allocator/timing claim.",
+  "assessment": "QEMU text/data/BSS unchanged811080/4600/1302528. RPi5 text+32 bytes4196036->4196068, data/BSS5576/1929216 unchanged. Both usable_ram_start boundaries unchanged.21 genuine handle globals now protected. No handle layout, allocation, metadata pool or retention change. MMIO primitive/backend lowering unchanged; sampled UART FIFO/TX accessor instruction bytes identical on both targets. Adopt bounded boot-code cost; no per-MMIO check or new allocator/timing claim.",
   "next_trigger": "Changed handle capacity, device-map lifetime, or allocation workload."
 }
