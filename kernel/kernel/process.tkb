@@ -5299,14 +5299,14 @@ private fn execution_stack_publish(guard: borrow ProcessRunGuard[&scheduled_proc
 }
 
 private fn execution_current_set_handle(guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
-        cpu: CpuHere, handle: ProcessHandle) {
+        cpu: CpuHere, handle: ProcessHandle) !{changes_witness_ProcessCurrent} {
     let index: {0..<KERNEL_MAX_CORES as usize} = cpu_here_index(cpu);
     execution_state[index].current_handle = handle;
     execution_current_publish(guard, cpu);
 }
 
 private fn execution_current_set_live(guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
-        cpu: CpuHere, live: bool) {
+        cpu: CpuHere, live: bool) !{changes_witness_ProcessCurrent} {
     let index: {0..<KERNEL_MAX_CORES as usize} = cpu_here_index(cpu);
     execution_state[index].current_live = live;
     execution_current_publish(guard, cpu);
