@@ -44,7 +44,6 @@ CALL = re.compile(r"\bcpu_id\s*\(\s*\)")
 
 # file -> (count, kind, reason): the calls of a file outside REVIEWED_SITES.
 LISTED = {
-    "kernel/arch/arm64/kernel/exception_evidence.tkb": (9, FLIP, "not yet reviewed for migration"),
     "kernel/fs/ext2/mutation_lock.tkb": (2, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/cpu_authority.tkb": (3, MINT, "normal region entry and availability, plus the approved exception-only unscoped constructor (#1159, #638)"),
     "kernel/kernel/process.tkb": (29, FLIP, "remaining raw callers after typed ExecutionState selection removed execution_cpu_index (#638)"),
@@ -62,6 +61,7 @@ LISTED = {
 # function, so a new call in an already reviewed file is refused rather
 # than absorbed by the file's label.
 REVIEWED_SITES = {
+    "kernel/arch/arm64/kernel/exception_evidence.tkb::kernel_ddb_enter_stopped": (1, "#1486: interrupt root with complete MachineStopped authority; records the inspecting CPU in the guarded DDB snapshot, not an unguarded CPU-array index"),
     "kernel/kernel/workload_evidence.tkb::workload_busy_record_progress": (1, "#638 stage 9: read while the process-run lock is held (an IRQ-masking Mutex guard) (the PinThen arm pins under the same guard)"),
     "kernel/kernel/workload_evidence.tkb::workload_busy_restart_step": (1, "#638 stage 9: the function borrows the ProcessRunGuard (an IRQ-masking Mutex guard), so no tick switches the task while it reads and uses the CPU"),
     "kernel/kernel/workload_evidence.tkb::workload_busy_start_profile": (1, "#638 stage 9: read while the process-run lock is held (an IRQ-masking Mutex guard) (start_guard, passed on to workload_profile_start)"),

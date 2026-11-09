@@ -52,6 +52,8 @@ LISTED = {
     ("kernel/kernel/syscall.tkb", "syscall_slot_words"): (POOL, "SyscallSlot's acquire words"),
     ("kernel/init/test_driver.tkb", "exec_window_words"): (POOL, "ExecWindowSlot's acquire words"),
     # Read by another CPU.
+    ("kernel/arch/arm64/kernel/exception_evidence.tkb", "crash_snapshot_published"): (CROSS, "builtin publication; checked copies into each reader CPU's typed scratch"),
+    ("kernel/arch/arm64/kernel/exception_evidence.tkb", "ddb_stopped_sequence"): (CROSS, "AtomicWord sequence metadata; peer payload requires complete-stop authority"),
     ("kernel/arch/arm64/kernel/secondary.tkb", "kernel_secondary_boot_state"): (CROSS, "the boot CPU's secondary handshake"),
     ("kernel/arch/arm64/kernel/secondary.tkb", "secondary_tick_count"): (CROSS, "peer tick waits and reports"),
     ("kernel/kernel/irq_counts.tkb", "irq_count_cores"): (CROSS, "DDB's intr view and the SGI fixture"),

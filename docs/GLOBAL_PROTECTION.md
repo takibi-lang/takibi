@@ -9,6 +9,19 @@ classification is the compiler's (`lib/global_protection.ml`): it reads the
 `per_cpu`, `dma_fixed`, `guarded_by` and region registries and the
 generated protocol and region-pool names, not `.tkb` text.
 
+The build ratchet additionally admits exactly the private
+`exception_evidence.tkb::crash_snapshot_published` array as
+`exception_publication`. The raw compiler table still reports `none`.
+This scoped admission requires the actual builtin `struct publish`, its
+private fixed array, an exact own-CPU publisher and checked reader adapters,
+a terminal capture flag that cannot rearm, closed payload aliases, and the
+compiled caller graph with foreign-call and function-pointer controls. Both
+platforms must supply the evidence. Missing or changed premises leave the
+array unprotected. This is a reviewed source-policy boundary, not a generic
+classification of all published records or a proof that manually minted CPU
+authority cannot migrate or escape. The compiler separately enforces the
+publication token/mandatory-field protocol and typed per-CPU access.
+
 ## Format, version 3
 
 The first line is

@@ -62,7 +62,7 @@ HEADER = "# takibi globals, format "
 COLUMNS = ("file", "line", "name", "visibility", "qualifier", "type", "protection")
 PROTECTED = {"atomic", "lock", "per_cpu", "region", "place", "dma_fixed",
              "protocol", "boot_once", "set_once", "stop", "composite", "slot_owned",
-             "debugger_set", "handle"}
+             "debugger_set", "handle", "exception_publication"}
 UNPROTECTED = {"none"}
 
 
@@ -124,6 +124,42 @@ def debugger_set_names(path=DEBUGGER_SET):
     return {line.split("\t")[0] for line in lines if line.strip()}
 
 
+def exception_publication_admitted(row, origin, source=None, table=None, rules=None):
+    """One approved admission, not a generic published-record class.
+
+    The compiler enforces builtin publication and per_cpu access. Exact source
+    adapters close association and success-before-read; the compiled call graph
+    closes foreign and pointer callers. Missing evidence never grants admission.
+    """
+    from check_exception_cpu_snapshots import PATH, MIRROR, CALLERS, problems
+    if (row['file'], row['name'], row['visibility'], row['qualifier'],
+            row['type'], row['protection']) != (PATH, MIRROR, 'private', '-',
+                                                '[CrashSnapshot;4]', 'none'):
+        return False
+    import call_graph_table
+    from buildcheck_allowed_callers import read_list, problems_in, controls_fail
+    try:
+        if source is None:
+            source = (ROOT / PATH).read_text(encoding='ascii')
+        if problems(source):
+            return False
+        if table is None:
+            table = call_graph_table.read(pathlib.Path(origin).with_name('callgraph.tsv'))
+        if not table or not any(r['file'] == PATH for r in table):
+            return False
+        if rules is None:
+            rules = read_list()
+        for helper, names in CALLERS.items():
+            matches = [r for r in rules if r['helper'] == helper]
+            if len(matches) != 1 or matches[0]['allowed'] != {(PATH, n) for n in names}:
+                return False
+            if problems_in(matches[0], table) or controls_fail(matches[0], table):
+                return False
+        return True
+    except (OSError, ValueError, StopIteration, call_graph_table.TableError):
+        return False
+
+
 def globals_of(tables, debugger_set=None):
     """(file, name) -> row, the union over both kernels. A scalar row named
     in scripts/debugger_set_globals.tsv is classified `debugger_set`."""
@@ -136,7 +172,16 @@ def globals_of(tables, debugger_set=None):
                 if (row["name"] in debugger_set and row["protection"] in UNPROTECTED
                         and row["type"] in DEBUGGER_SET_TYPES):
                     row = dict(row, protection="debugger_set")
-                found.setdefault((row["file"], row["name"]), row)
+                if exception_publication_admitted(row, origin):
+                    row = dict(row, protection="exception_publication")
+                key = (row["file"], row["name"])
+                previous = found.get(key)
+                if previous and {previous['protection'], row['protection']} == {'none', 'exception_publication'}:
+                    # Every platform must supply all premises; union order may
+                    # not hide a platform whose evidence is missing or invalid.
+                    found[key] = dict(row, protection='none')
+                else:
+                    found.setdefault(key, row)
     if not found:
         raise TableError("no production globals in the tables")
     return found

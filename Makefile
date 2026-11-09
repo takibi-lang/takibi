@@ -2337,7 +2337,7 @@ $(MODEL_MAP_STAMP): $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_DIR)/mo
 ## a stale row there, fails the build.
 GLOBAL_PROTECTION_TABLES = $(KERNEL_QEMU_MAIN_O).facts/globals.tsv $(KERNEL_RPI5_MAIN_O).facts/globals.tsv
 GLOBAL_PROTECTION_STAMP  = $(KERNEL_DIR)/build/global_protection.ok
-$(GLOBAL_PROTECTION_STAMP): $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O) scripts/buildcheck_global_protection.py scripts/buildcheck_unread_globals.py scripts/global_protection_allowlist.tsv scripts/debugger_set_globals.tsv scripts/buildcheck_dma_mint_files.py
+$(GLOBAL_PROTECTION_STAMP): $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O) scripts/buildcheck_global_protection.py scripts/buildcheck_unread_globals.py scripts/global_protection_allowlist.tsv scripts/debugger_set_globals.tsv scripts/buildcheck_dma_mint_files.py scripts/check_exception_cpu_snapshots.py scripts/allowed_callers.tsv scripts/buildcheck_allowed_callers.py
 	python3 scripts/buildcheck_global_protection.py $(GLOBAL_PROTECTION_TABLES)
 	python3 scripts/buildcheck_unread_globals.py $(GLOBAL_PROTECTION_TABLES)
 	python3 scripts/buildcheck_dma_mint_files.py $(KERNEL_QEMU_MAIN_O).facts/fields.tsv $(KERNEL_RPI5_MAIN_O).facts/fields.tsv
@@ -2385,7 +2385,8 @@ _kernelbuild-check: _kernelbuild-images
 	TAKIBI_KERNEL_COMPILE_FLAGS='$(KERNEL_QEMU_COMPILE_FLAGS)' bash scripts/run_concurrent_checks.sh \
 		buildcheck-backing-exists 'python3 scripts/buildcheck_backing_exists.py $(KERNELBUILD_CHECK_ARGS)' \
 		buildcheck-process-current-phase 'python3 scripts/buildcheck_process_current_phase.py $(KERNELBUILD_CHECK_ARGS)' \
-		buildcheck-user-write-result 'python3 scripts/buildcheck_user_write_result.py $(KERNELBUILD_CHECK_ARGS)'
+		buildcheck-user-write-result 'python3 scripts/buildcheck_user_write_result.py $(KERNELBUILD_CHECK_ARGS)' \
+		buildcheck-exception-cpu-access 'python3 scripts/buildcheck_exception_cpu_access.py $(KERNELBUILD_CHECK_ARGS)'
 	MAKE='$(MAKE)' bash scripts/buildcheck_ext2_reproducible.sh $(KERNEL_USER_BUILD_DIR) $(KERNEL_EXT2_FAKE_TIME)
 	MAKE='$(MAKE)' bash scripts/buildcheck_kernel_reproducible.sh $(KERNEL_QEMU_MAIN_TKB)=$(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_TKB)=$(KERNEL_RPI5_MAIN_O)
 
