@@ -31,7 +31,8 @@ anything: when you need them, stop and report (see "Report").
   block. Hardware lanes (`*rpi5*`, `kernelcheck`, `allcheck`) wait on shared
   leases; run them only at a natural boundary, as AGENTS.md says.
 - Do not touch `~/.takibi-sessions` except to append to the audit file below
-  and acquire its adjacent `<audit-file>.lock`.
+  and acquire its adjacent `<audit-file>.lock`, or to write evidence to a
+  directory explicitly assigned by the coordinator.
 - Never write to shared toolchains or system directories (`~/.opam`, `/usr`,
   the model-tools cache): tools are installed by the maintainer or the
   devcontainer. Before any third-party `make install`, check where it writes
@@ -73,6 +74,12 @@ overwrite another worker's section). Prepare the complete section in a
 private temporary file, then append it while holding `flock` on
 `<audit-file>.lock`; every writer, including the coordinator, uses that same
 lock. Do not perform an unlocked read-modify-write of the batch.
+Keep private Japanese audit copies outside the checkout, including its Git
+metadata, in a coordinator-assigned `~/.takibi-sessions/evidence/` directory.
+The main checkout's ASCII scan also traverses its actual `.git` directory;
+a worker's `.git` file does not expose that difference during worker checks.
+Preserve artifact hashes and manifests when relocating evidence; do not
+weaken the scan or rewrite a private audit to make its archive pass.
 Head your section with the issue number,
 branch and final commit. Answer all nine:
 
