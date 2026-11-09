@@ -47,7 +47,6 @@ LISTED = {
     "kernel/fs/ext2/mutation_lock.tkb": (2, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/cpu_authority.tkb": (3, MINT, "normal region entry and availability, plus the approved exception-only unscoped constructor (#1159, #638)"),
     "kernel/kernel/process.tkb": (29, FLIP, "remaining raw callers after typed ExecutionState selection removed execution_cpu_index (#638)"),
-    "kernel/kernel/protocol_trace.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/stall_probe.tkb": (3, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/syscall.tkb": (4, FLIP, "not yet reviewed for migration"),
     "kernel/lib/occupancy.tkb": (6, FLIP, "not yet reviewed for migration"),
@@ -60,6 +59,7 @@ LISTED = {
 # function, so a new call in an already reviewed file is refused rather
 # than absorbed by the file's label.
 REVIEWED_SITES = {
+    "kernel/kernel/protocol_trace.tkb::protocol_trace_record": (1, "#638 stage 9: event CPU metadata, not a CPU-array index; all observer and synthetic-open-probe callers hold the ProcessRunGuard, whose Mutex masks IRQs until after recording; this is current-caller evidence, not typed trace storage"),
     "kernel/kernel/profile_session.tkb::profile_session_sync": (1, "#638 stage 9: called only by timer_irq_handler, kernel_world_stop_serve and kernel_ddb_enter_stopped, interrupt/nmi contexts with ordinary IRQs excluded; the CPU read, core-state accesses and local PMU arm/disarm finish before exception return"),
     "kernel/kernel/profile_session.tkb::profile_session_irq": (1, "#638 stage 9: an interrupt function called by profile_sample_irq in the PMU handler; ordinary IRQs exclude migration throughout the CPU-indexed state/buffer accesses, and the nested buffer lock restores the already-masked state"),
     "kernel/kernel/profile_session.tkb::irqsoff_open": (1, "#638 stage 9: mutex_irq_save calls it after irq_save, and irq_mask_cost_daif calls it after msr_daifset_irq; the CPU-indexed walk and stores finish while the caller's IRQ mask is still held"),
