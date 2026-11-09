@@ -3,11 +3,13 @@
   "event": "milestone",
   "decision": "measured",
   "source_sha256": "47068a3b7ff3f35d7dc5f44ee6a08bab99db9279505aa80954f9d5910d48accb",
-  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 96cd76f0: this branch's review, rebound to the merged sources (upstream's record was 2026-11-09 milestone/measured). RootHeld activation entries: maintained live two-root/image probes and cleanup, clone/exec/wait/reap, normal QEMU/PTY plus affinity/DDB/oops, and four-core RPi5. ELF payload/reservation, both-platform production/debug prologues and boot/bounded-end pool endpoints are separate boundaries.",
+  "workload": "Combined RootHeld activation entries and authority-derived guard/synchronous callback compiler foundation. Retain both component workloads and accounting boundaries; freshly build both production ELFs and four production/debug objects. Coordinator allcheck supplies combined runtime acceptance.",
   "evidence": [
+    "docs/ROOT_HELD_FOUNDATION_INTEGRATION_SPACE.json",
     "docs/ROOT_HELD_ENTRY_SPACE.md",
-    "docs/ROOT_HELD_ENTRY_SPACE.json"
+    "docs/ROOT_HELD_ENTRY_SPACE.json",
+    "docs/AUTHORITY_GUARD_CALLBACK_SPACE_2026-11-09.txt"
   ],
-  "assessment": "Accept QEMU text +3512 and RPi5 +3544 bytes; named mutable payload, data/BSS spans and image reservation unchanged. Existing scheduler frames are 3184 production/3312 corrected debug bytes on both platforms. Helper frames and sequential branches are explicit, not a whole-stack bound. Final compiler allocation 593855601 words with approved approximately 25-percent headroom; no compiler optimization retained.",
-  "next_trigger": "Changed root-owner lifetime, page-table write authority, activation/context-switch or stack-helper structure, allocation workload, or next kernel milestone."
+  "assessment": "Fresh combined production ELFs/objects are byte-identical to measured RootHeld; debug objects differ only in debug sections, with identical complete disassemblies. Text +3512 QEMU/+3544 RPi5 versus published88; mutable payload/BSS/reservation and recorded corrected frames unchanged. Combined compiler allocates 598982878 words below approved743M ceiling. Native callback ABI cost remains separate. No whole-stack or generic reclamation proof.",
+  "next_trigger": "Sleeping Mutex scheduler/phase integration or changed root-owner lifetime, PTE authority, callback/guard representation, allocation workload or stack-helper structure."
 }

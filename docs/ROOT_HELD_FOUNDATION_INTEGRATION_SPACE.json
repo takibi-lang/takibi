@@ -1,0 +1,72 @@
+{
+  "source_head": "81ec002a594d5210adef51c8c7b3a37063f0033e",
+  "production_fingerprint": "47068a3b7ff3f35d7dc5f44ee6a08bab99db9279505aa80954f9d5910d48accb",
+  "rootheld_head": "74a9993279c52f83172ce40491f4af13493e312e",
+  "foundation_head": "96cd76f00e82f0bc7217507e0c8c79695464e4a9",
+  "compiler_sha256": "962d38de72796b363ec16de38c3eefecb8aa40d441083f76771fb84ff744ca6c",
+  "uninstrumented_allocwords": 598982878,
+  "rootheld_allocwords": 593855601,
+  "published_88_allocwords": 579396188,
+  "ceiling": 743000000,
+  "artifacts": [
+    {
+      "path": "kernel/build/qemu/kernel.elf",
+      "sha256": "e242e8d3d4af7879c157877db95af15013401e2baae8c8d2dad8f4579e9f8203",
+      "bytes": 1314376,
+      "rootheld_sha256": "e242e8d3d4af7879c157877db95af15013401e2baae8c8d2dad8f4579e9f8203",
+      "identical_to_rootheld": true
+    },
+    {
+      "path": "kernel/build/qemu/main.o",
+      "sha256": "dddc3a0612d3141c62dcf0e68e6594beda6507d577170e86d02e0c7587be6c2a",
+      "bytes": 2997480,
+      "rootheld_sha256": "dddc3a0612d3141c62dcf0e68e6594beda6507d577170e86d02e0c7587be6c2a",
+      "identical_to_rootheld": true
+    },
+    {
+      "path": "kernel/build/qemu/main.debug.o",
+      "sha256": "f0d93e4dde460308eda80ae51ebda217b4b2acc72924a07754acd53cebeb8742",
+      "bytes": 7827064,
+      "rootheld_sha256": "39703ee1a044d7497aa774970ad839466c2d01317f14f5f691bf239736f3d510",
+      "identical_to_rootheld": false,
+      "disassembly_identical_to_rootheld": true,
+      "disassembly_sha256": "f4f07e47df61a20e4229c1a90f47fdfb4ee8a75d5f8670009f205f3c2eb4d1de",
+      "different_sections": [
+        ".debug_line",
+        ".debug_str",
+        ".rela.debug_info",
+        ".rela.debug_line"
+      ]
+    },
+    {
+      "path": "kernel/build/rpi5/kernel.elf",
+      "sha256": "bea0e1f0da97a94461603665b71692fdd25079d80fa8c2fe8367e295a39776a9",
+      "bytes": 4731792,
+      "rootheld_sha256": "bea0e1f0da97a94461603665b71692fdd25079d80fa8c2fe8367e295a39776a9",
+      "identical_to_rootheld": true
+    },
+    {
+      "path": "kernel/build/rpi5/main.o",
+      "sha256": "a15d349f308eff46598ae113b7adcd0e202be293434913d4ca8d95dbb8f4ab09",
+      "bytes": 6540112,
+      "rootheld_sha256": "a15d349f308eff46598ae113b7adcd0e202be293434913d4ca8d95dbb8f4ab09",
+      "identical_to_rootheld": true
+    },
+    {
+      "path": "kernel/build/rpi5/main.debug.o",
+      "sha256": "1f8fa6b37c65af619510af9c2da62986dad0de3e65c4dc444d5e82d7c3def777",
+      "bytes": 12095544,
+      "rootheld_sha256": "0b6d7f64059df20aba8c0136d7377936dfc8294845e597b169a8c201aacba2db",
+      "identical_to_rootheld": false,
+      "disassembly_identical_to_rootheld": true,
+      "disassembly_sha256": "ed238b429fa8ac67f108682c9be7053b9c2cfaf8ee8d7621861229b232b3b753",
+      "different_sections": [
+        ".debug_line",
+        ".debug_str",
+        ".rela.debug_info",
+        ".rela.debug_line"
+      ]
+    }
+  ],
+  "scope": "Fresh combined compiler and both production kernels plus four objects. Production artifacts are byte-identical to RootHeld; debug objects differ only in recorded debug sections and have identical complete instruction disassemblies. Existing RootHeld frame observations transfer at that strength. Combined runtime acceptance still requires coordinator allcheck."
+}
