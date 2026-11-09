@@ -189,6 +189,10 @@ fn log_storm_probe() -> bool !{logs, unsafe} {
 private let mut log_storm_trace_rounds: AtomicWord;
 
 fn log_storm_trace_probe() -> bool !{logs, unsafe} {
+    match log_ring_trace_order_probe() {
+        LogRingTraceOrderProbe::Failed => { return false; }
+        LogRingTraceOrderProbe::Passed => {}
+    }
     let expected: usize = kernel_online_core_count() - 1;
     atomic_word_fetch_add(&log_storm_trace_rounds, 1);
     let round: usize = LOG_STORM_ROUNDS + atomic_word_load(&log_storm_trace_rounds);

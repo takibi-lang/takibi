@@ -2031,7 +2031,7 @@ fn kernel_log_snapshot_build_from(guard: borrow KernelLogSnapshotGuard[&kernel_l
 
 private fn kernel_log_snapshot_fill(snapshot: borrow &mut KernelLogSnapshot, floor: usize,
                                     traced: bool) -> usize !{unsafe} {
-    let mut reader: LogRingTraceReader = { traced, false };
+    let mut reader: LogRingTraceReader = { traced, false, 0 };
     snapshot.length = 0;
     let end: usize = kernel_log_observe(&kernel_log_head);
     let mut begin: usize = 0;
@@ -2237,7 +2237,7 @@ private fn kernel_log_probe_snapshot_record(seq: usize, end: usize, second_check
                                             overwrite_mid_copy: bool)
         -> KernelLogRecordCopy !{unsafe} {
     let guard = kernel_log_snapshot_take();
-    let mut reader: LogRingTraceReader = { false, false };
+    let mut reader: LogRingTraceReader = { false, false, 0 };
     let answer: KernelLogRecordCopy = match place_borrow(guard, kernel_log_snapshot_store.state) {
         Place::Empty => { KernelLogRecordCopy::Lost(0) }
         Place::Full(states) => {
