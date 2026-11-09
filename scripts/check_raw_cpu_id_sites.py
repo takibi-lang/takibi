@@ -46,7 +46,7 @@ CALL = re.compile(r"\bcpu_id\s*\(\s*\)")
 LISTED = {
     "kernel/fs/ext2/mutation_lock.tkb": (2, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/cpu_authority.tkb": (3, MINT, "normal region entry and availability, plus the approved exception-only unscoped constructor (#1159, #638)"),
-    "kernel/kernel/process.tkb": (23, FLIP, "remaining raw callers after typed ExecutionState selection removed execution_cpu_index (#638)"),
+    "kernel/kernel/process.tkb": (22, FLIP, "remaining raw callers after typed ExecutionState selection removed execution_cpu_index (#638)"),
     "kernel/kernel/syscall.tkb": (2, FLIP, "kernel_syscall_dispatch_action: affinity response can outlive its selecting CPU before Migrate consumption; getcpu is a scalar sample in the same function and remains counted pending that path review"),
     "kernel/mm/page.tkb": (1, FLIP, "#1079 page_reserve_cpu: read only under the page pool's IRQ-masking lock, and the kernel is not preemptible (KERNEL_PREEMPTIBLE == 0), so the CPU cannot change before the lock is given back; page_alloc has no CpuHere to take"),
 }
@@ -56,6 +56,7 @@ LISTED = {
 # function, so a new call in an already reviewed file is refused rather
 # than absorbed by the file's label.
 REVIEWED_SITES = {
+    "kernel/kernel/process.tkb::kernel_process_rollover_backoff": (1, "#638: the CPU sample only chooses an immutable counter-delay threshold; the IRQ-unmasked helper does not index CPU storage or return execution authority, so later migration does not invalidate that already chosen scalar value; no activation, ASID or liveness guarantee"),
     "kernel/kernel/process.tkb::kernel_process_spread_timer_progress": (1, "#638: acquires the IRQ-masking ProcessRunGuard before its CPU1 fixture-role read; all uses of that predicate and guarded fixture updates finish before unlock; no post-unlock scheduling claim"),
     "kernel/kernel/process.tkb::kernel_process_spread_timer_enter": (1, "#638: acquires the IRQ-masking ProcessRunGuard before the CPU0 sample; the changing predicate and its immediate guarded update stay under that hold; timer-schedule caller is interrupt context, not a substitute for this local hold"),
     "kernel/kernel/process.tkb::kernel_process_spread_timer_left": (1, "#638: borrows ProcessRunGuard across the CPU0 check and immediate Left-phase bookkeeping; the caller passes the guard and unlocks only after return; no sampled CPU value or deferred action escapes"),
