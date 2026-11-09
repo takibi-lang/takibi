@@ -108,12 +108,11 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
 
 ### Territory A: the trunk, in this order
 
-**Priority update, 2026-11-09.** Repair #1482 (stale UART evidence after
-launch/connection refusal) and restore fresh validation first. Then #1330
-removes the remaining core-0 placement exceptions with actual path evidence;
-ExecutionState moves to existing per_cpu/CpuHere authority and #1472 adds
-RootHeld before the flip. The coordinator sequences shared scheduler edits
-with the sleeping-Mutex work below.
+**Priority update, 2026-11-09.** Move ExecutionState to existing
+per_cpu/CpuHere authority and add RootHeld (#1472) before the flip. The
+coordinator sequences shared scheduler edits with the sleeping-Mutex
+foundation (#1481), taking independent steps while its design questions
+are reviewed.
 
 **Assigned queue (maintainer, 2026-10-23, pruned 2026-10-25).** Memory
 safety and multicore backbone only. Taken in order whenever the numbered
@@ -165,7 +164,7 @@ owners are TaskMutex, the spare stack stays masked). #980
    `PreemptOff` rule (#641 item 1; done 2026-10-29, 20e22f3c: D1 (a) an
    `!{interrupt}` function is called only masked and mints CPU authority
    there, D2 (i) a fallible `preempt_off (cpu) { } else { }`); (5) site migration (process_image's
-   target root, the log's partial line with an owner word, done (#1159),
+   target root is explicit and carried by ProcessImagePages, #981; the log's partial line with an owner word, done (#1159),
    `syscall_ext2_reader`, done (#1323: a dispatch local), exception_evidence);
    (6) the slot pools'
    capacity premise (#993, done 2026-11-01: capacity unchanged, a full pool retries unmasked for the tick, the mutation lock before any slot, `SlotPool.tla`); (7) the lock-holder group with the `PreemptOff`
