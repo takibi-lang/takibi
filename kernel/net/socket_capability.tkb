@@ -27,7 +27,7 @@ struct NetworkCapabilityStore {
     // installed, and never cleared. Once set, an empty store means a holder
     // is between take and put, which network_capability_take_waiting waits
     // out; while clear, no capability exists anywhere.
-    private installed_once: bool;
+    private installed_once: AtomicWord;
 }
 
 private let mut network_capability_store: NetworkCapabilityStore;
@@ -103,7 +103,7 @@ fn network_capability_install(ready: sink NetRxCanAcquire[net])
         network_capability_store.value, ready);
     match previous {
         Place::Empty => {
-            network_capability_store.installed_once = true;
+            atomic_word_store(&network_capability_store.installed_once, 1);
             network_capability_unlock(
                 guard, &network_capability_store.mutex);
             return NetworkCapabilityInstallResult::Installed;
@@ -162,7 +162,7 @@ must_use variant NetworkCapabilityWaitResult {
 fn network_capability_take_waiting() -> NetworkCapabilityWaitResult {
     while (true) {
         let guard = network_capability_lock(&network_capability_store.mutex);
-        let installed: bool = network_capability_store.installed_once;
+        let installed: bool = atomic_word_load(&network_capability_store.installed_once) != 0;
         let previous: Place(exists net: addr. NetRxCanAcquire[net]) = place_take(
             guard, &network_capability_store.mutex,
             network_capability_store.value);

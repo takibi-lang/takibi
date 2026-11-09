@@ -1,0 +1,307 @@
+{
+  "baseline_head": "f2bf60f56c915b8efa920946ebbffeeb1c83f6a9",
+  "boundary": "Actual linked production ELF and main.o, read-only copies verified against published archive manifest; old34ee guest component evidence kept separately",
+  "targets": {
+    "qemu": {
+      "hashes": {
+        "baseline/qemu/kernel.elf": "1b30056403a15fca83ea089d45e1860ccec06558c77cf7887a805024095d992f",
+        "candidate/qemu/kernel.elf": "f0ffac1baee95f06b4e287ac627947b373e5a05bf3f9c0f24fbeb9a3a1a45705",
+        "baseline/qemu/main.o": "809fa678691e70e8f17906f135a877103dc32343b86513b1c541c28a231b65ec",
+        "candidate/qemu/main.o": "63158de12374beacb7f56eb3cc8382519077617b8902d50a15212edfad5c87e7"
+      },
+      "linked_sizes": {
+        "baseline": {
+          "text": 822792,
+          "data": 4624,
+          "bss": 1318912
+        },
+        "candidate": {
+          "text": 822808,
+          "data": 4624,
+          "bss": 1318912
+        }
+      },
+      "layouts": {
+        "baseline": [
+          "AtomicWord\tvalue\t0",
+          "AtomicWord\t.size\t8",
+          "AtomicWord\t.members\t1",
+          "NetworkCapabilityStore\tmutex\t0",
+          "NetworkCapabilityStore\tvalue\t8",
+          "NetworkCapabilityStore\tinstalled_once\t28",
+          "NetworkCapabilityStore\t.size\t32",
+          "NetworkCapabilityStore\t.members\t3"
+        ],
+        "candidate": [
+          "AtomicWord\tvalue\t0",
+          "AtomicWord\t.size\t8",
+          "AtomicWord\t.members\t1",
+          "NetworkCapabilityStore\tmutex\t0",
+          "NetworkCapabilityStore\tvalue\t8",
+          "NetworkCapabilityStore\tinstalled_once\t32",
+          "NetworkCapabilityStore\t.size\t40",
+          "NetworkCapabilityStore\t.members\t3"
+        ]
+      },
+      "selected_symbols": {
+        "network_capability_store": {
+          "baseline": {
+            "address": 1075257984,
+            "size": 32,
+            "type": 1,
+            "section": 6
+          },
+          "candidate": {
+            "address": 1075257984,
+            "size": 40,
+            "type": 1,
+            "section": 6
+          }
+        },
+        "network_capability_install": {
+          "baseline": {
+            "address": 1074178032,
+            "size": 384,
+            "type": 2,
+            "section": 1
+          },
+          "candidate": {
+            "address": 1074178032,
+            "size": 392,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "network_capability_take_waiting": {
+          "baseline": {
+            "address": 1074178656,
+            "size": 264,
+            "type": 2,
+            "section": 1
+          },
+          "candidate": {
+            "address": 1074178672,
+            "size": 268,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "usable_ram_start": {
+          "baseline": {
+            "address": 1075904512,
+            "size": 0,
+            "type": 0,
+            "section": 7
+          },
+          "candidate": {
+            "address": 1075904512,
+            "size": 0,
+            "type": 0,
+            "section": 7
+          }
+        }
+      },
+      "changed_object_sections": [
+        {
+          "name": ".bss.network_capability_store",
+          "baseline_size": 32,
+          "candidate_size": 40
+        },
+        {
+          "name": ".eh_frame",
+          "baseline_size": 127216,
+          "candidate_size": 127216
+        },
+        {
+          "name": ".rela.text.takibi.network_capability_install",
+          "baseline_size": 120,
+          "candidate_size": 120
+        },
+        {
+          "name": ".rela.text.takibi.network_capability_take_waiting",
+          "baseline_size": 96,
+          "candidate_size": 96
+        },
+        {
+          "name": ".symtab",
+          "baseline_size": 457656,
+          "candidate_size": 457656
+        },
+        {
+          "name": ".text.takibi.network_capability_install",
+          "baseline_size": 384,
+          "candidate_size": 392
+        },
+        {
+          "name": ".text.takibi.network_capability_take_waiting",
+          "baseline_size": 264,
+          "candidate_size": 268
+        }
+      ],
+      "data_address_shift_counts": {
+        "0": 1,
+        "8": 61,
+        "16": 167
+      },
+      "changed_got_words": 234,
+      "object_eh_frame_byte_changes": [
+        {
+          "offset": 99276,
+          "old": 128,
+          "new": 136
+        },
+        {
+          "offset": 99372,
+          "old": 8,
+          "new": 12
+        }
+      ]
+    },
+    "rpi5": {
+      "hashes": {
+        "baseline/rpi5/kernel.elf": "0cea1dd11c72fde1f68b3ddb1e0e5452655ad97b1c1d06f28c124abade33a9c3",
+        "candidate/rpi5/kernel.elf": "09c659cef9f3a7d8d574ed6334b2afd5d75ba2f2d2e642945e62ded6821f8546",
+        "baseline/rpi5/main.o": "8c0f1296064fd22eacddf44b6b34d78953b3f34acc858e2325555059d2ee0f13",
+        "candidate/rpi5/main.o": "a92f948418681de8ef186855e0164ed6b565039500f26ea478bb67f125408557"
+      },
+      "linked_sizes": {
+        "baseline": {
+          "text": 4207396,
+          "data": 5600,
+          "bss": 1933312
+        },
+        "candidate": {
+          "text": 4207396,
+          "data": 5600,
+          "bss": 1933312
+        }
+      },
+      "layouts": {
+        "baseline": [
+          "AtomicWord\tvalue\t0",
+          "AtomicWord\t.size\t8",
+          "AtomicWord\t.members\t1",
+          "NetworkCapabilityStore\tmutex\t0",
+          "NetworkCapabilityStore\tvalue\t8",
+          "NetworkCapabilityStore\tinstalled_once\t16",
+          "NetworkCapabilityStore\t.size\t24",
+          "NetworkCapabilityStore\t.members\t3"
+        ],
+        "candidate": [
+          "AtomicWord\tvalue\t0",
+          "AtomicWord\t.size\t8",
+          "AtomicWord\t.members\t1",
+          "NetworkCapabilityStore\tmutex\t0",
+          "NetworkCapabilityStore\tvalue\t8",
+          "NetworkCapabilityStore\tinstalled_once\t16",
+          "NetworkCapabilityStore\t.size\t24",
+          "NetworkCapabilityStore\t.members\t3"
+        ]
+      },
+      "selected_symbols": {
+        "network_capability_store": {
+          "baseline": {
+            "address": 7483984,
+            "size": 24,
+            "type": 1,
+            "section": 6
+          },
+          "candidate": {
+            "address": 7483984,
+            "size": 24,
+            "type": 1,
+            "section": 6
+          }
+        },
+        "network_capability_install": {
+          "baseline": {
+            "address": 2544816,
+            "size": 148,
+            "type": 2,
+            "section": 1
+          },
+          "candidate": {
+            "address": 2544816,
+            "size": 156,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "network_capability_take_waiting": {
+          "baseline": {
+            "address": 2545088,
+            "size": 120,
+            "type": 2,
+            "section": 1
+          },
+          "candidate": {
+            "address": 2545088,
+            "size": 124,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "usable_ram_start": {
+          "baseline": {
+            "address": 8257536,
+            "size": 0,
+            "type": 0,
+            "section": 7
+          },
+          "candidate": {
+            "address": 8257536,
+            "size": 0,
+            "type": 0,
+            "section": 7
+          }
+        }
+      },
+      "changed_object_sections": [
+        {
+          "name": ".eh_frame",
+          "baseline_size": 137576,
+          "candidate_size": 137576
+        },
+        {
+          "name": ".rela.text.takibi.network_capability_install",
+          "baseline_size": 120,
+          "candidate_size": 120
+        },
+        {
+          "name": ".rela.text.takibi.network_capability_take_waiting",
+          "baseline_size": 96,
+          "candidate_size": 96
+        },
+        {
+          "name": ".symtab",
+          "baseline_size": 493968,
+          "candidate_size": 493968
+        },
+        {
+          "name": ".text.takibi.network_capability_install",
+          "baseline_size": 148,
+          "candidate_size": 156
+        },
+        {
+          "name": ".text.takibi.network_capability_take_waiting",
+          "baseline_size": 120,
+          "candidate_size": 124
+        }
+      ],
+      "data_address_shift_counts": {},
+      "changed_got_words": 0,
+      "object_eh_frame_byte_changes": [
+        {
+          "offset": 101680,
+          "old": 148,
+          "new": 156
+        },
+        {
+          "offset": 101752,
+          "old": 120,
+          "new": 124
+        }
+      ]
+    }
+  }
+}

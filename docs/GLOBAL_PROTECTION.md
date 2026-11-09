@@ -1062,3 +1062,15 @@ refusal, complete/partial token distinction and negative probes remain.
 Atomic access types do not establish those protocol properties by themselves;
 see TRUSTED_BASE.md and WORLD_STOP_GENERATION_SPACE.md for their boundary
 and the measured 8-byte field/layout and image accounting.
+
+### Network capability installed word (2026-11-09)
+
+NetworkCapabilityStore.installed_once uses the existing AtomicWord: zero
+from BSS, one from its sole private store site, and a nonzero read. Both
+accesses still hold the same Mutex around the existing Place protocol.
+The two actual compiler tables classify the controller as composite through
+the existing field rule, retiring only its allowance row. AtomicWord does
+not refine its payload to a boolean or prove the lock/wait protocol.
+No fixture exemption, guard, classifier or language rule changes.
+See TRUSTED_BASE.md and NETWORK_INSTALLED_WORD_SPACE.md for the trust
+boundary, actual layouts and linked-image cost.

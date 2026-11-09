@@ -548,6 +548,14 @@ rules globally.
   WorldStopped retain their different authority. Existing bounded WorldStop
   and WorldStopRetry models are evidence under their stated bounds and
   assumptions, not a whole-protocol proof from atomic access alone.
+- NetworkCapabilityStore's installed_once is an AtomicWord beside its
+  existing Mutex and Place. BSS zero, the sole private writer storing one
+  under that mutex, no clear and no field pointer escape establish the
+  current boolean domain; AtomicWord itself does not prove zero/one. The
+  nonzero reader remains under the same lock. The recursive composite
+  classification checks field types, not the Mutex/Place waiting protocol.
+  Existing guard, device identity, try-lock/DDB and caller/mint premises
+  remain; no new authority or atomic-bool capability is introduced.
 - ExecutionState's stopped diagnostic copy contains scalar slot/generation
   words and live bits, not handles or mutable loans. Each peer captures its
   own typed store before the holding pen acknowledges the stop; the debugger
