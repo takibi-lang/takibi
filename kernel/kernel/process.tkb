@@ -4801,8 +4801,13 @@ fn scheduled_process_exit(
 // Every reaper calls the two itself, releasing the run lock between them
 // (#693 step 5): there is no combined form, because one that took the guard
 // let a caller run the teardown under the lock.
+// Root lifetime ends here, before the owner itself is removed. Requiring the
+// same generation's Reapable state excludes a reserved Running root; the
+// destructive effect also rejects a record loan kept across this boundary.
 fn scheduled_process_reap_teardown(
-        owner: borrow ScheduledProcessOwner[process]) !{unsafe} {
+        owner: borrow ScheduledProcessOwner[process],
+        reaping: borrow ScheduledProcessState[process, ProcessState::Reapable])
+        !{unsafe, record_mutates_ScheduledProcessOwner} {
     // GitHub issue #488: see scheduled_process_reaped_current_count.
     match kernel_process_current_read() {
         ProcessCurrentRead::Idle => {}
@@ -4982,7 +4987,7 @@ fn scheduled_process_probe_cycle(handle: ProcessHandle) -> bool !{unsafe} {
             let (owner, exited) = resources;
             process_run_unlock(guard);
             scheduled_process_probe_second_reaper(handle);
-            scheduled_process_reap_teardown(owner);
+            scheduled_process_reap_teardown(owner, exited);
             let remove_guard = process_run_lock();
             scheduled_process_reap_remove(remove_guard, owner, exited);
             process_run_unlock(remove_guard);
@@ -12817,7 +12822,7 @@ fn kernel_process_clone_rollback(current_authority: ProcessCurrent[process, Proc
                 ScheduledProcessExitedTakeResult::Exited(done) => {
                     let (exited_owner, exited_state) = done;
                     process_run_unlock(guard);
-                    scheduled_process_reap_teardown(exited_owner);
+                    scheduled_process_reap_teardown(exited_owner, exited_state);
                     let remove_guard = process_run_lock();
                     scheduled_process_reap_remove(
                         remove_guard, exited_owner, exited_state);
@@ -13823,7 +13828,7 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
             workload_peer_read_reaped(pid);
             // The teardown outside the lock, as before; the removal under
             // it (#482, see scheduled_process_reap_teardown).
-            scheduled_process_reap_teardown(exited_owner);
+            scheduled_process_reap_teardown(exited_owner, exited_state);
             let removal_guard = process_run_lock();
             scheduled_process_reap_remove(removal_guard, exited_owner,
                                           exited_state);

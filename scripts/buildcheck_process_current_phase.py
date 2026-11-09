@@ -60,11 +60,48 @@ private fn current_phase_control(
     return pid;
 }
 ''', True))
+    # Teardown ends the root before the owner is sunk into removal. Exercise
+    # the real API, including borrowed invalidation rather than only a sink.
+    cases.extend([
+        ('teardown requires Reapable', """
+private fn root_teardown_control(
+        owner: borrow ScheduledProcessOwner[process],
+        state: borrow ScheduledProcessState[process, ProcessState::Running]) {
+    scheduled_process_reap_teardown(owner, state);
+}
+""", False, 'static'),
+        ('teardown rejects another generation', """
+private fn root_teardown_control(
+        owner: borrow ScheduledProcessOwner[process],
+        state: borrow ScheduledProcessState[other, ProcessState::Reapable]) {
+    scheduled_process_reap_teardown(owner, state);
+}
+""", False, 'static'),
+        ('teardown invalidates borrowed record', """
+private fn root_teardown_control(
+        owner: borrow ScheduledProcessOwner[process],
+        state: borrow ScheduledProcessState[process, ProcessState::Reapable]) -> usize {
+    let record = scheduled_process_record_owned(owner);
+    scheduled_process_reap_teardown(owner, state);
+    return record.pid;
+}
+""", False, 'may invalidate live derived value'),
+        ('teardown after completed loan', """
+private fn root_teardown_control(
+        owner: borrow ScheduledProcessOwner[process],
+        state: borrow ScheduledProcessState[process, ProcessState::Reapable]) -> usize {
+    let pid: usize = scheduled_process_record_owned(owner).pid;
+    scheduled_process_reap_teardown(owner, state);
+    return pid;
+}
+""", True, ''),
+    ])
     def judge(case, result):
-        name, _, accepts = case
+        name, _, accepts = case[:3]
         output = result.stdout + result.stderr
         status_ok = (result.returncode == 0) == accepts
-        diagnostic_ok = accepts or 'contains a live ProcessCurrent witness' in output
+        expected = case[3] if len(case) == 4 else 'contains a live ProcessCurrent witness'
+        diagnostic_ok = accepts or expected in output
         if status_ok and diagnostic_ok:
             return None
         return f'FAIL process-current-phase: {name}: status={result.returncode}\n{output}'
@@ -83,7 +120,7 @@ private fn current_phase_control(
     if any(failures):
         return 1
     report_pass('process-current-phase',
-                'five phase transitions and both table resets reject retained current authority; consumption permits transition',
+                'phase transitions and resets reject retained current authority; teardown requires matching Reapable state and rejects live record loans',
                 cases=ran.ran)
     return 0
 
