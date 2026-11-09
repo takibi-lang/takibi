@@ -6,8 +6,12 @@ in `wfe`. Do not route around that behavior while diagnosing it.
 
 The snapshot includes ESR, FAR, ELR, SPSR, live EL0 and address-space context,
 process and scheduler state, saved-frame fields when available, and a bounded
-trace. Capture is allocation-free. `valid` is written last and the sequence
-changes on each capture so stale or zeroed storage can be distinguished.
+trace. Capture is allocation-free. Each CPU captures once per boot; a recursive
+entry parks before rewriting its payload. The compiler publication commit
+writes the flat mirror marker last after its payload is cleaned to memory,
+then that marker is cleaned. Own-CPU working capture, the published mirror
+and own-CPU reader scratch are distinct storage. A failed publication copy
+is not read; sequence freshness alone does not authorize a peer-frame walk.
 
 Use `kernelcheck-oops-qemu` for deterministic EL0-BRK coverage. For interactive
 postmortem work in `gdb-multiarch`, source

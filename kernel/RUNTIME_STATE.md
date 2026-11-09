@@ -147,16 +147,25 @@ also be snapshotted and printed without a crash by
 `kernel_process_trace_report()`; that entry point and the oops path share one
 row formatter, and neither prints from a scheduler or interrupt writer.
 
-`exception_evidence.tkb`'s per-core crash snapshots/capture guards and the
-machine-global `ddb_state.snapshot` (guarded_by(kernel_world_stop), #1159). Core 0 records into element 0 like every
-other core; the GDB scripts read `crash_snapshot_per_core` by name (#822).
+`exception_evidence.tkb` retains typed per-CPU capture/reader scratch and
+terminal capture guards, plus a compiler-published `crash_snapshot_published`
+mirror. Core 0 uses the same authority-indexed capture as every other core;
+GDB reads the flat published mirror. Peer DDB roots require a complete
+`MachineStopped` scalar read, with atomic sequence freshness checked around
+the payload. The machine-global `ddb_state.snapshot` remains
+`guarded_by(kernel_world_stop)`.
 
 **Why global:** the terminal crash record must survive the failing context,
 while resumable DDB must retain one bounded trace/FD/VM/process-table copy
 and the current compiler-defined IRQ-frame pointer while its polled command
 loop is active.
-Neither record owns scheduler or process resources. IRQ masking prevents a
-nested entry on the servicing CPU.
+Neither record owns scheduler or process resources. The one-shot capture flag
+parks recursive faults before a payload write. Each renderer copies a committed
+publication into its own CPU scratch and reads it only after success. Busy or
+partial machine stops do not authorize peer-frame or pooled-object inspection;
+they retain cached crash-console diagnostics. The claimed-PID fixture supplies
+a synthetic selector input while retaining a real stopped-peer frame walk,
+rather than temporarily mutating a peer CPU store.
 
 **Four things in this file stopped being machine-global in September 2026,
 and the distinction they turn on is worth stating once: a single writer is

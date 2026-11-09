@@ -485,6 +485,18 @@ rules globally.
   function-value checks in `scripts/buildcheck_allowed_callers.py` and
   `scripts/buildcheck_cpu_authority_mints.py` enforce that boundary; they do
   not grant general ordinary-code mint permission.
+- Exception retained CPU stores use that same approved manual authority.
+  Complete-stop DDB readers use scalar `stopped_read` plus sequence freshness;
+  sequence freshness alone grants no complete-stop authority. Crash reporters
+  retain their own capture and reader scratch and use the compiler publication
+  protocol for the flat debugger-visible mirror. Readers check `publish_copy`
+  success before consuming output, without relying on destination preservation
+  on failure. `scripts/check_exception_cpu_snapshots.py` closes the exact
+  publisher, checked adapters, terminal no-rearm flag and nested-array aliases.
+  `scripts/buildcheck_global_protection.py` admits only that private mirror
+  when this policy and its compiled caller evidence hold on both platforms.
+  These are bounded source/caller trust boundaries, not a generic published
+  record class or a proof of arbitrary control flow and manual-mint lifetime.
 - ExecutionState's stopped diagnostic copy contains scalar slot/generation
   words and live bits, not handles or mutable loans. Each peer captures its
   own typed store before the holding pen acknowledges the stop; the debugger

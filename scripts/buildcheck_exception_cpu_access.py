@@ -38,6 +38,22 @@ def main():
         if not problems(source + code):
             raise SystemExit('FAIL exception-cpu-access: source policy missed an escape')
 
+    for store, field, result_type in [
+            ('ddb_stopped_root', 'pid', 'usize'),
+            ('kernel_ddb_memory_access', 'address', 'usize'),
+            ('crash_snapshot_capturing_per_core', 'active', 'bool'),
+            ('crash_snapshot_per_core', 'capture.sequence', 'usize')]:
+        code = ('\nprivate fn exception_integer_control(core: {0..<KERNEL_MAX_CORES as usize}) -> ' +
+                result_type + ' { return ' + store + '[core].' + field + '; }\n')
+        cases.append((store + ' integer index', code, False,
+                      ('per-CPU store', 'indexed only by a CpuHere value')))
+    for authority, accepts in [('MachineStopped', True), ('MachineStopPartial', False)]:
+        code = ('\nprivate fn exception_stopped_control(stopped: borrow ' + authority +
+                '[&kernel_world_stop], core: {0..<KERNEL_MAX_CORES as usize}) -> usize { '
+                'return stopped_read(stopped, ddb_stopped_root[core].pid); }\n')
+        cases.append((authority + ' peer read', code, accepts,
+                      ('not a parameter of type `borrow MachineStopped',)))
+
     def judge(case, result):
         name, _, accepts, expected = case
         output = result.stdout + result.stderr
@@ -57,7 +73,7 @@ def main():
     if any(failures):
         return 1
     report_pass('exception-cpu-access',
-                'published arrays/global alias reject; plain capture decay needs and fails source policy',
+                'real arrays/global alias/integer CPU/partial-stop controls reject; complete-stop scalar read accepts; plain capture escape needs source policy',
                 cases=len(cases))
     return 0
 

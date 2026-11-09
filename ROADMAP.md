@@ -112,9 +112,11 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
 per_cpu/CpuHere authority; its runtime and four-core RPi5 cost review are
 complete. Continue RootHeld (#1472) and the remaining #638 review before
 the flip; #638 is not complete. The coordinator sequences shared scheduler
-edits with the sleeping-Mutex foundation (#1481). Finish the current
-exception diagnostic per-CPU leaf #1486 first, separately from the driver
-queue below, then resume RootHeld. Its compile-allocation route is approved:
+edits with the sleeping-Mutex foundation (#1481). The four retained
+exception diagnostic CPU stores now use existing typed per-CPU/complete-stop
+access and a narrowly admitted publication mirror (#1486); parent #1159
+remains open for its other globals. Resume RootHeld next, separately from
+the driver queue below. Its compile-allocation route is approved:
 investigate inexpensive reduction briefly, then refresh the measured budget
 if that does not resolve the ceiling. The Mutex lifetime/callback foundation
 and nonblocking boot probes are also approved; no extra bootstrap stack.

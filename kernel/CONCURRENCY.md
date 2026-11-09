@@ -1153,3 +1153,25 @@ copies are separate from run-lock publication, since a stopped peer may hold
 that lock. `scripts/check_current_task_reads.py` lists each direct reader.
 A snapshot does not survive a call that can reap a process: the compiler's
 handle invalidation rule makes the caller read again.
+
+
+## Retained exception CPU diagnostics
+
+The stopped-root, guarded memory-access recovery, terminal capture flag and
+crash capture/reader scratch stores are `per_cpu` and use the same approved
+exception-only `CpuHere`. The stopped root is published by its owning CPU
+before the stop acknowledgement and retired after the pen exits. Atomic
+sequence metadata detects an unsettled or retired root, but only a borrowed
+complete `MachineStopped` permits reading peer fields and walking that frame.
+A partial stop does not become complete authority through sequence freshness.
+
+Crash capture parks recursion before any payload write and publishes once
+per CPU per boot. A separate compiler-published flat mirror serves GDB and
+peer reporters. Each reporter checks the copy result before reading its own
+CPU scratch. Busy/Partial stop reports keep the cached console subset; they
+do not inspect shared pooled state or peer frames. This retains a fixed
+three-copy payload cost described in `docs/EXCEPTION_CPU_SPACE.md`. The
+claimed-PID fixture now injects the selector value beside a real stopped-peer
+walk instead of modifying the peer CPU store. The exact publisher/reader and
+alias policy is build-checked; it is not a general proof of manual authority
+lifetime or arbitrary control flow.

@@ -3,7 +3,7 @@
 
 from pathlib import Path
 from check_exception_cpu_snapshots import PATH, MIRROR, CALLERS, problems
-from buildcheck_global_protection import exception_publication_admitted
+from buildcheck_global_protection import exception_publication_admitted, parse_table, TableError, COLUMNS
 from buildcheck_allowed_callers import read_list
 from control_patch import replace_once, replace_in_function
 from pass_line import report_pass
@@ -73,6 +73,9 @@ def main():
                        ('visibility', 'public'), ('qualifier', 'scratch'),
                        ('type', '[PlainSnapshot;4]')]:
         assert not admits(record=dict(row, **{key: value}))
+    aliased = [dict(r) for r in table]
+    aliased[0] = dict(aliased[0], values=['crash_snapshot_capture@-'])
+    assert not admits(graph=aliased)
     assert not admits(graph=[])
     assert not admits(policy=[])
     for kind in ('callees', 'values'):
@@ -80,6 +83,14 @@ def main():
         changed[-1] = dict(changed[-1], **{kind: ['crash_snapshot_publish@-']})
         assert not admits(graph=changed)
     assert not exception_publication_admitted(row, 'missing/globals.tsv')
+    forged = dict(row, line='1', protection='exception_publication')
+    raw = '# takibi globals, format 3\n' + '\t'.join(COLUMNS) + '\n' + '\t'.join(forged[k] for k in COLUMNS)
+    try:
+        parse_table(raw, 'forged')
+    except TableError as error:
+        assert 'derived only by the scoped build admission' in str(error)
+    else:
+        raise AssertionError('a raw protection label bypassed scoped admission')
     assert not problems(source + '\n// &crash_snapshot_per_core[cpu].capture is prose.\n')
     report_pass('exception-cpu-snapshots controls',
                 'production/prose pass; payload escapes, extra writers, field/slot substitution and capture rearming fail',

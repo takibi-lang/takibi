@@ -22,3 +22,5 @@ run_litmus_checks.py	the herd7 tie of orderings to emitted instructions	permanen
 buildcheck_dma_mint_files.py	which files may declare a dma_fixed record and so call dma_finish_owned_*	#720 device protocols absorb the dma_fixed records
 check_execution_state_publication.py	closed placement setters and guarded PID/live publication	#955 or a typed transition binding can express coupled publication; #638 retains the actual trace regression
 check_virtio_queue_mints.py	block queue container and integer addresses confined to guarded setup MMIO sinks	typed DMA-address publication could replace this closed source policy; no general integer noninterference is claimed
+check_exception_cpu_snapshots.py	exact exception publisher/reader adapters, terminal flag and nested-array alias closure	#1159 stronger scoped exception authority and compiler writer/reader association
+buildcheck_global_protection.py	single private exception publication admission requires source closure and compiled callers on both platforms	#1159 compiler protection provenance for coherent published CPU records

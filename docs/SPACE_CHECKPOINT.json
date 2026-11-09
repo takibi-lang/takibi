@@ -2,15 +2,14 @@
   "date": "2026-11-09",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "4de08f18f63aaf6dee9126821a93262bbc0fa9aceb73cb84633c17dbbf828f0a",
-  "workload": "Virtio block queue guarded CPU-access boundary: existing synchronous initialization/submission/completion and timeout/reset paths, with the existing real-guard DMA fixture. Published766d9e8a archived production ELF baseline verified against its SHA manifest. Fixed capacity and allocation lifetimes unchanged.",
+  "source_sha256": "fe8f78181911bbfb09a711f5900e4f1711ad0513de02f61ff9d7adce10694f0f",
+  "workload": "Four retained exception CPU stores use existing per_cpu/CpuHere, complete-stop scalar peer reads and a builtin-published crash mirror with own-CPU reader scratch. Published e15c4f54 baseline manifest hashes checked against both archived ELFs and all four objects; candidate source95512e7b linked-image and corrected frame measurement. Maintained normal boot, stopped DDB and terminal/concurrent fault paths are the functional workload; static retention lasts until reboot. No dynamic allocation or ordinary teardown is introduced.",
   "evidence": [
-    "docs/EXECUTION_IOHANDLE_INTEGRATION_SPACE_2026-11-09.txt",
-    "docs/EXECUTION_STATE_PER_CPU_SPACE_2026-11-09.txt",
-    "docs/EXECUTION_STATE_PER_CPU_EVIDENCE_2026-11-09.json",
+    "docs/EXCEPTION_CPU_SPACE.md",
+    "docs/EXCEPTION_CPU_SPACE.json",
     "docs/GLOBAL_PROTECTION.md",
     "kernel/MEMORY_MAP.md"
   ],
-  "assessment": "Queue payload/container remains256B aligned64, desc0/avail128. QEMU text815368->815420(+52), data/BSS4616/1302528 unchanged. RPi5 text4200428->4200424(-4), data/BSS5592/1925120 unchanged. usable_ram_start0x40208000/0x7e0000 unchanged. No allocation, pool metadata or retention change. Adopt small guard-plumbing code cost; CPU lock is not a device-quiescence proof or new physical-timing measurement.",
-  "next_trigger": "Changed queue capacity, DMA ownership protocol, or allocation lifetime."
+  "assessment": "Retain explicit safety cost: snapshot payload +16544B (capture2064 + observed2072 perCPU, mirror2072 perCPU). Stopped root128 + atomic sequence32 replaces160 unchanged. QEMU text+2068/data+16/BSSspan+16384; RPi5 text+2180/data+16/BSSspan+12288. Whole-image reservation QEMU +32768B/eight pages; RPi5 unchanged within existing alignment, not zero payload cost. Scratch avoids a full2072B stack temporary and cannot overwrite cached capture or become shared mutable scratch under abandoned report serialization. Corrected individual frames are observations; publication and later cached-console ordered rendering are separate paths, not a summed callchain or16KiB proof; existing1485 host parser defect is separate. No cross-OS or allocator-normalization boundary changes.",
+  "next_trigger": "Changed crash schema/publication representation, capture/reader lifetime, exception callpath, or next kernel feature changing image/allocation workload."
 }

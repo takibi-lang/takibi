@@ -89,6 +89,8 @@ def parse_table(text, origin):
         if len(cells) != len(COLUMNS):
             raise TableError(f"{origin}:{number}: {len(cells)} cells, not {len(COLUMNS)}")
         row = dict(zip(COLUMNS, cells))
+        if row["protection"] == "exception_publication":
+            raise TableError(f"{origin}:{number}: exception_publication is derived only by the scoped build admission, never accepted from a raw table")
         if row["protection"] not in PROTECTED | UNPROTECTED:
             raise TableError(f"{origin}:{number}: unknown protection {row['protection']!r}")
         rows.append(row)
@@ -146,6 +148,11 @@ def exception_publication_admitted(row, origin, source=None, table=None, rules=N
         if table is None:
             table = call_graph_table.read(pathlib.Path(origin).with_name('callgraph.tsv'))
         if not table or not any(r['file'] == PATH for r in table):
+            return False
+        # Even an otherwise allowed adapter may not export a protocol helper
+        # as a function value and evade its direct caller boundary.
+        if any(call_graph_table.callee_name(value) in CALLERS
+               for row in table for value in row['values']):
             return False
         if rules is None:
             rules = read_list()

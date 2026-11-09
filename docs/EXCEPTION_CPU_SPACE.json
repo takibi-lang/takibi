@@ -1,0 +1,2025 @@
+{
+  "baseline_head": "e15c4f54ba075b8ce467209c33e704b1c7297fdf",
+  "candidate_head": "95512e7b84c44c0132a29c0e69e88169faa1de5a",
+  "artifact_root": "/tmp/takibi-1486-space-95512e7b-1t4bqy98",
+  "files": [
+    {
+      "path": "kernel/build/qemu/kernel.elf",
+      "sha256": "e81ded710625a1b6a28ba396df2f08d2c522eb6103087f765dec8e0f187313be",
+      "bytes": 1307216
+    },
+    {
+      "path": "kernel/build/qemu/main.o",
+      "sha256": "c5982660985f3c3462194f1fafb482bc077e3458ce7c287e5e85d8e2383e586c",
+      "bytes": 2984424
+    },
+    {
+      "path": "kernel/build/qemu/main.debug.o",
+      "sha256": "9d7cea1ed4651877e9c8c6a5d386507402af6d9f75bf434c689ad5e3a22b165a",
+      "bytes": 7803448
+    },
+    {
+      "path": "kernel/build/rpi5/kernel.elf",
+      "sha256": "f58caad8c8ff859bafa8d8fe48c5177bc132aafc8e1ee5c5ad0077f4d2181b20",
+      "bytes": 4728976
+    },
+    {
+      "path": "kernel/build/rpi5/main.o",
+      "sha256": "46bd7d0e2cb4611c20886458f8022225cfd95c736d8256ef87829da06235b82b",
+      "bytes": 6526864
+    },
+    {
+      "path": "kernel/build/rpi5/main.debug.o",
+      "sha256": "443becfeb5ddf6a991674b32bc475d8548b19e1c93015777e54d6eb7fe7849be",
+      "bytes": 12077592
+    }
+  ],
+  "platforms": {
+    "qemu": {
+      "base_size": {
+        "text": 815420,
+        "data": 4616,
+        "bss": 1302528
+      },
+      "candidate_size": {
+        "text": 817488,
+        "data": 4632,
+        "bss": 1318912
+      },
+      "base_usable_ram_start": 1075871744,
+      "candidate_usable_ram_start": 1075904512,
+      "changed_data_bss": {
+        "crash_snapshot_per_core": [
+          8288,
+          16544
+        ],
+        "crash_snapshot_published": [
+          0,
+          8288
+        ],
+        "ddb_stopped_root": [
+          160,
+          128
+        ],
+        "ddb_stopped_sequence": [
+          0,
+          32
+        ]
+      }
+    },
+    "rpi5": {
+      "base_size": {
+        "text": 4200424,
+        "data": 5592,
+        "bss": 1925120
+      },
+      "candidate_size": {
+        "text": 4202604,
+        "data": 5608,
+        "bss": 1937408
+      },
+      "base_usable_ram_start": 8257536,
+      "candidate_usable_ram_start": 8257536,
+      "changed_data_bss": {
+        "crash_snapshot_per_core": [
+          8288,
+          16544
+        ],
+        "crash_snapshot_published": [
+          0,
+          8288
+        ],
+        "ddb_stopped_root": [
+          160,
+          128
+        ],
+        "ddb_stopped_sequence": [
+          0,
+          32
+        ]
+      }
+    }
+  },
+  "frame_measurement": {
+    "kernel/build/qemu/main.o": {
+      "argv": [
+        "llvm-objdump-19",
+        "-d",
+        "--no-show-raw-insn",
+        "/tmp/takibi-1486-space-95512e7b-1t4bqy98/kernel/build/qemu/main.o"
+      ],
+      "exit": 0,
+      "asm_sha256": "46833600d4db8ea96bcd61c7db3bba990a62db7723402eba4772e5485fa64b68",
+      "named_frames": {
+        "kernel_process_scheduler_probe": 3184,
+        "ext2_update_regular_file": 2528,
+        "crash_snapshot_capture": 64,
+        "crash_world_stop_report": 80,
+        "crash_snapshot_publish": 32,
+        "crash_snapshot_render": 16,
+        "crash_snapshot_render_every_core": 80,
+        "crash_snapshot_render_core": 32,
+        "crash_snapshot_copy_published": 16,
+        "crash_snapshot_render_from": 80,
+        "crash_snapshot_trace_render": 96,
+        "crash_console_run": 64,
+        "crash_console_run_stopped": 96
+      },
+      "limit": "single prologue frames, not whole callpath or 16KiB stack proof",
+      "baseline_argv": [
+        "llvm-objdump-19",
+        "-d",
+        "--no-show-raw-insn",
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-e15c4f54/kernel/build/qemu/main.o"
+      ],
+      "baseline_exit": 0,
+      "baseline_object_sha256": "cfb101286ac694951c3a2beca8245eca5adc82a0d6d9e4f799c83ad72aeb9248",
+      "baseline_named_frames": {
+        "kernel_process_scheduler_probe": 3184,
+        "ext2_update_regular_file": 2528,
+        "crash_snapshot_capture": 64,
+        "crash_world_stop_report": 80,
+        "crash_snapshot_publish": 16,
+        "crash_snapshot_render": 32,
+        "crash_snapshot_render_every_core": 64,
+        "crash_snapshot_render_core": 32,
+        "crash_snapshot_copy_published": null,
+        "crash_snapshot_render_from": 80,
+        "crash_snapshot_trace_render": null,
+        "crash_console_run": 64,
+        "crash_console_run_stopped": 80
+      },
+      "baseline_asm_sha256": "0c4d81c8466a8d9a58d5b002b13adfcae4177f3eb909b901084c1dcf6acb3f9c"
+    },
+    "kernel/build/qemu/main.debug.o": {
+      "argv": [
+        "llvm-objdump-19",
+        "-d",
+        "--no-show-raw-insn",
+        "/tmp/takibi-1486-space-95512e7b-1t4bqy98/kernel/build/qemu/main.debug.o"
+      ],
+      "exit": 0,
+      "asm_sha256": "8ae5a60c43c6739cea86673a79ad3f9d275426bc463f782ce2767a057919d110",
+      "named_frames": {
+        "kernel_process_scheduler_probe": 3312,
+        "ext2_update_regular_file": 2640,
+        "crash_snapshot_capture": 80,
+        "crash_world_stop_report": 96,
+        "crash_snapshot_publish": 48,
+        "crash_snapshot_render": 32,
+        "crash_snapshot_render_every_core": 112,
+        "crash_snapshot_render_core": 32,
+        "crash_snapshot_copy_published": 32,
+        "crash_snapshot_render_from": 112,
+        "crash_snapshot_trace_render": 112,
+        "crash_console_run": 80,
+        "crash_console_run_stopped": 96
+      },
+      "limit": "single prologue frames, not whole callpath or 16KiB stack proof",
+      "baseline_argv": [
+        "llvm-objdump-19",
+        "-d",
+        "--no-show-raw-insn",
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-e15c4f54/kernel/build/qemu/main.debug.o"
+      ],
+      "baseline_exit": 0,
+      "baseline_object_sha256": "2a3fe5d68d5937ac3c59f7b5d53f0e252c917657eda3b6b72361e168760a47df",
+      "baseline_named_frames": {
+        "kernel_process_scheduler_probe": 3312,
+        "ext2_update_regular_file": 2640,
+        "crash_snapshot_capture": 80,
+        "crash_world_stop_report": 96,
+        "crash_snapshot_publish": 16,
+        "crash_snapshot_render": 32,
+        "crash_snapshot_render_every_core": 80,
+        "crash_snapshot_render_core": 32,
+        "crash_snapshot_copy_published": null,
+        "crash_snapshot_render_from": 112,
+        "crash_snapshot_trace_render": null,
+        "crash_console_run": 64,
+        "crash_console_run_stopped": 96
+      },
+      "baseline_asm_sha256": "ade5cc1d4eaf766e2cb303069c551a9e88bf50906a7b535ec9e3b1ba1e81659c"
+    },
+    "kernel/build/rpi5/main.o": {
+      "argv": [
+        "llvm-objdump-19",
+        "-d",
+        "--no-show-raw-insn",
+        "/tmp/takibi-1486-space-95512e7b-1t4bqy98/kernel/build/rpi5/main.o"
+      ],
+      "exit": 0,
+      "asm_sha256": "89b28108b67e3c226518d2c3cc074cb5659bea8d51cc872f60ce99c50ace2a20",
+      "named_frames": {
+        "kernel_process_scheduler_probe": 3184,
+        "ext2_update_regular_file": 2528,
+        "crash_snapshot_capture": 64,
+        "crash_world_stop_report": 80,
+        "crash_snapshot_publish": 32,
+        "crash_snapshot_render": 16,
+        "crash_snapshot_render_every_core": 80,
+        "crash_snapshot_render_core": 32,
+        "crash_snapshot_copy_published": 16,
+        "crash_snapshot_render_from": 80,
+        "crash_snapshot_trace_render": 96,
+        "crash_console_run": 64,
+        "crash_console_run_stopped": 96
+      },
+      "limit": "single prologue frames, not whole callpath or 16KiB stack proof",
+      "baseline_argv": [
+        "llvm-objdump-19",
+        "-d",
+        "--no-show-raw-insn",
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-e15c4f54/kernel/build/rpi5/main.o"
+      ],
+      "baseline_exit": 0,
+      "baseline_object_sha256": "154e04289b5646dbf9053c5942c5fbcd79d842b85743d732904f2238907e3610",
+      "baseline_named_frames": {
+        "kernel_process_scheduler_probe": 3184,
+        "ext2_update_regular_file": 2528,
+        "crash_snapshot_capture": 80,
+        "crash_world_stop_report": 80,
+        "crash_snapshot_publish": 16,
+        "crash_snapshot_render": 32,
+        "crash_snapshot_render_every_core": 64,
+        "crash_snapshot_render_core": 32,
+        "crash_snapshot_copy_published": null,
+        "crash_snapshot_render_from": 80,
+        "crash_snapshot_trace_render": null,
+        "crash_console_run": 64,
+        "crash_console_run_stopped": 80
+      },
+      "baseline_asm_sha256": "5da2918658ff1a11b5e51878c96459eff2de0aeb16f21bdca0ab091d32242c13"
+    },
+    "kernel/build/rpi5/main.debug.o": {
+      "argv": [
+        "llvm-objdump-19",
+        "-d",
+        "--no-show-raw-insn",
+        "/tmp/takibi-1486-space-95512e7b-1t4bqy98/kernel/build/rpi5/main.debug.o"
+      ],
+      "exit": 0,
+      "asm_sha256": "f1a1842837ec9ff52879e88b26ba0b5e8f13a026df8429b75fb5098992ea7fdb",
+      "named_frames": {
+        "kernel_process_scheduler_probe": 3312,
+        "ext2_update_regular_file": 2640,
+        "crash_snapshot_capture": 80,
+        "crash_world_stop_report": 96,
+        "crash_snapshot_publish": 48,
+        "crash_snapshot_render": 32,
+        "crash_snapshot_render_every_core": 112,
+        "crash_snapshot_render_core": 32,
+        "crash_snapshot_copy_published": 32,
+        "crash_snapshot_render_from": 112,
+        "crash_snapshot_trace_render": 112,
+        "crash_console_run": 80,
+        "crash_console_run_stopped": 96
+      },
+      "limit": "single prologue frames, not whole callpath or 16KiB stack proof",
+      "baseline_argv": [
+        "llvm-objdump-19",
+        "-d",
+        "--no-show-raw-insn",
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-e15c4f54/kernel/build/rpi5/main.debug.o"
+      ],
+      "baseline_exit": 0,
+      "baseline_object_sha256": "a0b81b67ab3405234715aa303935140a539298bcbf8953652c67110914b72aaa",
+      "baseline_named_frames": {
+        "kernel_process_scheduler_probe": 3312,
+        "ext2_update_regular_file": 2640,
+        "crash_snapshot_capture": 96,
+        "crash_world_stop_report": 96,
+        "crash_snapshot_publish": 16,
+        "crash_snapshot_render": 32,
+        "crash_snapshot_render_every_core": 80,
+        "crash_snapshot_render_core": 32,
+        "crash_snapshot_copy_published": null,
+        "crash_snapshot_render_from": 112,
+        "crash_snapshot_trace_render": null,
+        "crash_console_run": 64,
+        "crash_console_run_stopped": 96
+      },
+      "baseline_asm_sha256": "15cee6773468430898ccc0d041749c789ac8c9c0f024239a3480b98a8bce2f2d"
+    }
+  },
+  "runtime_manifest_sha256": "f5f60424d994df5904e6b9472ad8de1ab8e9b21ed2316793480aac9450afdbde",
+  "runtime_artifact_files": [
+    {
+      "path": "_build/kernel-hwtest-rpi5/nested_exec.actual",
+      "bytes": 398,
+      "sha256": "0fc2543d6e7578fff837df252a48d0b44a2f6e5fa4ac95390a3ada84171e70fd"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/ash_trap.actual",
+      "bytes": 212,
+      "sha256": "a7444e95be76faecd1714abda8bb89f2bdd6ccc5405ee9877b677ceac651f2e1"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/uart.log",
+      "bytes": 115575,
+      "sha256": "747b905c6a335f4ffabbb132b9b6a0466b1f10268320d651f7151f3ce58f8ac3"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/socket-accept.log",
+      "bytes": 146,
+      "sha256": "b643f957fd315a89d0a6a1006bb37a4819a8039e7331956530c38f4976c49751"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/busy-pair-profile.json",
+      "bytes": 2457,
+      "sha256": "b54fa30bdbb7a5908cbb04cb11fca30961f7498eee735701d5df0b03a7e2bc53"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/httpd-concurrent.log",
+      "bytes": 121,
+      "sha256": "ee6fbe1cfa89c4e693f2b4448ca38ad0cfb0975a284507a91e83edffa418b3c0"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/process_lifecycle_extended.actual",
+      "bytes": 175,
+      "sha256": "ec83db18f5c365d589e94cc79bf2844dd7f4baff9d14450b78ef8b36ac32c285"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/workload_busy_pair.actual",
+      "bytes": 454,
+      "sha256": "05d55e36336e44407fb7b60fb00c8d39e21efb98b200e11f24c31779f342e498"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/uart-timing.log",
+      "bytes": 130408,
+      "sha256": "8d1c381b6efe04149e9b0dfc499fcb51969f94de622db4a605c767492b9388e6"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/process_reap.actual",
+      "bytes": 74,
+      "sha256": "727140f62efcf9e2e20ed21d3edaa89d9fd33aa5663d14123925284c0e2dd5c2"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/shell_script.actual",
+      "bytes": 106,
+      "sha256": "8d1449e690dfe0b35021cf5441bbd29e6af96348ff3ba972c32b71f0ebcaadf8"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/interactive-httpd-index.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/tcp_connection_pool.actual",
+      "bytes": 146,
+      "sha256": "cc97511a6b8485bd84bf7f3b87221e1ebff21785f32a6a2bfb92c5798280c24e"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/peer_exec.actual",
+      "bytes": 101,
+      "sha256": "71cf21141d8cd4c9631d5f8c69ec83fbb8c40d101c35e1601fc7777ed077111b"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/boot_milestone.actual",
+      "bytes": 44,
+      "sha256": "c8c6282f29227faea9072e030919404457c168c475a7399ea3a1a39526e72fd8"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/shared_object_pool.actual",
+      "bytes": 140,
+      "sha256": "edeefc3d72f36b8e0b671b5bcbfd8e2d038b2d7ad989221f5c162f651d3228c8"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/peer_console.actual",
+      "bytes": 408,
+      "sha256": "b4d81bb20c1dcd866c1e8ed680d5ac75a27b487d5b46d5ccdb9b72668916d33f"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/distro_image.actual",
+      "bytes": 182,
+      "sha256": "73a1387ba096e3662d26d99ad1a7e29e34aa47cbbb75f92c17f96e1997b5b697"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/profile_pc_samples.actual",
+      "bytes": 74,
+      "sha256": "5432c6b968fb4d05b5fe0bf7bcbc490816e332591078571f8ecb7b6122c5ab47"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/peer_syslog.actual",
+      "bytes": 85,
+      "sha256": "a8df6fc010ba1703b07f8e41a1b2dae6032df20ab060589d72659eb5d2577c47"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/peer_sleep_mask.actual",
+      "bytes": 66,
+      "sha256": "068e4460f8918be751642bed528479b7dc387f2abab95c5caf789f5e5f73938d"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/pool_contention.actual",
+      "bytes": 3474,
+      "sha256": "f0713f46b4e6e3b3ff83f7d94ec1c086ac5de31ef05fe2f3facfda1fbbb2de67"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/log_storm.actual",
+      "bytes": 78,
+      "sha256": "e074af14e6ed328ca90b49935a7234bef6068f5c731b7754a0cd3f756134f0f2"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/peer_filesystem.actual",
+      "bytes": 83,
+      "sha256": "a850f042e4791c345121137739eb4bb93f7c9a640cb6ecf755087df60e46205b"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/linux_file.actual",
+      "bytes": 1876,
+      "sha256": "71c705bd1c9532fcbe8e4a9642f29500f5a7d6449918ba9cd2833ea253ad4115"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/interactive-httpd-arp.log",
+      "bytes": 80,
+      "sha256": "ef1b67048d6811726028b783049250006fa6c88629e05fc5959f96ea1f041ca5"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/peer_console_verdict.actual",
+      "bytes": 106,
+      "sha256": "ac0e1cd70daa681788fd6a224753e060519d475c3845f2424de73148d2b8c7ee"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/console_contention.actual",
+      "bytes": 112,
+      "sha256": "5a7272c0f5703372a209b5649c962b2b5fd4557d1672d68268344356a93a53fa"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/syscall_subset.actual",
+      "bytes": 476,
+      "sha256": "c8f2d8967599e5a6e9e58126c95aa33f4211a45dd1d7f6ef0c8a4bddb8adf80a"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/peer_fork.actual",
+      "bytes": 112,
+      "sha256": "a426ad6a9f6e69ca3402c0d84cc80dc59787318e3044726a66e4a11b28fc3097"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/core0_idle.actual",
+      "bytes": 66,
+      "sha256": "3e3485a718f86559156194fc563b5fbe54f790fded29761e1e5c8816f5cda2b0"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/stack_guard.actual",
+      "bytes": 95,
+      "sha256": "42b2b9dbf4ee74b510bb298891a4751514f3c34d55a59a37e5f15124d8656d24"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/boot.actual",
+      "bytes": 1030,
+      "sha256": "3869adb21f7248f0ea7c4f748345b826dfe7dc05b723aec48d24aba5d9b99847"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/user_memory_root_isolation.actual",
+      "bytes": 107,
+      "sha256": "d027e72d36e097b7bbc9b0a1c716b1924d89673bef7ce3f6fe31c12449f80d9c"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/uname.actual",
+      "bytes": 89,
+      "sha256": "3e916cd80469136e4ce1662a76af36ed394633902d01ce9b3fad0bca23956cdf"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/fpsimd.actual",
+      "bytes": 57,
+      "sha256": "0365db88e363626883aeb070603148f1e40c6f19da3984b86420e25751941b21"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/tcp-throughput.json",
+      "bytes": 513,
+      "sha256": "d01548e42ff86f3887da7dd17ad9ca0db59159d8c3c26900751d81f5217d7d11"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/unimplemented_syscalls.actual",
+      "bytes": 41,
+      "sha256": "719e732cfd2709c49595e8f8d9ea59db00afa1caf72d0aa9621652e85a9c4a3c"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/syscall.actual",
+      "bytes": 51,
+      "sha256": "9e157fdc9426ac6a46718059831e7da965f4c5558662bbff8a9ba828f02f2a77"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/peer_socket.actual",
+      "bytes": 228,
+      "sha256": "286d2e77981c7bcce069a5fa83f69971729fb3aac020df50bcb1a0595010a3ea"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/reboot_abi.actual",
+      "bytes": 52,
+      "sha256": "3185284f90ec9b8e5590599dbae08a00f631438e8fc5abd8ba4503a7192e62fa"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/busy-pair-flat-pc.json",
+      "bytes": 5900,
+      "sha256": "42b6167bcf82ee26fc50c2bbca8ffd30ac40fe6cf2c52ea3945e69610eff7d1b"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/ddb-openocd.log",
+      "bytes": 3436,
+      "sha256": "fb9a9334b6c79c13d1e6a76811b2abda68a06cdc00623ec92d9cc3adbcf93981"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/uart_rx_irq.actual",
+      "bytes": 192,
+      "sha256": "a1cb2e39484b9552e52eb9e6078d3ce1fc72a9a1a232a46d2635655ad89d0210"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/console_lock_measurement.actual",
+      "bytes": 63,
+      "sha256": "1d5e575184a1241c33797386bb8b83191ec7b78f6650774822d34acd45fd5b77"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/icmp.log",
+      "bytes": 135,
+      "sha256": "e450971ed71019766a9d514c70845fb5f98d50508ed414203b43aa51b5ccbd9a"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/httpd-curl.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/ash_wait.actual",
+      "bytes": 76,
+      "sha256": "b3e505a7e9a75dbeb88920a30afc6ee312f4481271886dd7e04df8689a4d461f"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/session.actual",
+      "bytes": 118,
+      "sha256": "d6df4edf2541c9d72ea445da12b765068f036419f0bb795e00f03d05829c2695"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/process_lifecycle.actual",
+      "bytes": 1369,
+      "sha256": "6cad5651f5cf8d783b329f1cc6e2109a9ef4e20c4710653197a5b1976ec4878c"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/child_exec.actual",
+      "bytes": 111,
+      "sha256": "9dbdedf8528f22ddb522bb8b3da1d26c68e72495dc728e82a33fc4406c46bf59"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/ethernet.actual",
+      "bytes": 213,
+      "sha256": "34241da1831084c25675692c43c721b27fae2e5a64270d0787b7a1e27f69fd4a"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/signal_wait.actual",
+      "bytes": 60,
+      "sha256": "2d40e30441c265d49758879358e5e6684217d1e8d42c643cb463330a440de271"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/peer_mutation.actual",
+      "bytes": 111,
+      "sha256": "c397205f72323c631d116dee766fa2a43814e6bde2a96d876b2b46c4c9700dee"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/usb_storage.actual",
+      "bytes": 288,
+      "sha256": "79cc46a220bd4d49b530907eaf1904bd8840f4e31bc138ec57633845f4022d1e"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/dmesg.actual",
+      "bytes": 758,
+      "sha256": "0f35aeecc53adbb49eca482b6087ad1becd6ef19c7b188700d64861f643c8a1a"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/shared_object_ref_ceiling.actual",
+      "bytes": 101,
+      "sha256": "5401d2f85633b65272146ef2ecdd89a534d1568a498b135fca05da4904d628a0"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/filesystem_context.actual",
+      "bytes": 94,
+      "sha256": "61a258bfaad4c2183459641a07f5dd3078dd2d1697820ff5dc7a621f58961e04"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/nic_irq.actual",
+      "bytes": 128,
+      "sha256": "5d87cafa68917edcb10371dc49de3ffec50c224d9d1412864cd787541fa427a5"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/peer_wait.actual",
+      "bytes": 85,
+      "sha256": "b312184b8315399640bd3564c705d33fcb57a498452a3c03c32a2fbe21ea670f"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/page_mapping_ref_ceiling.actual",
+      "bytes": 98,
+      "sha256": "c6f19785ecf298696b3f4412e5abf52ff24507faf4a64d3ac4d06a677d404f5d"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/od.actual",
+      "bytes": 115,
+      "sha256": "fa842f40b9060381acb07b67e9a42e150b5010b8363ca186abffafa5f8eb6316"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/ext2.actual",
+      "bytes": 85,
+      "sha256": "503fc2e0c0232a6b70a33eeea91d656e1a7e6baca6bc11e69eca4ba7fc75b513"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/terminal_echo.actual",
+      "bytes": 41,
+      "sha256": "12fae96188f9cfe2204b246098348a268a207328b6c1652fa921e71e389b6b5a"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/ash_heap.actual",
+      "bytes": 57,
+      "sha256": "699cfc04807da5a81ec3a9a7c077747ae38a3a6dc967a739e76313ff61ae72a0"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/interactive-httpd-about.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/httpd_loader.actual",
+      "bytes": 168,
+      "sha256": "24bf3a354c007f906653501157cdcfff9ba39d9add86f1c27cb18e7eca09f8e1"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/interactive-httpd-root.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/irq_counts.actual",
+      "bytes": 41,
+      "sha256": "f27edcaa9b529580a03dc3f4ced25edce2c0499b70a77fc7ae776538dd9786bc"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/ext2_mutation.actual",
+      "bytes": 691,
+      "sha256": "bd3ec9435d4e4c666057e3313b72e9f5ebefe24a1f6f39894d556f57be011489"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/user_memory.actual",
+      "bytes": 62,
+      "sha256": "566cdf827494e749b31671a01048a2a4b17f63d4189294d535314d6c519d1f13"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/process_fd_table.actual",
+      "bytes": 113,
+      "sha256": "580ab5993826c4804dc11029efc04cf36868c1b0fa91d80d79bda19dddbe59e4"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/peer_console_process.actual",
+      "bytes": 1071,
+      "sha256": "ba226c481f18ffd9346ab7f4031c646d643c7490152cf1e3e277ff884280f61a"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/page_runs.actual",
+      "bytes": 104,
+      "sha256": "e023c6a9a48b59d7d075ff9ce446b9c5ea2a5d8bd17597579d2b777c2f01404e"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/loader.log",
+      "bytes": 2833,
+      "sha256": "3092025dc6d2778805ce22ca6c9e95435a4b60f1bebd876e55105cf4e7a629f4"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/httpd-curl-second.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/signal_terminal.actual",
+      "bytes": 93,
+      "sha256": "8e6d392304da2a7dea2873bf76ee6cef2f04e0bc7a4a1deda218187da0587ebe"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/tcp.log",
+      "bytes": 295,
+      "sha256": "19ce8a78e21abcb87959491bbf3e72aeab6f6cbdef7da16995ffed40335bf995"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/page_generation_exhaustion.actual",
+      "bytes": 96,
+      "sha256": "c7ae3dbae78a73d40db73bc8850dcc7dd7cf7eec8254dc0baedc04c4a38feea9"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/ddb-uart.log",
+      "bytes": 2513,
+      "sha256": "b9051df1f31ff2994e0c54c1b827d1b7e32bda9a6c5ef6bbae357d5f4e6748f6"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/userspace.actual",
+      "bytes": 21,
+      "sha256": "1f1138f9ac50cae224a77c6d9acfb0e07c7701a38f8f9dcf2fdb1f6eb5a55170"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/busy-pair-perfetto.json",
+      "bytes": 53855,
+      "sha256": "dcc4a3d41bd9a1b0c8f56b0fdfa2ecbf53d0ff373ad7c8152d1104cd416534e3"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/shell_read.actual",
+      "bytes": 124,
+      "sha256": "799dcfef81da2269f3e75ce9471d5398b972a7b20e21d129f23bb52e1b1c34c3"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/peer_tty.actual",
+      "bytes": 283,
+      "sha256": "50b6c56550494227cbc783bca61c7dd934fb915669a4e7b52d56f7c52b959f21"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/reset.log",
+      "bytes": 138,
+      "sha256": "052f06b0e2f3c2ad3d9234eaa0fa2873a5b3c1160904f050965accd703778bd7"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/busybox.actual",
+      "bytes": 78,
+      "sha256": "7d832bd18eb8627315f2c9a3d916bf0118cf31da17571b8f42ebaa99dee48650"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/vm_layout.actual",
+      "bytes": 77,
+      "sha256": "f77a500a641d1635d75dfafe6f9e767a5e0432c8ff5edee8d830acdc06dc326a"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/asid_pool.actual",
+      "bytes": 134,
+      "sha256": "20e463a6d6501654acb9557f257ceb649633b25673e35c50e957689993d417d8"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/move-cost.json",
+      "bytes": 2137,
+      "sha256": "70f0daa261a2cd4af2dc89d9e942530b939bbf54dd343dee9aea31cdbd314421"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/settings_wake.actual",
+      "bytes": 256,
+      "sha256": "a6e3258a59de2779e4416a0f394b3cba567193e8d4b09faad8f61a877b84fb6b"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/arp-capture.log",
+      "bytes": 2013,
+      "sha256": "48557c8421c47973b786c74a9022280427019fa07a254475b3637a0c25dc7cd0"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/linux_socket.actual",
+      "bytes": 713,
+      "sha256": "bd8eb89f0e3b7510b1ee0e6dc4623202253b3ffe56f572652506287cedc6b326"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/arp.log",
+      "bytes": 80,
+      "sha256": "ef1b67048d6811726028b783049250006fa6c88629e05fc5959f96ea1f041ca5"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/record_existence.actual",
+      "bytes": 120,
+      "sha256": "911e6a01c8ffa01a4332ccbcb6a22c97bea49ffe26e7cc635a1f52003faab8ce"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/console_order.actual",
+      "bytes": 184,
+      "sha256": "41f909341d482e8ad667063887d7a9ba26add10e17c4e40275e801778a0aed87"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/smp_bringup.actual",
+      "bytes": 192,
+      "sha256": "ae36b342ce6b100dbd6642978bbd79d583fa08dc7de2f079d9a3ab1d02063c86"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/interactive-httpd-icon.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/tcp_retransmit_queue.actual",
+      "bytes": 194,
+      "sha256": "ef8a918490fa3caa243e4fe598eedc2b425af4705488769140763b0c0eed45f9"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/signal_boundary.actual",
+      "bytes": 1169,
+      "sha256": "8818b3c6721e81a4efd7699018b30bd006d4922054fd5b638749b6de3e762579"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/poweroff-uart.log",
+      "bytes": 173,
+      "sha256": "c4bd240d2dec0adbf42b67a2eb4c53603968fdf5351cd42586cbff560d15c97b"
+    },
+    {
+      "path": "_build/kernel-hwtest-rpi5/pool_space.actual",
+      "bytes": 102,
+      "sha256": "598416c5a03ce8b6fa3dc958c87f8d566c49582ab4bf517827aaeadeb9cfc16e"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/DDB_COMMANDS.json",
+      "bytes": 2966,
+      "sha256": "271ef5c885a456188fe1d39414916c3066b6944e21bdc0c79102e3bce6fdd4e6"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/models/coverage_allow.txt",
+      "bytes": 2962,
+      "sha256": "54b4bfd4a31aec65f6ebed031e1078f9a954501ca5cc837e50e9c6f0bf04770d"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/tests/ext2/hello.txt",
+      "bytes": 16,
+      "sha256": "0e7d61bb5a543e12d15f3b55af705299ae244f94896670b869af391bc1016f55"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/tests/ext2/large.txt",
+      "bytes": 3200,
+      "sha256": "4a3db3197c3e6176b5cb8ede1bcac8e8f41d5ffb1585d5909b394e9bb6cb27a6"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/tests/ext2/mutable.txt",
+      "bytes": 7,
+      "sha256": "9160d4be34c8695bd172a76c7c7966587ea5a4d991ad22c87b2b91af54aa9ebb"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/pool_retention/experiment.json",
+      "bytes": 1547,
+      "sha256": "1c6598f93101c45379f17d596400cd35cd582ee43dbb2877d1a79f647a037c78"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/service_space/captures/freebsd-repeat.txt",
+      "bytes": 2831,
+      "sha256": "dcbabcdf987983e45694f10d5e42908739d4fb632ab7f0070898f321845f33a9"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/service_space/captures/linux.txt",
+      "bytes": 2536,
+      "sha256": "9f23e30b2569054d53c49e1d46a89931312cf0d676a418d79e6a6ad0632b1bb9"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/service_space/captures/takibi-repeat.txt",
+      "bytes": 7795,
+      "sha256": "2743ff4cf953986699d5319e265816d522690f815a533dd67d3327689a7d591b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/service_space/captures/freebsd.txt",
+      "bytes": 2831,
+      "sha256": "1845c9511aa7346bb407a13a03ab8f106be5bb4dabb43d93e38435cc887df63e"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/service_space/captures/takibi-packed-repeat.txt",
+      "bytes": 7795,
+      "sha256": "c61f5c013f2615fa76a8034a13e02a221c4955ab0513dbf98430e429d4b1f05d"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/service_space/captures/takibi.txt",
+      "bytes": 7795,
+      "sha256": "2743ff4cf953986699d5319e265816d522690f815a533dd67d3327689a7d591b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/service_space/captures/takibi-packed.txt",
+      "bytes": 7795,
+      "sha256": "c61f5c013f2615fa76a8034a13e02a221c4955ab0513dbf98430e429d4b1f05d"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/service_space/captures/linux-repeat.txt",
+      "bytes": 2540,
+      "sha256": "98ba78074c27a0e430bcd51a5bd7be9a8007ae695b06deb7ac171200b6080e2b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/pool_space/captures/slub-repeat.txt",
+      "bytes": 14310,
+      "sha256": "ba8023f8ed7607409d9dc8b12b889ba7856deba3f95c4b778b7691608d293697"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/pool_space/captures/takibi-repeat.txt",
+      "bytes": 9440,
+      "sha256": "be01e8aa8e91a98a7f8650df8e3b93a53a67164167937b62e1972de8db4f2143"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/pool_space/captures/takibi.txt",
+      "bytes": 9440,
+      "sha256": "be01e8aa8e91a98a7f8650df8e3b93a53a67164167937b62e1972de8db4f2143"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/pool_space/captures/uma-repeat.txt",
+      "bytes": 19934,
+      "sha256": "35fc3b18aa5d2b998743a5470f087b94f9ce06cfac4ed6940aef4d220f5fe97b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/pool_space/captures/slub.txt",
+      "bytes": 14310,
+      "sha256": "ba8023f8ed7607409d9dc8b12b889ba7856deba3f95c4b778b7691608d293697"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/pool_space/captures/uma.txt",
+      "bytes": 19934,
+      "sha256": "35fc3b18aa5d2b998743a5470f087b94f9ce06cfac4ed6940aef4d220f5fe97b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/pool_retention/captures/rpi5-5-retain1.txt",
+      "bytes": 2349,
+      "sha256": "702d0bf483f7503b870f636db238d217f8b9b8dab0aa0379914ca41d5fde9e58"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/pool_retention/captures/rpi5-4-retain1.txt",
+      "bytes": 2349,
+      "sha256": "977b67cc49a10cc1ed268cb27d5099b03214965824ad71819cb995eacc86be88"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/pool_retention/captures/rpi5-1-retain1.txt",
+      "bytes": 2349,
+      "sha256": "8625714103545c2affba419a8cced4ff4d0ad3813208e5be629e971a698f9042"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/pool_retention/captures/qemu-retain0-run2.txt",
+      "bytes": 2389,
+      "sha256": "4022a5be2af95d4d7a939fa998e23f2bd99eb9252f64e2980c788236ac843d99"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/pool_retention/captures/qemu-retain1-run1.txt",
+      "bytes": 2375,
+      "sha256": "f808a2ea2854cb2005323d483606263ee51c0edf8beb63b3dcec2db5ad88d0d6"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/pool_retention/captures/rpi5-2-retain0.txt",
+      "bytes": 2360,
+      "sha256": "1bef0b3d8253b3f5b6b7e4a94640766b6b8e76bcda6074cf0a6628b55894b0a2"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/pool_retention/captures/qemu-retain0-run1.txt",
+      "bytes": 2389,
+      "sha256": "eaad5e9ba25595694fc8e779b62fcd49145a47044e018774f6725534327dbe17"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/pool_retention/captures/qemu-retain1-run2.txt",
+      "bytes": 2375,
+      "sha256": "ec88add7989f43a3bc22ddbf379c9fcaf4234cd7f11e40e781d6525b8b5d539f"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/pool_retention/captures/rpi5-6-retain0.txt",
+      "bytes": 2360,
+      "sha256": "ab4500c0b6d8754577f2043103d5e8adc0152f6507c0efd023920cf0bd078b06"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/pool_retention/captures/rpi5-3-retain0.txt",
+      "bytes": 2360,
+      "sha256": "0f8c5d44dd9f304a2bc9bc0b7a335de642d3453e50b107fa6f4aa1ff8a297026"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/benchmarks/pool_retention/service/retain0.txt",
+      "bytes": 7792,
+      "sha256": "af77e2d3e44bf89f61be89d38c0c9dff64a9f3b7d93033befed7e6ffc260d8af"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/models/litmus/expected.txt",
+      "bytes": 738,
+      "sha256": "c08f8048d2e27cb596721cf31166cbd22386d303d8def74e7d39f35804f4570b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-ready/kernel/models/litmus/emitted_map.txt",
+      "bytes": 3994,
+      "sha256": "d720cb5f0250339fc70a5b16f646652ff514cc8d163c0893938e3ea09e091022"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/DDB_COMMANDS.json",
+      "bytes": 2966,
+      "sha256": "271ef5c885a456188fe1d39414916c3066b6944e21bdc0c79102e3bce6fdd4e6"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/models/coverage_allow.txt",
+      "bytes": 2962,
+      "sha256": "54b4bfd4a31aec65f6ebed031e1078f9a954501ca5cc837e50e9c6f0bf04770d"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/tests/ext2/hello.txt",
+      "bytes": 16,
+      "sha256": "0e7d61bb5a543e12d15f3b55af705299ae244f94896670b869af391bc1016f55"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/tests/ext2/large.txt",
+      "bytes": 3200,
+      "sha256": "4a3db3197c3e6176b5cb8ede1bcac8e8f41d5ffb1585d5909b394e9bb6cb27a6"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/tests/ext2/mutable.txt",
+      "bytes": 7,
+      "sha256": "9160d4be34c8695bd172a76c7c7966587ea5a4d991ad22c87b2b91af54aa9ebb"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/pool_retention/experiment.json",
+      "bytes": 1547,
+      "sha256": "1c6598f93101c45379f17d596400cd35cd582ee43dbb2877d1a79f647a037c78"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/service_space/captures/freebsd-repeat.txt",
+      "bytes": 2831,
+      "sha256": "dcbabcdf987983e45694f10d5e42908739d4fb632ab7f0070898f321845f33a9"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/service_space/captures/linux.txt",
+      "bytes": 2536,
+      "sha256": "9f23e30b2569054d53c49e1d46a89931312cf0d676a418d79e6a6ad0632b1bb9"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/service_space/captures/takibi-repeat.txt",
+      "bytes": 7795,
+      "sha256": "2743ff4cf953986699d5319e265816d522690f815a533dd67d3327689a7d591b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/service_space/captures/freebsd.txt",
+      "bytes": 2831,
+      "sha256": "1845c9511aa7346bb407a13a03ab8f106be5bb4dabb43d93e38435cc887df63e"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/service_space/captures/takibi-packed-repeat.txt",
+      "bytes": 7795,
+      "sha256": "c61f5c013f2615fa76a8034a13e02a221c4955ab0513dbf98430e429d4b1f05d"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/service_space/captures/takibi.txt",
+      "bytes": 7795,
+      "sha256": "2743ff4cf953986699d5319e265816d522690f815a533dd67d3327689a7d591b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/service_space/captures/takibi-packed.txt",
+      "bytes": 7795,
+      "sha256": "c61f5c013f2615fa76a8034a13e02a221c4955ab0513dbf98430e429d4b1f05d"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/service_space/captures/linux-repeat.txt",
+      "bytes": 2540,
+      "sha256": "98ba78074c27a0e430bcd51a5bd7be9a8007ae695b06deb7ac171200b6080e2b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/pool_space/captures/slub-repeat.txt",
+      "bytes": 14310,
+      "sha256": "ba8023f8ed7607409d9dc8b12b889ba7856deba3f95c4b778b7691608d293697"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/pool_space/captures/takibi-repeat.txt",
+      "bytes": 9440,
+      "sha256": "be01e8aa8e91a98a7f8650df8e3b93a53a67164167937b62e1972de8db4f2143"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/pool_space/captures/takibi.txt",
+      "bytes": 9440,
+      "sha256": "be01e8aa8e91a98a7f8650df8e3b93a53a67164167937b62e1972de8db4f2143"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/pool_space/captures/uma-repeat.txt",
+      "bytes": 19934,
+      "sha256": "35fc3b18aa5d2b998743a5470f087b94f9ce06cfac4ed6940aef4d220f5fe97b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/pool_space/captures/slub.txt",
+      "bytes": 14310,
+      "sha256": "ba8023f8ed7607409d9dc8b12b889ba7856deba3f95c4b778b7691608d293697"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/pool_space/captures/uma.txt",
+      "bytes": 19934,
+      "sha256": "35fc3b18aa5d2b998743a5470f087b94f9ce06cfac4ed6940aef4d220f5fe97b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/pool_retention/captures/rpi5-5-retain1.txt",
+      "bytes": 2349,
+      "sha256": "702d0bf483f7503b870f636db238d217f8b9b8dab0aa0379914ca41d5fde9e58"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/pool_retention/captures/rpi5-4-retain1.txt",
+      "bytes": 2349,
+      "sha256": "977b67cc49a10cc1ed268cb27d5099b03214965824ad71819cb995eacc86be88"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/pool_retention/captures/rpi5-1-retain1.txt",
+      "bytes": 2349,
+      "sha256": "8625714103545c2affba419a8cced4ff4d0ad3813208e5be629e971a698f9042"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/pool_retention/captures/qemu-retain0-run2.txt",
+      "bytes": 2389,
+      "sha256": "4022a5be2af95d4d7a939fa998e23f2bd99eb9252f64e2980c788236ac843d99"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/pool_retention/captures/qemu-retain1-run1.txt",
+      "bytes": 2375,
+      "sha256": "f808a2ea2854cb2005323d483606263ee51c0edf8beb63b3dcec2db5ad88d0d6"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/pool_retention/captures/rpi5-2-retain0.txt",
+      "bytes": 2360,
+      "sha256": "1bef0b3d8253b3f5b6b7e4a94640766b6b8e76bcda6074cf0a6628b55894b0a2"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/pool_retention/captures/qemu-retain0-run1.txt",
+      "bytes": 2389,
+      "sha256": "eaad5e9ba25595694fc8e779b62fcd49145a47044e018774f6725534327dbe17"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/pool_retention/captures/qemu-retain1-run2.txt",
+      "bytes": 2375,
+      "sha256": "ec88add7989f43a3bc22ddbf379c9fcaf4234cd7f11e40e781d6525b8b5d539f"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/pool_retention/captures/rpi5-6-retain0.txt",
+      "bytes": 2360,
+      "sha256": "ab4500c0b6d8754577f2043103d5e8adc0152f6507c0efd023920cf0bd078b06"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/pool_retention/captures/rpi5-3-retain0.txt",
+      "bytes": 2360,
+      "sha256": "0f8c5d44dd9f304a2bc9bc0b7a335de642d3453e50b107fa6f4aa1ff8a297026"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/benchmarks/pool_retention/service/retain0.txt",
+      "bytes": 7792,
+      "sha256": "af77e2d3e44bf89f61be89d38c0c9dff64a9f3b7d93033befed7e6ffc260d8af"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/models/litmus/expected.txt",
+      "bytes": 738,
+      "sha256": "c08f8048d2e27cb596721cf31166cbd22386d303d8def74e7d39f35804f4570b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-reply/kernel/models/litmus/emitted_map.txt",
+      "bytes": 3994,
+      "sha256": "d720cb5f0250339fc70a5b16f646652ff514cc8d163c0893938e3ea09e091022"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/DDB_COMMANDS.json",
+      "bytes": 2966,
+      "sha256": "271ef5c885a456188fe1d39414916c3066b6944e21bdc0c79102e3bce6fdd4e6"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/models/coverage_allow.txt",
+      "bytes": 2962,
+      "sha256": "54b4bfd4a31aec65f6ebed031e1078f9a954501ca5cc837e50e9c6f0bf04770d"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/tests/ext2/hello.txt",
+      "bytes": 16,
+      "sha256": "0e7d61bb5a543e12d15f3b55af705299ae244f94896670b869af391bc1016f55"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/tests/ext2/large.txt",
+      "bytes": 3200,
+      "sha256": "4a3db3197c3e6176b5cb8ede1bcac8e8f41d5ffb1585d5909b394e9bb6cb27a6"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/tests/ext2/mutable.txt",
+      "bytes": 7,
+      "sha256": "9160d4be34c8695bd172a76c7c7966587ea5a4d991ad22c87b2b91af54aa9ebb"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/pool_retention/experiment.json",
+      "bytes": 1547,
+      "sha256": "1c6598f93101c45379f17d596400cd35cd582ee43dbb2877d1a79f647a037c78"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/service_space/captures/freebsd-repeat.txt",
+      "bytes": 2831,
+      "sha256": "dcbabcdf987983e45694f10d5e42908739d4fb632ab7f0070898f321845f33a9"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/service_space/captures/linux.txt",
+      "bytes": 2536,
+      "sha256": "9f23e30b2569054d53c49e1d46a89931312cf0d676a418d79e6a6ad0632b1bb9"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/service_space/captures/takibi-repeat.txt",
+      "bytes": 7795,
+      "sha256": "2743ff4cf953986699d5319e265816d522690f815a533dd67d3327689a7d591b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/service_space/captures/freebsd.txt",
+      "bytes": 2831,
+      "sha256": "1845c9511aa7346bb407a13a03ab8f106be5bb4dabb43d93e38435cc887df63e"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/service_space/captures/takibi-packed-repeat.txt",
+      "bytes": 7795,
+      "sha256": "c61f5c013f2615fa76a8034a13e02a221c4955ab0513dbf98430e429d4b1f05d"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/service_space/captures/takibi.txt",
+      "bytes": 7795,
+      "sha256": "2743ff4cf953986699d5319e265816d522690f815a533dd67d3327689a7d591b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/service_space/captures/takibi-packed.txt",
+      "bytes": 7795,
+      "sha256": "c61f5c013f2615fa76a8034a13e02a221c4955ab0513dbf98430e429d4b1f05d"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/service_space/captures/linux-repeat.txt",
+      "bytes": 2540,
+      "sha256": "98ba78074c27a0e430bcd51a5bd7be9a8007ae695b06deb7ac171200b6080e2b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/pool_space/captures/slub-repeat.txt",
+      "bytes": 14310,
+      "sha256": "ba8023f8ed7607409d9dc8b12b889ba7856deba3f95c4b778b7691608d293697"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/pool_space/captures/takibi-repeat.txt",
+      "bytes": 9440,
+      "sha256": "be01e8aa8e91a98a7f8650df8e3b93a53a67164167937b62e1972de8db4f2143"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/pool_space/captures/takibi.txt",
+      "bytes": 9440,
+      "sha256": "be01e8aa8e91a98a7f8650df8e3b93a53a67164167937b62e1972de8db4f2143"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/pool_space/captures/uma-repeat.txt",
+      "bytes": 19934,
+      "sha256": "35fc3b18aa5d2b998743a5470f087b94f9ce06cfac4ed6940aef4d220f5fe97b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/pool_space/captures/slub.txt",
+      "bytes": 14310,
+      "sha256": "ba8023f8ed7607409d9dc8b12b889ba7856deba3f95c4b778b7691608d293697"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/pool_space/captures/uma.txt",
+      "bytes": 19934,
+      "sha256": "35fc3b18aa5d2b998743a5470f087b94f9ce06cfac4ed6940aef4d220f5fe97b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/pool_retention/captures/rpi5-5-retain1.txt",
+      "bytes": 2349,
+      "sha256": "702d0bf483f7503b870f636db238d217f8b9b8dab0aa0379914ca41d5fde9e58"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/pool_retention/captures/rpi5-4-retain1.txt",
+      "bytes": 2349,
+      "sha256": "977b67cc49a10cc1ed268cb27d5099b03214965824ad71819cb995eacc86be88"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/pool_retention/captures/rpi5-1-retain1.txt",
+      "bytes": 2349,
+      "sha256": "8625714103545c2affba419a8cced4ff4d0ad3813208e5be629e971a698f9042"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/pool_retention/captures/qemu-retain0-run2.txt",
+      "bytes": 2389,
+      "sha256": "4022a5be2af95d4d7a939fa998e23f2bd99eb9252f64e2980c788236ac843d99"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/pool_retention/captures/qemu-retain1-run1.txt",
+      "bytes": 2375,
+      "sha256": "f808a2ea2854cb2005323d483606263ee51c0edf8beb63b3dcec2db5ad88d0d6"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/pool_retention/captures/rpi5-2-retain0.txt",
+      "bytes": 2360,
+      "sha256": "1bef0b3d8253b3f5b6b7e4a94640766b6b8e76bcda6074cf0a6628b55894b0a2"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/pool_retention/captures/qemu-retain0-run1.txt",
+      "bytes": 2389,
+      "sha256": "eaad5e9ba25595694fc8e779b62fcd49145a47044e018774f6725534327dbe17"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/pool_retention/captures/qemu-retain1-run2.txt",
+      "bytes": 2375,
+      "sha256": "ec88add7989f43a3bc22ddbf379c9fcaf4234cd7f11e40e781d6525b8b5d539f"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/pool_retention/captures/rpi5-6-retain0.txt",
+      "bytes": 2360,
+      "sha256": "ab4500c0b6d8754577f2043103d5e8adc0152f6507c0efd023920cf0bd078b06"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/pool_retention/captures/rpi5-3-retain0.txt",
+      "bytes": 2360,
+      "sha256": "0f8c5d44dd9f304a2bc9bc0b7a335de642d3453e50b107fa6f4aa1ff8a297026"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/benchmarks/pool_retention/service/retain0.txt",
+      "bytes": 7792,
+      "sha256": "af77e2d3e44bf89f61be89d38c0c9dff64a9f3b7d93033befed7e6ffc260d8af"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/models/litmus/expected.txt",
+      "bytes": 738,
+      "sha256": "c08f8048d2e27cb596721cf31166cbd22386d303d8def74e7d39f35804f4570b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-wrong-enable/kernel/models/litmus/emitted_map.txt",
+      "bytes": 3994,
+      "sha256": "d720cb5f0250339fc70a5b16f646652ff514cc8d163c0893938e3ea09e091022"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/DDB_COMMANDS.json",
+      "bytes": 2966,
+      "sha256": "271ef5c885a456188fe1d39414916c3066b6944e21bdc0c79102e3bce6fdd4e6"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/models/coverage_allow.txt",
+      "bytes": 2962,
+      "sha256": "54b4bfd4a31aec65f6ebed031e1078f9a954501ca5cc837e50e9c6f0bf04770d"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/tests/ext2/hello.txt",
+      "bytes": 16,
+      "sha256": "0e7d61bb5a543e12d15f3b55af705299ae244f94896670b869af391bc1016f55"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/tests/ext2/large.txt",
+      "bytes": 3200,
+      "sha256": "4a3db3197c3e6176b5cb8ede1bcac8e8f41d5ffb1585d5909b394e9bb6cb27a6"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/tests/ext2/mutable.txt",
+      "bytes": 7,
+      "sha256": "9160d4be34c8695bd172a76c7c7966587ea5a4d991ad22c87b2b91af54aa9ebb"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/pool_retention/experiment.json",
+      "bytes": 1547,
+      "sha256": "1c6598f93101c45379f17d596400cd35cd582ee43dbb2877d1a79f647a037c78"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/service_space/captures/freebsd-repeat.txt",
+      "bytes": 2831,
+      "sha256": "dcbabcdf987983e45694f10d5e42908739d4fb632ab7f0070898f321845f33a9"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/service_space/captures/linux.txt",
+      "bytes": 2536,
+      "sha256": "9f23e30b2569054d53c49e1d46a89931312cf0d676a418d79e6a6ad0632b1bb9"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/service_space/captures/takibi-repeat.txt",
+      "bytes": 7795,
+      "sha256": "2743ff4cf953986699d5319e265816d522690f815a533dd67d3327689a7d591b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/service_space/captures/freebsd.txt",
+      "bytes": 2831,
+      "sha256": "1845c9511aa7346bb407a13a03ab8f106be5bb4dabb43d93e38435cc887df63e"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/service_space/captures/takibi-packed-repeat.txt",
+      "bytes": 7795,
+      "sha256": "c61f5c013f2615fa76a8034a13e02a221c4955ab0513dbf98430e429d4b1f05d"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/service_space/captures/takibi.txt",
+      "bytes": 7795,
+      "sha256": "2743ff4cf953986699d5319e265816d522690f815a533dd67d3327689a7d591b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/service_space/captures/takibi-packed.txt",
+      "bytes": 7795,
+      "sha256": "c61f5c013f2615fa76a8034a13e02a221c4955ab0513dbf98430e429d4b1f05d"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/service_space/captures/linux-repeat.txt",
+      "bytes": 2540,
+      "sha256": "98ba78074c27a0e430bcd51a5bd7be9a8007ae695b06deb7ac171200b6080e2b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/pool_space/captures/slub-repeat.txt",
+      "bytes": 14310,
+      "sha256": "ba8023f8ed7607409d9dc8b12b889ba7856deba3f95c4b778b7691608d293697"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/pool_space/captures/takibi-repeat.txt",
+      "bytes": 9440,
+      "sha256": "be01e8aa8e91a98a7f8650df8e3b93a53a67164167937b62e1972de8db4f2143"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/pool_space/captures/takibi.txt",
+      "bytes": 9440,
+      "sha256": "be01e8aa8e91a98a7f8650df8e3b93a53a67164167937b62e1972de8db4f2143"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/pool_space/captures/uma-repeat.txt",
+      "bytes": 19934,
+      "sha256": "35fc3b18aa5d2b998743a5470f087b94f9ce06cfac4ed6940aef4d220f5fe97b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/pool_space/captures/slub.txt",
+      "bytes": 14310,
+      "sha256": "ba8023f8ed7607409d9dc8b12b889ba7856deba3f95c4b778b7691608d293697"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/pool_space/captures/uma.txt",
+      "bytes": 19934,
+      "sha256": "35fc3b18aa5d2b998743a5470f087b94f9ce06cfac4ed6940aef4d220f5fe97b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/pool_retention/captures/rpi5-5-retain1.txt",
+      "bytes": 2349,
+      "sha256": "702d0bf483f7503b870f636db238d217f8b9b8dab0aa0379914ca41d5fde9e58"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/pool_retention/captures/rpi5-4-retain1.txt",
+      "bytes": 2349,
+      "sha256": "977b67cc49a10cc1ed268cb27d5099b03214965824ad71819cb995eacc86be88"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/pool_retention/captures/rpi5-1-retain1.txt",
+      "bytes": 2349,
+      "sha256": "8625714103545c2affba419a8cced4ff4d0ad3813208e5be629e971a698f9042"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/pool_retention/captures/qemu-retain0-run2.txt",
+      "bytes": 2389,
+      "sha256": "4022a5be2af95d4d7a939fa998e23f2bd99eb9252f64e2980c788236ac843d99"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/pool_retention/captures/qemu-retain1-run1.txt",
+      "bytes": 2375,
+      "sha256": "f808a2ea2854cb2005323d483606263ee51c0edf8beb63b3dcec2db5ad88d0d6"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/pool_retention/captures/rpi5-2-retain0.txt",
+      "bytes": 2360,
+      "sha256": "1bef0b3d8253b3f5b6b7e4a94640766b6b8e76bcda6074cf0a6628b55894b0a2"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/pool_retention/captures/qemu-retain0-run1.txt",
+      "bytes": 2389,
+      "sha256": "eaad5e9ba25595694fc8e779b62fcd49145a47044e018774f6725534327dbe17"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/pool_retention/captures/qemu-retain1-run2.txt",
+      "bytes": 2375,
+      "sha256": "ec88add7989f43a3bc22ddbf379c9fcaf4234cd7f11e40e781d6525b8b5d539f"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/pool_retention/captures/rpi5-6-retain0.txt",
+      "bytes": 2360,
+      "sha256": "ab4500c0b6d8754577f2043103d5e8adc0152f6507c0efd023920cf0bd078b06"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/pool_retention/captures/rpi5-3-retain0.txt",
+      "bytes": 2360,
+      "sha256": "0f8c5d44dd9f304a2bc9bc0b7a335de642d3453e50b107fa6f4aa1ff8a297026"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/benchmarks/pool_retention/service/retain0.txt",
+      "bytes": 7792,
+      "sha256": "af77e2d3e44bf89f61be89d38c0c9dff64a9f3b7d93033befed7e6ffc260d8af"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/models/litmus/expected.txt",
+      "bytes": 738,
+      "sha256": "c08f8048d2e27cb596721cf31166cbd22386d303d8def74e7d39f35804f4570b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-confirmed-reply/kernel/models/litmus/emitted_map.txt",
+      "bytes": 3994,
+      "sha256": "d720cb5f0250339fc70a5b16f646652ff514cc8d163c0893938e3ea09e091022"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/DDB_COMMANDS.json",
+      "bytes": 2966,
+      "sha256": "271ef5c885a456188fe1d39414916c3066b6944e21bdc0c79102e3bce6fdd4e6"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/models/coverage_allow.txt",
+      "bytes": 2962,
+      "sha256": "54b4bfd4a31aec65f6ebed031e1078f9a954501ca5cc837e50e9c6f0bf04770d"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/tests/ext2/hello.txt",
+      "bytes": 16,
+      "sha256": "0e7d61bb5a543e12d15f3b55af705299ae244f94896670b869af391bc1016f55"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/tests/ext2/large.txt",
+      "bytes": 3200,
+      "sha256": "4a3db3197c3e6176b5cb8ede1bcac8e8f41d5ffb1585d5909b394e9bb6cb27a6"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/tests/ext2/mutable.txt",
+      "bytes": 7,
+      "sha256": "9160d4be34c8695bd172a76c7c7966587ea5a4d991ad22c87b2b91af54aa9ebb"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/pool_retention/experiment.json",
+      "bytes": 1547,
+      "sha256": "1c6598f93101c45379f17d596400cd35cd582ee43dbb2877d1a79f647a037c78"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/service_space/captures/freebsd-repeat.txt",
+      "bytes": 2831,
+      "sha256": "dcbabcdf987983e45694f10d5e42908739d4fb632ab7f0070898f321845f33a9"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/service_space/captures/linux.txt",
+      "bytes": 2536,
+      "sha256": "9f23e30b2569054d53c49e1d46a89931312cf0d676a418d79e6a6ad0632b1bb9"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/service_space/captures/takibi-repeat.txt",
+      "bytes": 7795,
+      "sha256": "2743ff4cf953986699d5319e265816d522690f815a533dd67d3327689a7d591b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/service_space/captures/freebsd.txt",
+      "bytes": 2831,
+      "sha256": "1845c9511aa7346bb407a13a03ab8f106be5bb4dabb43d93e38435cc887df63e"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/service_space/captures/takibi-packed-repeat.txt",
+      "bytes": 7795,
+      "sha256": "c61f5c013f2615fa76a8034a13e02a221c4955ab0513dbf98430e429d4b1f05d"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/service_space/captures/takibi.txt",
+      "bytes": 7795,
+      "sha256": "2743ff4cf953986699d5319e265816d522690f815a533dd67d3327689a7d591b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/service_space/captures/takibi-packed.txt",
+      "bytes": 7795,
+      "sha256": "c61f5c013f2615fa76a8034a13e02a221c4955ab0513dbf98430e429d4b1f05d"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/service_space/captures/linux-repeat.txt",
+      "bytes": 2540,
+      "sha256": "98ba78074c27a0e430bcd51a5bd7be9a8007ae695b06deb7ac171200b6080e2b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/pool_space/captures/slub-repeat.txt",
+      "bytes": 14310,
+      "sha256": "ba8023f8ed7607409d9dc8b12b889ba7856deba3f95c4b778b7691608d293697"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/pool_space/captures/takibi-repeat.txt",
+      "bytes": 9440,
+      "sha256": "be01e8aa8e91a98a7f8650df8e3b93a53a67164167937b62e1972de8db4f2143"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/pool_space/captures/takibi.txt",
+      "bytes": 9440,
+      "sha256": "be01e8aa8e91a98a7f8650df8e3b93a53a67164167937b62e1972de8db4f2143"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/pool_space/captures/uma-repeat.txt",
+      "bytes": 19934,
+      "sha256": "35fc3b18aa5d2b998743a5470f087b94f9ce06cfac4ed6940aef4d220f5fe97b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/pool_space/captures/slub.txt",
+      "bytes": 14310,
+      "sha256": "ba8023f8ed7607409d9dc8b12b889ba7856deba3f95c4b778b7691608d293697"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/pool_space/captures/uma.txt",
+      "bytes": 19934,
+      "sha256": "35fc3b18aa5d2b998743a5470f087b94f9ce06cfac4ed6940aef4d220f5fe97b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/pool_retention/captures/rpi5-5-retain1.txt",
+      "bytes": 2349,
+      "sha256": "702d0bf483f7503b870f636db238d217f8b9b8dab0aa0379914ca41d5fde9e58"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/pool_retention/captures/rpi5-4-retain1.txt",
+      "bytes": 2349,
+      "sha256": "977b67cc49a10cc1ed268cb27d5099b03214965824ad71819cb995eacc86be88"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/pool_retention/captures/rpi5-1-retain1.txt",
+      "bytes": 2349,
+      "sha256": "8625714103545c2affba419a8cced4ff4d0ad3813208e5be629e971a698f9042"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/pool_retention/captures/qemu-retain0-run2.txt",
+      "bytes": 2389,
+      "sha256": "4022a5be2af95d4d7a939fa998e23f2bd99eb9252f64e2980c788236ac843d99"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/pool_retention/captures/qemu-retain1-run1.txt",
+      "bytes": 2375,
+      "sha256": "f808a2ea2854cb2005323d483606263ee51c0edf8beb63b3dcec2db5ad88d0d6"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/pool_retention/captures/rpi5-2-retain0.txt",
+      "bytes": 2360,
+      "sha256": "1bef0b3d8253b3f5b6b7e4a94640766b6b8e76bcda6074cf0a6628b55894b0a2"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/pool_retention/captures/qemu-retain0-run1.txt",
+      "bytes": 2389,
+      "sha256": "eaad5e9ba25595694fc8e779b62fcd49145a47044e018774f6725534327dbe17"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/pool_retention/captures/qemu-retain1-run2.txt",
+      "bytes": 2375,
+      "sha256": "ec88add7989f43a3bc22ddbf379c9fcaf4234cd7f11e40e781d6525b8b5d539f"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/pool_retention/captures/rpi5-6-retain0.txt",
+      "bytes": 2360,
+      "sha256": "ab4500c0b6d8754577f2043103d5e8adc0152f6507c0efd023920cf0bd078b06"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/pool_retention/captures/rpi5-3-retain0.txt",
+      "bytes": 2360,
+      "sha256": "0f8c5d44dd9f304a2bc9bc0b7a335de642d3453e50b107fa6f4aa1ff8a297026"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/benchmarks/pool_retention/service/retain0.txt",
+      "bytes": 7792,
+      "sha256": "af77e2d3e44bf89f61be89d38c0c9dff64a9f3b7d93033befed7e6ffc260d8af"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/models/litmus/expected.txt",
+      "bytes": 738,
+      "sha256": "c08f8048d2e27cb596721cf31166cbd22386d303d8def74e7d39f35804f4570b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-window-closed/kernel/models/litmus/emitted_map.txt",
+      "bytes": 3994,
+      "sha256": "d720cb5f0250339fc70a5b16f646652ff514cc8d163c0893938e3ea09e091022"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/DDB_COMMANDS.json",
+      "bytes": 2966,
+      "sha256": "271ef5c885a456188fe1d39414916c3066b6944e21bdc0c79102e3bce6fdd4e6"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/models/coverage_allow.txt",
+      "bytes": 2962,
+      "sha256": "54b4bfd4a31aec65f6ebed031e1078f9a954501ca5cc837e50e9c6f0bf04770d"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/tests/ext2/hello.txt",
+      "bytes": 16,
+      "sha256": "0e7d61bb5a543e12d15f3b55af705299ae244f94896670b869af391bc1016f55"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/tests/ext2/large.txt",
+      "bytes": 3200,
+      "sha256": "4a3db3197c3e6176b5cb8ede1bcac8e8f41d5ffb1585d5909b394e9bb6cb27a6"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/tests/ext2/mutable.txt",
+      "bytes": 7,
+      "sha256": "9160d4be34c8695bd172a76c7c7966587ea5a4d991ad22c87b2b91af54aa9ebb"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/pool_retention/experiment.json",
+      "bytes": 1547,
+      "sha256": "1c6598f93101c45379f17d596400cd35cd582ee43dbb2877d1a79f647a037c78"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/service_space/captures/freebsd-repeat.txt",
+      "bytes": 2831,
+      "sha256": "dcbabcdf987983e45694f10d5e42908739d4fb632ab7f0070898f321845f33a9"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/service_space/captures/linux.txt",
+      "bytes": 2536,
+      "sha256": "9f23e30b2569054d53c49e1d46a89931312cf0d676a418d79e6a6ad0632b1bb9"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/service_space/captures/takibi-repeat.txt",
+      "bytes": 7795,
+      "sha256": "2743ff4cf953986699d5319e265816d522690f815a533dd67d3327689a7d591b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/service_space/captures/freebsd.txt",
+      "bytes": 2831,
+      "sha256": "1845c9511aa7346bb407a13a03ab8f106be5bb4dabb43d93e38435cc887df63e"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/service_space/captures/takibi-packed-repeat.txt",
+      "bytes": 7795,
+      "sha256": "c61f5c013f2615fa76a8034a13e02a221c4955ab0513dbf98430e429d4b1f05d"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/service_space/captures/takibi.txt",
+      "bytes": 7795,
+      "sha256": "2743ff4cf953986699d5319e265816d522690f815a533dd67d3327689a7d591b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/service_space/captures/takibi-packed.txt",
+      "bytes": 7795,
+      "sha256": "c61f5c013f2615fa76a8034a13e02a221c4955ab0513dbf98430e429d4b1f05d"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/service_space/captures/linux-repeat.txt",
+      "bytes": 2540,
+      "sha256": "98ba78074c27a0e430bcd51a5bd7be9a8007ae695b06deb7ac171200b6080e2b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/pool_space/captures/slub-repeat.txt",
+      "bytes": 14310,
+      "sha256": "ba8023f8ed7607409d9dc8b12b889ba7856deba3f95c4b778b7691608d293697"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/pool_space/captures/takibi-repeat.txt",
+      "bytes": 9440,
+      "sha256": "be01e8aa8e91a98a7f8650df8e3b93a53a67164167937b62e1972de8db4f2143"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/pool_space/captures/takibi.txt",
+      "bytes": 9440,
+      "sha256": "be01e8aa8e91a98a7f8650df8e3b93a53a67164167937b62e1972de8db4f2143"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/pool_space/captures/uma-repeat.txt",
+      "bytes": 19934,
+      "sha256": "35fc3b18aa5d2b998743a5470f087b94f9ce06cfac4ed6940aef4d220f5fe97b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/pool_space/captures/slub.txt",
+      "bytes": 14310,
+      "sha256": "ba8023f8ed7607409d9dc8b12b889ba7856deba3f95c4b778b7691608d293697"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/pool_space/captures/uma.txt",
+      "bytes": 19934,
+      "sha256": "35fc3b18aa5d2b998743a5470f087b94f9ce06cfac4ed6940aef4d220f5fe97b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/pool_retention/captures/rpi5-5-retain1.txt",
+      "bytes": 2349,
+      "sha256": "702d0bf483f7503b870f636db238d217f8b9b8dab0aa0379914ca41d5fde9e58"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/pool_retention/captures/rpi5-4-retain1.txt",
+      "bytes": 2349,
+      "sha256": "977b67cc49a10cc1ed268cb27d5099b03214965824ad71819cb995eacc86be88"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/pool_retention/captures/rpi5-1-retain1.txt",
+      "bytes": 2349,
+      "sha256": "8625714103545c2affba419a8cced4ff4d0ad3813208e5be629e971a698f9042"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/pool_retention/captures/qemu-retain0-run2.txt",
+      "bytes": 2389,
+      "sha256": "4022a5be2af95d4d7a939fa998e23f2bd99eb9252f64e2980c788236ac843d99"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/pool_retention/captures/qemu-retain1-run1.txt",
+      "bytes": 2375,
+      "sha256": "f808a2ea2854cb2005323d483606263ee51c0edf8beb63b3dcec2db5ad88d0d6"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/pool_retention/captures/rpi5-2-retain0.txt",
+      "bytes": 2360,
+      "sha256": "1bef0b3d8253b3f5b6b7e4a94640766b6b8e76bcda6074cf0a6628b55894b0a2"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/pool_retention/captures/qemu-retain0-run1.txt",
+      "bytes": 2389,
+      "sha256": "eaad5e9ba25595694fc8e779b62fcd49145a47044e018774f6725534327dbe17"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/pool_retention/captures/qemu-retain1-run2.txt",
+      "bytes": 2375,
+      "sha256": "ec88add7989f43a3bc22ddbf379c9fcaf4234cd7f11e40e781d6525b8b5d539f"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/pool_retention/captures/rpi5-6-retain0.txt",
+      "bytes": 2360,
+      "sha256": "ab4500c0b6d8754577f2043103d5e8adc0152f6507c0efd023920cf0bd078b06"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/pool_retention/captures/rpi5-3-retain0.txt",
+      "bytes": 2360,
+      "sha256": "0f8c5d44dd9f304a2bc9bc0b7a335de642d3453e50b107fa6f4aa1ff8a297026"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/benchmarks/pool_retention/service/retain0.txt",
+      "bytes": 7792,
+      "sha256": "af77e2d3e44bf89f61be89d38c0c9dff64a9f3b7d93033befed7e6ffc260d8af"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/models/litmus/expected.txt",
+      "bytes": 738,
+      "sha256": "c08f8048d2e27cb596721cf31166cbd22386d303d8def74e7d39f35804f4570b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-unconfirmed-ready/kernel/models/litmus/emitted_map.txt",
+      "bytes": 3994,
+      "sha256": "d720cb5f0250339fc70a5b16f646652ff514cc8d163c0893938e3ea09e091022"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/DDB_COMMANDS.json",
+      "bytes": 2966,
+      "sha256": "271ef5c885a456188fe1d39414916c3066b6944e21bdc0c79102e3bce6fdd4e6"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/models/coverage_allow.txt",
+      "bytes": 2962,
+      "sha256": "54b4bfd4a31aec65f6ebed031e1078f9a954501ca5cc837e50e9c6f0bf04770d"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/tests/ext2/hello.txt",
+      "bytes": 16,
+      "sha256": "0e7d61bb5a543e12d15f3b55af705299ae244f94896670b869af391bc1016f55"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/tests/ext2/large.txt",
+      "bytes": 3200,
+      "sha256": "4a3db3197c3e6176b5cb8ede1bcac8e8f41d5ffb1585d5909b394e9bb6cb27a6"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/tests/ext2/mutable.txt",
+      "bytes": 7,
+      "sha256": "9160d4be34c8695bd172a76c7c7966587ea5a4d991ad22c87b2b91af54aa9ebb"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/pool_retention/experiment.json",
+      "bytes": 1547,
+      "sha256": "1c6598f93101c45379f17d596400cd35cd582ee43dbb2877d1a79f647a037c78"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/service_space/captures/freebsd-repeat.txt",
+      "bytes": 2831,
+      "sha256": "dcbabcdf987983e45694f10d5e42908739d4fb632ab7f0070898f321845f33a9"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/service_space/captures/linux.txt",
+      "bytes": 2536,
+      "sha256": "9f23e30b2569054d53c49e1d46a89931312cf0d676a418d79e6a6ad0632b1bb9"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/service_space/captures/takibi-repeat.txt",
+      "bytes": 7795,
+      "sha256": "2743ff4cf953986699d5319e265816d522690f815a533dd67d3327689a7d591b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/service_space/captures/freebsd.txt",
+      "bytes": 2831,
+      "sha256": "1845c9511aa7346bb407a13a03ab8f106be5bb4dabb43d93e38435cc887df63e"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/service_space/captures/takibi-packed-repeat.txt",
+      "bytes": 7795,
+      "sha256": "c61f5c013f2615fa76a8034a13e02a221c4955ab0513dbf98430e429d4b1f05d"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/service_space/captures/takibi.txt",
+      "bytes": 7795,
+      "sha256": "2743ff4cf953986699d5319e265816d522690f815a533dd67d3327689a7d591b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/service_space/captures/takibi-packed.txt",
+      "bytes": 7795,
+      "sha256": "c61f5c013f2615fa76a8034a13e02a221c4955ab0513dbf98430e429d4b1f05d"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/service_space/captures/linux-repeat.txt",
+      "bytes": 2540,
+      "sha256": "98ba78074c27a0e430bcd51a5bd7be9a8007ae695b06deb7ac171200b6080e2b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/pool_space/captures/slub-repeat.txt",
+      "bytes": 14310,
+      "sha256": "ba8023f8ed7607409d9dc8b12b889ba7856deba3f95c4b778b7691608d293697"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/pool_space/captures/takibi-repeat.txt",
+      "bytes": 9440,
+      "sha256": "be01e8aa8e91a98a7f8650df8e3b93a53a67164167937b62e1972de8db4f2143"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/pool_space/captures/takibi.txt",
+      "bytes": 9440,
+      "sha256": "be01e8aa8e91a98a7f8650df8e3b93a53a67164167937b62e1972de8db4f2143"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/pool_space/captures/uma-repeat.txt",
+      "bytes": 19934,
+      "sha256": "35fc3b18aa5d2b998743a5470f087b94f9ce06cfac4ed6940aef4d220f5fe97b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/pool_space/captures/slub.txt",
+      "bytes": 14310,
+      "sha256": "ba8023f8ed7607409d9dc8b12b889ba7856deba3f95c4b778b7691608d293697"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/pool_space/captures/uma.txt",
+      "bytes": 19934,
+      "sha256": "35fc3b18aa5d2b998743a5470f087b94f9ce06cfac4ed6940aef4d220f5fe97b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/pool_retention/captures/rpi5-5-retain1.txt",
+      "bytes": 2349,
+      "sha256": "702d0bf483f7503b870f636db238d217f8b9b8dab0aa0379914ca41d5fde9e58"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/pool_retention/captures/rpi5-4-retain1.txt",
+      "bytes": 2349,
+      "sha256": "977b67cc49a10cc1ed268cb27d5099b03214965824ad71819cb995eacc86be88"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/pool_retention/captures/rpi5-1-retain1.txt",
+      "bytes": 2349,
+      "sha256": "8625714103545c2affba419a8cced4ff4d0ad3813208e5be629e971a698f9042"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/pool_retention/captures/qemu-retain0-run2.txt",
+      "bytes": 2389,
+      "sha256": "4022a5be2af95d4d7a939fa998e23f2bd99eb9252f64e2980c788236ac843d99"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/pool_retention/captures/qemu-retain1-run1.txt",
+      "bytes": 2375,
+      "sha256": "f808a2ea2854cb2005323d483606263ee51c0edf8beb63b3dcec2db5ad88d0d6"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/pool_retention/captures/rpi5-2-retain0.txt",
+      "bytes": 2360,
+      "sha256": "1bef0b3d8253b3f5b6b7e4a94640766b6b8e76bcda6074cf0a6628b55894b0a2"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/pool_retention/captures/qemu-retain0-run1.txt",
+      "bytes": 2389,
+      "sha256": "eaad5e9ba25595694fc8e779b62fcd49145a47044e018774f6725534327dbe17"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/pool_retention/captures/qemu-retain1-run2.txt",
+      "bytes": 2375,
+      "sha256": "ec88add7989f43a3bc22ddbf379c9fcaf4234cd7f11e40e781d6525b8b5d539f"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/pool_retention/captures/rpi5-6-retain0.txt",
+      "bytes": 2360,
+      "sha256": "ab4500c0b6d8754577f2043103d5e8adc0152f6507c0efd023920cf0bd078b06"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/pool_retention/captures/rpi5-3-retain0.txt",
+      "bytes": 2360,
+      "sha256": "0f8c5d44dd9f304a2bc9bc0b7a335de642d3453e50b107fa6f4aa1ff8a297026"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/benchmarks/pool_retention/service/retain0.txt",
+      "bytes": 7792,
+      "sha256": "af77e2d3e44bf89f61be89d38c0c9dff64a9f3b7d93033befed7e6ffc260d8af"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/models/litmus/expected.txt",
+      "bytes": 738,
+      "sha256": "c08f8048d2e27cb596721cf31166cbd22386d303d8def74e7d39f35804f4570b"
+    },
+    {
+      "path": "_build/rpi5-gem-tx-irq-primary/kernel/models/litmus/emitted_map.txt",
+      "bytes": 3994,
+      "sha256": "d720cb5f0250339fc70a5b16f646652ff514cc8d163c0893938e3ea09e091022"
+    },
+    {
+      "path": "takibi-1486-classified-kernelbuild.log",
+      "bytes": 125442,
+      "sha256": "3fb824858be168199918398b406b4d4ecd507ba8019d631cf817f3269144821b"
+    },
+    {
+      "path": "takibi-1486-classified-kernelbuild.exit",
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "takibi-1486-runtime-chain.log",
+      "bytes": 88927,
+      "sha256": "914ea5c9f45ed0c2e85c7e04209ca083cb9792995a95a42a29334bbd3acb6cef"
+    },
+    {
+      "path": "takibi-1486-runtime-chain.exit",
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "takibi-1486-modelcheck.log",
+      "bytes": 6415,
+      "sha256": "1a80a4f157d5d2074c309c16b3b394d6cf04e710420942e3ff91ec2bad54f05b"
+    },
+    {
+      "path": "takibi-1486-modelcheck.exit",
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "takibi-1486-rpi5.log",
+      "bytes": 20954,
+      "sha256": "99752d5770a53b103f9806fd78e55ce959c6bbe9ef3df93d328c9d4390ebaba4"
+    },
+    {
+      "path": "takibi-1486-rpi5.exit",
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "takibi-1486-maintained-controls-final.log",
+      "bytes": 865,
+      "sha256": "9086416d290517f6ec9b3e8c381d71b2a6cca02626fcfc7e0c1722b3087b7a88"
+    },
+    {
+      "path": "takibi-1486-maintained-controls-final.exit",
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    }
+  ],
+  "terminal_status": {
+    "kernelbuild": 0,
+    "runtime_chain": 0,
+    "modelcheck": 0,
+    "rpi5": 0,
+    "maintained_13_controls": 0
+  }
+}
