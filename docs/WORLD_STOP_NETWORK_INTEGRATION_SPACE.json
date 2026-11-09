@@ -1,0 +1,407 @@
+{
+  "base_head": "f2bf60f56c915b8efa920946ebbffeeb1c83f6a9",
+  "integration_implementation_head": "0ee3871dcc4a83e67943f7ec2d06d14986829345",
+  "production_fingerprint": "ec5c130907fbd90ad9fea56aa89246b4005060135ecb2aab1dc415c79c8e45ac",
+  "component_heads": [
+    "dc64dc9d3c2aadc4bf4221b5a0bba34c5d1d4996",
+    "5cbbe5c6f275b0255373f788d08d98cd759f854a"
+  ],
+  "scope": "Actual combined production ELF/object/facts under the existing shared kernel build lock. Component reports retain their own baseline and runtime scope. No physical cycle/coherence claim.",
+  "targets": {
+    "qemu": {
+      "baseline_size": {
+        "text": 822792,
+        "data": 4624,
+        "bss": 1318912
+      },
+      "combined_size": {
+        "text": 822808,
+        "data": 4624,
+        "bss": 1318912
+      },
+      "delta": {
+        "text": 16,
+        "data": 0,
+        "bss": 0
+      },
+      "usable_ram_start": 1075904512,
+      "data_bss_symbol_size_changes": {
+        "network_capability_store": [
+          32,
+          40
+        ]
+      },
+      "selected_symbols": {
+        "kernel_world_stop": {
+          "baseline": {
+            "address": 1074761408,
+            "size": 72,
+            "type": 1,
+            "section": 6
+          },
+          "combined": {
+            "address": 1074761408,
+            "size": 72,
+            "type": 1,
+            "section": 6
+          }
+        },
+        "network_capability_install": {
+          "baseline": {
+            "address": 1074178032,
+            "size": 384,
+            "type": 2,
+            "section": 1
+          },
+          "combined": {
+            "address": 1074178032,
+            "size": 392,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "network_capability_store": {
+          "baseline": {
+            "address": 1075257984,
+            "size": 32,
+            "type": 1,
+            "section": 6
+          },
+          "combined": {
+            "address": 1075257984,
+            "size": 40,
+            "type": 1,
+            "section": 6
+          }
+        },
+        "network_capability_take_waiting": {
+          "baseline": {
+            "address": 1074178656,
+            "size": 264,
+            "type": 2,
+            "section": 1
+          },
+          "combined": {
+            "address": 1074178672,
+            "size": 268,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "usable_ram_start": {
+          "baseline": {
+            "address": 1075904512,
+            "size": 0,
+            "type": 0,
+            "section": 7
+          },
+          "combined": {
+            "address": 1075904512,
+            "size": 0,
+            "type": 0,
+            "section": 7
+          }
+        },
+        "world_stop_begin_claimed": {
+          "baseline": {
+            "address": 1073854112,
+            "size": 420,
+            "type": 2,
+            "section": 1
+          },
+          "combined": {
+            "address": 1073854112,
+            "size": 420,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "world_stop_stale_probe_controller": {
+          "baseline": {
+            "address": 1075476640,
+            "size": 72,
+            "type": 1,
+            "section": 6
+          },
+          "combined": {
+            "address": 1075476656,
+            "size": 72,
+            "type": 1,
+            "section": 6
+          }
+        }
+      },
+      "changed_object_text_sections": [
+        ".text.takibi.network_capability_install",
+        ".text.takibi.network_capability_take_waiting",
+        ".text.takibi.world_stop_begin_claimed"
+      ],
+      "changed_object_sections": [
+        ".bss.network_capability_store",
+        ".eh_frame",
+        ".rela.text.takibi.network_capability_install",
+        ".rela.text.takibi.network_capability_take_waiting",
+        ".symtab",
+        ".text.takibi.network_capability_install",
+        ".text.takibi.network_capability_take_waiting",
+        ".text.takibi.world_stop_begin_claimed"
+      ],
+      "changed_function_bodies": [
+        "network_capability_install",
+        "network_capability_take_waiting",
+        "world_stop_begin_claimed"
+      ],
+      "contracts_callers_effects_unchanged": true,
+      "layouts": {
+        "baseline": [
+          "AtomicWord\tvalue\t0",
+          "AtomicWord\t.size\t8",
+          "AtomicWord\t.members\t1",
+          "NetworkCapabilityStore\tmutex\t0",
+          "NetworkCapabilityStore\tvalue\t8",
+          "NetworkCapabilityStore\tinstalled_once\t28",
+          "NetworkCapabilityStore\t.size\t32",
+          "NetworkCapabilityStore\t.members\t3",
+          "WorldStop\tclaimed\t0",
+          "WorldStop\towner\t8",
+          "WorldStop\tgeneration\t16",
+          "WorldStop\trequested\t24",
+          "WorldStop\tack\t32",
+          "WorldStop\tparticipants\t64",
+          "WorldStop\t.size\t72",
+          "WorldStop\t.members\t6"
+        ],
+        "combined": [
+          "AtomicWord\tvalue\t0",
+          "AtomicWord\t.size\t8",
+          "AtomicWord\t.members\t1",
+          "NetworkCapabilityStore\tmutex\t0",
+          "NetworkCapabilityStore\tvalue\t8",
+          "NetworkCapabilityStore\tinstalled_once\t32",
+          "NetworkCapabilityStore\t.size\t40",
+          "NetworkCapabilityStore\t.members\t3",
+          "WorldStop\tclaimed\t0",
+          "WorldStop\towner\t8",
+          "WorldStop\tgeneration\t16",
+          "WorldStop\trequested\t24",
+          "WorldStop\tack\t32",
+          "WorldStop\tparticipants\t64",
+          "WorldStop\t.size\t72",
+          "WorldStop\t.members\t6"
+        ]
+      },
+      "artifact_and_facts_sha256": {
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-f2bf60f5/kernel/build/qemu/kernel.elf": "1b30056403a15fca83ea089d45e1860ccec06558c77cf7887a805024095d992f",
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-f2bf60f5/kernel/build/qemu/main.o": "809fa678691e70e8f17906f135a877103dc32343b86513b1c541c28a231b65ec",
+        "kernel/build/qemu/kernel.elf": "8d9e77e4bfe9a6a448c3f8a35fad35478245a073cfac36076947f41ed30872c6",
+        "kernel/build/qemu/main.o": "054588de94be54811ca61a5ab042c317f88de1d3ec7b0bc7f04b4c8f8a7dd086",
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-f2bf60f5/kernel/build/qemu/main.o.facts/callgraph.tsv": "7009b20f45e4d0ee6e40d3c2954ae0959da520e59f413d2cc9948ee9e02215c6",
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-f2bf60f5/kernel/build/qemu/main.o.facts/globals.tsv": "8764cc0bac1a94bbc3a762e846c24b95cf5d9d06aee0abc3acd284dcc8a01382",
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-f2bf60f5/kernel/build/qemu/main.o.facts/structs.tsv": "9eb4370e6278103ffc06b877c3298d50509269ffb998cd62d0fb818eea2877e8",
+        "kernel/build/qemu/main.o.facts/callgraph.tsv": "e530c1718a5f255129e58d7f07d9fe3a502d348ba7e9297741e0a6aa1fb2ba4d",
+        "kernel/build/qemu/main.o.facts/globals.tsv": "1db7314a03c290fbf5abbaa30933ed25e0fef36a7e00a0f8171821b30659193b",
+        "kernel/build/qemu/main.o.facts/structs.tsv": "1c370095977b8eee0db34aa0a86cd8a7a8c2dd5ed502932e36952e889815cca5"
+      },
+      "changed_linked_allocated_sections": [
+        ".eh_frame",
+        ".got",
+        ".text"
+      ]
+    },
+    "rpi5": {
+      "baseline_size": {
+        "text": 4207396,
+        "data": 5600,
+        "bss": 1933312
+      },
+      "combined_size": {
+        "text": 4207428,
+        "data": 5600,
+        "bss": 1933312
+      },
+      "delta": {
+        "text": 32,
+        "data": 0,
+        "bss": 0
+      },
+      "usable_ram_start": 8257536,
+      "data_bss_symbol_size_changes": {},
+      "selected_symbols": {
+        "kernel_world_stop": {
+          "baseline": {
+            "address": 6987424,
+            "size": 72,
+            "type": 1,
+            "section": 6
+          },
+          "combined": {
+            "address": 6987424,
+            "size": 72,
+            "type": 1,
+            "section": 6
+          }
+        },
+        "network_capability_install": {
+          "baseline": {
+            "address": 2544816,
+            "size": 148,
+            "type": 2,
+            "section": 1
+          },
+          "combined": {
+            "address": 2544848,
+            "size": 156,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "network_capability_store": {
+          "baseline": {
+            "address": 7483984,
+            "size": 24,
+            "type": 1,
+            "section": 6
+          },
+          "combined": {
+            "address": 7483984,
+            "size": 24,
+            "type": 1,
+            "section": 6
+          }
+        },
+        "network_capability_take_waiting": {
+          "baseline": {
+            "address": 2545088,
+            "size": 120,
+            "type": 2,
+            "section": 1
+          },
+          "combined": {
+            "address": 2545120,
+            "size": 124,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "usable_ram_start": {
+          "baseline": {
+            "address": 8257536,
+            "size": 0,
+            "type": 0,
+            "section": 7
+          },
+          "combined": {
+            "address": 8257536,
+            "size": 0,
+            "type": 0,
+            "section": 7
+          }
+        },
+        "world_stop_begin_claimed": {
+          "baseline": {
+            "address": 2194688,
+            "size": 408,
+            "type": 2,
+            "section": 1
+          },
+          "combined": {
+            "address": 2194688,
+            "size": 436,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "world_stop_stale_probe_controller": {
+          "baseline": {
+            "address": 7834712,
+            "size": 72,
+            "type": 1,
+            "section": 6
+          },
+          "combined": {
+            "address": 7834712,
+            "size": 72,
+            "type": 1,
+            "section": 6
+          }
+        }
+      },
+      "changed_object_text_sections": [
+        ".text.takibi.network_capability_install",
+        ".text.takibi.network_capability_take_waiting",
+        ".text.takibi.world_stop_begin_claimed"
+      ],
+      "changed_object_sections": [
+        ".eh_frame",
+        ".rela.text.takibi.network_capability_install",
+        ".rela.text.takibi.network_capability_take_waiting",
+        ".rela.text.takibi.world_stop_begin_claimed",
+        ".symtab",
+        ".text.takibi.network_capability_install",
+        ".text.takibi.network_capability_take_waiting",
+        ".text.takibi.world_stop_begin_claimed"
+      ],
+      "changed_function_bodies": [
+        "network_capability_install",
+        "network_capability_take_waiting",
+        "world_stop_begin_claimed"
+      ],
+      "contracts_callers_effects_unchanged": true,
+      "layouts": {
+        "baseline": [
+          "AtomicWord\tvalue\t0",
+          "AtomicWord\t.size\t8",
+          "AtomicWord\t.members\t1",
+          "NetworkCapabilityStore\tmutex\t0",
+          "NetworkCapabilityStore\tvalue\t8",
+          "NetworkCapabilityStore\tinstalled_once\t16",
+          "NetworkCapabilityStore\t.size\t24",
+          "NetworkCapabilityStore\t.members\t3",
+          "WorldStop\tclaimed\t0",
+          "WorldStop\towner\t8",
+          "WorldStop\tgeneration\t16",
+          "WorldStop\trequested\t24",
+          "WorldStop\tack\t32",
+          "WorldStop\tparticipants\t64",
+          "WorldStop\t.size\t72",
+          "WorldStop\t.members\t6"
+        ],
+        "combined": [
+          "AtomicWord\tvalue\t0",
+          "AtomicWord\t.size\t8",
+          "AtomicWord\t.members\t1",
+          "NetworkCapabilityStore\tmutex\t0",
+          "NetworkCapabilityStore\tvalue\t8",
+          "NetworkCapabilityStore\tinstalled_once\t16",
+          "NetworkCapabilityStore\t.size\t24",
+          "NetworkCapabilityStore\t.members\t3",
+          "WorldStop\tclaimed\t0",
+          "WorldStop\towner\t8",
+          "WorldStop\tgeneration\t16",
+          "WorldStop\trequested\t24",
+          "WorldStop\tack\t32",
+          "WorldStop\tparticipants\t64",
+          "WorldStop\t.size\t72",
+          "WorldStop\t.members\t6"
+        ]
+      },
+      "artifact_and_facts_sha256": {
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-f2bf60f5/kernel/build/rpi5/kernel.elf": "0cea1dd11c72fde1f68b3ddb1e0e5452655ad97b1c1d06f28c124abade33a9c3",
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-f2bf60f5/kernel/build/rpi5/main.o": "8c0f1296064fd22eacddf44b6b34d78953b3f34acc858e2325555059d2ee0f13",
+        "kernel/build/rpi5/kernel.elf": "6eaa4bade940f34c154377f7fdd86eb5c721dfb7d77e0b55a08a6db6f1e4a10c",
+        "kernel/build/rpi5/main.o": "7d08c67c109fbef434707a13d8d3ea48c3e94164cd180fce81508bd2d668fa1b",
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-f2bf60f5/kernel/build/rpi5/main.o.facts/callgraph.tsv": "98bd3281f9fd5cc0cce7310e78d9fed3b942b16c91c525f331ff299a799bdef7",
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-f2bf60f5/kernel/build/rpi5/main.o.facts/globals.tsv": "07c5897c3b4dccfaf896dc04e1848038c6369d41f415123d2100fcd8eab51054",
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-f2bf60f5/kernel/build/rpi5/main.o.facts/structs.tsv": "a5e5dd5926ec5ef8f8ec1fd510ccd6ea00e380101575b4645e3deffa48f64c7e",
+        "kernel/build/rpi5/main.o.facts/callgraph.tsv": "2d06165e6d693df486bad85fcae1881587c47fb4fb36801c512295a8cb96e653",
+        "kernel/build/rpi5/main.o.facts/globals.tsv": "ac45a9db184ded178165018dbc824397b01a77ef9b1c53cd84a8074ca4167953",
+        "kernel/build/rpi5/main.o.facts/structs.tsv": "a5e5dd5926ec5ef8f8ec1fd510ccd6ea00e380101575b4645e3deffa48f64c7e"
+      },
+      "changed_linked_allocated_sections": [
+        ".eh_frame",
+        ".got",
+        ".text"
+      ]
+    }
+  }
+}

@@ -2,12 +2,12 @@
   "date": "2026-11-09",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "30f9cca60b72b5d052aba063fe14998cd973be8cb5d7f35f14fc8d48c7b71c49",
-  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto f2bf60f5: this branch's review, rebound to the merged sources (upstream's record was 2026-11-09 milestone/measured). Existing WorldStop stop/release, partial, nested and stale-ack probes; standard linked production QEMU and RPi5 kernels compared read-only with verified published 34ee3015 ELF/object pairs. No allocation workload change.",
+  "source_sha256": "ec5c130907fbd90ad9fea56aa89246b4005060135ecb2aab1dc415c79c8e45ac",
+  "workload": "Actual combined production QEMU/RPi5 ELF/object/facts for WorldStop generation and network installed-word migrations against verified published f2bf60f5. Existing occupancy reused only at unchanged allocator/pool/storage-lifetime boundary.",
   "evidence": [
-    "docs/WORLD_STOP_GENERATION_SPACE.md",
-    "docs/WORLD_STOP_GENERATION_SPACE.json"
+    "docs/WORLD_STOP_NETWORK_INTEGRATION_SPACE.md",
+    "docs/WORLD_STOP_NETWORK_INTEGRATION_SPACE.json"
   ],
-  "assessment": "Completed WorldStop typed storage migration, reviewed as a feature unit. Generation stays 8 bytes at offset16 and WorldStop stays72 bytes. QEMU linked sizes/symbols unchanged; RPi5 text +32 bytes (function +28, next-function padding +4), data/BSS and usable_ram_start unchanged. No pages saved or pool/retained capacity changed. Existing AtomicWord typing adopted; claim/ack protocol remains reviewed, no physical timing/coherence claim.",
-  "next_trigger": "Changed controller fields, membership, generation policy, stop callers or allocation lifetime, or the next completed kernel stage."
+  "assessment": "Actual combined QEMU text+16B, RPi5 text+32B; data/BSS totals and usable_ram_start unchanged. WorldStop72B unchanged; network store32->40B on QEMU,24B unchanged on RPi5. Only three intended object text sections/body hashes change; contracts/effects/callers unchanged. Payload versus rounded placement is explicit; no extra page, pool or retained capacity and no physical timing/coherence claim.",
+  "next_trigger": "Changed controller/flag representation or protocol, new allocation/retention workload, or the next completed kernel stage."
 }
