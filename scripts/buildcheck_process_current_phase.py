@@ -112,7 +112,10 @@ private fn root_entry_control(
         AddressSpaceActivationPrepareResult::Invalid => { return false; }
         AddressSpaceActivationPrepareResult::RolloverNeeded => { return false; }
         AddressSpaceActivationPrepareResult::Prepared(prepared) => {
-            return process_image_commit_activation(other, other_running, prepared);
+            match process_image_commit_activation(other, other_running, prepared) {
+                AddressSpaceActivationCommitResult::Invalid => { return false; }
+                AddressSpaceActivationCommitResult::Activated(_) => { return true; }
+            }
         }
     }
 }
@@ -125,7 +128,10 @@ private fn root_entry_control(
         AddressSpaceActivationPrepareResult::Invalid => { return false; }
         AddressSpaceActivationPrepareResult::RolloverNeeded => { return false; }
         AddressSpaceActivationPrepareResult::Prepared(prepared) => {
-            return process_image_commit_activation(owner, running, prepared);
+            match process_image_commit_activation(owner, running, prepared) {
+                AddressSpaceActivationCommitResult::Invalid => { return false; }
+                AddressSpaceActivationCommitResult::Activated(_) => { return true; }
+            }
         }
     }
 }
@@ -152,11 +158,14 @@ private fn root_entry_control(
                     let (reaper, reaping) = resources;
                     process_run_unlock(guard);
                     scheduled_process_reap_teardown(reaper, reaping);
-                    let committed: bool = process_image_commit_activation(reaper, reaping, prepared);
+                    let committed: AddressSpaceActivationCommitResult = process_image_commit_activation(reaper, reaping, prepared);
                     let removal = process_run_lock();
                     scheduled_process_reap_remove(removal, reaper, reaping);
                     process_run_unlock(removal);
-                    return committed;
+                    match committed {
+                        AddressSpaceActivationCommitResult::Invalid => { return false; }
+                        AddressSpaceActivationCommitResult::Activated(_) => { return true; }
+                    }
                 }
             }
         }
@@ -197,6 +206,35 @@ private fn root_boot_control(
     }
 }
 """, False, 'static value mismatch'),
+    ])
+    cases.extend([
+        ('current prepared commit exhaustive match', """
+private fn root_current_commit_control(
+        current: borrow ProcessCurrent[process, ProcessState::Running]) -> bool {
+    match process_image_prepare_current_activation(current) {
+        AddressSpaceActivationPrepareResult::Invalid => { return false; }
+        AddressSpaceActivationPrepareResult::RolloverNeeded => { return false; }
+        AddressSpaceActivationPrepareResult::Prepared(prepared) => {
+            match process_image_commit_current_activation(current, prepared) {
+                AddressSpaceActivationCommitResult::Invalid => { return false; }
+                AddressSpaceActivationCommitResult::Activated(_) => { return true; }
+            }
+        }
+    }
+}
+""", True, ''),
+        ('current prepared commit must be handled', """
+private fn root_current_commit_control(
+        current: borrow ProcessCurrent[process, ProcessState::Running]) {
+    match process_image_prepare_current_activation(current) {
+        AddressSpaceActivationPrepareResult::Invalid => {}
+        AddressSpaceActivationPrepareResult::RolloverNeeded => {}
+        AddressSpaceActivationPrepareResult::Prepared(prepared) => {
+            process_image_commit_current_activation(current, prepared);
+        }
+    }
+}
+""", False, "must-use result of 'process_image_commit_current_activation' must be handled"),
     ])
     def judge(case, result):
         name, _, accepts = case[:3]

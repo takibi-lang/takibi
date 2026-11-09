@@ -1257,11 +1257,10 @@ fn process_image_clone_vm_begin(source_space: AddressSpaceRoot,
 
 // GitHub issue #245: replaces the old activate_parent()/activate_child()
 // pair, which hardcoded root 0 ("parent") and root 1 ("child") as global
-// roles. Callers now track their own parent/child root relationships
-// (process.tkb's per-slot ProcessHandle.pool_index) and pass the explicit
-// root they mean, since with more than one live clone in the tree "the
-// child" and "the parent" are relative to whoever is switching, not fixed
-// numbers.
+// roles. Activation now derives the root from the actual current or retained
+// scheduled-process authority: with more than one live clone, parent and
+// child are relative to the process being switched, not fixed root numbers.
+// Image mapping separately retains its explicit target in ProcessImagePages.
 fn process_image_activate_root(
         current: borrow ProcessCurrent[source, ProcessState::Running]) {
     let mut root: AddressSpaceRoot = kernel_process_current_root(current);
@@ -1303,13 +1302,13 @@ fn process_image_prepare_current_activation(
 }
 
 private fn process_image_activation_committed(result: AddressSpaceActivationCommitResult)
-        -> bool {
+        -> AddressSpaceActivationCommitResult {
     match result {
-        AddressSpaceActivationCommitResult::Invalid => { return false; }
+        AddressSpaceActivationCommitResult::Invalid => { return AddressSpaceActivationCommitResult::Invalid; }
         AddressSpaceActivationCommitResult::Activated(target) => {
             kernel_process_trace_address_space_activate(
                 root_slot_word(address_space_root_slot(target)));
-            return true;
+            return AddressSpaceActivationCommitResult::Activated(target);
         }
     }
 }
@@ -1317,14 +1316,14 @@ private fn process_image_activation_committed(result: AddressSpaceActivationComm
 fn process_image_commit_activation(
         owner: borrow ScheduledProcessOwner[source],
         running: borrow ScheduledProcessState[source, ProcessState::Running],
-        prepared: sink AddressSpaceActivationPrepared[root, source]) -> bool {
+        prepared: sink AddressSpaceActivationPrepared[root, source]) -> AddressSpaceActivationCommitResult {
     return process_image_activation_committed(
         address_space_commit_activation(owner, running, prepared));
 }
 
 fn process_image_commit_current_activation(
         current: borrow ProcessCurrent[source, ProcessState::Running],
-        prepared: sink AddressSpaceActivationPrepared[root, source]) -> bool {
+        prepared: sink AddressSpaceActivationPrepared[root, source]) -> AddressSpaceActivationCommitResult {
     return process_image_activation_committed(
         address_space_commit_current_activation(current, prepared));
 }

@@ -1197,7 +1197,9 @@ A prepared activation carries both its root-slot identity and the retaining
 process generation. Commit re-borrows the actual current authority or the
 same owner and Running state and checks the saved root's slot and backing
 address/generation against that authority's root before installation. It
-still validates backing liveness and the ASID generation. The returned token
+still validates backing liveness and the ASID generation. Image commit
+wrappers preserve the must-use Invalid/Activated result; only Activated emits
+the activation trace, and every scheduler caller matches both outcomes. The returned token
 or a returned erased view alone is not a retained borrow. Borrowed reap
 teardown requires Reapable state of the same generation and invalidates live
 owner-derived record loans; its owner remains alive until record removal.

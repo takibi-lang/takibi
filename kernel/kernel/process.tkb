@@ -7667,12 +7667,15 @@ private fn kernel_process_secondary_start_reserved(
                     preempt_span_end(span);
                     return ProcessSecondaryStart::Idle;
                 }
-                if (process_image_commit_activation(owner, running, prepared) == false) {
-                    let ready = scheduled_process_yield(owner, running);
-                    scheduled_process_release(owner, ready);
-                    process_run_unlock(guard);
-                    preempt_span_end(span);
-                    return ProcessSecondaryStart::Idle;
+                match process_image_commit_activation(owner, running, prepared) {
+                    AddressSpaceActivationCommitResult::Invalid => {
+                        let ready = scheduled_process_yield(owner, running);
+                        scheduled_process_release(owner, ready);
+                        process_run_unlock(guard);
+                        preempt_span_end(span);
+                        return ProcessSecondaryStart::Idle;
+                    }
+                    AddressSpaceActivationCommitResult::Activated(_) => {}
                 }
                 execution_current_set_handle(guard, execution_cpu, to);
                 execution_current_set_live(guard, execution_cpu, true);
@@ -7951,13 +7954,16 @@ private fn kernel_process_schedule_reserved(
                     preempt_span_end(span);
                     return FrameSwitch::Stay;
                 }
-                if (process_image_commit_activation(owner, running, prepared) == false) {
-                    if (kernel_process_start_handle(guard, from)) {}
-                    let ready = scheduled_process_yield(owner, running);
-                    scheduled_process_release(owner, ready);
-                    process_run_unlock(guard);
-                    preempt_span_end(span);
-                    return FrameSwitch::Stay;
+                match process_image_commit_activation(owner, running, prepared) {
+                    AddressSpaceActivationCommitResult::Invalid => {
+                        if (kernel_process_start_handle(guard, from)) {}
+                        let ready = scheduled_process_yield(owner, running);
+                        scheduled_process_release(owner, ready);
+                        process_run_unlock(guard);
+                        preempt_span_end(span);
+                        return FrameSwitch::Stay;
+                    }
+                    AddressSpaceActivationCommitResult::Activated(_) => {}
                 }
                 execution_current_set_handle(guard, execution_cpu, to);
                 profile_timeline_schedule(
@@ -8051,15 +8057,17 @@ fn kernel_process_activate_current_root(current_authority: borrow ProcessCurrent
                 process_run_unlock(guard);
                 return CurrentRootActivationResult::Invalid;
             }
-            let committed: bool = process_image_commit_current_activation(current_authority, prepared);
+            let committed: AddressSpaceActivationCommitResult = process_image_commit_current_activation(current_authority, prepared);
             process_run_unlock(guard);
             if (injected_busy != 0) {
                 kernel_boot_log("asid rollover: clone activation retried " as *u8);
                 uart_put_udec(injected_busy);
                 kernel_boot_log(" busy world stops, then rolled over\n" as *u8);
             }
-            if (committed) { return CurrentRootActivationResult::Activated; }
-            return CurrentRootActivationResult::Invalid;
+            match committed {
+                AddressSpaceActivationCommitResult::Activated(_) => { return CurrentRootActivationResult::Activated; }
+                AddressSpaceActivationCommitResult::Invalid => { return CurrentRootActivationResult::Invalid; }
+            }
         }
     }
     }
@@ -8136,8 +8144,11 @@ fn kernel_process_activate_stable_root(
                 }
             }
             AddressSpaceActivationPrepareResult::Prepared(prepared) => {
-                if (process_image_commit_current_activation(current_authority, prepared) == false) {
-                    kernel_invariant_stop();
+                match process_image_commit_current_activation(current_authority, prepared) {
+                    AddressSpaceActivationCommitResult::Invalid => {
+                        kernel_invariant_stop();
+                    }
+                    AddressSpaceActivationCommitResult::Activated(_) => {}
                 }
                 activating = false;
                 if (injected_busy != 0) {
@@ -8188,8 +8199,11 @@ fn kernel_process_activate_stable_owned_root(
                 }
             }
             AddressSpaceActivationPrepareResult::Prepared(prepared) => {
-                if (process_image_commit_activation(owner, running, prepared) == false) {
-                    kernel_invariant_stop();
+                match process_image_commit_activation(owner, running, prepared) {
+                    AddressSpaceActivationCommitResult::Invalid => {
+                        kernel_invariant_stop();
+                    }
+                    AddressSpaceActivationCommitResult::Activated(_) => {}
                 }
                 activating = false;
                 if (injected_busy != 0) {
@@ -9559,37 +9573,40 @@ private fn kernel_process_block_reserved(
                 }
                 kernel_process_trace_handle(
                     ProcessTraceBlock, from, to, trace_aux);
-                if (process_image_commit_activation(owner, running, prepared) == false) {
-                    match scheduled_process_blocked_take(guard, from) {
-                        ScheduledProcessBlockedTakeResult::Missing => {}
-                        ScheduledProcessBlockedTakeResult::Blocked(resources) => {
-                            let (from_owner, blocked) = resources;
-                            let ready = scheduled_process_wake(guard, from_owner, blocked);
-                            match scheduled_process_restart_check(
-                                    guard, from_owner, ready) {
-                                ScheduledProcessStartCheck::Startable(startable) => {
-                                    let from_running = scheduled_process_start(
-                                        from_owner, startable);
-                                    scheduled_process_release(
-                                        from_owner, from_running);
-                                }
-                                // Another core stands on the stack this CPU
-                                // just blocked on: the same stop
-                                // scheduled_process_start makes.
-                                ScheduledProcessStartCheck::Standing(standing) => {
-                                    scheduled_process_release(from_owner, standing);
-                                    kernel_activity_set(
-                                        KernelActivity::StartOnOwnedStack);
-                                    kernel_invariant_stop();
+                match process_image_commit_activation(owner, running, prepared) {
+                    AddressSpaceActivationCommitResult::Invalid => {
+                        match scheduled_process_blocked_take(guard, from) {
+                            ScheduledProcessBlockedTakeResult::Missing => {}
+                            ScheduledProcessBlockedTakeResult::Blocked(resources) => {
+                                let (from_owner, blocked) = resources;
+                                let ready = scheduled_process_wake(guard, from_owner, blocked);
+                                match scheduled_process_restart_check(
+                                        guard, from_owner, ready) {
+                                    ScheduledProcessStartCheck::Startable(startable) => {
+                                        let from_running = scheduled_process_start(
+                                            from_owner, startable);
+                                        scheduled_process_release(
+                                            from_owner, from_running);
+                                    }
+                                    // Another core stands on the stack this CPU
+                                    // just blocked on: the same stop
+                                    // scheduled_process_start makes.
+                                    ScheduledProcessStartCheck::Standing(standing) => {
+                                        scheduled_process_release(from_owner, standing);
+                                        kernel_activity_set(
+                                            KernelActivity::StartOnOwnedStack);
+                                        kernel_invariant_stop();
+                                    }
                                 }
                             }
                         }
+                        let ready = scheduled_process_yield(owner, running);
+                        scheduled_process_release(owner, ready);
+                        process_run_unlock(guard);
+                        preempt_span_end(span);
+                        return BlockSwitch::Retry;
                     }
-                    let ready = scheduled_process_yield(owner, running);
-                    scheduled_process_release(owner, ready);
-                    process_run_unlock(guard);
-                    preempt_span_end(span);
-                    return BlockSwitch::Retry;
+                    AddressSpaceActivationCommitResult::Activated(_) => {}
                 }
                 execution_current_set_handle(guard, execution_cpu, to);
                 // GitHub issue #448/#469: every blocking handoff is accounted,
@@ -13386,11 +13403,14 @@ private fn kernel_process_exit_reserved(
                 process_run_unlock(guard);
                 return ExitSwitch::Idle(span);
             }
-            if (process_image_commit_activation(owner, running, prepared) == false) {
-                let ready = scheduled_process_yield(owner, running);
-                scheduled_process_release(owner, ready);
-                process_run_unlock(guard);
-                return ExitSwitch::Idle(span);
+            match process_image_commit_activation(owner, running, prepared) {
+                AddressSpaceActivationCommitResult::Invalid => {
+                    let ready = scheduled_process_yield(owner, running);
+                    scheduled_process_release(owner, ready);
+                    process_run_unlock(guard);
+                    return ExitSwitch::Idle(span);
+                }
+                AddressSpaceActivationCommitResult::Activated(_) => {}
             }
             preempt_off (execution_cpu) {
                 execution_current_set_handle(guard, execution_cpu, successor);

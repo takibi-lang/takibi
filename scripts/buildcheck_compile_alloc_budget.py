@@ -38,7 +38,9 @@ from pass_line import report_pass
 # found 99,139,467 words; replacing intersection with disjoint increased the
 # total to 624,878,992, so that candidate was discarded. The approved #1472
 # refresh keeps about 25% headroom. With the private Running factory and
-# its confined callers the final object measured 593,876,245 words.
+# its confined callers that checkpoint measured 593,876,245 words. The
+# closed commit-result API measured 593,855,092 before final documentation;
+# the final source-bound measurement accompanies the milestone review.
 BUDGET_WORDS = {
     "qemu": 743_000_000,
 }
