@@ -751,3 +751,35 @@ controls consume UART output and inject a separate unchanged atomic word;
 no raw BusyWait layout consumer was found in scripts or maintained tests.
 This incremental record migration adopts the small code cost; completion
 of the globals milestone still requires its own workload/space review.
+
+- 2026-11-09: `WorkloadProfileCore` uses `Atomic(WorkloadCpuMode)`
+  for its two mode fields and `AtomicWord` for counters and flags. The
+  enum is explicitly u8-backed for the existing typed enum-cell API.
+  Own-CPU IRQ-masked updates, run-locked selection/capture and stopped
+  interval reset/reporting retain their original ordering. Atomic cells
+  do not establish a multi-field accounting snapshot or reset protocol.
+  The cross-core report classification remains; only the plain-global
+  allowlist row is removed.
+
+### Profile-core atomic-cell space review (2026-11-09)
+
+Compared with c87f9027, both production kernels measure a 136 -> 144 byte
+WorkloadProfileCore record and a 544 -> 576 byte four-core array. Its two
+enum cells occupy offsets 0 and 8, followed by word fields at offsets
+16 through 136. QEMU text grows 810948 -> 811412 bytes (+464); RPi5 text
+grows 4193208 -> 4193656 bytes (+448). Data/BSS remain 4600/1302528 bytes
+on QEMU and 5576/1933312 bytes on RPi5. usable_ram_start remains
+0x40208000 and 0x7e0000 respectively. There is no allocation, pool metadata
+or lifetime change. No external raw record-layout or enum ABI consumer
+was found in maintained scripts or tests.
+
+Typed local enum-cell references satisfy the existing generic inference
+rule. They add no new ownership or scope semantics. The own-CPU charge
+and mode transition retain one IRQ-masked interval; separate load/store
+counter increments rely on that mask, not on a compound atomic operation.
+Selection and inactive PID capture retain the run guard. Start preserves
+selected witnesses before reset and publishes active only after restoring
+them. Finish charges all online cores before publishing inactive; reporting
+retains MachineStopped and ProcessRunGuard until its last field read.
+This incremental review adopts the bounded code/payload cost. Completion
+of the globals milestone still requires its measured workload review.
