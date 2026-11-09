@@ -1,13 +1,13 @@
 {
   "date": "2026-11-09",
-  "event": "incremental",
+  "event": "milestone",
   "decision": "measured",
-  "source_sha256": "072672ce460905310f78d544ed8c25c849c5afc510796de11fbc76f4a56d519a",
-  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 793a1d09: this branch's review, rebound to the merged sources (upstream's record was 2026-11-09 incremental/reuse). One #1475 record: WorkloadSettingsWake, compared with recovered-source commit ac5712d1. Both production kernels built at that baseline in a task-owned clone and at the candidate. Common settings_wake/peer_tty fixture; one boot-scoped record, no allocation or lifetime change. Earlier recovery-record review remains in the same evidence document.",
+  "source_sha256": "eeed604f684f1bfcc7615665fe17e0980154fe286243496b74cc78b1f805833c",
+  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 2f085859: this branch's review, rebound to the merged sources (upstream's record was 2026-11-09 incremental/measured). #1330 syscall-symmetry removal and replacement affinity descriptor/procfs fixture; maintained linked boot/rootfs before and after origin/main 793a1d09. Static image/symbol/reservation boundary only; no runtime-occupancy or timing inference.",
   "evidence": [
-    "docs/GLOBAL_PROTECTION.md",
+    "docs/SYSCALL_SYMMETRY_SPACE_2026-11-09.txt",
     "kernel/MEMORY_MAP.md"
   ],
-  "assessment": "Both kernels: .text +160 B, data/BSS reservations and usable_ram_start unchanged. The settings-wake payload grows 64 -> 80 B; adjacent bools become atomic words. ioctl recorder +36 B; progress +136/+128 B; alignment padding -12/-4 B. No other text/data/BSS symbol changes size. No allocator or pool metadata changes. Adopt the small cost for word-level atomic accesses, preserving run-lock serialization and snapshot/reset protocols.",
-  "next_trigger": "The next #1475 workload record migration, a changed fixture storage/lifetime, or completion of the globals milestone (which requires its own workload review)."
+  "assessment": "QEMU total text -1820 B; RPi5 +804 B, explained as .text -1312, .rodata +2288 (usb_provision_container +2528 and other read-only data -240), unwind -172. Final measurements include the errno diagnostic (+333 container/+336 aligned RPi5 read-only bytes) and state filter (+16 QEMU/+64 RPi5 code bytes) after the original milestone measurement. ddb_state shrinks 512 B on both; total data/BSS and usable_ram_start remain unchanged. Accept the measured regression/evidence payload cost; no allocator/retention or physical-performance claim.",
+  "next_trigger": "ExecutionState per_cpu migration, RootHeld lifetime changes, or completion of another scheduler/storage feature including the sleeping-Mutex foundation."
 }
