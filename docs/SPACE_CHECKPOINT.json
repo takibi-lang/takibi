@@ -2,12 +2,13 @@
   "date": "2026-11-09",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "dfdb5c8a991c2bae8da2904250fd0a04d0d07faca797cbc8a63d2187663bb976",
-  "workload": "IoHandle boot-boundary feature: existing device-map bootstrap/DTB attachments before CPU_ON, single-core DMA fake transport and shared native virtio tx/reply fixtures with their existing BootPhase. Both production linked kernels compared against published762abced; fixed handle storage/capacity and allocation workload unchanged.",
+  "source_sha256": "5e7bfb58cc3415757e74c1e51e3268050189a08e405216d29b8388262a42654b",
+  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 21a5a960: this branch's review, rebound to the merged sources (upstream's record was 2026-11-09 milestone/measured). ExecutionState typed per_cpu/CpuHere feature milestone against published 762abced, tested source 521e320b: both linked production images, common bounded boot/teardown pool samples, live PID0/absent-peer regression, real old-reader mutant, normal QEMU/affinity/DDB/crash and four-core RPi5 with publication microbenchmark, busy pair, move-cost and physical DDB.",
   "evidence": [
-    "docs/GLOBAL_PROTECTION.md",
+    "docs/EXECUTION_STATE_PER_CPU_SPACE_2026-11-09.txt",
+    "docs/EXECUTION_STATE_PER_CPU_EVIDENCE_2026-11-09.json",
     "kernel/MEMORY_MAP.md"
   ],
-  "assessment": "QEMU text/data/BSS unchanged811080/4600/1302528. RPi5 text+32 bytes4196036->4196068, data/BSS5576/1929216 unchanged. Both usable_ram_start boundaries unchanged.21 genuine handle globals now protected. No handle layout, allocation, metadata pool or retention change. MMIO primitive/backend lowering unchanged; sampled UART FIFO/TX accessor instruction bytes identical on both targets. Adopt bounded boot-code cost; no per-MMIO check or new allocator/timing claim.",
-  "next_trigger": "Changed handle capacity, device-map lifetime, or allocation workload."
+  "assessment": "Accept 264 bytes new static observation/stop-capture payload and GOT+16; total text QEMU+4288/RPi5+4360, unchanged usable-RAM boundaries and provision container. RPi5 BSS span-4096 is alignment slack, not allocator savings. All11 pool samples at boot/bounded_end match baseline. Physical publication increment165.545ns per one current+stack pair, finite3x4096 minima, not whole-switch/per-publisher/worst-case proof. Corrected scheduler/ext2 frames match actual baseline; partial helper chains are not stack bounds and the old parser defect is separate#1485. Exact source runtime/host/model/PID0 controls and RPi5 terminal0; metadata changes no production source.",
+  "next_trigger": "RootHeld activation lifetime changes, sleeping-Mutex scheduling changes, publication/capture layout change, or completion of the preemption flip."
 }
