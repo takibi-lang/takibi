@@ -683,3 +683,10 @@ rebuild in this recovery. No timing or cache-performance claim is made.
 The next trigger is another storage/lifetime change or completion of the
 remaining evidence-record migration. The coordinator still runs the full
 publication gate, including hardware.
+
+- 2026-11-09: integration retains the three evidence-record sizes and the
+  allocation boundary above. The process evidence header now states atomic
+  field updates, coordinated resets and the clone callers' run lock, rather
+  than the obsolete single-scheduler-core premise. Host capture/inventory
+  repairs add no kernel storage or workload; the preceding incremental
+  observations are reused, not reported as a fresh baseline measurement.

@@ -1,13 +1,13 @@
 {
-  "date": "2026-11-08",
+  "date": "2026-11-09",
   "event": "incremental",
   "decision": "reuse",
-  "source_sha256": "85c94b296022d63ef7b739b8145d5721a301c522256c6f2c3d1c819187203330",
-  "workload": "Recovery of the three interrupted #1475 commits only: move_cost_records, process_test_evidence and syscall_test_evidence. No new storage, allocation, lifetime or workload; reuse existing occupancy evidence at its unchanged boundary. Current linked images rebuilt; baseline text comes from the source-matched origin/main checkpoint, not a new baseline build.",
+  "source_sha256": "034fd5f684239607d4958aacebff7bbf3ca5ca505602059dadbab5ff9080c716",
+  "workload": "Recovery of the three interrupted #1475 commits only: move_cost_records, process_test_evidence and syscall_test_evidence. No new storage, allocation, lifetime or workload; reuse existing occupancy evidence at its unchanged boundary. Current linked images rebuilt; baseline text comes from the source-matched origin/main checkpoint, not a new baseline build. Integration adds only host-runner/inventory fixes and a source-header correction; the three records and their allocation workload are unchanged.",
   "evidence": [
     "docs/GLOBAL_PROTECTION.md",
     "kernel/MEMORY_MAP.md"
   ],
-  "assessment": "AtomicWord replaces padded scalar word slots; current records are 72 B, 112 B and 1536 B on both platforms. QEMU text/data/BSS 810628/4600/1302528 B; RPi5 4192856/5576/1933312 B; usable_ram_start 0x40208000/0x7e0000. Against the source-matched recorded baseline text 809700/4192012 B, atomic access and claim/decrement code costs +928/+844 B. Memory-map check passes. Incremental allocation evidence reuse; no new performance claim.",
+  "assessment": "AtomicWord replaces padded scalar word slots; current records are 72 B, 112 B and 1536 B on both platforms. QEMU text/data/BSS 810628/4600/1302528 B; RPi5 4192856/5576/1933312 B; usable_ram_start 0x40208000/0x7e0000. Against the source-matched recorded baseline text 809700/4192012 B, atomic access and claim/decrement code costs +928/+844 B. Memory-map check passes. Incremental allocation evidence reuse; no new performance claim. The integration header edit changes no executable/storage constructs; reuse remains incremental at the same allocation boundary, not a feature/milestone completion or a fresh baseline measurement.",
   "next_trigger": "Another storage or lifetime change, or completion of the remaining #1475 evidence-record migration; the globals milestone requires its own measured review."
 }
