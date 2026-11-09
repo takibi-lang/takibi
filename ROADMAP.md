@@ -108,11 +108,12 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
 
 ### Territory A: the trunk, in this order
 
-**Priority update, 2026-11-09.** Move ExecutionState to existing
-per_cpu/CpuHere authority and add RootHeld (#1472) before the flip. The
-coordinator sequences shared scheduler edits with the sleeping-Mutex
-foundation (#1481), taking independent steps while its design questions
-are reviewed.
+**Priority update, 2026-11-09.** ExecutionState now uses existing
+per_cpu/CpuHere authority; its runtime and four-core RPi5 cost review are
+complete. Continue RootHeld (#1472) and the remaining #638 review before
+the flip; #638 is not complete. The coordinator sequences shared scheduler
+edits with the sleeping-Mutex foundation (#1481), whose ownership/phase
+question remains parked, taking independent approved steps meanwhile.
 
 **Assigned queue (maintainer, 2026-10-23, pruned 2026-10-25).** Memory
 safety and multicore backbone only. Taken in order whenever the numbered

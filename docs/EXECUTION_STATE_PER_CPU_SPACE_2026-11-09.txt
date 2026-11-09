@@ -1,0 +1,166 @@
+ExecutionState per-CPU authority: measured milestone
+Date: 2026-11-09
+Baseline source: 762abcedd3103cf7e94d10da3327538755ff55bf
+Tested candidate source: 521e320b1d33155acb398bdd9e0ca077ea8d066f
+Evidence: docs/EXECUTION_STATE_PER_CPU_EVIDENCE_2026-11-09.json
+
+Workload and evidence boundary
+------------------------------
+Both production kernels, the maintained bounded boot and teardown, the real
+PID0 scheduler probe, normal QEMU's 76 views/ext2 equality/all PTY smokes,
+affinity/GDB, UART/software DDB and crash lanes. The four-core RPi5 lane
+also includes physical UART BREAK, guarded-fault recovery, masked-peer stop,
+resume and poweroff. Host/model/QEMU chain 62483 and hardware handle 16939
+both returned terminal exit 0 on the candidate above. The separate old-PID0
+reader control compiled and passed its checker only after the inner runner
+returned nonzero and independently printed scheduler: failed. Its fresh
+expected archive is 20261109T041641Z; positive and negative UART/ELF hashes
+are distinct. No common view, lane membership or budget was weakened.
+
+The coordinator preserved both revisions' ELFs, four production/debug
+objects and RPi5 captures outside future cleans. The evidence JSON records
+manifest and selected artifact hashes, exact objdump inputs, raw cost lines,
+full workload samples and actual terminal receipts. The candidate archive's
+original pending-receipt description is superseded by the worker's actual
+16939 exit 0 receipt here; its recorded artifact bytes are unchanged.
+
+Linked image and static payload (bytes)
+--------------------------------------
+                        QEMU baseline  candidate   RPi5 baseline  candidate
+llvm-size text                 811080     815368         4196036    4200396
+data including GOT               4600       4616            5576       5592
+BSS including stack           1302528    1302528         1929216    1925120
+usable_ram_start          0x40208000 0x40208000        0x7e0000   0x7e0000
+
+QEMU text +4288 = .text +3648, .rodata +128, .eh_frame +512.
+RPi5 text +4360 = .text +3712, .rodata +128, .eh_frame +520.
+GOT grows 16 bytes on each; .data itself stays 136/336 bytes. RPi5's
+usb_provision_container remains 3327501 bytes. The architectural .stack
+section remains 393216 bytes on each target.
+
+ExecutionState remains 544 bytes across four CPUs. Guarded PID/live trace
+publication adds 72 bytes; the scalar per-CPU stopped capture adds 192 bytes:
+264 bytes new named static payload. RPi5 BSS begins at 0x604000 rather than
+0x603000 and still ends at 0x77a000, consuming alignment slack before the
+fixed DMA arena. Its 4096-byte span decrease is not freed allocator memory.
+Neither target's image/page reservation boundary grows.
+
+Allocation accounting
+---------------------
+The same parser validates complete boot and bounded_end samples for all
+11 pools from both RPi5 UART captures. All sample fields are identical.
+                            boot         bounded_end
+allocated chunk bytes      32768              98304
+static pool headers          264                264
+occupied object storage     2440               3488
+slot-state metadata         1240               2176
+
+Chunk bytes include their own headers, alignment, tail and free capacity;
+occupied object storage is not peak caller usage. The 264-byte static pool
+headers above predate this change and are distinct from the new 264-byte
+publication/capture payload. No pool capacity, allocation, retention policy
+or resource lifetime changes. There is no new cross-OS comparison boundary.
+
+Measured physical costs
+-----------------------
+The real current/stack publishers run on the boot CPU before peer dispatch,
+with live boot PID0 and protocol tracing inactive. Each timed pair takes the
+run lock and a CPU region; the matched empty envelope does the same without
+publication. A pair performs one current plus one stack publish, including
+their actual pooled PID lookups. Three samples each contain 4096 pairs;
+reported values are separate finite minima, not bounds.
+
+Counter frequency: 54000000 Hz.
+Empty envelope: 17900 ticks / 4096 = 80.928096 ns/pair.
+Published pair: 54516 ticks / 4096 = 246.473524 ns/pair.
+Increment: (54516 - 17900) ticks / 4096 = 165.545428 ns/pair.
+The calculation uses raw ticks before rounding. These are not independent
+per-publisher measurements and not a whole context-switch latency.
+
+Real paths have different publication counts. An idle successor commit has
+handle/live current publications (2); a running successor replacement has
+one current publication. EL0 IRQ departure has one stack publication;
+arrival after departure has stack handle/live publications (2), whereas a
+direct physical replacement with the old stack still live has 3. Exit to
+idle clears current then stack (1 each). Live=false publication skips the
+pooled lookup; handle/live setters while already live may each look it up.
+The measured pair is not multiplied into a universal handoff estimate.
+
+The same 16-iteration busy pair (16000000 steps/iteration) completed with
+identical PIDs/checksums: elapsed counter ticks 15582052 -> 15582309,
+0.288556519 -> 0.288561278 seconds. Per-CPU records retain placement and
+background work: CPU0 context switches 0 -> 0, CPU1 39 -> 41; background
+blocks/syscalls differ. This one-run result is not statistical nonregression.
+
+The existing 256 KiB move workload alternates CPUs 2/3. Median cold/warm
+cycles are 79338/29755 baseline and 79410.5/29822.5 candidate; median
+cold-minus-warm 49537 -> 49582.5 (+0.092% approximately), over 7/8 versus
+8/8 clean rounds. Each version's cold and warm passes retire equal work,
+but clean instruction counts differ across versions (62165 -> 62628).
+Intervals begin after affinity migration: they measure post-move cache/TLB
+refill and their measurement envelope, not migration-path instructions or
+publication latency. No causal or general performance guarantee follows.
+
+The separate IRQ-off sampler measured 11.5 -> 9.6 ns/mask pair, least of
+14 samples of 4096 pairs. Judged classes pass their existing thresholds;
+raw maximum includes the deliberately masked peer-sleep fixture. Neither
+its sample nor the busy-pair/move sample establishes a worst-case bound.
+
+Corrected frame and callpath boundary
+------------------------------------
+The frame parser used for these builds missed hexadecimal negative STP
+allocations (the independently recorded #1485 defect). Local corrected
+measurement accepts hexadecimal and decimal immediates from the exact
+llvm-objdump-19 -d --no-show-raw-insn inputs and retained object hashes.
+All four preserved baseline objects were measured directly, including debug.
+Both targets, baseline and candidate:
+  scheduler frame: 3184 production / 3312 debug bytes;
+  ext2_update_regular_file: 2528 production / 2640 debug bytes.
+The old 3088/3216 and 2432/2544 reports each missed 96 bytes. The shared
+checker and budgets are unchanged by this feature; no new parent-frame
+increase is claimed from the corrected comparison.
+
+Production publishers each have 32-byte frames, not zero. Debug helpers:
+probe wrapper 48, held probe 64, live setter 32, publisher 64, PID-of-handle
+48, PID-of-slot 32, scalar snapshot 128 and pool-lock entry 32 bytes.
+A compiled-callgraph-confirmed PID0 path sums listed frames to 3760 bytes;
+the cost-probe path through its logger/sample sums 3840 bytes. Pool-lock
+callees, other branches, interrupts and generated frames are excluded.
+These partial sums are not whole-callgraph or 16 KiB stack bounds. Extracting
+fixture scopes restored the prior parent's size; it did not remove helper
+call costs or prove that 80 bytes disappeared from every live callpath.
+
+Trust and assessment
+--------------------
+Existing per_cpu typing excludes foreign integer indexing and element
+escape; existing region/PreemptOff rules exclude may_block while held.
+Private fields and four closed placement setters preserve the reviewed
+publication boundary. Actual compiler/source controls and runtime traces
+cover their stated instances, not arbitrary control-flow equivalence.
+
+The exact exception-only manual CpuHere constructor remains trusted and
+unscoped, with eight reviewed compiled callers and foreign-call/function-
+value controls. Private-field construction explains its physical definition
+site; successful compilation is not a proof of physical nonmigration.
+Stop participants capture scalar handle words before acknowledgement and
+retire after pen exit; complete-stop readers validate allocation generations
+and refuse busy metadata. Coupling and those context/order premises remain
+explicit trusted review, not a new language rule or raw-pointer escape.
+
+Source inventory: 9 typed per-CPU stores, 53 reviewed ordinary arrays,
+64 unprotected globals; raw CPU calls total147, of which3 mint calls,
+60 flip-worklist and84 reviewed calls across67 functions. The 20 direct
+current readers and27 carried fields are checked; six fields are task-
+carried. Build-inclusive ledger refresh keeps production-only raw-site
+counts76/86; its evidence-file reduction since the 2026-11-08 ledger build
+includes earlier published migrations and is not attributed to this unit
+alone. The derived-range/init/overlay distribution578/565/21 retains1164
+obligations overall.
+
+Adopt the measured static/image and bounded publication cost for the
+approved typed migration. Do not weaken ownership or diagnostics to minimize
+the numbers. This is the ExecutionState feature milestone, not completion
+of #638, the preemption flip, the globals milestone or the sleeping Mutex.
+KERNEL_PREEMPTIBLE remains0. The next measurement trigger is RootHeld
+activation lifetime changes, sleeping-Mutex scheduling changes, a changed
+publication/capture layout, or completion of the preemption flip.

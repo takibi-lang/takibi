@@ -875,3 +875,20 @@ and TX-store accessors retain identical instruction bytes on both targets;
 there is no per-MMIO wrapper, load, branch or lock. The 32-byte boot-code
 cost is adopted for the explicit phase boundary. The next measurement is a
 changed handle capacity, device-map lifetime or allocation workload.
+### ExecutionState authority milestone (2026-11-09)
+
+ExecutionState is a private-field per_cpu store reached through CpuHere;
+its ordinary-global allowance is removed. Run-lock observers use guarded
+PID/live copies, retaining live PID0 separately from absence. Complete-stop
+diagnostics use a separate scalar per_cpu capture, generation revalidation
+and existing stopped_read. The exception constructor is an exact confined
+trusted mint, not a language proof of physical nonmigration. The measured
+source is 521e320b; both platforms retain the 544-byte execution-state
+layout and add 72-byte observation plus 192-byte stop capture payload.
+Image/page reservations and both bounded pool samples remain unchanged.
+The physical incremental publication observation is 165.545 ns per one
+current-plus-stack pair, not per switch or individually per publisher.
+The accounting, artifact hashes and corrected frame/callpath boundary are
+in docs/EXECUTION_STATE_PER_CPU_SPACE_2026-11-09.txt and its evidence JSON.
+This completes the ExecutionState slice, not the globals or preemption
+milestone.

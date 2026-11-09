@@ -1,0 +1,1537 @@
+{
+  "schema": "takibi.execution-state-milestone/v1",
+  "date": "2026-11-09",
+  "archives": {
+    "baseline": {
+      "source_head": "762abcedd3103cf7e94d10da3327538755ff55bf",
+      "archive": "/workspaces/takibi-claude/.git/takibi-land/baselines/638-before-percpu-762abced",
+      "manifest_sha256": "31aec84c25802a352dfee9e236f0b811867179fb7685462c13f5d1bca3d0dff4",
+      "selected_files": [
+        {
+          "path": "kernel/build/qemu/kernel.elf",
+          "bytes": 1300400,
+          "sha256": "38dd469683fed22634a564cba53f6c6e2e00f0c8382d4bb9bf07a5809217b649"
+        },
+        {
+          "path": "kernel/build/qemu/main.o",
+          "bytes": 2966400,
+          "sha256": "f57ff2cca0f10c9028e39b3840e70e4be2c1b738f912364c6fdb9a76b72da0e2"
+        },
+        {
+          "path": "kernel/build/qemu/main.debug.o",
+          "bytes": 7769360,
+          "sha256": "8aba56183f1ffb02a02199798d901816c09317265fe37290b32a85478d473885"
+        },
+        {
+          "path": "kernel/build/rpi5/kernel.elf",
+          "bytes": 4718056,
+          "sha256": "05ce3d62bd2f30c91c25f5c6864175bc10577c04e5c62e7d2f2e14a1857bd1aa"
+        },
+        {
+          "path": "kernel/build/rpi5/main.o",
+          "bytes": 6510504,
+          "sha256": "4295bf43f161fa7cae4e40e7bd62312ca8b68036cef97d64ddb74544a88ad109"
+        },
+        {
+          "path": "kernel/build/rpi5/main.debug.o",
+          "bytes": 12040760,
+          "sha256": "2df4b45743ddec21134679073809904b9c2ed34098920a2bb9d2cde87419e5b9"
+        },
+        {
+          "path": "_build/kernel-hwtest-rpi5/uart.log",
+          "bytes": 117596,
+          "sha256": "9bda5831c8a26bebc93274059c3ab09ab8ca8d5536af64fa9e5ddade3cc296dc"
+        },
+        {
+          "path": "_build/kernel-hwtest-rpi5/uart-timing.log",
+          "bytes": 132620,
+          "sha256": "5ce1b79debbca27ecfb756a5104bee55c9a4e1801ecd0056d1082c2a0b03ab2e"
+        },
+        {
+          "path": "_build/kernel-hwtest-rpi5/busy-pair-profile.json",
+          "bytes": 2461,
+          "sha256": "264db742c0cda421755775f8add61c307841064524e174a6826bef14d94ec2f1"
+        },
+        {
+          "path": "_build/kernel-hwtest-rpi5/move-cost.json",
+          "bytes": 2131,
+          "sha256": "330d73bf1e618f4de135973787971602bc7d4197e8065f90df9486e94fe9bdb1"
+        }
+      ]
+    },
+    "candidate": {
+      "source_head": "521e320b1d33155acb398bdd9e0ca077ea8d066f",
+      "archive": "/workspaces/takibi-claude/.git/takibi-land/baselines/638-percpu-521e320b",
+      "manifest_sha256": "36b3c1435c40b128485ad1848a039d52d5df82d520d894d30dee05f0bc5b7892",
+      "selected_files": [
+        {
+          "path": "kernel/build/qemu/kernel.elf",
+          "bytes": 1302624,
+          "sha256": "605eb9bd90b45649c78d2bb7b9bcb48d269a5d412aeefc4e8a673b6d9157fa05"
+        },
+        {
+          "path": "kernel/build/qemu/main.o",
+          "bytes": 2980640,
+          "sha256": "040482cf8ae122196499d8639e56d2cf93dd43d8c2962706b707ca8890466bb1"
+        },
+        {
+          "path": "kernel/build/qemu/main.debug.o",
+          "bytes": 7796560,
+          "sha256": "34711c8f04deb75ca2b91340031acbda5de07d6fc45c93d187df0238cacbc1a6"
+        },
+        {
+          "path": "kernel/build/rpi5/kernel.elf",
+          "bytes": 4724384,
+          "sha256": "499796d7707afa81c598d25e4debec4f2d2a2c1db48a3c311b50c8cf98218f66"
+        },
+        {
+          "path": "kernel/build/rpi5/main.o",
+          "bytes": 6525136,
+          "sha256": "285b67284b7f9965402d580a1c655c94b5de2046affb82584f871bb08a35a42a"
+        },
+        {
+          "path": "kernel/build/rpi5/main.debug.o",
+          "bytes": 12069064,
+          "sha256": "36b7dc7d3f489e08502df0c1b57350dccd737aaad82b7efd39e131ae428d86bf"
+        },
+        {
+          "path": "_build/kernel-hwtest-rpi5/uart.log",
+          "bytes": 117643,
+          "sha256": "ad624d815c4ff6d3ede937b77b0038feb7afd22263114e17bee19c8ff4442a4b"
+        },
+        {
+          "path": "_build/kernel-hwtest-rpi5/uart-timing.log",
+          "bytes": 132666,
+          "sha256": "a24653912b66137144a5b033587a8dfbcdfe0ed4f45a294ca88c3255ca24c58e"
+        },
+        {
+          "path": "_build/kernel-hwtest-rpi5/busy-pair-profile.json",
+          "bytes": 2460,
+          "sha256": "32bafe0e03e693e852f58a1d7cbda631a19d6eb28f1df245d9249203fd360374"
+        },
+        {
+          "path": "_build/kernel-hwtest-rpi5/move-cost.json",
+          "bytes": 2138,
+          "sha256": "3ba4d812847c4e8aad2d75c6dc32231252653ae1a117e83ee1fd9439c706de1e"
+        }
+      ]
+    }
+  },
+  "source_fingerprint": "8dee815f178bee210275a6ecffa1e1f56549e247320e1d4a4774dd357c569ce8",
+  "linked_space": [
+    {
+      "target": "qemu",
+      "baseline_head": "762abcedd3103cf7e94d10da3327538755ff55bf",
+      "candidate_head": "521e320b1d33155acb398bdd9e0ca077ea8d066f",
+      "baseline": {
+        "text": 811080,
+        "data": 4600,
+        "bss": 1302528
+      },
+      "candidate": {
+        "text": 815368,
+        "data": 4616,
+        "bss": 1302528
+      },
+      "delta": {
+        "text": 4288,
+        "data": 16,
+        "bss": 0
+      },
+      "usable_ram_start": [
+        "0x40208000",
+        "0x40208000"
+      ],
+      "changed_symbols": {
+        "execution_observation": [
+          null,
+          72
+        ],
+        "execution_stop": [
+          null,
+          192
+        ]
+      }
+    },
+    {
+      "target": "rpi5",
+      "baseline_head": "762abcedd3103cf7e94d10da3327538755ff55bf",
+      "candidate_head": "521e320b1d33155acb398bdd9e0ca077ea8d066f",
+      "baseline": {
+        "text": 4196036,
+        "data": 5576,
+        "bss": 1929216
+      },
+      "candidate": {
+        "text": 4200396,
+        "data": 5592,
+        "bss": 1925120
+      },
+      "delta": {
+        "text": 4360,
+        "data": 16,
+        "bss": -4096
+      },
+      "usable_ram_start": [
+        "0x7e0000",
+        "0x7e0000"
+      ],
+      "changed_symbols": {
+        "execution_observation": [
+          null,
+          72
+        ],
+        "execution_stop": [
+          null,
+          192
+        ]
+      }
+    }
+  ],
+  "sections": [
+    {
+      "target": "qemu",
+      "side": "baseline",
+      "sections": {
+        ".text": 635088,
+        ".rodata": 54568,
+        ".eh_frame": 121424,
+        ".got": 4464,
+        ".data": 136,
+        ".bss": 909312,
+        ".stack": 393216
+      },
+      "symbols": {
+        "execution_state": 544
+      }
+    },
+    {
+      "target": "qemu",
+      "side": "candidate",
+      "sections": {
+        ".text": 638736,
+        ".rodata": 54696,
+        ".eh_frame": 121936,
+        ".got": 4480,
+        ".data": 136,
+        ".bss": 909312,
+        ".stack": 393216
+      },
+      "symbols": {
+        "execution_observation": 72,
+        "execution_state": 544,
+        "execution_stop": 192
+      }
+    },
+    {
+      "target": "rpi5",
+      "side": "baseline",
+      "sections": {
+        ".text": 679012,
+        ".rodata": 3384808,
+        ".eh_frame": 132216,
+        ".got": 5240,
+        ".data": 336,
+        ".bss": 1536000,
+        ".stack": 393216
+      },
+      "symbols": {
+        "execution_state": 544,
+        "usb_provision_container": 3327501
+      }
+    },
+    {
+      "target": "rpi5",
+      "side": "candidate",
+      "sections": {
+        ".text": 682724,
+        ".rodata": 3384936,
+        ".eh_frame": 132736,
+        ".got": 5256,
+        ".data": 336,
+        ".bss": 1531904,
+        ".stack": 393216
+      },
+      "symbols": {
+        "execution_observation": 72,
+        "execution_state": 544,
+        "execution_stop": 192,
+        "usb_provision_container": 3327501
+      }
+    }
+  ],
+  "corrected_frame_method": "Prologue-only observations, first 12 lines per emitted function; not a callgraph stack bound. Original JSON retained as undercount witness. Local measurement only; shared checker unchanged.",
+  "corrected_candidate_frames": {
+    "kernel/build/qemu/main.o": {
+      "command": [
+        "llvm-objdump-19",
+        "-d",
+        "--no-show-raw-insn",
+        "kernel/build/qemu/main.o"
+      ],
+      "object_sha256": "040482cf8ae122196499d8639e56d2cf93dd43d8c2962706b707ca8890466bb1",
+      "objdump_capture": "/tmp/takibi-execution-percpu-qemu-main.o-objdump.txt",
+      "frames": {
+        "kernel_process_scheduler_probe": 3184,
+        "kernel_process_execution_observation_probe": 32,
+        "kernel_process_execution_observation_probe_held": 48,
+        "execution_current_set_live_here": 48,
+        "execution_current_set_live": 16,
+        "execution_stack_set_live": 16,
+        "execution_current_publish": 32,
+        "execution_stack_publish": 32,
+        "scheduled_process_pid_of_handle": 16,
+        "scheduled_process_pid_of_slot": 16,
+        "scheduled_process_scalar_snapshot": 96,
+        "process_pool_lock": 32,
+        "process_pool_unlock": 16,
+        "process_run_lock": 32,
+        "process_run_unlock": 32,
+        "execution_publication_cost_sample": 64,
+        "execution_publication_cost_log": 48
+      },
+      "undercounted_named_functions": {
+        "kernel_process_scheduler_probe": {
+          "old": 3088,
+          "corrected": 3184
+        },
+        "kernel_process_execution_observation_probe": {
+          "old": 0,
+          "corrected": 32
+        },
+        "kernel_process_execution_observation_probe_held": {
+          "old": 0,
+          "corrected": 48
+        },
+        "execution_current_set_live_here": {
+          "old": 0,
+          "corrected": 48
+        },
+        "execution_current_set_live": {
+          "old": 0,
+          "corrected": 16
+        },
+        "execution_stack_set_live": {
+          "old": 0,
+          "corrected": 16
+        },
+        "execution_current_publish": {
+          "old": 0,
+          "corrected": 32
+        },
+        "execution_stack_publish": {
+          "old": 0,
+          "corrected": 32
+        },
+        "scheduled_process_pid_of_handle": {
+          "old": 0,
+          "corrected": 16
+        },
+        "scheduled_process_pid_of_slot": {
+          "old": 0,
+          "corrected": 16
+        },
+        "scheduled_process_scalar_snapshot": {
+          "old": 0,
+          "corrected": 96
+        },
+        "process_pool_lock": {
+          "old": 0,
+          "corrected": 32
+        },
+        "process_pool_unlock": {
+          "old": 0,
+          "corrected": 16
+        },
+        "process_run_lock": {
+          "old": 0,
+          "corrected": 32
+        },
+        "process_run_unlock": {
+          "old": 0,
+          "corrected": 32
+        },
+        "execution_publication_cost_sample": {
+          "old": 0,
+          "corrected": 64
+        },
+        "execution_publication_cost_log": {
+          "old": 0,
+          "corrected": 48
+        }
+      }
+    },
+    "kernel/build/qemu/main.debug.o": {
+      "command": [
+        "llvm-objdump-19",
+        "-d",
+        "--no-show-raw-insn",
+        "kernel/build/qemu/main.debug.o"
+      ],
+      "object_sha256": "34711c8f04deb75ca2b91340031acbda5de07d6fc45c93d187df0238cacbc1a6",
+      "objdump_capture": "/tmp/takibi-execution-percpu-qemu-main.debug.o-objdump.txt",
+      "frames": {
+        "kernel_process_scheduler_probe": 3312,
+        "kernel_process_execution_observation_probe": 48,
+        "kernel_process_execution_observation_probe_held": 64,
+        "execution_current_set_live_here": 48,
+        "execution_current_set_live": 32,
+        "execution_stack_set_live": 32,
+        "execution_current_publish": 64,
+        "execution_stack_publish": 64,
+        "scheduled_process_pid_of_handle": 48,
+        "scheduled_process_pid_of_slot": 32,
+        "scheduled_process_scalar_snapshot": 128,
+        "process_pool_lock": 32,
+        "process_pool_unlock": 32,
+        "process_run_lock": 32,
+        "process_run_unlock": 32,
+        "execution_publication_cost_sample": 80,
+        "execution_publication_cost_log": 96
+      },
+      "undercounted_named_functions": {
+        "kernel_process_scheduler_probe": {
+          "old": 3216,
+          "corrected": 3312
+        },
+        "process_pool_lock": {
+          "old": 0,
+          "corrected": 32
+        }
+      }
+    },
+    "kernel/build/rpi5/main.o": {
+      "command": [
+        "llvm-objdump-19",
+        "-d",
+        "--no-show-raw-insn",
+        "kernel/build/rpi5/main.o"
+      ],
+      "object_sha256": "285b67284b7f9965402d580a1c655c94b5de2046affb82584f871bb08a35a42a",
+      "objdump_capture": "/tmp/takibi-execution-percpu-rpi5-main.o-objdump.txt",
+      "frames": {
+        "kernel_process_scheduler_probe": 3184,
+        "kernel_process_execution_observation_probe": 32,
+        "kernel_process_execution_observation_probe_held": 48,
+        "execution_current_set_live_here": 48,
+        "execution_current_set_live": 16,
+        "execution_stack_set_live": 16,
+        "execution_current_publish": 32,
+        "execution_stack_publish": 32,
+        "scheduled_process_pid_of_handle": 16,
+        "scheduled_process_pid_of_slot": 16,
+        "scheduled_process_scalar_snapshot": 96,
+        "process_pool_lock": 32,
+        "process_pool_unlock": 16,
+        "process_run_lock": 32,
+        "process_run_unlock": 32,
+        "execution_publication_cost_sample": 64,
+        "execution_publication_cost_log": 48
+      },
+      "undercounted_named_functions": {
+        "kernel_process_scheduler_probe": {
+          "old": 3088,
+          "corrected": 3184
+        },
+        "kernel_process_execution_observation_probe": {
+          "old": 0,
+          "corrected": 32
+        },
+        "kernel_process_execution_observation_probe_held": {
+          "old": 0,
+          "corrected": 48
+        },
+        "execution_current_set_live_here": {
+          "old": 0,
+          "corrected": 48
+        },
+        "execution_current_set_live": {
+          "old": 0,
+          "corrected": 16
+        },
+        "execution_stack_set_live": {
+          "old": 0,
+          "corrected": 16
+        },
+        "execution_current_publish": {
+          "old": 0,
+          "corrected": 32
+        },
+        "execution_stack_publish": {
+          "old": 0,
+          "corrected": 32
+        },
+        "scheduled_process_pid_of_handle": {
+          "old": 0,
+          "corrected": 16
+        },
+        "scheduled_process_pid_of_slot": {
+          "old": 0,
+          "corrected": 16
+        },
+        "scheduled_process_scalar_snapshot": {
+          "old": 0,
+          "corrected": 96
+        },
+        "process_pool_lock": {
+          "old": 0,
+          "corrected": 32
+        },
+        "process_pool_unlock": {
+          "old": 0,
+          "corrected": 16
+        },
+        "process_run_lock": {
+          "old": 0,
+          "corrected": 32
+        },
+        "process_run_unlock": {
+          "old": 0,
+          "corrected": 32
+        },
+        "execution_publication_cost_sample": {
+          "old": 0,
+          "corrected": 64
+        },
+        "execution_publication_cost_log": {
+          "old": 0,
+          "corrected": 48
+        }
+      }
+    },
+    "kernel/build/rpi5/main.debug.o": {
+      "command": [
+        "llvm-objdump-19",
+        "-d",
+        "--no-show-raw-insn",
+        "kernel/build/rpi5/main.debug.o"
+      ],
+      "object_sha256": "36b7dc7d3f489e08502df0c1b57350dccd737aaad82b7efd39e131ae428d86bf",
+      "objdump_capture": "/tmp/takibi-execution-percpu-rpi5-main.debug.o-objdump.txt",
+      "frames": {
+        "kernel_process_scheduler_probe": 3312,
+        "kernel_process_execution_observation_probe": 48,
+        "kernel_process_execution_observation_probe_held": 64,
+        "execution_current_set_live_here": 48,
+        "execution_current_set_live": 32,
+        "execution_stack_set_live": 32,
+        "execution_current_publish": 64,
+        "execution_stack_publish": 64,
+        "scheduled_process_pid_of_handle": 48,
+        "scheduled_process_pid_of_slot": 32,
+        "scheduled_process_scalar_snapshot": 128,
+        "process_pool_lock": 32,
+        "process_pool_unlock": 32,
+        "process_run_lock": 32,
+        "process_run_unlock": 32,
+        "execution_publication_cost_sample": 80,
+        "execution_publication_cost_log": 96
+      },
+      "undercounted_named_functions": {
+        "kernel_process_scheduler_probe": {
+          "old": 3216,
+          "corrected": 3312
+        },
+        "process_pool_lock": {
+          "old": 0,
+          "corrected": 32
+        }
+      }
+    }
+  },
+  "corrected_baseline_frames": [
+    {
+      "head": "762abcedd3103cf7e94d10da3327538755ff55bf",
+      "object": "kernel/build/qemu/main.o",
+      "sha256": "f57ff2cca0f10c9028e39b3840e70e4be2c1b738f912364c6fdb9a76b72da0e2",
+      "command": [
+        "llvm-objdump-19",
+        "-d",
+        "--no-show-raw-insn",
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/638-before-percpu-762abced/kernel/build/qemu/main.o"
+      ],
+      "capture": "/tmp/takibi-execution-baseline-762abced-qemu-main.o-objdump.txt",
+      "corrected_frames": {
+        "kernel_process_scheduler_probe": 3184,
+        "ext2_update_regular_file": 2528,
+        "scheduled_process_scalar_snapshot": 96,
+        "process_pool_lock": 32,
+        "process_run_lock": 32,
+        "process_run_unlock": 32
+      }
+    },
+    {
+      "head": "762abcedd3103cf7e94d10da3327538755ff55bf",
+      "object": "kernel/build/qemu/main.debug.o",
+      "sha256": "8aba56183f1ffb02a02199798d901816c09317265fe37290b32a85478d473885",
+      "command": [
+        "llvm-objdump-19",
+        "-d",
+        "--no-show-raw-insn",
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/638-before-percpu-762abced/kernel/build/qemu/main.debug.o"
+      ],
+      "capture": "/tmp/takibi-execution-baseline-762abced-qemu-main.debug.o-objdump.txt",
+      "corrected_frames": {
+        "kernel_process_scheduler_probe": 3312,
+        "ext2_update_regular_file": 2640,
+        "scheduled_process_scalar_snapshot": 128,
+        "process_pool_lock": 32,
+        "process_run_lock": 32,
+        "process_run_unlock": 32
+      }
+    },
+    {
+      "head": "762abcedd3103cf7e94d10da3327538755ff55bf",
+      "object": "kernel/build/rpi5/main.o",
+      "sha256": "4295bf43f161fa7cae4e40e7bd62312ca8b68036cef97d64ddb74544a88ad109",
+      "command": [
+        "llvm-objdump-19",
+        "-d",
+        "--no-show-raw-insn",
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/638-before-percpu-762abced/kernel/build/rpi5/main.o"
+      ],
+      "capture": "/tmp/takibi-execution-baseline-762abced-rpi5-main.o-objdump.txt",
+      "corrected_frames": {
+        "kernel_process_scheduler_probe": 3184,
+        "ext2_update_regular_file": 2528,
+        "scheduled_process_scalar_snapshot": 96,
+        "process_pool_lock": 32,
+        "process_run_lock": 32,
+        "process_run_unlock": 32
+      }
+    },
+    {
+      "head": "762abcedd3103cf7e94d10da3327538755ff55bf",
+      "object": "kernel/build/rpi5/main.debug.o",
+      "sha256": "2df4b45743ddec21134679073809904b9c2ed34098920a2bb9d2cde87419e5b9",
+      "command": [
+        "llvm-objdump-19",
+        "-d",
+        "--no-show-raw-insn",
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/638-before-percpu-762abced/kernel/build/rpi5/main.debug.o"
+      ],
+      "capture": "/tmp/takibi-execution-baseline-762abced-rpi5-main.debug.o-objdump.txt",
+      "corrected_frames": {
+        "kernel_process_scheduler_probe": 3312,
+        "ext2_update_regular_file": 2640,
+        "scheduled_process_scalar_snapshot": 128,
+        "process_pool_lock": 32,
+        "process_run_lock": 32,
+        "process_run_unlock": 32
+      }
+    }
+  ],
+  "partial_debug_chain_bytes": {
+    "PID0_probe_through_pool_lock_entry": 3760,
+    "cost_probe_through_pool_lock_entry": 3840,
+    "exclusions": "pool-lock callees, other branches, interrupts and generated frames; not whole-callgraph stack bounds"
+  },
+  "publication_cost": {
+    "raw_line": "RECORDED execution publication cost: pairs=4096 plain=17900 published=54516 samples=3 live_pid=0 trace=0 freq=54000000",
+    "unit": "one current plus one stack publication, not a whole context switch or an individually measured publisher",
+    "context": "CPU0 boot driver before peer dispatch, live boot PID0; protocol tracing inactive; one run hold/CPU region per pair",
+    "pairs_per_sample": 4096,
+    "samples": 3,
+    "frequency_hz": 54000000,
+    "empty_envelope_ticks": 17900,
+    "published_ticks": 54516,
+    "empty_envelope_ns_per_pair": 80.92809606481481,
+    "published_ns_per_pair": 246.47352430555554,
+    "incremental_ns_per_pair": 165.54542824074073,
+    "statistic": "separate minima of three finite samples, each 4096 pairs; includes loop/clock and live pooled PID lookups; not a bound"
+  },
+  "busy_pair": {
+    "baseline": {
+      "schema": "takibi.kernel.workload/v2",
+      "workload": "busy-pair",
+      "environment": {
+        "target": "rpi5",
+        "cpu_count": 4,
+        "commit": "762abcedd3103cf7e94d10da3327538755ff55bf"
+      },
+      "input": {
+        "steps_per_iteration": 16000000,
+        "iteration_goal": 16
+      },
+      "interval": {
+        "elapsed_cycles": 15582052,
+        "counter_frequency_hz": 54000000,
+        "elapsed_seconds": 0.28855651851851855
+      },
+      "results": {
+        "completed_iterations": 16,
+        "result_count": 2,
+        "pids": [
+          204,
+          205
+        ],
+        "checksums": [
+          9513312309693708938,
+          16285069905444712798
+        ],
+        "reported_cpu_cycles": [
+          15582052,
+          15277799
+        ]
+      },
+      "accounting": {
+        "dominant_state": "idle",
+        "aggregate_running_cycles": 30404859,
+        "aggregate_idle_cycles": 31923349,
+        "per_cpu": [
+          {
+            "cpu": 0,
+            "wall_cycles": 15582052,
+            "el0_cycles": 15567283,
+            "el1_cycles": 5372,
+            "irq_cycles": 9397,
+            "idle_cycles": 0,
+            "context_switches": 0,
+            "blocks": 0,
+            "wakeups": 0,
+            "syscalls": 9,
+            "block_read_bytes": 0,
+            "block_write_bytes": 0,
+            "network_rx_bytes": 0,
+            "network_tx_bytes": 0
+          },
+          {
+            "cpu": 1,
+            "wall_cycles": 15582052,
+            "el0_cycles": 14610059,
+            "el1_cycles": 162929,
+            "irq_cycles": 12980,
+            "idle_cycles": 796084,
+            "context_switches": 39,
+            "blocks": 20,
+            "wakeups": 18,
+            "syscalls": 63,
+            "block_read_bytes": 2048,
+            "block_write_bytes": 0,
+            "network_rx_bytes": 329,
+            "network_tx_bytes": 54
+          },
+          {
+            "cpu": 2,
+            "wall_cycles": 15582052,
+            "el0_cycles": 3354,
+            "el1_cycles": 18276,
+            "irq_cycles": 8894,
+            "idle_cycles": 15551528,
+            "context_switches": 0,
+            "blocks": 19,
+            "wakeups": 19,
+            "syscalls": 38,
+            "block_read_bytes": 0,
+            "block_write_bytes": 0,
+            "network_rx_bytes": 0,
+            "network_tx_bytes": 0
+          },
+          {
+            "cpu": 3,
+            "wall_cycles": 15582052,
+            "el0_cycles": 0,
+            "el1_cycles": 0,
+            "irq_cycles": 6315,
+            "idle_cycles": 15575737,
+            "context_switches": 0,
+            "blocks": 0,
+            "wakeups": 0,
+            "syscalls": 0,
+            "block_read_bytes": 0,
+            "block_write_bytes": 0,
+            "network_rx_bytes": 0,
+            "network_tx_bytes": 0
+          }
+        ]
+      }
+    },
+    "candidate": {
+      "schema": "takibi.kernel.workload/v2",
+      "workload": "busy-pair",
+      "environment": {
+        "target": "rpi5",
+        "cpu_count": 4,
+        "commit": "521e320b1d33155acb398bdd9e0ca077ea8d066f"
+      },
+      "input": {
+        "steps_per_iteration": 16000000,
+        "iteration_goal": 16
+      },
+      "interval": {
+        "elapsed_cycles": 15582309,
+        "counter_frequency_hz": 54000000,
+        "elapsed_seconds": 0.2885612777777778
+      },
+      "results": {
+        "completed_iterations": 16,
+        "result_count": 2,
+        "pids": [
+          204,
+          205
+        ],
+        "checksums": [
+          9513312309693708938,
+          16285069905444712798
+        ],
+        "reported_cpu_cycles": [
+          15582309,
+          15179855
+        ]
+      },
+      "accounting": {
+        "dominant_state": "idle",
+        "aggregate_running_cycles": 30466276,
+        "aggregate_idle_cycles": 31862960,
+        "per_cpu": [
+          {
+            "cpu": 0,
+            "wall_cycles": 15582309,
+            "el0_cycles": 15565900,
+            "el1_cycles": 7065,
+            "irq_cycles": 9344,
+            "idle_cycles": 0,
+            "context_switches": 0,
+            "blocks": 0,
+            "wakeups": 0,
+            "syscalls": 9,
+            "block_read_bytes": 0,
+            "block_write_bytes": 0,
+            "network_rx_bytes": 0,
+            "network_tx_bytes": 0
+          },
+          {
+            "cpu": 1,
+            "wall_cycles": 15582309,
+            "el0_cycles": 14672791,
+            "el1_cycles": 164649,
+            "irq_cycles": 13198,
+            "idle_cycles": 731671,
+            "context_switches": 41,
+            "blocks": 22,
+            "wakeups": 20,
+            "syscalls": 65,
+            "block_read_bytes": 2048,
+            "block_write_bytes": 0,
+            "network_rx_bytes": 329,
+            "network_tx_bytes": 54
+          },
+          {
+            "cpu": 2,
+            "wall_cycles": 15582309,
+            "el0_cycles": 0,
+            "el1_cycles": 0,
+            "irq_cycles": 6592,
+            "idle_cycles": 15575717,
+            "context_switches": 0,
+            "blocks": 0,
+            "wakeups": 0,
+            "syscalls": 0,
+            "block_read_bytes": 0,
+            "block_write_bytes": 0,
+            "network_rx_bytes": 0,
+            "network_tx_bytes": 0
+          },
+          {
+            "cpu": 3,
+            "wall_cycles": 15582309,
+            "el0_cycles": 3277,
+            "el1_cycles": 17325,
+            "irq_cycles": 6135,
+            "idle_cycles": 15555572,
+            "context_switches": 0,
+            "blocks": 18,
+            "wakeups": 18,
+            "syscalls": 36,
+            "block_read_bytes": 0,
+            "block_write_bytes": 0,
+            "network_rx_bytes": 0,
+            "network_tx_bytes": 0
+          }
+        ]
+      }
+    }
+  },
+  "move_cost": {
+    "baseline": {
+      "schema": "takibi.kernel.move-cost/v1",
+      "environment": {
+        "target": "rpi5",
+        "commit": "762abcedd3103cf7e94d10da3327538755ff55bf"
+      },
+      "working_set_bytes": 262144,
+      "rounds": [
+        {
+          "round": 0,
+          "cpu": 2,
+          "cold_cycles": 81112,
+          "warm_cycles": 29870,
+          "cold_instructions": 62165,
+          "warm_instructions": 62165,
+          "disturbed": false,
+          "move_cycles": 51242
+        },
+        {
+          "round": 1,
+          "cpu": 3,
+          "cold_cycles": 79741,
+          "warm_cycles": 29810,
+          "cold_instructions": 62165,
+          "warm_instructions": 62165,
+          "disturbed": false,
+          "move_cycles": 49931
+        },
+        {
+          "round": 2,
+          "cpu": 2,
+          "cold_cycles": 79338,
+          "warm_cycles": 29801,
+          "cold_instructions": 62165,
+          "warm_instructions": 62165,
+          "disturbed": false,
+          "move_cycles": 49537
+        },
+        {
+          "round": 3,
+          "cpu": 3,
+          "cold_cycles": 79066,
+          "warm_cycles": 29713,
+          "cold_instructions": 62165,
+          "warm_instructions": 62165,
+          "disturbed": false,
+          "move_cycles": 49353
+        },
+        {
+          "round": 4,
+          "cpu": 2,
+          "cold_cycles": 79582,
+          "warm_cycles": 29755,
+          "cold_instructions": 62165,
+          "warm_instructions": 62165,
+          "disturbed": false,
+          "move_cycles": 49827
+        },
+        {
+          "round": 5,
+          "cpu": 3,
+          "cold_cycles": 93486,
+          "warm_cycles": 29719,
+          "cold_instructions": 85534,
+          "warm_instructions": 62165,
+          "disturbed": true,
+          "move_cycles": 63767
+        },
+        {
+          "round": 6,
+          "cpu": 2,
+          "cold_cycles": 79015,
+          "warm_cycles": 29744,
+          "cold_instructions": 62165,
+          "warm_instructions": 62165,
+          "disturbed": false,
+          "move_cycles": 49271
+        },
+        {
+          "round": 7,
+          "cpu": 3,
+          "cold_cycles": 79249,
+          "warm_cycles": 29724,
+          "cold_instructions": 62165,
+          "warm_instructions": 62165,
+          "disturbed": false,
+          "move_cycles": 49525
+        }
+      ],
+      "disturbed_rounds": 1,
+      "median_cold_cycles": 79338,
+      "median_warm_cycles": 29755,
+      "median_move_cycles": 49537,
+      "authoritative": true
+    },
+    "candidate": {
+      "schema": "takibi.kernel.move-cost/v1",
+      "environment": {
+        "target": "rpi5",
+        "commit": "521e320b1d33155acb398bdd9e0ca077ea8d066f"
+      },
+      "working_set_bytes": 262144,
+      "rounds": [
+        {
+          "round": 0,
+          "cpu": 2,
+          "cold_cycles": 80834,
+          "warm_cycles": 29881,
+          "cold_instructions": 62628,
+          "warm_instructions": 62628,
+          "disturbed": false,
+          "move_cycles": 50953
+        },
+        {
+          "round": 1,
+          "cpu": 3,
+          "cold_cycles": 80127,
+          "warm_cycles": 29904,
+          "cold_instructions": 62628,
+          "warm_instructions": 62628,
+          "disturbed": false,
+          "move_cycles": 50223
+        },
+        {
+          "round": 2,
+          "cpu": 2,
+          "cold_cycles": 79802,
+          "warm_cycles": 29818,
+          "cold_instructions": 62628,
+          "warm_instructions": 62628,
+          "disturbed": false,
+          "move_cycles": 49984
+        },
+        {
+          "round": 3,
+          "cpu": 3,
+          "cold_cycles": 79362,
+          "warm_cycles": 29818,
+          "cold_instructions": 62628,
+          "warm_instructions": 62628,
+          "disturbed": false,
+          "move_cycles": 49544
+        },
+        {
+          "round": 4,
+          "cpu": 2,
+          "cold_cycles": 79459,
+          "warm_cycles": 29838,
+          "cold_instructions": 62628,
+          "warm_instructions": 62628,
+          "disturbed": false,
+          "move_cycles": 49621
+        },
+        {
+          "round": 5,
+          "cpu": 3,
+          "cold_cycles": 79344,
+          "warm_cycles": 29822,
+          "cold_instructions": 62628,
+          "warm_instructions": 62628,
+          "disturbed": false,
+          "move_cycles": 49522
+        },
+        {
+          "round": 6,
+          "cpu": 2,
+          "cold_cycles": 79309,
+          "warm_cycles": 29823,
+          "cold_instructions": 62628,
+          "warm_instructions": 62628,
+          "disturbed": false,
+          "move_cycles": 49486
+        },
+        {
+          "round": 7,
+          "cpu": 3,
+          "cold_cycles": 79030,
+          "warm_cycles": 29781,
+          "cold_instructions": 62628,
+          "warm_instructions": 62628,
+          "disturbed": false,
+          "move_cycles": 49249
+        }
+      ],
+      "disturbed_rounds": 0,
+      "median_cold_cycles": 79410.5,
+      "median_warm_cycles": 29822.5,
+      "median_move_cycles": 49582.5,
+      "authoritative": true
+    }
+  },
+  "irqsoff_cost_samples": {
+    "baseline": {
+      "raw_samples": [
+        [
+          4096,
+          6692,
+          9228,
+          54000000
+        ],
+        [
+          4096,
+          6693,
+          9230,
+          54000000
+        ],
+        [
+          4096,
+          6691,
+          9225,
+          54000000
+        ],
+        [
+          4096,
+          6690,
+          9230,
+          54000000
+        ],
+        [
+          4096,
+          6691,
+          9229,
+          54000000
+        ],
+        [
+          4096,
+          6691,
+          9229,
+          54000000
+        ],
+        [
+          4096,
+          6761,
+          9230,
+          54000000
+        ],
+        [
+          4096,
+          6692,
+          9228,
+          54000000
+        ],
+        [
+          4096,
+          6693,
+          9230,
+          54000000
+        ],
+        [
+          4096,
+          6691,
+          9225,
+          54000000
+        ],
+        [
+          4096,
+          6690,
+          9230,
+          54000000
+        ],
+        [
+          4096,
+          6691,
+          9229,
+          54000000
+        ],
+        [
+          4096,
+          6691,
+          9229,
+          54000000
+        ],
+        [
+          4096,
+          6761,
+          9230,
+          54000000
+        ]
+      ],
+      "scope": "existing IRQ-off sampler, least of 14 samples of 4096 mask pairs; separate from publication timing"
+    },
+    "candidate": {
+      "raw_samples": [
+        [
+          4096,
+          6693,
+          8816,
+          54000000
+        ],
+        [
+          4096,
+          6693,
+          8813,
+          54000000
+        ],
+        [
+          4096,
+          6692,
+          8814,
+          54000000
+        ],
+        [
+          4096,
+          6691,
+          8811,
+          54000000
+        ],
+        [
+          4096,
+          6690,
+          8814,
+          54000000
+        ],
+        [
+          4096,
+          6691,
+          8816,
+          54000000
+        ],
+        [
+          4096,
+          6691,
+          8814,
+          54000000
+        ],
+        [
+          4096,
+          6693,
+          8816,
+          54000000
+        ],
+        [
+          4096,
+          6693,
+          8813,
+          54000000
+        ],
+        [
+          4096,
+          6692,
+          8814,
+          54000000
+        ],
+        [
+          4096,
+          6691,
+          8811,
+          54000000
+        ],
+        [
+          4096,
+          6690,
+          8814,
+          54000000
+        ],
+        [
+          4096,
+          6691,
+          8816,
+          54000000
+        ],
+        [
+          4096,
+          6691,
+          8814,
+          54000000
+        ]
+      ],
+      "scope": "existing IRQ-off sampler, least of 14 samples of 4096 mask pairs; separate from publication timing"
+    }
+  },
+  "other_boot_cost_records": {
+    "baseline": [
+      "irq mask cost: sample=0 rounds=4096 pmr=6692 daif=2327 sampled=9228 frequency=54000000",
+      "irq mask cost: sample=1 rounds=4096 pmr=6693 daif=2334 sampled=9230 frequency=54000000",
+      "irq mask cost: sample=2 rounds=4096 pmr=6691 daif=2320 sampled=9225 frequency=54000000",
+      "irq mask cost: sample=3 rounds=4096 pmr=6690 daif=2333 sampled=9230 frequency=54000000",
+      "irq mask cost: sample=4 rounds=4096 pmr=6691 daif=2337 sampled=9229 frequency=54000000",
+      "irq mask cost: sample=5 rounds=4096 pmr=6691 daif=2325 sampled=9229 frequency=54000000",
+      "irq mask cost: sample=6 rounds=4096 pmr=6761 daif=2333 sampled=9230 frequency=54000000",
+      "RECORDED pool lock wait cost: pairs=4096 plain=17830 counted=17793 freq=54000000",
+      "RECORDED current read cost: reads=4096 ticks=1569 running=0 freq=54000000"
+    ],
+    "candidate": [
+      "irq mask cost: sample=0 rounds=4096 pmr=6693 daif=2341 sampled=8816 frequency=54000000",
+      "irq mask cost: sample=1 rounds=4096 pmr=6693 daif=2336 sampled=8813 frequency=54000000",
+      "irq mask cost: sample=2 rounds=4096 pmr=6692 daif=2327 sampled=8814 frequency=54000000",
+      "irq mask cost: sample=3 rounds=4096 pmr=6691 daif=2341 sampled=8811 frequency=54000000",
+      "irq mask cost: sample=4 rounds=4096 pmr=6690 daif=2336 sampled=8814 frequency=54000000",
+      "irq mask cost: sample=5 rounds=4096 pmr=6691 daif=2336 sampled=8816 frequency=54000000",
+      "irq mask cost: sample=6 rounds=4096 pmr=6691 daif=2336 sampled=8814 frequency=54000000",
+      "RECORDED pool lock wait cost: pairs=4096 plain=17827 counted=17769 freq=54000000",
+      "RECORDED current read cost: reads=4096 ticks=1385 running=0 freq=54000000"
+    ]
+  },
+  "pool_samples_identical": true,
+  "pool_samples": {
+    "boot": {
+      "process": {
+        "object": 2192,
+        "pool": 24,
+        "slot": 2192,
+        "chunk": 16384,
+        "chunks": 1,
+        "capacity": 7,
+        "nonfree": 1,
+        "bytes": 16384
+      },
+      "tcp": {
+        "object": 192,
+        "pool": 24,
+        "slot": 192,
+        "chunk": 4096,
+        "chunks": 0,
+        "capacity": 0,
+        "nonfree": 0,
+        "bytes": 0
+      },
+      "retx": {
+        "object": 1616,
+        "pool": 24,
+        "slot": 1616,
+        "chunk": 8192,
+        "chunks": 0,
+        "capacity": 0,
+        "nonfree": 0,
+        "bytes": 0
+      },
+      "frame": {
+        "object": 1528,
+        "pool": 24,
+        "slot": 1528,
+        "chunk": 8192,
+        "chunks": 0,
+        "capacity": 0,
+        "nonfree": 0,
+        "bytes": 0
+      },
+      "backing": {
+        "object": 40,
+        "pool": 24,
+        "slot": 40,
+        "chunk": 4096,
+        "chunks": 0,
+        "capacity": 0,
+        "nonfree": 0,
+        "bytes": 0
+      },
+      "image": {
+        "object": 96,
+        "pool": 24,
+        "slot": 96,
+        "chunk": 4096,
+        "chunks": 1,
+        "capacity": 38,
+        "nonfree": 1,
+        "bytes": 4096
+      },
+      "fd_context": {
+        "object": 56,
+        "pool": 24,
+        "slot": 56,
+        "chunk": 4096,
+        "chunks": 1,
+        "capacity": 63,
+        "nonfree": 1,
+        "bytes": 4096
+      },
+      "fd_block": {
+        "object": 400,
+        "pool": 24,
+        "slot": 400,
+        "chunk": 4096,
+        "chunks": 1,
+        "capacity": 9,
+        "nonfree": 0,
+        "bytes": 4096
+      },
+      "object": {
+        "object": 96,
+        "pool": 24,
+        "slot": 96,
+        "chunk": 4096,
+        "chunks": 1,
+        "capacity": 38,
+        "nonfree": 1,
+        "bytes": 4096
+      },
+      "pipe": {
+        "object": 4128,
+        "pool": 24,
+        "slot": 4128,
+        "chunk": 12288,
+        "chunks": 0,
+        "capacity": 0,
+        "nonfree": 0,
+        "bytes": 0
+      },
+      "mmap_region": {
+        "object": 512,
+        "pool": 24,
+        "slot": 512,
+        "chunk": 4096,
+        "chunks": 0,
+        "capacity": 0,
+        "nonfree": 0,
+        "bytes": 0
+      }
+    },
+    "bounded_end": {
+      "process": {
+        "object": 2192,
+        "pool": 24,
+        "slot": 2192,
+        "chunk": 16384,
+        "chunks": 4,
+        "capacity": 28,
+        "nonfree": 1,
+        "bytes": 65536
+      },
+      "tcp": {
+        "object": 192,
+        "pool": 24,
+        "slot": 192,
+        "chunk": 4096,
+        "chunks": 0,
+        "capacity": 0,
+        "nonfree": 0,
+        "bytes": 0
+      },
+      "retx": {
+        "object": 1616,
+        "pool": 24,
+        "slot": 1616,
+        "chunk": 8192,
+        "chunks": 1,
+        "capacity": 5,
+        "nonfree": 0,
+        "bytes": 8192
+      },
+      "frame": {
+        "object": 1528,
+        "pool": 24,
+        "slot": 1528,
+        "chunk": 8192,
+        "chunks": 0,
+        "capacity": 0,
+        "nonfree": 0,
+        "bytes": 0
+      },
+      "backing": {
+        "object": 40,
+        "pool": 24,
+        "slot": 40,
+        "chunk": 4096,
+        "chunks": 1,
+        "capacity": 84,
+        "nonfree": 1,
+        "bytes": 4096
+      },
+      "image": {
+        "object": 96,
+        "pool": 24,
+        "slot": 96,
+        "chunk": 4096,
+        "chunks": 1,
+        "capacity": 38,
+        "nonfree": 2,
+        "bytes": 4096
+      },
+      "fd_context": {
+        "object": 56,
+        "pool": 24,
+        "slot": 56,
+        "chunk": 4096,
+        "chunks": 1,
+        "capacity": 63,
+        "nonfree": 1,
+        "bytes": 4096
+      },
+      "fd_block": {
+        "object": 400,
+        "pool": 24,
+        "slot": 400,
+        "chunk": 4096,
+        "chunks": 1,
+        "capacity": 9,
+        "nonfree": 1,
+        "bytes": 4096
+      },
+      "object": {
+        "object": 96,
+        "pool": 24,
+        "slot": 96,
+        "chunk": 4096,
+        "chunks": 1,
+        "capacity": 38,
+        "nonfree": 1,
+        "bytes": 4096
+      },
+      "pipe": {
+        "object": 4128,
+        "pool": 24,
+        "slot": 4128,
+        "chunk": 12288,
+        "chunks": 0,
+        "capacity": 0,
+        "nonfree": 0,
+        "bytes": 0
+      },
+      "mmap_region": {
+        "object": 512,
+        "pool": 24,
+        "slot": 512,
+        "chunk": 4096,
+        "chunks": 1,
+        "capacity": 7,
+        "nonfree": 1,
+        "bytes": 4096
+      }
+    }
+  },
+  "runtime_receipts": {
+    "source_head": "521e320b1d33155acb398bdd9e0ca077ea8d066f",
+    "host_model_qemu_chain": {
+      "command": "make -j1 langcheck linuxcheck test slowcheck modelcheck kernelcheck-qemu-main kernelcheck-affinity-gdb-qemu kernelcheck-ddb-qemu kernelcheck-oops-qemu",
+      "terminal_exit": 0,
+      "log": "/tmp/takibi-execution-percpu-final-chain.log",
+      "handle": 62483
+    },
+    "rpi5": {
+      "command": "make kernelcheck-rpi5",
+      "terminal_exit": 0,
+      "log": "/tmp/takibi-execution-percpu-rpi5-cost.log",
+      "handle": 16939
+    },
+    "negative_pid0": {
+      "source_head": "521e320b1d33155acb398bdd9e0ca077ea8d066f",
+      "inner_runner_nonzero_verified": true,
+      "status_evidence": "run_variant reverted conditional failed; archived failing-views reason corresponds to run_kernel_qemutest.sh explicit exit 1; numeric inner status is not separately printed",
+      "control_runner_exit": 0,
+      "signature_independently_verified": "scheduler: failed",
+      "archive": "_build/kernel-hwtest-qemu-failures/20261109T041641Z",
+      "manifest_head": [
+        "reason: failing views: process_lifecycle",
+        "2026-11-09T04:16:41Z",
+        "commit: 521e320b",
+        "dirty: 0 file(s)",
+        "load: 2.31 2.66 6.57"
+      ],
+      "negative_uart_sha256": "298a48432bf0b432a69ba9dd8b0a7046a311148904820e985f75f08ef01fdcc1",
+      "positive_uart_sha256": "dcaaed890f5f5b9577ef5577a9b1720879a7605a4d9fdee99a3558b9cbf8613a",
+      "positive_elf_sha256": "605eb9bd90b45649c78d2bb7b9bcb48d269a5d412aeefc4e8a673b6d9157fa05",
+      "negative_elf_sha256": "70bf66608d640367539ea8d67e5895b403e7478327d21cb207b9a170fbdfb388"
+    }
+  },
+  "trust_inventory": {
+    "typed_per_cpu_stores": 9,
+    "reviewed_ordinary_per_cpu_arrays": 53,
+    "unprotected_globals": 64,
+    "raw_cpu_id_total": 147,
+    "raw_cpu_id_outside_mints": 144,
+    "raw_cpu_id_mints": 3,
+    "raw_cpu_flip_worklist": 60,
+    "raw_cpu_reviewed_sites": 84,
+    "raw_cpu_reviewed_functions": 67,
+    "current_direct_reader_functions": 20,
+    "carried_fields": 27,
+    "task_carried_fields": 6,
+    "placement_setters": 4,
+    "placement_lexical_call_sites": 37,
+    "placement_caller_functions": 25,
+    "source_trust_categories": 22,
+    "build_inclusive_trust_categories": 53,
+    "range_init_overlay_obligations": [
+      578,
+      565,
+      21
+    ]
+  },
+  "guarantee_boundary": "Compiler checks existing per_cpu indexing, region lifetime and may_block exclusion. The exact exception mint, physical nonmigration contexts, stop-capture ordering and guarded-publication coupling remain explicit trusted/source-review boundaries. No new language semantics. The frame-gate parsing defect is a separate #1485 finding; corrected measurements are used here."
+}
