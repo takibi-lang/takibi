@@ -3,11 +3,11 @@
   "event": "milestone",
   "decision": "measured",
   "source_sha256": "eddbac28456748b7a901ee3c9390c91ed74a7db6b73388e8e433aac3c67400a8",
-  "workload": "Workload evidence-record milestone: bounded common boot, stopped profiling interval, restart, peer filesystem/console and stack-release fixtures. Fixed global payload and both production linked kernels measured before/after BusyPair at9718310f and across the three-record batch against published a761a122. No allocation/retention workload change.",
+  "workload": "Workload evidence-record milestone: BusyWait, ProfileCore and BusyPair fixed records; common bounded boot, stopped profiling interval, restart, peer filesystem/console and stack-release fixtures. Both production linked kernels measured before/after BusyPair at 9718310f and across the three-record batch against published a761a122. No allocation/retention workload change.",
   "evidence": [
     "docs/GLOBAL_PROTECTION.md",
     "kernel/MEMORY_MAP.md"
   ],
-  "assessment": "BusyPair448->592 bytes. Three-record batch fixed payload+176 bytes: BusyWait400 unchanged, four-core ProfileCore544->576, BusyPair448->592. Batch text QEMU+2112 bytes/RPi5+2216; last record alone+1488/+1576. Data unchanged, QEMU BSS unchanged; RPi5 BSS reports-4096 because its start advances one page within alignment slack before the fixed DMA arena, with end unchanged. usable_ram_start unchanged on both targets. Adopt typed atomic accesses while retaining actual compound protocols; no allocator-occupancy or timing/cache claim.",
+  "assessment": "BusyPair448->592 bytes. Three-record batch fixed payload+176 bytes: BusyWait400 unchanged, four-core ProfileCore544->576, BusyPair448->592. Batch text QEMU+2112 bytes/RPi5+2216; last record alone+1488/+1576. Data unchanged, QEMU BSS unchanged; RPi5 BSS reports-4096 because its start advances one page within alignment slack before the fixed DMA arena, with end unchanged. usable_ram_start unchanged on both targets. Adopt typed atomic accesses while retaining actual compound protocols; no allocator-occupancy or timing/cache claim. Normal, affinity and DDB worker runtime checks passed at f3f42976 with this production fingerprint; closing metadata changes no production source.",
   "next_trigger": "Changed record capacity, allocation/retention behavior, or completion of a new kernel feature milestone."
 }

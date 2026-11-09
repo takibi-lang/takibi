@@ -1,5 +1,24 @@
 # takibi Engineering History
 
+## 2026-11-09: typed evidence counter records (#1475)
+
+Move-cost, process-test and syscall-test evidence records, followed by the
+workload settings, wait, profile and busy-pair records, use typed atomic
+fields. Enum cells use the existing Atomic(E) API with explicit u8 enums.
+IRQ masking, run-lock compound updates, stopped profile boundaries and
+the one-shot stack-release/reap handoff retain their original protocols;
+word-atomic access is not a multi-field snapshot or a compound increment.
+Peer source controls retain their planted failures, and the peer-exit GDB
+reader/watchpoint follows the AtomicWord value fields.
+
+The final three-record batch adds 176 bytes of fixed payload: BusyWait
+remains 400 bytes, the four-core profile array grows 544 -> 576 bytes, and
+BusyPair grows 448 -> 592 bytes. Both linked image reservation boundaries
+remain unchanged. The measured workload and the distinction between payload
+and section padding are in docs/GLOBAL_PROTECTION.md. Worker host checks
+and normal, affinity and DDB QEMU checks passed on the combined production
+sources before the closing metadata was recorded.
+
 ## 2026-10-25: the 2026-10-23 queues' done record, and the design review
 
 ROADMAP.md was re-cut on 2026-10-25 (Territories, re-cut 2026-10-25). The

@@ -199,8 +199,7 @@ owners are TaskMutex, the spare stack stays masked). #980
 
 **Priority update, 2026-11-09.** Implement #1481, scheduler-backed waiting
 Mutexes with non-sleeping paths preserved, before the preemption flip. When a
-design gate blocks it, continue the already-approved #1159 units and #1475
-counter records, preserving their separate recovery branch.
+design gate blocks it, continue the already-approved #1159 units.
 
 **Assigned queue (maintainer, 2026-10-23, re-cut 2026-10-25).**
 Low-dependency issues A does not hold, in this order; compiler work in
