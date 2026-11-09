@@ -124,7 +124,8 @@ fn dma_fixture_net_contention() !{unsafe} {
     let free_before: usize = virtio_pkt_free_index();
     let out_before: usize = virtio_pkt_out_count();
     let guard = block_device_take_unaccounted();
-    let used: *io VirtqUsedRing = unsafe { virtio_net_used_addr[0] as *io VirtqUsedRing };
+    let address: usize = atomic_word_load(&virtio_net_used_addr[0]);
+    let used: *io VirtqUsedRing = unsafe { address as *io VirtqUsedRing };
     used.ring[0].id = 0;
     used.ring[0].len = 74;
     used.idx = virtio_ring_index_next(before.rx_used_seen);
