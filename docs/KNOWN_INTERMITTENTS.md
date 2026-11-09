@@ -41,7 +41,7 @@ whether a row has gone quiet or has merely stopped being looked for.
 | `BREAK inspection did not resume boot` | 2 local allcheck aggregates (16fecc62, becb8ea6), each after `ddb: continuing` and further guest output; 0 of 3 standalone | #676 | 2026-10-03 |
 | `network init contention: failed` | 1 of 2 local allcheck aggregates on 563cb5f0, in `pool_contention`, with no counts line; 0 of 3 standalone | #654 | 2026-09-30 |
 | `the shell did not answer an empty line before the phase` | 1 of 2 local allcheck aggregates on 563cb5f0, in race-window 633's churn; 0 of 3 standalone; again on 655f9c49, the console lock's first stage; 2 of 4 land.sh aggregates on 2026-10-02, 0 of 3 standalone each time; 1 land.sh aggregate on 65848844; recorded again in race-window 633 armed on bd067a38 under the QEMU timing policy | #655 | 2026-10-05 |
-| `workload: settings wake FAILED: the reader is still asleep` | 1 local allcheck aggregate on 8f289250, in the peer_tty/settings_wake views; 0 of 11 armed-suite runs under host load | #667 | 2026-09-30 |
+| `workload: settings wake FAILED: the reader is still asleep` | 1 local allcheck on 8f289250; 0 of 11 earlier loaded armed-suite runs; later peer-settings stalls on 7cbb4398 (debug) and e81c8458 (main) were recorded under load before the UART fallback repair | #667 | 2026-11-08 |
 
 ## Reading a row
 
