@@ -23,7 +23,7 @@ import re
 import sys
 
 from pass_line import report_pass
-from source_scan import code_only, py_code_only
+from source_scan import code_only, py_code_only, per_file
 from layout_text import layout_count
 
 SECONDARY = pathlib.Path("kernel/arch/arm64/kernel/secondary.tkb")
@@ -71,6 +71,7 @@ ONLINE_CALLERS = {
 }
 
 
+@per_file
 def online_problems(source, callers):
     failures = []
     for label, shape in (
@@ -90,12 +91,12 @@ def online_problems(source, callers):
         matching = [row for row in rows if len(row) == 5 and row[1] == helper]
         if len(matching) != 1 or matching[0][2] != allowed:
             failures.append(f"online prefix: closed boot caller row for {helper} changed")
-    return failures
+    return tuple(failures)
 
 
 def main() -> int:
-    failures = online_problems(code_only(SECONDARY.read_text()),
-                               pathlib.Path("scripts/allowed_callers.tsv").read_text())
+    failures = list(online_problems(code_only(SECONDARY.read_text()),
+                                    pathlib.Path("scripts/allowed_callers.tsv").read_text()))
     facts = 0
     if not DECLARATION.search(code_only(SECONDARY.read_text(encoding="utf-8"))):
         failures.append(f"{SECONDARY}: secondary_tick_count is no longer "

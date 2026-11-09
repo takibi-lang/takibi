@@ -68,6 +68,18 @@ CSV reader omitted the callgraph format header; the measurement uses the
 repository's call_graph_table reader instead. Neither failed attempt supplies
 measurement evidence. No product behavior defect was discovered in this slice.
 
+The first full host run at `1f897799` exited two: the controls' new in-process
+import lacked the existing source_scan.per_file convention. The first full
+slowcheck also exited two because relayout's plain-copy run reached that same
+cache-policy gate. Focused controls did not include the separate integration
+policy. The correction caches online_problems by both semantic inputs (source
+text and caller-table text), returns an immutable tuple, and reads no file or
+ROOT inside that helper. This is a Python check-integration defect, distinct
+from kernel behavior. No exemption was added. Replacement full host and
+slowcheck gates are required; the failed receipts stay failed. Only the
+checker and this report change after that head, so the production fingerprint
+and measured ELF inputs remain unchanged.
+
 SHA256 of linked production inputs and results:
 
 | Target | Before | After |
