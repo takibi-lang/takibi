@@ -892,26 +892,51 @@ private fn address_space_refresh_asid(
 // reserve a Ready target under its run lock, release that lock, and call this
 // without having changed TTBR0 or the recorded current process. Prepared is
 // linear so every successful preparation must end in the matching commit.
-linear struct AddressSpaceActivationPrepared[root: usize] {
+// Entry-only root permission. The index is the retaining process allocation
+// generation (0 is the permanent boot root), not a reusable root-slot word.
+// Private entry adapters derive the root from that same authority; callers
+// supply no separate AddressSpaceRoot. This view is not a returned borrow: each public
+// commit re-borrows the matching current or reserved-owner authority.
+private affine view RootHeld[source: usize];
+
+private fn root_held_boot() -> RootHeld[0] {
+    return view RootHeld[0];
+}
+
+private fn root_held_current(
+        current: borrow ProcessCurrent[source, ProcessState::Running])
+        -> RootHeld[source] {
+    return view RootHeld[source];
+}
+
+// Only entry adapters requiring a Running reservation call this constructor.
+// Reapable owners remain alive after teardown and cannot authorize an entry.
+private fn root_held_owned(owner: borrow ScheduledProcessOwner[source])
+        -> RootHeld[source] {
+    return view RootHeld[source];
+}
+
+linear struct AddressSpaceActivationPrepared[root: usize, source: usize] {
     private root: usize @ root;
     private target: AddressSpaceRoot;
 }
 
-must_use variant AddressSpaceActivationPrepareResult {
+must_use variant AddressSpaceActivationPrepareResult[source: usize] {
     Invalid;
     RolloverNeeded;
-    Prepared(exists root: usize. AddressSpaceActivationPrepared[root]);
+    Prepared(exists root: usize. AddressSpaceActivationPrepared[root, source]);
 }
 
-private fn address_space_activation_prepared_new(root: usize @ identity,
+private fn address_space_activation_prepared_new(held: borrow RootHeld[source],
+                                                root: usize @ identity,
                                                 target: AddressSpaceRoot)
-        -> AddressSpaceActivationPrepared[identity] {
-    let mut prepared: AddressSpaceActivationPrepared[identity] = { root, target };
+        -> AddressSpaceActivationPrepared[identity, source] {
+    let mut prepared: AddressSpaceActivationPrepared[identity, source] = { root, target };
     return prepared;
 }
 
-fn address_space_prepare_activation(root: AddressSpaceRoot)
-        -> AddressSpaceActivationPrepareResult {
+private fn address_space_prepare_held(held: borrow RootHeld[source], root: AddressSpaceRoot)
+        -> AddressSpaceActivationPrepareResult[source] {
     let slot: usize = root.slot;
     if (address_space_root_key_valid(slot) == false) {
         return AddressSpaceActivationPrepareResult::Invalid;
@@ -943,7 +968,7 @@ fn address_space_prepare_activation(root: AddressSpaceRoot)
         }
     }
     return AddressSpaceActivationPrepareResult::Prepared(
-        address_space_activation_prepared_new(checked, root));
+        address_space_activation_prepared_new(held, checked, root));
 }
 
 must_use variant AddressSpaceActivationCommitResult {
@@ -951,11 +976,16 @@ must_use variant AddressSpaceActivationCommitResult {
     Activated(AddressSpaceRoot);
 }
 
-fn address_space_commit_activation(
-        prepared: sink AddressSpaceActivationPrepared[root])
+private fn address_space_commit_held(held: borrow RootHeld[source],
+        target: AddressSpaceRoot, prepared: sink AddressSpaceActivationPrepared[root, source])
         -> AddressSpaceActivationCommitResult {
     let slot: usize = prepared.root;
     let mut root: AddressSpaceRoot = prepared.target;
+    if (target.slot != slot ||
+        target.backing.address != root.backing.address ||
+        target.backing.generation != root.backing.generation) {
+        return AddressSpaceActivationCommitResult::Invalid;
+    }
     if (address_space_root_key_valid(slot) == false) {
         return AddressSpaceActivationCommitResult::Invalid;
     }
@@ -973,9 +1003,9 @@ fn address_space_commit_activation(
 }
 
 fn address_space_cancel_activation(
-        prepared: sink AddressSpaceActivationPrepared[root]) {}
+        prepared: sink AddressSpaceActivationPrepared[root, source]) {}
 
-fn address_space_activate_root(root: AddressSpaceRoot) {
+private fn address_space_activate_held(held: borrow RootHeld[source], root: AddressSpaceRoot) {
     let slot: usize = root.slot;
     if (address_space_root_key_valid(slot)) {
         let checked: usize = slot;
@@ -998,6 +1028,66 @@ fn address_space_activate_root(root: AddressSpaceRoot) {
     let mut fallback_backing: AddressSpaceBacking = address_space_backing_read_existing(address_space_boot_root());
     address_space_install_here(fallback_backing.l1_physical,
                                fallback_backing.asid, 0);
+}
+
+// Public entries never accept a root reconstructed from a stored word.
+// The same generation's Running reservation survives prepare until commit;
+// changing it to Reapable consumes that state, before teardown is legal.
+fn address_space_prepare_activation(
+        owner: borrow ScheduledProcessOwner[source],
+        running: borrow ScheduledProcessState[source, ProcessState::Running])
+        -> AddressSpaceActivationPrepareResult[source] {
+    let held = root_held_owned(owner);
+    return address_space_prepare_held(held, scheduled_process_address_space_root_owned(owner));
+}
+
+fn address_space_commit_activation(
+        owner: borrow ScheduledProcessOwner[source],
+        running: borrow ScheduledProcessState[source, ProcessState::Running],
+        prepared: sink AddressSpaceActivationPrepared[root, source])
+        -> AddressSpaceActivationCommitResult {
+    let held = root_held_owned(owner);
+    return address_space_commit_held(held, scheduled_process_address_space_root_owned(owner), prepared);
+}
+
+fn address_space_prepare_current_activation(
+        current: borrow ProcessCurrent[source, ProcessState::Running])
+        -> AddressSpaceActivationPrepareResult[source] {
+    let held = root_held_current(current);
+    return address_space_prepare_held(held, kernel_process_current_root(current));
+}
+
+fn address_space_commit_current_activation(
+        current: borrow ProcessCurrent[source, ProcessState::Running],
+        prepared: sink AddressSpaceActivationPrepared[root, source])
+        -> AddressSpaceActivationCommitResult {
+    let held = root_held_current(current);
+    return address_space_commit_held(held, kernel_process_current_root(current), prepared);
+}
+
+fn address_space_prepare_boot_activation() -> AddressSpaceActivationPrepareResult[0] {
+    let held = root_held_boot();
+    return address_space_prepare_held(held, address_space_boot_root());
+}
+
+fn address_space_commit_boot_activation(
+        prepared: sink AddressSpaceActivationPrepared[root, 0])
+        -> AddressSpaceActivationCommitResult {
+    let held = root_held_boot();
+    return address_space_commit_held(held, address_space_boot_root(), prepared);
+}
+
+fn address_space_activate_boot_root() {
+    let held = root_held_boot();
+    address_space_activate_held(held, address_space_boot_root());
+}
+
+// Synthetic roots retain real Running reservations, with their stack unowned.
+fn address_space_activate_owned_root(
+        owner: borrow ScheduledProcessOwner[source],
+        reserved: borrow ScheduledProcessState[source, ProcessState::Running]) {
+    let held = root_held_owned(owner);
+    address_space_activate_held(held, scheduled_process_address_space_root_owned(owner));
 }
 
 must_use variant AddressSpacePteWriteResult {
@@ -1334,7 +1424,7 @@ fn address_space_release_root(root: AddressSpaceRoot) {
     };
     if (evidence.value.live == false) { return; }
     if (address_space_active_slot_here() == checked) {
-        address_space_activate_root(address_space_boot_root());
+        address_space_activate_boot_root();
     }
     let l1_physical: usize = evidence.value.l1_physical;
     let l2_physical: usize = evidence.value.l2_physical;
@@ -1435,20 +1525,26 @@ fn process_address_space_probe() -> bool !{unsafe} {
     // the bare numbers 1 and 2, which named real roots only while any
     // index below the process ceiling was one. A root is a live process's
     // record now, so the probe allocates two processes and uses theirs.
-    let mut root_a_slot: ProcessSlot = scheduled_process_probe_slot_acquire();
-    let root_a: usize = process_slot_address(root_a_slot);
-    let mut root_b_slot: ProcessSlot = scheduled_process_probe_slot_acquire();
-    let root_b: usize = process_slot_address(root_b_slot);
-    let mut root_a_root: AddressSpaceRoot = scheduled_process_address_space_root_lookup(root_a_slot);
-    let mut root_b_root: AddressSpaceRoot = scheduled_process_address_space_root_lookup(root_b_slot);
-    if (root_a == 0 || root_b == 0) {
-        scheduled_process_probe_slot_release(root_b_slot);
-        scheduled_process_probe_slot_release(root_a_slot);
-        return false;
-    }
+    let ScheduledProcessRunningTakeResult::Running(resources_a) =
+        scheduled_process_probe_root_acquire() else {
+        ScheduledProcessRunningTakeResult::Missing => { return false; }
+    };
+    let (owner_a, running_a) = resources_a;
+    let ScheduledProcessRunningTakeResult::Running(resources_b) =
+        scheduled_process_probe_root_acquire() else {
+        ScheduledProcessRunningTakeResult::Missing => {
+            scheduled_process_probe_root_release(owner_a, running_a);
+            return false;
+        }
+    };
+    let (owner_b, running_b) = resources_b;
+    let mut root_a_slot: ProcessSlot = scheduled_process_probe_root_slot(owner_a);
+    let mut root_b_slot: ProcessSlot = scheduled_process_probe_root_slot(owner_b);
+    let mut root_a_root: AddressSpaceRoot = scheduled_process_address_space_root_owned(owner_a);
+    let mut root_b_root: AddressSpaceRoot = scheduled_process_address_space_root_owned(owner_b);
     if (address_space_is_live(root_a_root) || address_space_is_live(root_b_root)) {
-        scheduled_process_probe_slot_release(root_b_slot);
-        scheduled_process_probe_slot_release(root_a_slot);
+        scheduled_process_probe_root_release(owner_b, running_b);
+        scheduled_process_probe_root_release(owner_a, running_a);
         return false;
     }
     let before: usize = page_allocator_live_count();
@@ -1468,8 +1564,8 @@ fn process_address_space_probe() -> bool !{unsafe} {
     if (roots_ok == false) {
         address_space_release_root(root_b_root);
         address_space_release_root(root_a_root);
-        scheduled_process_probe_slot_release(root_b_slot);
-        scheduled_process_probe_slot_release(root_a_slot);
+        scheduled_process_probe_root_release(owner_b, running_b);
+        scheduled_process_probe_root_release(owner_a, running_a);
         return false;
     }
     // GitHub issue #402: a freshly created root has NO ASID -- it takes one
@@ -1480,9 +1576,10 @@ fn process_address_space_probe() -> bool !{unsafe} {
     let restore: usize = address_space_active_slot_here();
     let unassigned_ok: bool =
         address_space_asid(root_a_root) == 0 && address_space_asid(root_b_root) == 0;
-    address_space_activate_root(root_a_root);
-    address_space_activate_root(root_b_root);
-    address_space_activate_root(scheduled_process_address_space_root_of(root_slot_of_key(restore)));
+    address_space_activate_owned_root(owner_a, running_a);
+    address_space_activate_owned_root(owner_b, running_b);
+    kernel_process_activate_root_here();
+    if (address_space_active_slot_here() != restore) { roots_ok = false; }
     let backing_ok: bool =
         unassigned_ok &&
         address_space_l1_physical(root_a_root) != 0 &&
@@ -1501,16 +1598,16 @@ fn process_address_space_probe() -> bool !{unsafe} {
         kernel_boot_log("\n");
         address_space_release_root(root_b_root);
         address_space_release_root(root_a_root);
-        scheduled_process_probe_slot_release(root_b_slot);
-        scheduled_process_probe_slot_release(root_a_slot);
+        scheduled_process_probe_root_release(owner_b, running_b);
+        scheduled_process_probe_root_release(owner_a, running_a);
         return false;
     }
     match page_alloc(PageOwnerTag::PageTable) {
         PageAllocResult::OutOfMemory => {
             address_space_release_root(root_b_root);
             address_space_release_root(root_a_root);
-            scheduled_process_probe_slot_release(root_b_slot);
-            scheduled_process_probe_slot_release(root_a_slot);
+            scheduled_process_probe_root_release(owner_b, running_b);
+            scheduled_process_probe_root_release(owner_a, running_a);
             return false;
         }
         PageAllocResult::Allocated(page1) => {
@@ -1519,8 +1616,8 @@ fn process_address_space_probe() -> bool !{unsafe} {
                     page_free(page1);
                     address_space_release_root(root_b_root);
                     address_space_release_root(root_a_root);
-                    scheduled_process_probe_slot_release(root_b_slot);
-                    scheduled_process_probe_slot_release(root_a_slot);
+                    scheduled_process_probe_root_release(owner_b, running_b);
+                    scheduled_process_probe_root_release(owner_a, running_a);
                     return false;
                 }
                 PageAllocResult::Allocated(page2) => {
@@ -1530,8 +1627,8 @@ fn process_address_space_probe() -> bool !{unsafe} {
                             page_free(page1);
                             address_space_release_root(root_b_root);
                             address_space_release_root(root_a_root);
-                            scheduled_process_probe_slot_release(root_b_slot);
-                            scheduled_process_probe_slot_release(root_a_slot);
+                            scheduled_process_probe_root_release(owner_b, running_b);
+                            scheduled_process_probe_root_release(owner_a, running_a);
                             return false;
                         }
                         PageAllocResult::Allocated(page3) => {
@@ -1566,26 +1663,26 @@ fn process_address_space_probe() -> bool !{unsafe} {
                             if (mapped_ok) {
                                 let stores_ok: bool =
                                     process_address_space_probe_written(
-                                        user_probe_root_write_byte(root_a_root, low_address, 11)) &&
+                                        user_probe_root_write_byte(owner_a, running_a, low_address, 11)) &&
                                     process_address_space_probe_written(
-                                        user_probe_root_write_byte(root_a_root, high_address, 12)) &&
+                                        user_probe_root_write_byte(owner_a, running_a, high_address, 12)) &&
                                     process_address_space_probe_written(
-                                        user_probe_root_write_byte(root_b_root, low_address, 22));
+                                        user_probe_root_write_byte(owner_b, running_b, low_address, 22));
                                 let (second_low_ok, second_low) =
-                                    user_probe_root_read_byte(root_b_root, low_address);
+                                    user_probe_root_read_byte(owner_b, running_b, low_address);
                                 // Root 2 never mapped page 512: the accessor
                                 // must refuse it before any dereference, and
                                 // the table must agree.
                                 let (second_high_mapped, second_high) =
-                                    user_probe_root_read_byte(root_b_root, high_address);
+                                    user_probe_root_read_byte(owner_b, running_b, high_address);
                                 let second_high_absent: bool =
                                     second_high_mapped == false && second_high == 0 &&
                                     address_space_pte_read(root_b_root, 512) == 0;
                                 let (first_low_ok, first_low) =
-                                    user_probe_root_read_byte(root_a_root, low_address);
+                                    user_probe_root_read_byte(owner_a, running_a, low_address);
                                 let (first_high_ok, first_high) =
-                                    user_probe_root_read_byte(root_a_root, high_address);
-                                address_space_activate_root(address_space_boot_root());
+                                    user_probe_root_read_byte(owner_a, running_a, high_address);
+                                address_space_activate_boot_root();
                                 mapped_ok = stores_ok &&
                                     second_low_ok && second_low == 22 &&
                                     first_low_ok && first_low == 11 &&
@@ -1607,8 +1704,8 @@ fn process_address_space_probe() -> bool !{unsafe} {
                                 uart_put_udec(page_allocator_live_count());
                                 kernel_boot_log("\n");
                             }
-                            scheduled_process_probe_slot_release(root_b_slot);
-                            scheduled_process_probe_slot_release(root_a_slot);
+                            scheduled_process_probe_root_release(owner_b, running_b);
+                            scheduled_process_probe_root_release(owner_a, running_a);
                             return clean;
                         }
                     }
@@ -1696,16 +1793,35 @@ fn address_space_asid_rollover_probe() -> bool {
     if (asid_generation_is_current(generation_before)) { ok = false; }
 
     let active_before: usize = address_space_active_slot_here();
-    match address_space_prepare_activation(scheduled_process_address_space_root_of(root_slot_of_key(active_before))) {
-        AddressSpaceActivationPrepareResult::Invalid => { ok = false; }
-        AddressSpaceActivationPrepareResult::RolloverNeeded => { ok = false; }
-        AddressSpaceActivationPrepareResult::Prepared(prepared) => {
-            match address_space_commit_activation(prepared) {
-                AddressSpaceActivationCommitResult::Invalid => { ok = false; }
-                AddressSpaceActivationCommitResult::Activated(root) => {
-                    if (root_slot_word(address_space_root_slot(root)) != active_before) { ok = false; }
+    match process_running_here() {
+        ProcessRunningHere::Idle => {
+            match address_space_prepare_boot_activation() {
+                AddressSpaceActivationPrepareResult::Invalid => { ok = false; }
+                AddressSpaceActivationPrepareResult::RolloverNeeded => { ok = false; }
+                AddressSpaceActivationPrepareResult::Prepared(prepared) => {
+                    match address_space_commit_boot_activation(prepared) {
+                        AddressSpaceActivationCommitResult::Invalid => { ok = false; }
+                        AddressSpaceActivationCommitResult::Activated(root) => {
+                            if (root_slot_word(address_space_root_slot(root)) != active_before) { ok = false; }
+                        }
+                    }
                 }
             }
+        }
+        ProcessRunningHere::Running(current) => {
+            match address_space_prepare_current_activation(current) {
+                AddressSpaceActivationPrepareResult::Invalid => { ok = false; }
+                AddressSpaceActivationPrepareResult::RolloverNeeded => { ok = false; }
+                AddressSpaceActivationPrepareResult::Prepared(prepared) => {
+                    match address_space_commit_current_activation(current, prepared) {
+                        AddressSpaceActivationCommitResult::Invalid => { ok = false; }
+                        AddressSpaceActivationCommitResult::Activated(root) => {
+                            if (root_slot_word(address_space_root_slot(root)) != active_before) { ok = false; }
+                        }
+                    }
+                }
+            }
+            process_current_end(current);
         }
     }
     let active: usize = address_space_active_slot_here();

@@ -1262,30 +1262,49 @@ fn process_image_clone_vm_begin(source_space: AddressSpaceRoot,
 // root they mean, since with more than one live clone in the tree "the
 // child" and "the parent" are relative to whoever is switching, not fixed
 // numbers.
-fn process_image_activate_root(target: AddressSpaceRoot) {
-    let root: usize = root_slot_word(address_space_root_slot(target));
-    if (address_space_root_key_valid(root) == false) { return; }
-    // Root 0 owns permanent ASID 1 and never participates in rollover. Every
-    // dynamic root uses the stopped preparation boundary, including exec and
-    // boot-fixture callers outside the scheduler handoff paths.
-    if (root == 0) {
-        address_space_activate_root(target);
-        kernel_process_trace_address_space_activate(root);
+fn process_image_activate_root(
+        current: borrow ProcessCurrent[source, ProcessState::Running]) {
+    let mut root: AddressSpaceRoot = kernel_process_current_root(current);
+    if (root_slot_word(address_space_root_slot(root)) == 0) {
+        process_image_activate_boot_root();
         return;
     }
-    kernel_process_activate_stable_root(target);
+    kernel_process_activate_stable_root(current);
 }
 
-// Split activation for scheduler handoffs that may need an ASID rollover.
-// Preparation does not change TTBR0; commit changes it only after the caller has revalidated its reserved process.
-fn process_image_prepare_activation(root: AddressSpaceRoot)
-        -> AddressSpaceActivationPrepareResult {
-    return address_space_prepare_activation(root);
+fn process_image_activate_owned_root(
+        owner: borrow ScheduledProcessOwner[source],
+        running: borrow ScheduledProcessState[source, ProcessState::Running]) {
+    let mut root: AddressSpaceRoot = scheduled_process_address_space_root_owned(owner);
+    if (root_slot_word(address_space_root_slot(root)) == 0) {
+        process_image_activate_boot_root();
+        return;
+    }
+    kernel_process_activate_stable_owned_root(owner, running);
 }
 
-fn process_image_commit_activation(
-        prepared: sink AddressSpaceActivationPrepared[root]) -> bool {
-    match address_space_commit_activation(prepared) {
+fn process_image_activate_boot_root() {
+    address_space_activate_boot_root();
+    kernel_process_trace_address_space_activate(0);
+}
+
+// The reservation, not the returned prepared token alone, retains the root.
+fn process_image_prepare_activation(
+        owner: borrow ScheduledProcessOwner[source],
+        running: borrow ScheduledProcessState[source, ProcessState::Running])
+        -> AddressSpaceActivationPrepareResult[source] {
+    return address_space_prepare_activation(owner, running);
+}
+
+fn process_image_prepare_current_activation(
+        current: borrow ProcessCurrent[source, ProcessState::Running])
+        -> AddressSpaceActivationPrepareResult[source] {
+    return address_space_prepare_current_activation(current);
+}
+
+private fn process_image_activation_committed(result: AddressSpaceActivationCommitResult)
+        -> bool {
+    match result {
         AddressSpaceActivationCommitResult::Invalid => { return false; }
         AddressSpaceActivationCommitResult::Activated(target) => {
             kernel_process_trace_address_space_activate(
@@ -1295,8 +1314,23 @@ fn process_image_commit_activation(
     }
 }
 
+fn process_image_commit_activation(
+        owner: borrow ScheduledProcessOwner[source],
+        running: borrow ScheduledProcessState[source, ProcessState::Running],
+        prepared: sink AddressSpaceActivationPrepared[root, source]) -> bool {
+    return process_image_activation_committed(
+        address_space_commit_activation(owner, running, prepared));
+}
+
+fn process_image_commit_current_activation(
+        current: borrow ProcessCurrent[source, ProcessState::Running],
+        prepared: sink AddressSpaceActivationPrepared[root, source]) -> bool {
+    return process_image_activation_committed(
+        address_space_commit_current_activation(current, prepared));
+}
+
 fn process_image_cancel_activation(
-        prepared: sink AddressSpaceActivationPrepared[root]) {
+        prepared: sink AddressSpaceActivationPrepared[root, source]) {
     address_space_cancel_activation(prepared);
 }
 
@@ -1336,7 +1370,7 @@ fn process_image_clone_vm_reap(dest_space: AddressSpaceRoot) -> ProcessCloneVmRe
     // reaches here with no span of its own (the clone path holds one, which
     // this nests in).
     let span = preempt_span_begin();
-    process_image_activate_root(address_space_boot_root());
+    process_image_activate_boot_root();
     process_clone_vm_rollback(dest_space);
     preempt_span_end(span);
     return ProcessCloneVmReapResult::Reaped;
@@ -1362,29 +1396,32 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
     // not the bare number 1 -- see
     // scheduled_process_probe_slot_acquire for why a probe has to be a
     // process to have a root of its own.
-    let mut child_root_slot: ProcessSlot = scheduled_process_probe_slot_acquire();
-    let child_root: usize = process_slot_address(child_root_slot);
-    let mut child_root_root: AddressSpaceRoot = scheduled_process_address_space_root_lookup(child_root_slot);
-    if (child_root == 0) { return false; }
+    let ScheduledProcessRunningTakeResult::Running(resources) =
+        scheduled_process_probe_root_acquire() else {
+        ScheduledProcessRunningTakeResult::Missing => { return false; }
+    };
+    let (child_owner, child_running) = resources;
+    let mut child_root_slot: ProcessSlot = scheduled_process_probe_root_slot(child_owner);
+    let mut child_root_root: AddressSpaceRoot = scheduled_process_address_space_root_owned(child_owner);
     if (address_space_is_live(child_root_root)) {
-        scheduled_process_probe_slot_release(child_root_slot);
+        scheduled_process_probe_root_release(child_owner, child_running);
         return false;
     }
     match address_space_ensure_root(child_root_slot) {
         AddressSpaceEnsureResult::Ok => {}
         AddressSpaceEnsureResult::SlotOutOfRange => {
-            scheduled_process_probe_slot_release(child_root_slot);
+            scheduled_process_probe_root_release(child_owner, child_running);
             return false;
         }
         AddressSpaceEnsureResult::OutOfMemory => {
-            scheduled_process_probe_slot_release(child_root_slot);
+            scheduled_process_probe_root_release(child_owner, child_running);
             return false;
         }
     }
     match page_alloc(PageOwnerTag::UserPage) {
         PageAllocResult::OutOfMemory => {
             address_space_release_root(child_root_root);
-            scheduled_process_probe_slot_release(child_root_slot);
+            scheduled_process_probe_root_release(child_owner, child_running);
             return false;
         }
         PageAllocResult::Allocated(stack_page) => {
@@ -1392,12 +1429,12 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
                     address_space_boot_root(), process_stack_top_page(), stack_page, USER_RW_XN_FLAGS) {
                 AddressSpacePteWriteResult::Invalid => {
                     address_space_release_root(child_root_root);
-                    scheduled_process_probe_slot_release(child_root_slot);
+                    scheduled_process_probe_root_release(child_owner, child_running);
                     return false;
                 }
                 AddressSpacePteWriteResult::OutOfMemory => {
                     address_space_release_root(child_root_root);
-                    scheduled_process_probe_slot_release(child_root_slot);
+                    scheduled_process_probe_root_release(child_owner, child_running);
                     return false;
                 }
                 AddressSpacePteWriteResult::Written => {
@@ -1423,7 +1460,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
     }
 
     if (ok) {
-        process_image_activate_root(child_root_root);
+        process_image_activate_owned_root(child_owner, child_running);
         // fork must initially share the parent's top stack page, with both
         // PTEs marked COW. A simulated EL0 write-permission fault then gives
         // only root 1 a private writable page while root 0 retains the
@@ -1471,7 +1508,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
             address_space_pte_read(child_root_root, first_page - 1) == 0)) {
             ok = false;
         }
-        process_image_activate_root(address_space_boot_root());
+        process_image_activate_boot_root();
     }
 
     match process_image_clone_vm_reap(child_root_root) {
@@ -1497,7 +1534,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
     process_image_set_active_page_count(0, evidence, 0);
     process_image_set_stack_lowest_l3(0, evidence, process_stack_top_page());
     address_space_release_root(child_root_root);
-    scheduled_process_probe_slot_release(child_root_slot);
+    scheduled_process_probe_root_release(child_owner, child_running);
     return ok;
 }
 
@@ -1712,16 +1749,7 @@ fn process_image_exec_teardown(target: AddressSpaceRoot,
 // kernel_process_current_root() is already correct here, not a fixed
 // root 0.
 fn process_image_exec_resume_root() {
-    // An exit that found no successor reaches here with current_live false
-    // (GitHub issue #1289): no process is current, so no witness is minted.
-    match kernel_process_current_root_here() {
-        CurrentRootHere::Idle => {
-            kernel_process_activate_stable_root(address_space_boot_root());
-        }
-        CurrentRootHere::Root(current_root) => {
-            kernel_process_activate_stable_root(current_root);
-        }
-    }
+    kernel_process_activate_root_here();
 }
 
 // A flat, NUL-terminated argv blob is deliberately used instead of an array

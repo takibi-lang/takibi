@@ -24,6 +24,8 @@ ROOT = pathlib.Path("kernel")
 ALLOWED = {
     "process_running_here": Counter({
         "kernel_process_fanout_probe": 3,
+        "kernel_process_activate_root_here": 1,
+        "address_space_asid_rollover_probe": 1,
         "kernel_process_trace_block_wake_probe": 2,
         "syscall_vectored_prefix_wait_probe": 3,
         # GitHub issue #202: boot probes that check a user range after the

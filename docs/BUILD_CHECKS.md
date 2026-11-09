@@ -21,6 +21,8 @@ suffix is description; dispatch reads only the prefix.
 
 | Check | Enforced invariant |
 | --- | --- |
+| `check_root_held_entries.py` | three private erased root-entry mints, eight exact authority/root adapters, explicit image-target propagation and ProcessImagePages.root, no exported RootHeld values or extra same-adapter calls; compiled caller rows separately confine the hardware leaf |
+| `check_root_held_entries_controls.py` | production/prose positives and planted foreign/default/escape/extra-call/alias/rebinding root-entry bypasses and replaced image targets |
 | `check_space_checkpoint_controls.py` | milestone measurement, justified incremental reuse, source fingerprint freshness, tracked evidence, and the mandatory pre-allcheck publication hook |
 | `check_wait_interrupt_sites.py` | every `return` of `SyscallAction::WaitInterrupt` (or `InterruptWait`) in `kernel/kernel/syscall.tkb` is counted per function against a reviewed allowlist with reasons; an event wait must Block on its wake source instead of keeping the process Running (#866) |
 | `check_wait_status_sites.py` | every `process_end_exited` argument in a kernel `.tkb` is a reviewed form (exit/exit_group's code, a probe's stamped codes) -- the `ProcessEnd` variant (#886) already keeps an exit code and a signal apart, but not an integer that mixes them going in -- and no kernel `.tkb` outside `kernel/kernel/wait_status.tkb` adds 128 to a signal or status in code: wait4 reports Linux's WTERMSIG form, not a shell's `$?` (#882) |

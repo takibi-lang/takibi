@@ -1175,3 +1175,46 @@ claimed-PID fixture now injects the selector value beside a real stopped-peer
 walk instead of modifying the peer CPU store. The exact publisher/reader and
 alias policy is build-checked; it is not a general proof of manual authority
 lifetime or arbitrary control flow.
+## Root activation authority
+
+An activation entry takes the actual current Running authority or a retained
+scheduled-process owner with the same allocation generation's Running state.
+The permanent boot-root entry takes no process authority and can select only
+root 0. A root rebuilt from a saved slot word is data for table inspection,
+not an activation permission. Root 0 is also a valid kernel thread's root;
+its process generation is distinct from both PID 0 and the permanent-root
+entry's index 0.
+
+The entry module keeps an erased private `RootHeld[source]` view, indexed by
+that retaining allocation generation, within eight small adapters. The root is
+derived from the same authority in the adapter. Exact compiled caller rows
+confine the mints, installation helpers and MMU leaf; a source check closes
+the adapter bodies against extra calls or substituted roots. These are
+trusted source-association checks, not a proof of arbitrary control flow or
+physical page-table lifetime.
+
+A prepared activation carries both its root-slot identity and the retaining
+process generation. Commit re-borrows the actual current authority or the
+same owner and Running state and checks the saved root's slot and backing
+address/generation against that authority's root before installation. It
+still validates backing liveness and the ASID generation. The returned token
+or a returned erased view alone is not a retained borrow. Borrowed reap
+teardown requires Reapable state of the same generation and invalidates live
+owner-derived record loans; its owner remains alive until record removal.
+The existing typestate transition mints and current/root association remain
+trusted. PTE mutation and root release are separate ownership boundaries.
+
+Synthetic root probes retain real owners with Running reservations while
+using their roots; they do not mint a current witness from a slot word.
+These probes allocate before ordinary dispatch opens. The image probe keeps
+the stopped-ASID retry path; the low-level root probe keeps its existing
+direct early-boot path and activation/access preemption spans. Reaper and
+exec-return restoration derive current authority anew rather than turning
+a saved root snapshot into permission.
+
+Image mapping is a separate operation: `process_image_map_ext2_in_root`
+passes its explicit target through `process_image_map_current` and page
+installation, while pair mapping carries the same target through both ELF
+plans. `ProcessImagePages.root` retains that target for install, unmap and
+mapping inspection. Activation authority does not substitute the current
+root for this explicit image-loading target.

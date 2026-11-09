@@ -3928,7 +3928,7 @@ private fn scheduled_process_adopt_stack_run(
 fn scheduled_process_table_clear() !{unsafe} {
     // Reset can enter while a child root is in TTBR0_EL1. Select root 0,
     // the kernel's own, before releasing any nonzero backing record.
-    process_image_activate_root(address_space_boot_root());
+    process_image_activate_boot_root();
     scheduled_process_release_every_process();
     kernel_process_tick_wake_clear();
 }
@@ -4940,6 +4940,49 @@ fn scheduled_process_probe_slot_acquire() -> ProcessSlot !{unsafe} {
     return slot;
 }
 
+// These synthetic roots run before ordinary dispatch opens, like the slot
+// probes below. Retain the actual owner and a Running reservation instead of
+// keeping only a reusable slot word. No current/CPU witness is fabricated.
+fn scheduled_process_probe_root_acquire() -> ScheduledProcessRunningTakeResult {
+    let handle = match scheduled_process_alloc() {
+        ScheduledPooledProcessAllocResult::Full => {
+            return ScheduledProcessRunningTakeResult::Missing;
+        }
+        ScheduledPooledProcessAllocResult::Allocated(pooled) => {
+            scheduled_pooled_process_handle(pooled)
+        }
+    };
+    let guard = process_run_lock();
+    match scheduled_process_ready_take(guard, handle) {
+        ScheduledProcessReadyTakeResult::Missing => {
+            process_run_unlock(guard);
+            return ScheduledProcessRunningTakeResult::Missing;
+        }
+        ScheduledProcessReadyTakeResult::Ready(resources) => {
+            let (owner, ready) = resources;
+            let running = scheduled_process_start(owner, ready);
+            process_run_unlock(guard);
+            address_space_release_root(scheduled_process_address_space_root_owned(owner));
+            return ScheduledProcessRunningTakeResult::Running((owner, running));
+        }
+    }
+}
+
+fn scheduled_process_probe_root_slot(owner: borrow ScheduledProcessOwner[source])
+        -> ProcessSlot { return process_slot_of(owner.pool_index); }
+
+fn scheduled_process_probe_root_release(
+        owner: sink ScheduledProcessOwner[source],
+        running: sink ScheduledProcessState[source, ProcessState::Running])
+        !{changes_witness_ProcessCurrent} {
+    let mut slot: ProcessSlot = process_slot_of(owner.pool_index);
+    let guard = process_run_lock();
+    let exited = scheduled_process_exit(owner, running);
+    scheduled_process_release(owner, exited);
+    process_run_unlock(guard);
+    scheduled_process_probe_slot_release(slot);
+}
+
 fn scheduled_process_probe_slot_release(slot: ProcessSlot) !{unsafe} {
     scheduled_process_release_slot_resources(slot);
     let removal_guard = process_run_lock();
@@ -5788,7 +5831,7 @@ fn kernel_process_stack_idle_complete() {
         // freed root, ran on cached global kernel entries, and at the first
         // miss faulted fetching its own vector, forever, with IRQs masked:
         // the DDB lane's peer that never answered a world stop.
-        address_space_activate_root(address_space_boot_root());
+        address_space_activate_boot_root();
         let parked_record: &mut ProcessRecord = scheduled_process_record_live_locked(guard, outgoing);
         parked_record.parked_activity = kernel_activity_here();
         parked_record.stack_owner_cpu = PROCESS_STACK_UNOWNED;
@@ -5835,7 +5878,7 @@ fn kernel_process_stack_idle_yield() {
             kernel_invariant_stop();
         }
         // Leave its root before it can run elsewhere, as an exit does.
-        address_space_activate_root(address_space_boot_root());
+        address_space_activate_boot_root();
         let parked_record: &mut ProcessRecord = scheduled_process_record_live_locked(guard, outgoing);
         parked_record.parked_activity = kernel_activity_here();
         parked_record.stack_owner_cpu = PROCESS_STACK_UNOWNED;
@@ -5874,7 +5917,7 @@ fn kernel_process_stack_idle_blocked() {
             process_run_unlock(guard);
             kernel_invariant_stop();
         }
-        address_space_activate_root(address_space_boot_root());
+        address_space_activate_boot_root();
         let parked_record: &mut ProcessRecord = scheduled_process_record_live_locked(guard, outgoing);
         parked_record.parked_activity = kernel_activity_here();
         parked_record.stack_owner_cpu = PROCESS_STACK_UNOWNED;
@@ -6780,7 +6823,7 @@ fn kernel_process_boot_handoff(phase: sink TestDriverPhase[driver])
         execution_state[cpu].scheduler_enabled = false;
         execution_state[cpu].reschedule_pending = false;
     }
-    process_image_activate_root(address_space_boot_root());
+    process_image_activate_boot_root();
     let guard = process_run_lock();
     let mut live: bool = false;
     let mut boot: ProcessHandle;
@@ -7571,8 +7614,7 @@ private fn kernel_process_secondary_start_reserved(
         span: sink PreemptOff[0])
         -> ProcessSecondaryStart !{changes_witness_ProcessCurrent} {
     preempt_off (execution_cpu) {
-        match process_image_prepare_activation(
-            scheduled_process_address_space_root_owned(owner)) {
+        match process_image_prepare_activation(owner, running) {
             AddressSpaceActivationPrepareResult::Invalid => {
                 atomic_word_fetch_add(&kernel_process_start_refused_invalid, 1);
                 let guard = process_run_lock();
@@ -7625,7 +7667,7 @@ private fn kernel_process_secondary_start_reserved(
                     preempt_span_end(span);
                     return ProcessSecondaryStart::Idle;
                 }
-                if (process_image_commit_activation(prepared) == false) {
+                if (process_image_commit_activation(owner, running, prepared) == false) {
                     let ready = scheduled_process_yield(owner, running);
                     scheduled_process_release(owner, ready);
                     process_run_unlock(guard);
@@ -7851,8 +7893,7 @@ private fn kernel_process_schedule_reserved(
         current: borrow FrameRef[from_process, level],
         span: sink PreemptOff[0]) -> FrameSwitch !{changes_witness_ProcessCurrent} {
     preempt_off (execution_cpu) {
-        match process_image_prepare_activation(
-            scheduled_process_address_space_root_owned(owner)) {
+        match process_image_prepare_activation(owner, running) {
             AddressSpaceActivationPrepareResult::Invalid => {
                 kernel_process_schedule_cancel_reserved(owner, running);
                 preempt_span_end(span);
@@ -7910,7 +7951,7 @@ private fn kernel_process_schedule_reserved(
                     preempt_span_end(span);
                     return FrameSwitch::Stay;
                 }
-                if (process_image_commit_activation(prepared) == false) {
+                if (process_image_commit_activation(owner, running, prepared) == false) {
                     if (kernel_process_start_handle(guard, from)) {}
                     let ready = scheduled_process_yield(owner, running);
                     scheduled_process_release(owner, ready);
@@ -7969,7 +8010,7 @@ fn kernel_process_activate_current_root(current_authority: borrow ProcessCurrent
     }
     let mut injected_busy: usize = 0;
     while (true) {
-    match process_image_prepare_activation(kernel_process_current_root(current_authority)) {
+    match process_image_prepare_current_activation(current_authority) {
         AddressSpaceActivationPrepareResult::Invalid => {
             return CurrentRootActivationResult::Invalid;
         }
@@ -8010,7 +8051,7 @@ fn kernel_process_activate_current_root(current_authority: borrow ProcessCurrent
                 process_run_unlock(guard);
                 return CurrentRootActivationResult::Invalid;
             }
-            let committed: bool = process_image_commit_activation(prepared);
+            let committed: bool = process_image_commit_current_activation(current_authority, prepared);
             process_run_unlock(guard);
             if (injected_busy != 0) {
                 kernel_boot_log("asid rollover: clone activation retried " as *u8);
@@ -8050,14 +8091,25 @@ fn kernel_process_activate_current_root(current_authority: borrow ProcessCurrent
 // rejects that shape statically yet. A caller holding a ranked lock cannot
 // begin the stop at all (world_stop_machine_begin's rank). The wait differs
 // per core so two cores that both retry do not keep meeting.
-fn kernel_process_activate_stable_root(root: AddressSpaceRoot) {
+fn kernel_process_activate_root_here() {
+    match process_running_here() {
+        ProcessRunningHere::Idle => { process_image_activate_boot_root(); }
+        ProcessRunningHere::Running(current) => {
+            process_image_activate_root(current);
+            process_current_end(current);
+        }
+    }
+}
+
+fn kernel_process_activate_stable_root(
+        current_authority: borrow ProcessCurrent[source, ProcessState::Running]) {
     let mut activating: bool = true;
     let mut injected_busy: usize = 0;
     if (atomic_word_load(&kernel_process_rollover_busy_injections) != 0) {
         asid_force_rollover_needed();
     }
     while (activating) {
-        match process_image_prepare_activation(root) {
+        match process_image_prepare_current_activation(current_authority) {
             AddressSpaceActivationPrepareResult::Invalid => {
                 kernel_invariant_stop();
             }
@@ -8084,7 +8136,59 @@ fn kernel_process_activate_stable_root(root: AddressSpaceRoot) {
                 }
             }
             AddressSpaceActivationPrepareResult::Prepared(prepared) => {
-                if (process_image_commit_activation(prepared) == false) {
+                if (process_image_commit_current_activation(current_authority, prepared) == false) {
+                    kernel_invariant_stop();
+                }
+                activating = false;
+                if (injected_busy != 0) {
+                    kernel_boot_log("asid rollover: activation retried " as *u8);
+                    uart_put_udec(injected_busy);
+                    kernel_boot_log(" busy world stops, then rolled over\n" as *u8);
+                }
+            }
+        }
+    }
+}
+
+// The synthetic-image consumer has a real reserved owner, not a current
+// witness. Keep the same stopped-ASID retry protocol and IRQ-open back-off.
+fn kernel_process_activate_stable_owned_root(
+        owner: borrow ScheduledProcessOwner[source],
+        running: borrow ScheduledProcessState[source, ProcessState::Running]) {
+    let mut activating: bool = true;
+    let mut injected_busy: usize = 0;
+    if (atomic_word_load(&kernel_process_rollover_busy_injections) != 0) {
+        asid_force_rollover_needed();
+    }
+    while (activating) {
+        match process_image_prepare_activation(owner, running) {
+            AddressSpaceActivationPrepareResult::Invalid => {
+                kernel_invariant_stop();
+            }
+            AddressSpaceActivationPrepareResult::RolloverNeeded => {
+                if (kernel_process_rollover_injection_take(&kernel_process_rollover_busy_injections)) {
+                    injected_busy = injected_busy + 1;
+                    kernel_process_rollover_backoff();
+                    continue;
+                }
+                match world_stop_machine_begin(SCHEDULER_WORLD_STOP_SPINS) {
+                    MachineStopResult::Busy => {
+                        atomic_word_fetch_add(&kernel_process_stable_retry_busy, 1);
+                        kernel_process_rollover_backoff();
+                    }
+                    MachineStopResult::Partial(partial) => {
+                        machine_stop_partial_release(partial, &kernel_world_stop);
+                        atomic_word_fetch_add(&kernel_process_stable_retry_partial, 1);
+                        kernel_process_rollover_backoff();
+                    }
+                    MachineStopResult::Complete(stopped) => {
+                        if (asid_rollover_stopped(stopped)) {}
+                        machine_stop_release(stopped, &kernel_world_stop);
+                    }
+                }
+            }
+            AddressSpaceActivationPrepareResult::Prepared(prepared) => {
+                if (process_image_commit_activation(owner, running, prepared) == false) {
                     kernel_invariant_stop();
                 }
                 activating = false;
@@ -8945,7 +9049,7 @@ private fn kernel_process_tick_leave_excluded(
         }
         scheduled_process_record_live_locked(guard, outgoing).saved_sp = frame_ref_address(frame);
         // Leave its root before it can run elsewhere, as every idle entry does.
-        address_space_activate_root(address_space_boot_root());
+        address_space_activate_boot_root();
         execution_current_set_live(guard, execution_cpu, false);
         execution_state[execution_cpu].scheduler_enabled = false;
         execution_state[execution_cpu].reschedule_pending = false;
@@ -9372,8 +9476,7 @@ private fn kernel_process_block_reserved(
         current: borrow FrameRef[from_process, level], reason: ProcessWaitReason,
         trace_aux: usize, span: sink PreemptOff[0]) -> BlockSwitch !{changes_witness_ProcessCurrent} {
     preempt_off (execution_cpu) {
-        match process_image_prepare_activation(
-            scheduled_process_address_space_root_owned(owner)) {
+        match process_image_prepare_activation(owner, running) {
             AddressSpaceActivationPrepareResult::Invalid => {
                 kernel_process_schedule_cancel_reserved(owner, running);
                 preempt_span_end(span);
@@ -9456,7 +9559,7 @@ private fn kernel_process_block_reserved(
                 }
                 kernel_process_trace_handle(
                     ProcessTraceBlock, from, to, trace_aux);
-                if (process_image_commit_activation(prepared) == false) {
+                if (process_image_commit_activation(owner, running, prepared) == false) {
                     match scheduled_process_blocked_take(guard, from) {
                         ScheduledProcessBlockedTakeResult::Missing => {}
                         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
@@ -13234,8 +13337,7 @@ private fn kernel_process_exit_reserved(
         owner: sink ScheduledProcessOwner[process],
         running: sink ScheduledProcessState[process, ProcessState::Running],
         deliver_wait4: bool, auto_reap: bool, span: sink PreemptOff[0]) -> ExitSwitch !{changes_witness_ProcessCurrent} {
-    match process_image_prepare_activation(
-        scheduled_process_address_space_root_owned(owner)) {
+    match process_image_prepare_activation(owner, running) {
         AddressSpaceActivationPrepareResult::Invalid => {
             kernel_process_schedule_cancel_reserved(owner, running);
             return ExitSwitch::Idle(span);
@@ -13284,7 +13386,7 @@ private fn kernel_process_exit_reserved(
                 process_run_unlock(guard);
                 return ExitSwitch::Idle(span);
             }
-            if (process_image_commit_activation(prepared) == false) {
+            if (process_image_commit_activation(owner, running, prepared) == false) {
                 let ready = scheduled_process_yield(owner, running);
                 scheduled_process_release(owner, ready);
                 process_run_unlock(guard);
@@ -13759,7 +13861,8 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
     // it because its parents always block before the child exits; RPi5's
     // children finish first, deterministically.
     //
-    // So: capture the root the reaper is running on, reap, restore. The
+    // So: retain whether the reaper had a current root, reap, then derive
+    // the current root again under actual current authority. The
     // same repair kernel_syscall_wait4_deliver already does for the same
     // reason, one call earlier in the same path.
     // GitHub issue #516: an absent target is carried as absent rather than
@@ -13767,7 +13870,6 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
     // invisible here -- it activated PID 1's live image and only the next
     // COW fault said so. With no target there is nothing to move away from
     // and nothing to recommit, so both activations below are skipped.
-    let mut resume_root: AddressSpaceRoot = address_space_boot_root();
     let mut has_resume_root: bool = false;
     // A secondary may arrive here from stack_idle_complete after it moved to
     // the IRQ stack and cleared current_live. It has already activated root
@@ -13776,7 +13878,6 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
     match kernel_process_current_root_here() {
         CurrentRootHere::Idle => {}
         CurrentRootHere::Root(current_root) => {
-            resume_root = current_root;
             has_resume_root = true;
         }
     }
@@ -13821,7 +13922,7 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
             // starts. The current process remains Running throughout this
             // kernel-only span.
             if (has_resume_root) {
-                kernel_process_activate_stable_root(resume_root);
+                kernel_process_activate_root_here();
             }
             // The take refused a stack still stood on, so it is free here.
             workload_busy_peer_exit_reaped(pid, parent_pid, true);
@@ -13846,7 +13947,7 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
             // tearing down the child. Recommit the reaper's root so a later COW fault
             // consults the same address space that TTBR0 already names.
             if (has_resume_root) {
-                kernel_process_activate_stable_root(resume_root);
+                kernel_process_activate_root_here();
             }
             return status;
         }

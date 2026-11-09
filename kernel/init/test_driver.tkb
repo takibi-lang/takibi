@@ -423,7 +423,7 @@ fn kernel_process_child_exec_map_result(current_authority: borrow ProcessCurrent
                 ProcessImageExecInstallResult::Installed => {}
             }
             kernel_syscall_process_configure_current(heap_start, heap_limit);
-            process_image_activate_root(child_root);
+            process_image_activate_root(current_authority);
             kernel_process_child_exec_mark(current_authority);
             // An exec commits here too, not only on the dynamic image path
             // below. The checkpoint is scoped to the one tracked child pid,
@@ -1113,7 +1113,7 @@ private fn kernel_process_child_exec_commit(current_authority: borrow ProcessCur
                         kernel_syscall_persistent_shell_checkpoint_exec_commit(
                             kernel_process_current_pid());
                     }
-                    process_image_activate_root(child_space);
+                    process_image_activate_root(current_authority);
                     kernel_process_child_exec_mark(current_authority);
                     kernel_syscall_exec_clear();
                     return KernelChildExecPrepareResult::Prepared(user_entry);

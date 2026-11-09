@@ -96,6 +96,108 @@ private fn root_teardown_control(
 }
 """, True, ''),
     ])
+    cases.extend([
+        ('activation rejects reconstructed root', """
+private fn root_entry_control(word: usize) {
+    process_image_activate_root(address_space_root_of_key(word));
+}
+""", False, 'cannot unify AddressSpaceRoot with view ProcessCurrent'),
+        ('prepared commit rejects another owner generation', """
+private fn root_entry_control(
+        owner: borrow ScheduledProcessOwner[process],
+        running: borrow ScheduledProcessState[process, ProcessState::Running],
+        other: borrow ScheduledProcessOwner[another],
+        other_running: borrow ScheduledProcessState[another, ProcessState::Running]) -> bool {
+    match process_image_prepare_activation(owner, running) {
+        AddressSpaceActivationPrepareResult::Invalid => { return false; }
+        AddressSpaceActivationPrepareResult::RolloverNeeded => { return false; }
+        AddressSpaceActivationPrepareResult::Prepared(prepared) => {
+            return process_image_commit_activation(other, other_running, prepared);
+        }
+    }
+}
+""", False, 'static value mismatch'),
+        ('prepared commit retains real authority', """
+private fn root_entry_control(
+        owner: borrow ScheduledProcessOwner[process],
+        running: borrow ScheduledProcessState[process, ProcessState::Running]) -> bool {
+    match process_image_prepare_activation(owner, running) {
+        AddressSpaceActivationPrepareResult::Invalid => { return false; }
+        AddressSpaceActivationPrepareResult::RolloverNeeded => { return false; }
+        AddressSpaceActivationPrepareResult::Prepared(prepared) => {
+            return process_image_commit_activation(owner, running, prepared);
+        }
+    }
+}
+""", True, ''),
+        ('prepared expiry through real borrowed teardown', """
+private fn root_entry_control(
+        owner: sink ScheduledProcessOwner[process],
+        running: sink ScheduledProcessState[process, ProcessState::Running]) -> bool {
+    let mut handle: ProcessHandle = { owner.pool_index, owner.generation };
+    match process_image_prepare_activation(owner, running) {
+        AddressSpaceActivationPrepareResult::Invalid => { return false; }
+        AddressSpaceActivationPrepareResult::RolloverNeeded => { return false; }
+        AddressSpaceActivationPrepareResult::Prepared(prepared) => {
+            let guard = process_run_lock();
+            let exited = scheduled_process_exit(owner, running);
+            scheduled_process_release(owner, exited);
+            match scheduled_process_exited_take(guard, handle) {
+                ScheduledProcessExitedTakeResult::Missing => {
+                    process_run_unlock(guard);
+                    process_image_cancel_activation(prepared);
+                    return false;
+                }
+                ScheduledProcessExitedTakeResult::Exited(resources) => {
+                    let (reaper, reaping) = resources;
+                    process_run_unlock(guard);
+                    scheduled_process_reap_teardown(reaper, reaping);
+                    let committed: bool = process_image_commit_activation(reaper, reaping, prepared);
+                    let removal = process_run_lock();
+                    scheduled_process_reap_remove(removal, reaper, reaping);
+                    process_run_unlock(removal);
+                    return committed;
+                }
+            }
+        }
+    }
+}
+""", False, 'ProcessState::Reapable'),
+    ])
+    cases.extend([
+        ('permanent boot prepared activation', """
+private fn root_boot_control() -> bool {
+    match address_space_prepare_boot_activation() {
+        AddressSpaceActivationPrepareResult::Invalid => { return false; }
+        AddressSpaceActivationPrepareResult::RolloverNeeded => { return false; }
+        AddressSpaceActivationPrepareResult::Prepared(prepared) => {
+            match address_space_commit_boot_activation(prepared) {
+                AddressSpaceActivationCommitResult::Invalid => { return false; }
+                AddressSpaceActivationCommitResult::Activated(root) => {
+                    return root_slot_word(address_space_root_slot(root)) == 0;
+                }
+            }
+        }
+    }
+}
+""", True, ''),
+        ('owner prepared token is not boot authority', """
+private fn root_boot_control(
+        owner: borrow ScheduledProcessOwner[process],
+        running: borrow ScheduledProcessState[process, ProcessState::Running]) -> bool {
+    match process_image_prepare_activation(owner, running) {
+        AddressSpaceActivationPrepareResult::Invalid => { return false; }
+        AddressSpaceActivationPrepareResult::RolloverNeeded => { return false; }
+        AddressSpaceActivationPrepareResult::Prepared(prepared) => {
+            match address_space_commit_boot_activation(prepared) {
+                AddressSpaceActivationCommitResult::Invalid => { return false; }
+                AddressSpaceActivationCommitResult::Activated(root) => { return true; }
+            }
+        }
+    }
+}
+""", False, 'static value mismatch'),
+    ])
     def judge(case, result):
         name, _, accepts = case[:3]
         output = result.stdout + result.stderr
@@ -120,7 +222,7 @@ private fn root_teardown_control(
     if any(failures):
         return 1
     report_pass('process-current-phase',
-                'phase transitions and resets reject retained current authority; teardown requires matching Reapable state and rejects live record loans',
+                'current phases, borrowed teardown, reconstructed roots, wrong-generation commits and prepared expiry are checked on real kernel APIs',
                 cases=ran.ran)
     return 0
 

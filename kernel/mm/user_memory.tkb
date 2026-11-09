@@ -312,8 +312,12 @@ fn user_probe_boot_read_matches(address: usize, expected: borrow [const u8; 8..]
 // function, like user_probe_boot_read_matches' own. A refused validation
 // is reported as Fault / (false, 0) and nothing is dereferenced, so a
 // probe can expect a fault as a refusal rather than as an EL1 abort.
-fn user_probe_root_write_byte(root: AddressSpaceRoot, address: usize, value: u8)
+fn user_probe_root_write_byte(
+        owner: borrow ScheduledProcessOwner[source],
+        running: borrow ScheduledProcessState[source, ProcessState::Running],
+        address: usize, value: u8)
         -> UserWriteResult !{unsafe} {
+    let mut root: AddressSpaceRoot = scheduled_process_address_space_root_owned(owner);
     if (user_range_span_ok(root, address, 1, UserAccessMode::Write) == false) {
         return UserWriteResult::Fault;
     }
@@ -321,7 +325,7 @@ fn user_probe_root_write_byte(root: AddressSpaceRoot, address: usize, value: u8)
     // names root 0, so a switch between the activation and the access would
     // resume it on root 0. The span keeps the two on one root.
     let span = preempt_span_begin();
-    address_space_activate_root(root);
+    address_space_activate_owned_root(owner, running);
     match user_range_base(address, 1) {
         UserRangeBase::Refused => {
             preempt_span_end(span);
@@ -336,14 +340,18 @@ fn user_probe_root_write_byte(root: AddressSpaceRoot, address: usize, value: u8)
     }
 }
 
-fn user_probe_root_read_byte(root: AddressSpaceRoot, address: usize)
+fn user_probe_root_read_byte(
+        owner: borrow ScheduledProcessOwner[source],
+        running: borrow ScheduledProcessState[source, ProcessState::Running],
+        address: usize)
         -> (bool, u8) !{unsafe} {
+    let mut root: AddressSpaceRoot = scheduled_process_address_space_root_owned(owner);
     if (user_range_span_ok(root, address, 1, UserAccessMode::Read) == false) {
         return (false, 0);
     }
     // The same span as user_probe_root_write_byte's (#638 stage 9).
     let span = preempt_span_begin();
-    address_space_activate_root(root);
+    address_space_activate_owned_root(owner, running);
     match user_range_base(address, 1) {
         UserRangeBase::Refused => {
             preempt_span_end(span);
