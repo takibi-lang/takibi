@@ -7,6 +7,7 @@ use "kernel/fs/elf64.tkb";
 use "kernel/fs/ext2/ext2.tkb";
 use "kernel/lib/mutex.tkb";
 use "kernel/lib/atomic_word.tkb";
+use "kernel/lib/byte_slice.tkb";
 use "kernel/lib/set_once.tkb";
 use "kernel/lib/slot_pool_wait.tkb";
 use "kernel/kernel/cpu_authority.tkb";
@@ -15,7 +16,6 @@ use "kernel/kernel/cpu_authority.tkb";
 // User-page ownership is recorded only in the page tables. Address-space
 // cleanup walks populated L2 branches and their L3 PTEs, so neither image
 // mappings nor clone rollback needs an enormous per-page shadow array.
-private let mut process_image_zero_page: [u8; PAGE_SIZE];
 // Streaming ELF source selected only for the ext2-backed map entry point.
 // The metadata window still contains the ELF header/program table; file
 // bytes for PT_LOAD pages are fetched one filesystem block at a time.
@@ -2010,7 +2010,7 @@ private fn process_image_load_page(slot: borrow ProcessImageSlot[0],
     let mut copy_end: usize = page_end;
     if (copy_end > file_end) { copy_end = file_end; }
     if (copy_start >= copy_end) {
-        if (slice_eq(bytes, process_image_zero_page as []u8)) {
+        if (byte_slice_is_zero(bytes)) {
             return ProcessImagePageLoadResult::Loaded;
         }
         return ProcessImagePageLoadResult::Invalid;
@@ -2047,17 +2047,14 @@ private fn process_image_load_page(slot: borrow ProcessImageSlot[0],
 
     // Every byte outside the file-backed overlap must still be zero. Dynamic
     // endpoints reuse the same checked-slice evidence as the copy views.
-    let zeros = process_image_zero_page as []u8;
     let suffix_start: usize = destination_offset + copy_length;
     if (suffix_start > PAGE_SIZE) {
         return ProcessImagePageLoadResult::Invalid;
     }
     let prefix = bytes[0..<destination_offset];
-    let zero_prefix = zeros[0..<destination_offset];
     let suffix = bytes[suffix_start..<PAGE_SIZE];
-    let zero_suffix = zeros[suffix_start..<PAGE_SIZE];
-    if (slice_eq(prefix, zero_prefix) == false ||
-        slice_eq(suffix, zero_suffix) == false) {
+    if (byte_slice_is_zero(prefix) == false ||
+        byte_slice_is_zero(suffix) == false) {
         return ProcessImagePageLoadResult::Invalid;
     }
     return ProcessImagePageLoadResult::Loaded;
@@ -2092,7 +2089,7 @@ private fn process_image_load_page_ext2(slot: borrow ProcessImageSlot[0],
     let mut copy_end: usize = page_end;
     if (copy_end > file_end) { copy_end = file_end; }
     if (copy_start >= copy_end) {
-        if (slice_eq(bytes, process_image_zero_page as []u8)) {
+        if (byte_slice_is_zero(bytes)) {
             return ProcessImagePageLoadResult::Loaded;
         }
         return ProcessImagePageLoadResult::Invalid;
@@ -2139,18 +2136,15 @@ private fn process_image_load_page_ext2(slot: borrow ProcessImageSlot[0],
             }
         }
     }
-    let zeros = process_image_zero_page as []u8;
     let prefix_end: usize = copy_start - page_start;
     let suffix_start: usize = copy_end - page_start;
     if (prefix_end > PAGE_SIZE || suffix_start > PAGE_SIZE) {
         return ProcessImagePageLoadResult::Invalid;
     }
     let prefix = bytes[0..<prefix_end];
-    let zero_prefix = zeros[0..<prefix_end];
     let suffix = bytes[suffix_start..<PAGE_SIZE];
-    let zero_suffix = zeros[suffix_start..<PAGE_SIZE];
-    if (slice_eq(prefix, zero_prefix) == false ||
-        slice_eq(suffix, zero_suffix) == false) {
+    if (byte_slice_is_zero(prefix) == false ||
+        byte_slice_is_zero(suffix) == false) {
         return ProcessImagePageLoadResult::Invalid;
     }
     return ProcessImagePageLoadResult::Loaded;
@@ -2904,7 +2898,6 @@ fn process_image_gap_is_unmapped(pages: borrow ProcessImagePages[image]) -> bool
 // - process_image_pool and mmap_region_pool: rank-39 pool locks whose
 //   wrappers hold the preempt count across the hold (preempt_lock_raise, #1350).
 // - process_image_root0_record: SetOnce.
-// - process_image_zero_page: never written (zero at boot), only compared.
 
 // Samples allocator metadata while holding only this pool allocation guard.
 fn process_image_pool_space_stats() -> (usize, usize, usize, usize) !{unsafe} {

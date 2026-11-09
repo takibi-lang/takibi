@@ -45,6 +45,50 @@ fn one_subject() -> []const u8 {
     return bs"cmdline";
 }
 
+// Independent generated inputs: each one-byte mutation has a known nonzero
+// byte, and slice_eq checks it against a separately initialized zero array.
+// The production predicate is called directly, not copied into this fixture.
+fn zero_predicate_probe() -> bool {
+    let mut subject: [u8; 4096];
+    let mut reference: [u8; 4096];
+    for position: usize in 0..<4096 {
+        subject[position] = 0;
+        reference[position] = 0;
+    }
+    if (byte_slice_is_zero(subject as []const u8) == false ||
+        slice_eq(subject as []const u8, reference as []const u8) == false) {
+        return false;
+    }
+    for position: usize in 0..<4096 {
+        for value: usize in 1..<256 {
+            subject[position] = value as u8;
+            if (byte_slice_is_zero(subject as []const u8) ||
+                slice_eq(subject as []const u8, reference as []const u8)) {
+                return false;
+            }
+        }
+        let after: usize = position + 1;
+        if (after <= 4096) {
+            if (byte_slice_is_zero(subject[0..<position]) == false ||
+                byte_slice_is_zero(subject[0..<after]) ||
+                byte_slice_is_zero(subject[position..<4096]) ||
+                byte_slice_is_zero(subject[after..<4096]) == false) {
+                return false;
+            }
+        }
+        subject[position] = 0;
+    }
+    for boundary: usize in 0..<4097 {
+        if (boundary <= 4096) {
+            if (byte_slice_is_zero(subject[0..<boundary]) == false ||
+                byte_slice_is_zero(subject[boundary..<4096]) == false) {
+                return false;
+            }
+        }
+    }
+    return byte_slice_is_zero(bs"");
+}
+
 fn app_main() {
     uart_puts("equal=");
     uart_print(slice_eq(bs"proc", bs"proc"));
@@ -85,5 +129,7 @@ fn app_main() {
     }
     uart_puts(":");
     uart_print(subject_calls);
+    uart_puts("\nzero predicate exhaustive=");
+    uart_print(zero_predicate_probe());
     uart_puts("\n");
 }

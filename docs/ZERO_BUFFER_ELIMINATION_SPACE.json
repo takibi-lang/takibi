@@ -1,0 +1,445 @@
+{
+  "published_base": "cd08c3e89ee76e3936faec857f56439bc22967fb",
+  "baseline_binding": {
+    "manifest_path": "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-cd08c3e8/manifest.json",
+    "manifest_sha256": "e9112241f278898ee07c7abaa7928b4c8c5c6bcf2a077b6ba3c30de23de652ba",
+    "files": [
+      {
+        "path": "/home/vscode/.takibi-sessions/evidence/1159-zero-buffer-elimination/unit-20261109T190440Z/baseline-qemu-kernel.elf",
+        "archive_path": "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-cd08c3e8/kernel/build/qemu/kernel.elf",
+        "bytes": 1314864,
+        "sha256": "07f08811353a2cd6895aa9e9fb53a690438d56b9e060632713e043724631e72f"
+      },
+      {
+        "path": "/home/vscode/.takibi-sessions/evidence/1159-zero-buffer-elimination/unit-20261109T190440Z/baseline-qemu-main.o",
+        "archive_path": "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-cd08c3e8/kernel/build/qemu/main.o",
+        "bytes": 3000536,
+        "sha256": "945fa2362d8370bd9e84ce2ec046d8f350704c616d989eafef0f3127ff7219f2"
+      },
+      {
+        "path": "/home/vscode/.takibi-sessions/evidence/1159-zero-buffer-elimination/unit-20261109T190440Z/baseline-rpi5-kernel.elf",
+        "archive_path": "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-cd08c3e8/kernel/build/rpi5/kernel.elf",
+        "bytes": 4736384,
+        "sha256": "24c87237030838f29697e9dc5c3ab9cd450f00a338af17b88518e0793c8211be"
+      },
+      {
+        "path": "/home/vscode/.takibi-sessions/evidence/1159-zero-buffer-elimination/unit-20261109T190440Z/baseline-rpi5-main.o",
+        "archive_path": "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-cd08c3e8/kernel/build/rpi5/main.o",
+        "bytes": 6542016,
+        "sha256": "b044256bae219a9fb7fbfe5b4ac2057cb283e4b3200372c9fbbd1af70d8557a7"
+      }
+    ]
+  },
+  "targets": {
+    "qemu": {
+      "kernel.elf": {
+        "before_sha256": "07f08811353a2cd6895aa9e9fb53a690438d56b9e060632713e043724631e72f",
+        "after_sha256": "44606d92a4083929d8fcbcc3fff8e4b41de58150482654ca2a43986568e5609c",
+        "before_bytes": 1314864,
+        "after_bytes": 1314880,
+        "size": {
+          "before": {
+            "text": 822840,
+            "data": 4624,
+            "bss": 1318912
+          },
+          "after": {
+            "text": 822736,
+            "data": 4616,
+            "bss": 1314816
+          }
+        },
+        "sections": {
+          ".text": {
+            "before": 645040,
+            "after": 644912
+          },
+          ".rodata": {
+            "before": 54904,
+            "after": 54904
+          },
+          ".data": {
+            "before": 136,
+            "after": 136
+          },
+          ".got": {
+            "before": 4488,
+            "after": 4480
+          },
+          ".eh_frame": {
+            "before": 122896,
+            "after": 122920
+          },
+          ".bss": {
+            "before": 925696,
+            "after": 921600
+          }
+        },
+        "bounds": {
+          "__bss_end": {
+            "before": {
+              "value": 1075499008,
+              "size": 0,
+              "type": 0,
+              "bind": 1,
+              "section": 6
+            },
+            "after": {
+              "value": 1075494912,
+              "size": 0,
+              "type": 0,
+              "bind": 1,
+              "section": 6
+            }
+          },
+          "usable_ram_start": {
+            "before": {
+              "value": 1075904512,
+              "size": 0,
+              "type": 0,
+              "bind": 1,
+              "section": 7
+            },
+            "after": {
+              "value": 1075904512,
+              "size": 0,
+              "type": 0,
+              "bind": 1,
+              "section": 7
+            }
+          },
+          "process_image_zero_page": {
+            "before": {
+              "value": 1075233872,
+              "size": 4096,
+              "type": 1,
+              "bind": 1,
+              "section": 6
+            },
+            "after": null
+          }
+        },
+        "changed_section_count": 7,
+        "changed_section_names_sha256": "0a7864c6141676b3ecaad28814ccda84f6e1a2671854820f2a95137f82957353",
+        "changed_body_or_storage_sections": [
+          ".eh_frame"
+        ],
+        "other_changes_scope": "Full section names and byte hashes retained in external measurement-full.json; relocation, symbol/string and linked address shifts are not new source bodies."
+      },
+      "main.o": {
+        "before_sha256": "945fa2362d8370bd9e84ce2ec046d8f350704c616d989eafef0f3127ff7219f2",
+        "after_sha256": "4a03410dbf184b78508727e18da6cc3bd9bdea54f3088436e41a93aab93eefe6",
+        "before_bytes": 3000536,
+        "after_bytes": 3000416,
+        "size": {
+          "before": {
+            "text": 818251,
+            "data": 136,
+            "bss": 908119
+          },
+          "after": {
+            "text": 818151,
+            "data": 136,
+            "bss": 904023
+          }
+        },
+        "sections": {
+          ".text": {
+            "before": 2548,
+            "after": 2548
+          },
+          ".rodata": {
+            "before": 2440,
+            "after": 2440
+          },
+          ".eh_frame": {
+            "before": 127216,
+            "after": 127240
+          },
+          ".bss.process_image_zero_page": {
+            "before": 4096,
+            "after": 0
+          },
+          ".text.takibi.byte_slice_is_zero": {
+            "before": 0,
+            "after": 64
+          },
+          ".text.takibi.process_image_load_page": {
+            "before": 616,
+            "after": 524
+          },
+          ".text.takibi.process_image_load_page_ext2": {
+            "before": 664,
+            "after": 568
+          }
+        },
+        "bounds": {
+          "__bss_end": {
+            "before": null,
+            "after": null
+          },
+          "usable_ram_start": {
+            "before": {
+              "value": 0,
+              "size": 0,
+              "type": 0,
+              "bind": 1,
+              "section": 0
+            },
+            "after": {
+              "value": 0,
+              "size": 0,
+              "type": 0,
+              "bind": 1,
+              "section": 0
+            }
+          },
+          "process_image_zero_page": {
+            "before": {
+              "value": 0,
+              "size": 4096,
+              "type": 1,
+              "bind": 1,
+              "section": 7883
+            },
+            "after": null
+          }
+        },
+        "changed_section_count": 2874,
+        "changed_section_names_sha256": "9b1446d1be0b757a0d98071111cec38b551b00652aa3cf2e5c361185fa577425",
+        "changed_body_or_storage_sections": [
+          ".bss.process_image_zero_page",
+          ".eh_frame",
+          ".text.takibi.byte_slice_is_zero",
+          ".text.takibi.process_image_load_page",
+          ".text.takibi.process_image_load_page_ext2"
+        ],
+        "other_changes_scope": "Full section names and byte hashes retained in external measurement-full.json; relocation, symbol/string and linked address shifts are not new source bodies."
+      },
+      "frames": {
+        "load_page": {
+          "before": 224,
+          "after": 224
+        },
+        "load_page_ext2": {
+          "before": 240,
+          "after": 240
+        },
+        "predicate": {
+          "before": null,
+          "after": 16
+        },
+        "new_predicate_edge_totals": [
+          240,
+          256
+        ],
+        "scope": "static frame reservations at these call edges only, not whole call-chain peak"
+      }
+    },
+    "rpi5": {
+      "kernel.elf": {
+        "before_sha256": "24c87237030838f29697e9dc5c3ab9cd450f00a338af17b88518e0793c8211be",
+        "after_sha256": "951fc8c5a00dacea1a826a3fbf6f4b3c063b7719e9e2910d4a1d2fa55d4c4832",
+        "before_bytes": 4736384,
+        "after_bytes": 4736392,
+        "size": {
+          "before": {
+            "text": 4207492,
+            "data": 5600,
+            "bss": 1933312
+          },
+          "after": {
+            "text": 4207420,
+            "data": 5592,
+            "bss": 1929216
+          }
+        },
+        "sections": {
+          ".text": {
+            "before": 688740,
+            "after": 688644
+          },
+          ".rodata": {
+            "before": 3385144,
+            "after": 3385144
+          },
+          ".data": {
+            "before": 336,
+            "after": 336
+          },
+          ".got": {
+            "before": 5264,
+            "after": 5256
+          },
+          ".eh_frame": {
+            "before": 133608,
+            "after": 133632
+          },
+          ".bss": {
+            "before": 1540096,
+            "after": 1536000
+          }
+        },
+        "bounds": {
+          "__bss_end": {
+            "before": {
+              "value": 7856128,
+              "size": 0,
+              "type": 0,
+              "bind": 1,
+              "section": 6
+            },
+            "after": {
+              "value": 7852032,
+              "size": 0,
+              "type": 0,
+              "bind": 1,
+              "section": 6
+            }
+          },
+          "usable_ram_start": {
+            "before": {
+              "value": 8257536,
+              "size": 0,
+              "type": 0,
+              "bind": 1,
+              "section": 7
+            },
+            "after": {
+              "value": 8257536,
+              "size": 0,
+              "type": 0,
+              "bind": 1,
+              "section": 7
+            }
+          },
+          "process_image_zero_page": {
+            "before": {
+              "value": 7459856,
+              "size": 4096,
+              "type": 1,
+              "bind": 1,
+              "section": 6
+            },
+            "after": null
+          }
+        },
+        "changed_section_count": 7,
+        "changed_section_names_sha256": "0a7864c6141676b3ecaad28814ccda84f6e1a2671854820f2a95137f82957353",
+        "changed_body_or_storage_sections": [
+          ".eh_frame"
+        ],
+        "other_changes_scope": "Full section names and byte hashes retained in external measurement-full.json; relocation, symbol/string and linked address shifts are not new source bodies."
+      },
+      "main.o": {
+        "before_sha256": "b044256bae219a9fb7fbfe5b4ac2057cb283e4b3200372c9fbbd1af70d8557a7",
+        "after_sha256": "aaa7763a28c6424235ac8e6c04d935c140328e514fb6d10a4291639fea9a864e",
+        "before_bytes": 6542016,
+        "after_bytes": 6542000,
+        "size": {
+          "before": {
+            "text": 4192702,
+            "data": 336,
+            "bss": 1177627
+          },
+          "after": {
+            "text": 4192622,
+            "data": 336,
+            "bss": 1173531
+          }
+        },
+        "sections": {
+          ".text": {
+            "before": 2548,
+            "after": 2548
+          },
+          ".rodata": {
+            "before": 2568,
+            "after": 2568
+          },
+          ".eh_frame": {
+            "before": 137576,
+            "after": 137600
+          },
+          ".bss.process_image_zero_page": {
+            "before": 4096,
+            "after": 0
+          },
+          ".text.takibi.byte_slice_is_zero": {
+            "before": 0,
+            "after": 76
+          },
+          ".text.takibi.process_image_load_page": {
+            "before": 632,
+            "after": 540
+          },
+          ".text.takibi.process_image_load_page_ext2": {
+            "before": 656,
+            "after": 568
+          }
+        },
+        "bounds": {
+          "__bss_end": {
+            "before": null,
+            "after": null
+          },
+          "usable_ram_start": {
+            "before": {
+              "value": 0,
+              "size": 0,
+              "type": 0,
+              "bind": 1,
+              "section": 0
+            },
+            "after": {
+              "value": 0,
+              "size": 0,
+              "type": 0,
+              "bind": 1,
+              "section": 0
+            }
+          },
+          "process_image_zero_page": {
+            "before": {
+              "value": 0,
+              "size": 4096,
+              "type": 1,
+              "bind": 1,
+              "section": 8550
+            },
+            "after": null
+          }
+        },
+        "changed_section_count": 3111,
+        "changed_section_names_sha256": "a93c3e10d57f9020afb1f6885a3e264e21ecce7e722522900747e51009794d63",
+        "changed_body_or_storage_sections": [
+          ".bss.process_image_zero_page",
+          ".eh_frame",
+          ".text.takibi.byte_slice_is_zero",
+          ".text.takibi.process_image_load_page",
+          ".text.takibi.process_image_load_page_ext2"
+        ],
+        "other_changes_scope": "Full section names and byte hashes retained in external measurement-full.json; relocation, symbol/string and linked address shifts are not new source bodies."
+      },
+      "frames": {
+        "load_page": {
+          "before": 224,
+          "after": 224
+        },
+        "load_page_ext2": {
+          "before": 240,
+          "after": 240
+        },
+        "predicate": {
+          "before": null,
+          "after": 16
+        },
+        "new_predicate_edge_totals": [
+          240,
+          256
+        ],
+        "scope": "static frame reservations at these call edges only, not whole call-chain peak"
+      }
+    }
+  }
+}

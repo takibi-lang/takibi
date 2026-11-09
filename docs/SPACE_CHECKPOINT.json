@@ -2,12 +2,12 @@
   "date": "2026-11-09",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "e09d550737bcd10a69666ad2cbb09b9f64ad671a3e992ec7d0f364f2172f2828",
-  "workload": "Actual combined production QEMU/RPi5 ELF/object/facts for init display projection and retained TCP cost word migrations against verified published1a2a69ee. Existing occupancy reused only at unchanged allocation/pool/storage-lifetime boundary.",
+  "source_sha256": "de4e78eb14f46fef1a8b5e93e0f9b66f044dc42db15141c8ca3bfba5a0fb3e25",
+  "workload": "Actual production QEMU/RPi5 ELF/object/facts against verified publishedcd08 baseline; six literal-zero checks in unchanged page-loading paths. Existing pool occupancy reused only for unchanged allocation/lifetime workload.",
   "evidence": [
-    "docs/REPORT_TCP_WORDS_INTEGRATION_SPACE.md",
-    "docs/REPORT_TCP_WORDS_INTEGRATION_SPACE.json"
+    "docs/ZERO_BUFFER_ELIMINATION_SPACE.md",
+    "docs/ZERO_BUFFER_ELIMINATION_SPACE.json"
   ],
-  "assessment": "Actual combined text+32B QEMU/+64B RPi5, unchanged data/BSS/usable RAM. Display symbol rename keeps8B and same address; TCP records stay3x32B with unchanged field offsets. Only four intended object text sections/body hashes change; contracts/effects/value identities unchanged and caller changes confined to those bodies. Typed ProcessEnd APIs, readiness and benchmark intervals remain unchanged; no page-saving or physical timing/coherence claim.",
-  "next_trigger": "Next completed kernel feature, or changed report/sample representation, timing intervals, allocation or retained lifetime."
+  "assessment": "Remove the 4096-byte mutable reference array and one allowance. Actual text -104B QEMU/-72B RPi5, GOT/data -8B and BSS -4096B on both. Loader frames remain224/240B; predicate adds16B at its new call edges. Pool/usable RAM start unchanged by rounding, so no extra usable pages or physical timing/coherence claim. Existing readonly-array compiler gap remains separate.",
+  "next_trigger": "Next completed kernel feature, or changed byte traversal, loader comparison/copy behavior, stack call structure, pool-start rounding or retained allocation/lifetime workload."
 }

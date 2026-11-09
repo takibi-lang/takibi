@@ -3,8 +3,8 @@
 // This deliberately stays below a String abstraction: kernel pathname and
 // protocol parsers already operate on bounded []const u8 views, may contain NUL,
 // and need byte-exact semantics. slice_eq remains the exact-equality
-// primitive; this file supplies the two missing compositions that callers
-// otherwise hand-code.
+// primitive; this file supplies small byte queries that callers otherwise
+// hand-code.
 //
 // Current limitations (2026-08-26). Keep this list current as call sites
 // change; a limitation that goes stale here is worse than none.
@@ -28,6 +28,14 @@ must_use variant ByteSliceSplitResult {
 must_use variant ByteSliceFindResult {
     Absent;
     Found(usize);
+}
+
+// Empty input is all zero. Element iteration carries its own bounds proof.
+fn byte_slice_is_zero(value: borrow []const u8) -> bool {
+    for byte in value {
+        if (byte != 0) { return false; }
+    }
+    return true;
 }
 
 fn byte_slice_find_first(value: borrow []const u8, delimiter: u8)
