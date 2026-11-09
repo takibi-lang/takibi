@@ -148,6 +148,14 @@ land there that langcheck had passed. Do not move HEAD (no checkpoint commit)
 while a full run is in progress; a run that straddles a commit is not
 evidence for either head.
 
+When those gates are separate make invocations, serialize make slowcheck with
+system-QEMU lane chains in the same worktree. Its resource-lease controls use
+qemu.sh and meet the same one-chain guard (#1433), so another root chain is
+refused. A single aggregate owns its child lanes through the existing runner
+protocol; separate worktrees can still run in parallel. Preserve a refusal,
+collect the original owned chain's terminal result, then rerun only the
+refused gate. Keep the refusal distinct from a kernel test failure.
+
 Do not close the issue yourself unless your prompt says to; the closing commit
 lands through the coordinator after it checks the audit against DECISIONS.md
 (and, for an escalated item, after the maintainer approves the land). The coordinator quotes escalated audit
