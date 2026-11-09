@@ -40,13 +40,13 @@ class PeerExitBoundary(gdb.Breakpoint):
     def stop(self):
         pair = gdb.parse_and_eval("workload_busy_pair")
         cpu = gdb.selected_thread().num - 1
-        if int(pair["peer_exit_cpu"]) == 0 or bool(pair["peer_exit_reported"]):
+        if int(pair["peer_exit_cpu"]["value"]) == 0 or bool(pair["peer_exit_reported"]["value"]):
             return False
         expected = 2 if self.reply else 93
         if int(gdb.parse_and_eval("$x1")) != expected:
             return False
         record = current_record(cpu)
-        if record is None or int(record["pid"]) != int(pair["peer_exit_pid"]):
+        if record is None or int(record["pid"]) != int(pair["peer_exit_pid"]["value"]):
             return False
         self.reached = True
         self.cpu = cpu
@@ -77,12 +77,12 @@ class PeerExitArmed(gdb.Breakpoint):
     # peer_exit_cpu is written, PeerExitBoundary.stop refuses every hit
     # anyway, so waiting for that write first drops no stop the check uses.
     def __init__(self):
-        super().__init__("workload_busy_pair.peer_exit_cpu",
+        super().__init__("workload_busy_pair.peer_exit_cpu.value",
                          gdb.BP_WATCHPOINT, gdb.WP_WRITE)
         self.reached = False
 
     def stop(self):
-        if int(gdb.parse_and_eval("workload_busy_pair.peer_exit_cpu")) == 0:
+        if int(gdb.parse_and_eval("workload_busy_pair.peer_exit_cpu.value")) == 0:
             return False
         self.reached = True
         return True

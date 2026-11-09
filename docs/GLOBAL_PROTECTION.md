@@ -783,3 +783,46 @@ them. Finish charges all online cores before publishing inactive; reporting
 retains MachineStopped and ProcessRunGuard until its last field read.
 This incremental review adopts the bounded code/payload cost. Completion
 of the globals milestone still requires its measured workload review.
+
+- 2026-11-09: `WorkloadBusyPair` scalar/array fields use `AtomicWord`;
+  restart state uses the existing `Atomic(E)` API with an explicit u8
+  enum. Run-locked updates, stopped profiling boundaries and the one-shot
+  stack-release/reap handoff retain their ordering. Reaping publishes its
+  reported flag after unlink releases the run guard; this is not described
+  as a locked compound operation. Peer controls retain their planted
+  failures, and GDB reads/watchpoints address the atomic value fields.
+
+### Workload record milestone space review (2026-11-09)
+
+The final record conversion is compared with the rebased pre-conversion
+commit 9718310f, which includes published a761a122 and the earlier two
+workload units. Both production kernels were built before and after the
+conversion in the same worktree. BusyPair grows 448 -> 592 bytes; its two
+four-word arrays retain word strides and all fields are now word cells.
+QEMU text grows 809592 -> 811080 bytes (+1488); RPi5 text grows
+4194460 -> 4196036 bytes (+1576). Data remains 4600/5576 bytes. QEMU BSS
+remains 1302528 bytes. RPi5's reported BSS falls 1933312 -> 1929216 bytes
+because its start moves 0x602000 -> 0x603000 while its end stays 0x77a000.
+The fixed RP1 DMA arena stays 0x640000..0x680000: this consumes alignment
+slack before the arena, not a payload saving.
+
+The three-record batch is also compared with the published a761a122 ELFs
+from the coordinator's completed allcheck, copied read-only for measurement.
+QEMU text grows 808968 -> 811080 bytes (+2112); RPi5 text grows
+4193820 -> 4196036 bytes (+2216). BusyWait remains 400 bytes, ProfileCore
+grows 544 -> 576 bytes across four cores, and BusyPair grows 448 -> 592:
+176 bytes more fixed record payload in total. These measurements separate
+payload from section padding. usable_ram_start stays 0x40208000 on QEMU
+and 0x7e0000 on RPi5 throughout; the reserved image/page boundary does not
+grow. There is no allocation, pool metadata, retained-resource lifetime or
+workload-capacity change.
+
+The workload remains the bounded common boot: two CPU-bound workers, the
+stopped profile interval, restart, peer filesystem/console and stack-release
+fixtures, with existing starvation and DDB controls. This milestone measures
+fixed evidence-record storage and linked-image reservations; it does not
+claim a new allocator-occupancy measurement, timing/cache guarantee or an
+OS comparison. The small measured cost is adopted for typed atomic field
+access, retaining all multi-field protocols. The next measurement trigger
+is changed record capacity, allocation/retention behavior or a new kernel
+feature milestone.

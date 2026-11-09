@@ -118,32 +118,33 @@ must_use variant WorkloadPeerNetWakeResult {
 
 // Observing the result on B's CPU is distinct from emitting it on the
 // ordinary console's owner. Pending freezes the verdict until core 0 prints.
-enum WorkloadRestartReportState { Waiting; Pending; Reported; }
+enum WorkloadRestartReportState: u8 { Waiting; Pending; Reported; }
 
+// Individual atomic cells retain the fixture and lifecycle protocols below.
 struct WorkloadBusyPair {
     // The pid currently reporting under each tag, and how many times that
     // pid has changed -- which is init having respawned that entry.
-    a_pid: usize;
-    b_pid: usize;
-    a_restarts: usize;
-    b_restarts: usize;
-    a_rounds: usize;
-    b_rounds: usize;
-    a_checksum: usize;
-    b_checksum: usize;
+    a_pid: AtomicWord;
+    b_pid: AtomicWord;
+    a_restarts: AtomicWord;
+    b_restarts: AtomicWord;
+    a_rounds: AtomicWord;
+    b_rounds: AtomicWord;
+    a_checksum: AtomicWord;
+    b_checksum: AtomicWord;
     // Each tag's round count at the moment the second one first reported.
     // Skew is measured from there: whichever entry init forked first is
     // ahead by however long the second took to start, and that is startup
     // ordering, not starvation.
-    a_base: usize;
-    b_base: usize;
-    both_running: bool;
-    start_requested: bool;
-    max_skew: usize;
-    a_slices: usize;
-    b_slices: usize;
-    a_ticks: usize;
-    b_ticks: usize;
+    a_base: AtomicWord;
+    b_base: AtomicWord;
+    both_running: AtomicWord;
+    start_requested: AtomicWord;
+    max_skew: AtomicWord;
+    a_slices: AtomicWord;
+    b_slices: AtomicWord;
+    a_ticks: AtomicWord;
+    b_ticks: AtomicWord;
     // GitHub issue #580: PER CPU, because the interval between two
     // selections belongs to the core that made them. These were one pair
     // shared by every core, so the time since the last selection ANYWHERE
@@ -152,55 +153,55 @@ struct WorkloadBusyPair {
     // idle wakeups, and stopped the moment an ordinary process gave that
     // core something else to do: `cpu_a=26048999 cpu_b=0` for a worker that
     // had completed nine rounds.
-    last_pid: [usize; KERNEL_MAX_CORES];
-    last_tick: [usize; KERNEL_MAX_CORES];
-    start_ticks: usize;
-    end_ticks: usize;
-    profile_cpu: usize;
-    reported: bool;
-    finish_ready: bool;
-    finish_requested: bool;
+    last_pid: [AtomicWord; KERNEL_MAX_CORES];
+    last_tick: [AtomicWord; KERNEL_MAX_CORES];
+    start_ticks: AtomicWord;
+    end_ticks: AtomicWord;
+    profile_cpu: AtomicWord;
+    reported: AtomicWord;
+    finish_ready: AtomicWord;
+    finish_requested: AtomicWord;
     // The restart demonstration, which runs once after the fairness
     // verdict. `restart_requested` is this file having told tag A to exit;
     // the two `*_before` fields are what was true of the pair at that
     // moment, and what B is checked against when A's replacement speaks.
-    restart_requested: bool;
-    restart_b_pid_before: usize;
-    restart_b_rounds_before: usize;
-    restart_report_state: WorkloadRestartReportState;
-    a_last_cpu: usize;
-    b_last_cpu: usize;
-    a_cpu_seen: bool;
-    b_cpu_seen: bool;
-    a_migrations: usize;
-    b_migrations: usize;
-    migration_reported: bool;
-    ordinary_busybox_peer_reported: bool;
-    ordinary_busybox_peer_parent_pid: usize;
+    restart_requested: AtomicWord;
+    restart_b_pid_before: AtomicWord;
+    restart_b_rounds_before: AtomicWord;
+    restart_report_state: Atomic(WorkloadRestartReportState);
+    a_last_cpu: AtomicWord;
+    b_last_cpu: AtomicWord;
+    a_cpu_seen: AtomicWord;
+    b_cpu_seen: AtomicWord;
+    a_migrations: AtomicWord;
+    b_migrations: AtomicWord;
+    migration_reported: AtomicWord;
+    ordinary_busybox_peer_reported: AtomicWord;
+    ordinary_busybox_peer_parent_pid: AtomicWord;
     // The one post-migration exit that proves a peer can give up its
     // process stack before init reaps the zombie on core 0. The pid identifies
     // that one lifetime only; init
     // may reuse its number for the replacement, so post-reap routing uses tag.
-    peer_exit_pid: usize;
-    peer_exit_tag: usize;
-    peer_exit_cpu: usize;
-    peer_exit_stack_released: bool;
-    peer_exit_reported: bool;
+    peer_exit_pid: AtomicWord;
+    peer_exit_tag: AtomicWord;
+    peer_exit_cpu: AtomicWord;
+    peer_exit_stack_released: AtomicWord;
+    peer_exit_reported: AtomicWord;
     // The read-only filesystem fixture asks for the peer in its own affinity
     // mask only after the exit fixture above has completed. Its pid is fixed
     // by its first tag-3 report, before it opens the fixture file.
-    peer_read_pid: usize;
-    peer_read_reported: bool;
+    peer_read_pid: AtomicWord;
+    peer_read_reported: AtomicWord;
     // GitHub issue #843: the registered reader was reaped without an
     // accepted report. The console writer's turn waits on the report, and
     // before this flag it asked for that turn forever with no line naming
     // the fixture that never came.
-    peer_read_failed: bool;
+    peer_read_failed: AtomicWord;
     // GitHub issue #861: the pid this file told to exec /bin/peer-read
     // (answer 4). If it is reaped before its first tag-3 report fixes
     // peer_read_pid, the reader died before it registered, and the reap
     // names that instead of leaving the console writer asking forever.
-    peer_read_exec_pid: usize;
+    peer_read_exec_pid: AtomicWord;
     // GitHub issue #881: the pid told to exec /bin/core-read (answer 5).
     // Each reader image is handed out to one worker lifetime only; init's
     // later replacements stay busy loops. Before this, every replacement was
@@ -208,50 +209,50 @@ struct WorkloadBusyPair {
     // refused once registered; core-read re-runs its reads), init reaped it,
     // slept a second and respawned the worker, forever -- on RPi5 PID 1
     // never reached its no-deadline signal wait.
-    core_read_exec_pid: usize;
+    core_read_exec_pid: AtomicWord;
     // The two filesystem readers rendezvous after pinning themselves to
     // opposite CPUs. This makes device-lock contention evidence a real
     // overlap rather than a race between when the init workers get scheduled.
-    peer_read_core_ready: bool;
-    peer_read_peer_ready: bool;
+    peer_read_core_ready: AtomicWord;
+    peer_read_peer_ready: AtomicWord;
     // The output-only process follows the filesystem reader. It registers
     // before writing, then pins itself to the peer until one deliberately
     // over-capacity write and its retry have completed.
     // A UART-BREAK DDB lane keeps it for one more record: held, pending,
     // then released by the debugger's entry.
-    peer_console_pid: usize;
+    peer_console_pid: AtomicWord;
     // GitHub issue #843: told to leave because the reader failed.
-    peer_console_abandoned: bool;
-    peer_console_order_step: usize;
-    peer_console_first_count: usize;
-    peer_console_first_seen: bool;
-    peer_console_initial_reported: bool;
-    peer_console_reported: bool;
+    peer_console_abandoned: AtomicWord;
+    peer_console_order_step: AtomicWord;
+    peer_console_first_count: AtomicWord;
+    peer_console_first_seen: AtomicWord;
+    peer_console_initial_reported: AtomicWord;
+    peer_console_reported: AtomicWord;
     // GitHub issue #547: the terminal reader the persistent shell starts
     // after the whole chain. Its pid is fixed by its first tag-5 report, and
     // it then runs only on the admitted secondary until its line is read.
-    peer_tty_pid: usize;
-    peer_tty_reading: bool;
-    peer_tty_reported: bool;
+    peer_tty_pid: AtomicWord;
+    peer_tty_reading: AtomicWord;
+    peer_tty_reported: AtomicWord;
     // GitHub issue #581: the inittab pins the resident HTTPd to the
     // secondary with taskset, so its forked connection handler makes its
     // connected read and write there. Latched once both have succeeded.
-    peer_socket_read: bool;
-    peer_socket_write: bool;
-    peer_socket_reported: bool;
+    peer_socket_read: AtomicWord;
+    peer_socket_write: AtomicWord;
+    peer_socket_reported: AtomicWord;
     // GitHub issue #598: the same handler's teardown -- a connected
     // descriptor closed, and a shutdown -- on the secondary.
-    peer_socket_closed: bool;
-    peer_socket_shut_down: bool;
-    peer_socket_teardown_reported: bool;
+    peer_socket_closed: AtomicWord;
+    peer_socket_shut_down: AtomicWord;
+    peer_socket_teardown_reported: AtomicWord;
     // GitHub issue #828: the resident HTTPd's own exec of BusyBox Extras,
     // whose handoff drains the TCP pool, ran on the secondary rather than
     // being rerun on core 0.
-    peer_daemon_handoff_reported: bool;
+    peer_daemon_handoff_reported: AtomicWord;
     // A report this file refused: an unknown tag, or a caller that is not
     // a child of init. Zero on a healthy boot, and printed only when it
     // is not.
-    refused: usize;
+    refused: AtomicWord;
 }
 
 private let mut workload_busy_pair: WorkloadBusyPair;
@@ -337,8 +338,8 @@ fn workload_busy_starve_skips(pid: usize) -> bool {
 }
 
 private fn workload_busy_worker_pid(worker: {0..<2 as usize}) -> usize {
-    if (worker == 0) { return workload_busy_pair.a_pid; }
-    return workload_busy_pair.b_pid;
+    if (worker == 0) { return atomic_word_load(&workload_busy_pair.a_pid); }
+    return atomic_word_load(&workload_busy_pair.b_pid);
 }
 
 private fn workload_busy_waits_reset() {
@@ -947,19 +948,19 @@ private fn workload_profile_start(
     }
     stop_cell_set(&workload_profile_active, stopped, true);
     profile_timeline_start(
-        stopped, workload_busy_pair.a_pid, workload_busy_pair.b_pid);
+        stopped, atomic_word_load(&workload_busy_pair.a_pid), atomic_word_load(&workload_busy_pair.b_pid));
     // GitHub issue #572: the per-worker totals belong to THIS window, and
     // each core's interval opens here against whatever it is running. They
     // used to be derived at the end instead, which is the premise #580
     // breaks -- see workload_profile_finish.
-    workload_busy_pair.a_ticks = 0;
-    workload_busy_pair.b_ticks = 0;
+    atomic_word_store(&workload_busy_pair.a_ticks, 0);
+    atomic_word_store(&workload_busy_pair.b_ticks, 0);
     workload_busy_waits_reset();
     for cpu: usize in 0..<KERNEL_MAX_CORES {
         if (cpu < online) {
             let selected: usize = workload_profile_selected_pid(cpu);
-            workload_busy_pair.last_pid[cpu] = selected;
-            workload_busy_pair.last_tick[cpu] = now;
+            atomic_word_store(&workload_busy_pair.last_pid[cpu], selected);
+            atomic_word_store(&workload_busy_pair.last_tick[cpu], now);
             profile_timeline_interval_start_cpu(stopped, cpu, selected, now);
         }
     }
@@ -999,20 +1000,20 @@ private fn workload_profile_finish(
     // two halves now have one rule between them instead of two that
     // disagree above one core.
     for cpu: usize in 0..<KERNEL_MAX_CORES {
-        if (cpu < online && workload_busy_pair.last_tick[cpu] != 0) {
-            let spent: usize = now - workload_busy_pair.last_tick[cpu];
-            if (workload_busy_pair.a_pid != 0 &&
-                workload_busy_pair.last_pid[cpu] ==
-                    workload_busy_pair.a_pid) {
-                workload_busy_pair.a_ticks =
-                    workload_busy_pair.a_ticks + spent;
-            } else if (workload_busy_pair.b_pid != 0 &&
-                       workload_busy_pair.last_pid[cpu] ==
-                           workload_busy_pair.b_pid) {
-                workload_busy_pair.b_ticks =
-                    workload_busy_pair.b_ticks + spent;
+        if (cpu < online && atomic_word_load(&workload_busy_pair.last_tick[cpu]) != 0) {
+            let spent: usize = now - atomic_word_load(&workload_busy_pair.last_tick[cpu]);
+            if (atomic_word_load(&workload_busy_pair.a_pid) != 0 &&
+                atomic_word_load(&workload_busy_pair.last_pid[cpu]) ==
+                    atomic_word_load(&workload_busy_pair.a_pid)) {
+                atomic_word_store(&workload_busy_pair.a_ticks,
+                    atomic_word_load(&workload_busy_pair.a_ticks) + spent);
+            } else if (atomic_word_load(&workload_busy_pair.b_pid) != 0 &&
+                       atomic_word_load(&workload_busy_pair.last_pid[cpu]) ==
+                           atomic_word_load(&workload_busy_pair.b_pid)) {
+                atomic_word_store(&workload_busy_pair.b_ticks,
+                    atomic_word_load(&workload_busy_pair.b_ticks) + spent);
             }
-            workload_busy_pair.last_tick[cpu] = now;
+            atomic_word_store(&workload_busy_pair.last_tick[cpu], now);
         }
     }
     workload_busy_wait_end(0);
@@ -1044,10 +1045,11 @@ private fn workload_profile_note_selected(pid: usize) {
 // cannot say whether the cause was the pick or the work.
 fn workload_busy_note_selected_locked(
         guard: borrow ProcessRunGuard[lock], pid: usize) {
+    let restart_state_cell: &mut Atomic(WorkloadRestartReportState) = &workload_busy_pair.restart_report_state;
     // Free until the pair exists: every boot before this workload starts,
     // and every switch after the verdict, leaves here without reading the
     // counter. The scheduler calls this on every context switch.
-    if (workload_busy_pair.a_pid == 0 && workload_busy_pair.b_pid == 0) {
+    if (atomic_word_load(&workload_busy_pair.a_pid) == 0 && atomic_word_load(&workload_busy_pair.b_pid) == 0) {
         return;
     }
     workload_profile_note_selected(pid);
@@ -1055,44 +1057,46 @@ fn workload_busy_note_selected_locked(
     if (raw_cpu >= KERNEL_MAX_CORES) { return; }
     let core: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
     let now: usize = read_cntpct() as usize;
-    if (workload_busy_pair.last_tick[core] != 0) {
-        let spent: usize = now - workload_busy_pair.last_tick[core];
-        if (workload_busy_pair.a_pid != 0 &&
-            workload_busy_pair.last_pid[core] == workload_busy_pair.a_pid) {
-            workload_busy_pair.a_ticks = workload_busy_pair.a_ticks + spent;
-        } else if (workload_busy_pair.b_pid != 0 &&
-                   workload_busy_pair.last_pid[core] ==
-                       workload_busy_pair.b_pid) {
-            workload_busy_pair.b_ticks = workload_busy_pair.b_ticks + spent;
+    if (atomic_word_load(&workload_busy_pair.last_tick[core]) != 0) {
+        let spent: usize = now - atomic_word_load(&workload_busy_pair.last_tick[core]);
+        if (atomic_word_load(&workload_busy_pair.a_pid) != 0 &&
+            atomic_word_load(&workload_busy_pair.last_pid[core]) == atomic_word_load(&workload_busy_pair.a_pid)) {
+            atomic_word_store(&workload_busy_pair.a_ticks,
+                atomic_word_load(&workload_busy_pair.a_ticks) + spent);
+        } else if (atomic_word_load(&workload_busy_pair.b_pid) != 0 &&
+                   atomic_word_load(&workload_busy_pair.last_pid[core]) ==
+                       atomic_word_load(&workload_busy_pair.b_pid)) {
+            atomic_word_store(&workload_busy_pair.b_ticks,
+                atomic_word_load(&workload_busy_pair.b_ticks) + spent);
         }
     }
     workload_busy_wait_note_selected(
-        core, workload_busy_pair.last_pid[core], pid);
-    workload_busy_pair.last_pid[core] = pid;
-    workload_busy_pair.last_tick[core] = now;
-    if (workload_busy_pair.a_pid != 0 && pid == workload_busy_pair.a_pid) {
-        workload_busy_pair.a_slices = workload_busy_pair.a_slices + 1;
-        if (workload_busy_pair.restart_report_state ==
+        core, atomic_word_load(&workload_busy_pair.last_pid[core]), pid);
+    atomic_word_store(&workload_busy_pair.last_pid[core], pid);
+    atomic_word_store(&workload_busy_pair.last_tick[core], now);
+    if (atomic_word_load(&workload_busy_pair.a_pid) != 0 && pid == atomic_word_load(&workload_busy_pair.a_pid)) {
+        atomic_word_store(&workload_busy_pair.a_slices, atomic_word_load(&workload_busy_pair.a_slices) + 1);
+        if (atomic_enum_load(restart_state_cell) ==
                 WorkloadRestartReportState::Reported) {
-            if (workload_busy_pair.a_cpu_seen &&
-                workload_busy_pair.a_last_cpu != cpu_id()) {
-                workload_busy_pair.a_migrations =
-                    workload_busy_pair.a_migrations + 1;
+            if ((atomic_word_load(&workload_busy_pair.a_cpu_seen) != 0) &&
+                atomic_word_load(&workload_busy_pair.a_last_cpu) != cpu_id()) {
+                atomic_word_store(&workload_busy_pair.a_migrations,
+                    atomic_word_load(&workload_busy_pair.a_migrations) + 1);
             }
-            workload_busy_pair.a_last_cpu = cpu_id();
-            workload_busy_pair.a_cpu_seen = true;
+            atomic_word_store(&workload_busy_pair.a_last_cpu, cpu_id());
+            atomic_word_store(&workload_busy_pair.a_cpu_seen, 1);
         }
-    } else if (workload_busy_pair.b_pid != 0 && pid == workload_busy_pair.b_pid) {
-        workload_busy_pair.b_slices = workload_busy_pair.b_slices + 1;
-        if (workload_busy_pair.restart_report_state ==
+    } else if (atomic_word_load(&workload_busy_pair.b_pid) != 0 && pid == atomic_word_load(&workload_busy_pair.b_pid)) {
+        atomic_word_store(&workload_busy_pair.b_slices, atomic_word_load(&workload_busy_pair.b_slices) + 1);
+        if (atomic_enum_load(restart_state_cell) ==
                 WorkloadRestartReportState::Reported) {
-            if (workload_busy_pair.b_cpu_seen &&
-                workload_busy_pair.b_last_cpu != cpu_id()) {
-                workload_busy_pair.b_migrations =
-                    workload_busy_pair.b_migrations + 1;
+            if ((atomic_word_load(&workload_busy_pair.b_cpu_seen) != 0) &&
+                atomic_word_load(&workload_busy_pair.b_last_cpu) != cpu_id()) {
+                atomic_word_store(&workload_busy_pair.b_migrations,
+                    atomic_word_load(&workload_busy_pair.b_migrations) + 1);
             }
-            workload_busy_pair.b_last_cpu = cpu_id();
-            workload_busy_pair.b_cpu_seen = true;
+            atomic_word_store(&workload_busy_pair.b_last_cpu, cpu_id());
+            atomic_word_store(&workload_busy_pair.b_cpu_seen, 1);
         }
     }
 }
@@ -1125,13 +1129,14 @@ private fn workload_busy_record_progress_locked(
         guard: borrow ProcessRunGuard[lock],
         tag: usize, checksum: usize,
         input_steps: usize) -> WorkloadBusyProgressResult !{unsafe} {
-    if (workload_busy_pair.restart_report_state ==
+    let restart_state_cell: &mut Atomic(WorkloadRestartReportState) = &workload_busy_pair.restart_report_state;
+    if (atomic_enum_load(restart_state_cell) ==
             WorkloadRestartReportState::Reported) {
         let pid: usize = kernel_process_current_pid();
         if ((tag == WORKLOAD_BUSY_TAG_A &&
-             pid == workload_busy_pair.a_pid) ||
+             pid == atomic_word_load(&workload_busy_pair.a_pid)) ||
             (tag == WORKLOAD_BUSY_TAG_B &&
-             pid == workload_busy_pair.b_pid)) {
+             pid == atomic_word_load(&workload_busy_pair.b_pid))) {
             let mask: usize = kernel_process_current_affinity_mask(guard);
             if (mask != kernel_process_online_mask()) {
                 // The workers pinned themselves while earlier staged boot
@@ -1146,26 +1151,26 @@ private fn workload_busy_record_progress_locked(
         }
         let pid: usize = kernel_process_current_pid();
         let is_pair_worker: bool =
-            (tag == WORKLOAD_BUSY_TAG_A && pid == workload_busy_pair.a_pid) ||
-            (tag == WORKLOAD_BUSY_TAG_B && pid == workload_busy_pair.b_pid);
+            (tag == WORKLOAD_BUSY_TAG_A && pid == atomic_word_load(&workload_busy_pair.a_pid)) ||
+            (tag == WORKLOAD_BUSY_TAG_B && pid == atomic_word_load(&workload_busy_pair.b_pid));
         let migration_goal_met: bool =
-            workload_busy_pair.a_migrations >= WORKLOAD_BUSY_MIGRATION_GOAL &&
-            workload_busy_pair.b_migrations >= WORKLOAD_BUSY_MIGRATION_GOAL;
-        if (workload_busy_pair.migration_reported == false &&
+            atomic_word_load(&workload_busy_pair.a_migrations) >= WORKLOAD_BUSY_MIGRATION_GOAL &&
+            atomic_word_load(&workload_busy_pair.b_migrations) >= WORKLOAD_BUSY_MIGRATION_GOAL;
+        if (atomic_word_load(&workload_busy_pair.migration_reported) == 0 &&
             migration_goal_met && cpu_id() != 0) {
             kernel_boot_log(
                 "\nworkload: busy pair migrated across both cpus with stack handoff intact\n");
-            workload_busy_pair.migration_reported = true;
-            workload_busy_pair.peer_exit_pid = kernel_process_current_pid();
-            workload_busy_pair.peer_exit_tag = tag;
+            atomic_word_store(&workload_busy_pair.migration_reported, 1);
+            atomic_word_store(&workload_busy_pair.peer_exit_pid, kernel_process_current_pid());
+            atomic_word_store(&workload_busy_pair.peer_exit_tag, tag);
         }
-        if (workload_busy_pair.migration_reported) {
+        if ((atomic_word_load(&workload_busy_pair.migration_reported) != 0)) {
             // Ask exactly the armed process to exit, and only while it is
             // actually running on a peer. Before reap, its pid names that
             // lifetime; after reap, the stable tag routes the replacement
             // and survivor to the two filesystem images.
-            if (workload_busy_pair.peer_exit_reported == false) {
-                if (workload_busy_pair.peer_exit_pid ==
+            if (atomic_word_load(&workload_busy_pair.peer_exit_reported) == 0) {
+                if (atomic_word_load(&workload_busy_pair.peer_exit_pid) ==
                         kernel_process_current_pid() && cpu_id() != 0) {
                     // The reply and exit(2) are separate syscalls. A timer
                     // may hand this process to CPU 0 between them, where
@@ -1173,7 +1178,7 @@ private fn workload_busy_record_progress_locked(
                     // Hold its placement through the actual exit, under the
                     // same run guard that chose this peer: the caller pins
                     // the process until it is reaped (GitHub issue #686).
-                    workload_busy_pair.peer_exit_cpu = cpu_id();
+                    atomic_word_store(&workload_busy_pair.peer_exit_cpu, cpu_id());
                     return WorkloadBusyProgressResult::PinThen(2);
                 }
                 // GitHub issue #604: the armed process was on a peer when
@@ -1183,7 +1188,7 @@ private fn workload_busy_record_progress_locked(
                 // and never told to move, since no other answer is given
                 // here. init waited for a child that would not die, and the
                 // boot stopped after `busy pair migrated`. Send it back.
-                if (workload_busy_pair.peer_exit_pid ==
+                if (atomic_word_load(&workload_busy_pair.peer_exit_pid) ==
                         kernel_process_current_pid()) {
                     return WorkloadBusyProgressResult::Value(
                         WORKLOAD_BUSY_ANSWER_PIN_CPU1);
@@ -1193,19 +1198,19 @@ private fn workload_busy_record_progress_locked(
             // GitHub issue #881: once per reader. The same pid may ask again
             // after a failed exec and is answered again.
             let asker: usize = kernel_process_current_pid();
-            if (tag == workload_busy_pair.peer_exit_tag) {
-                if (workload_busy_pair.peer_read_exec_pid != 0 &&
-                    workload_busy_pair.peer_read_exec_pid != asker) {
+            if (tag == atomic_word_load(&workload_busy_pair.peer_exit_tag)) {
+                if (atomic_word_load(&workload_busy_pair.peer_read_exec_pid) != 0 &&
+                    atomic_word_load(&workload_busy_pair.peer_read_exec_pid) != asker) {
                     return WorkloadBusyProgressResult::Value(0);
                 }
-                workload_busy_pair.peer_read_exec_pid = asker;
+                atomic_word_store(&workload_busy_pair.peer_read_exec_pid, asker);
                 return WorkloadBusyProgressResult::Value(4);
             }
-            if (workload_busy_pair.core_read_exec_pid != 0 &&
-                workload_busy_pair.core_read_exec_pid != asker) {
+            if (atomic_word_load(&workload_busy_pair.core_read_exec_pid) != 0 &&
+                atomic_word_load(&workload_busy_pair.core_read_exec_pid) != asker) {
                 return WorkloadBusyProgressResult::Value(0);
             }
-            workload_busy_pair.core_read_exec_pid = asker;
+            atomic_word_store(&workload_busy_pair.core_read_exec_pid, asker);
             return WorkloadBusyProgressResult::Value(5);
         }
         if (is_pair_worker) {
@@ -1218,7 +1223,7 @@ private fn workload_busy_record_progress_locked(
         }
         return WorkloadBusyProgressResult::Value(0);
     }
-    if (workload_busy_pair.restart_report_state ==
+    if (atomic_enum_load(restart_state_cell) ==
             WorkloadRestartReportState::Pending) {
         if (cpu_id() != 0) { return WorkloadBusyProgressResult::Value(0); }
         workload_busy_report_restart(guard);
@@ -1228,12 +1233,12 @@ private fn workload_busy_record_progress_locked(
     // not this workload, and counting it would let an unrelated process
     // satisfy the fairness assertion on the real one's behalf.
     if (kernel_process_parent_is_root_locked(guard) == false) {
-        workload_busy_pair.refused = workload_busy_pair.refused + 1;
+        atomic_word_store(&workload_busy_pair.refused, atomic_word_load(&workload_busy_pair.refused) + 1);
         return WorkloadBusyProgressResult::Value(0);
     }
     let pid: usize = kernel_process_current_pid();
     if (tag != WORKLOAD_BUSY_TAG_A && tag != WORKLOAD_BUSY_TAG_B) {
-        workload_busy_pair.refused = workload_busy_pair.refused + 1;
+        atomic_word_store(&workload_busy_pair.refused, atomic_word_load(&workload_busy_pair.refused) + 1);
         return WorkloadBusyProgressResult::Value(0);
     }
     workload_profile_capture_current_pid(pid);
@@ -1241,45 +1246,47 @@ private fn workload_busy_record_progress_locked(
     // let only the CPU that armed the local PMU request the close. Both busy
     // processes keep reporting, so the owner reaches this path without
     // requiring migration or a remote PMU operation.
-    if (workload_busy_pair.finish_ready &&
-            workload_busy_pair.reported == false) {
+    if ((atomic_word_load(&workload_busy_pair.finish_ready) != 0) &&
+            atomic_word_load(&workload_busy_pair.reported) == 0) {
         if ((tag == WORKLOAD_BUSY_TAG_A &&
-             pid != workload_busy_pair.a_pid) ||
+             pid != atomic_word_load(&workload_busy_pair.a_pid)) ||
             (tag == WORKLOAD_BUSY_TAG_B &&
-             pid != workload_busy_pair.b_pid)) {
-            workload_busy_pair.refused = workload_busy_pair.refused + 1;
+             pid != atomic_word_load(&workload_busy_pair.b_pid))) {
+            atomic_word_store(&workload_busy_pair.refused, atomic_word_load(&workload_busy_pair.refused) + 1);
             return WorkloadBusyProgressResult::Value(0);
         }
-        if (cpu_id() == workload_busy_pair.profile_cpu) {
-            workload_busy_pair.finish_requested = true;
+        if (cpu_id() == atomic_word_load(&workload_busy_pair.profile_cpu)) {
+            atomic_word_store(&workload_busy_pair.finish_requested, 1);
             return WorkloadBusyProgressResult::FinishRequested;
         }
         return WorkloadBusyProgressResult::Value(0);
     }
     if (tag == WORKLOAD_BUSY_TAG_A) {
-        if (workload_busy_pair.a_pid == 0) {
-            workload_busy_pair.a_pid = pid;
-        } else if (workload_busy_pair.a_pid != pid) {
-            workload_busy_pair.a_pid = pid;
-            workload_busy_pair.a_restarts = workload_busy_pair.a_restarts + 1;
+        if (atomic_word_load(&workload_busy_pair.a_pid) == 0) {
+            atomic_word_store(&workload_busy_pair.a_pid, pid);
+        } else if (atomic_word_load(&workload_busy_pair.a_pid) != pid) {
+            atomic_word_store(&workload_busy_pair.a_pid, pid);
+            atomic_word_store(&workload_busy_pair.a_restarts,
+                atomic_word_load(&workload_busy_pair.a_restarts) + 1);
         }
-        workload_busy_pair.a_rounds = workload_busy_pair.a_rounds + 1;
-        workload_busy_pair.a_checksum = checksum;
+        atomic_word_store(&workload_busy_pair.a_rounds, atomic_word_load(&workload_busy_pair.a_rounds) + 1);
+        atomic_word_store(&workload_busy_pair.a_checksum, checksum);
     } else if (tag == WORKLOAD_BUSY_TAG_B) {
-        if (workload_busy_pair.b_pid == 0) {
-            workload_busy_pair.b_pid = pid;
-        } else if (workload_busy_pair.b_pid != pid) {
-            workload_busy_pair.b_pid = pid;
-            workload_busy_pair.b_restarts = workload_busy_pair.b_restarts + 1;
+        if (atomic_word_load(&workload_busy_pair.b_pid) == 0) {
+            atomic_word_store(&workload_busy_pair.b_pid, pid);
+        } else if (atomic_word_load(&workload_busy_pair.b_pid) != pid) {
+            atomic_word_store(&workload_busy_pair.b_pid, pid);
+            atomic_word_store(&workload_busy_pair.b_restarts,
+                atomic_word_load(&workload_busy_pair.b_restarts) + 1);
         }
-        workload_busy_pair.b_rounds = workload_busy_pair.b_rounds + 1;
-        workload_busy_pair.b_checksum = checksum;
+        atomic_word_store(&workload_busy_pair.b_rounds, atomic_word_load(&workload_busy_pair.b_rounds) + 1);
+        atomic_word_store(&workload_busy_pair.b_checksum, checksum);
     }
-    if (workload_busy_pair.both_running == false) {
-        if (workload_busy_pair.a_pid == 0 || workload_busy_pair.b_pid == 0) {
+    if (atomic_word_load(&workload_busy_pair.both_running) == 0) {
+        if (atomic_word_load(&workload_busy_pair.a_pid) == 0 || atomic_word_load(&workload_busy_pair.b_pid) == 0) {
             return WorkloadBusyProgressResult::Value(0);
         }
-        if (workload_busy_pair.start_requested) {
+        if ((atomic_word_load(&workload_busy_pair.start_requested) != 0)) {
             return WorkloadBusyProgressResult::Value(0);
         }
         // Only core 0 opens the window. The CPU that opens it also closes
@@ -1291,64 +1298,67 @@ private fn workload_busy_record_progress_locked(
         if (cpu_id() != 0) {
             return WorkloadBusyProgressResult::Value(0);
         }
-        workload_busy_pair.start_requested = true;
+        atomic_word_store(&workload_busy_pair.start_requested, 1);
         return WorkloadBusyProgressResult::StartRequested;
     }
-    if (workload_busy_pair.reported) {
+    if ((atomic_word_load(&workload_busy_pair.reported) != 0)) {
         return WorkloadBusyProgressResult::Value(
             workload_busy_restart_step(guard, tag));
     }
-    if (workload_busy_pair.finish_requested) {
+    if ((atomic_word_load(&workload_busy_pair.finish_requested) != 0)) {
         return WorkloadBusyProgressResult::Value(0);
     }
     let a_progress: usize =
-        workload_busy_pair.a_rounds - workload_busy_pair.a_base;
+        atomic_word_load(&workload_busy_pair.a_rounds) - atomic_word_load(&workload_busy_pair.a_base);
     let b_progress: usize =
-        workload_busy_pair.b_rounds - workload_busy_pair.b_base;
+        atomic_word_load(&workload_busy_pair.b_rounds) - atomic_word_load(&workload_busy_pair.b_base);
     let skew: usize =
         workload_busy_absolute_difference(a_progress, b_progress);
-    if (skew > workload_busy_pair.max_skew) {
-        workload_busy_pair.max_skew = skew;
+    if (skew > atomic_word_load(&workload_busy_pair.max_skew)) {
+        atomic_word_store(&workload_busy_pair.max_skew, skew);
     }
     if (a_progress < WORKLOAD_BUSY_ROUNDS || b_progress < WORKLOAD_BUSY_ROUNDS) {
         return WorkloadBusyProgressResult::Value(0);
     }
-    workload_busy_pair.finish_ready = true;
-    if (cpu_id() != workload_busy_pair.profile_cpu) {
+    atomic_word_store(&workload_busy_pair.finish_ready, 1);
+    if (cpu_id() != atomic_word_load(&workload_busy_pair.profile_cpu)) {
         return WorkloadBusyProgressResult::Value(0);
     }
     // Reserve the close while serialized, then leave the run lock before
     // asking peers to stop. A peer spinning for this IRQ-masking lock cannot
     // acknowledge the stop SGI until this guard is released.
-    workload_busy_pair.finish_requested = true;
+    atomic_word_store(&workload_busy_pair.finish_requested, 1);
     return WorkloadBusyProgressResult::FinishRequested;
 }
 
 // Called at the physical boundary after the peer has moved off the exiting
 // process stack, either to its architectural idle stack or to a successor's
-// stack. ProcessRunGuard orders this publication before core 0 can reap the
+// stack. ProcessRunGuard orders this publication before init can reap the
 // zombie.
 fn workload_busy_peer_exit_stack_released(pid: usize, cpu: usize) {
-    if (workload_busy_pair.peer_exit_pid == pid &&
-        workload_busy_pair.peer_exit_cpu == cpu && cpu != 0) {
-        workload_busy_pair.peer_exit_stack_released = true;
+    if (atomic_word_load(&workload_busy_pair.peer_exit_pid) == pid &&
+        atomic_word_load(&workload_busy_pair.peer_exit_cpu) == cpu && cpu != 0) {
+        atomic_word_store(&workload_busy_pair.peer_exit_stack_released, 1);
     }
 }
 
 // Called immediately before the target zombie's record is consumed. The
 // caller has already checked the real ProcessRecord's stack_owner_cpu, so the
 // fixed line is end-to-end evidence rather than a synthetic state probe.
+// This call runs after unlink releases its run guard. Registration and stack
+// release are already latched for this one lifetime; only this reaper sets
+// the reported flag. Atomic fields do not make this a compound snapshot.
 fn workload_busy_peer_exit_reaped(pid: usize, parent_pid: usize,
                                   stack_unowned: bool) {
-    if (workload_busy_pair.peer_exit_reported == false &&
-        workload_busy_pair.peer_exit_pid == pid &&
-        workload_busy_pair.peer_exit_stack_released && stack_unowned &&
+    if (atomic_word_load(&workload_busy_pair.peer_exit_reported) == 0 &&
+        atomic_word_load(&workload_busy_pair.peer_exit_pid) == pid &&
+        (atomic_word_load(&workload_busy_pair.peer_exit_stack_released) != 0) && stack_unowned &&
         parent_pid == 1) {
         // Init reaps on whichever core it runs on since GitHub issue #775
         // stopped pinning PID 1 to core 0.
         kernel_boot_log(
         "workload: peer exit stack released before init collected it\n");
-        workload_busy_pair.peer_exit_reported = true;
+        atomic_word_store(&workload_busy_pair.peer_exit_reported, 1);
     }
 }
 
@@ -1359,21 +1369,21 @@ fn workload_busy_peer_exit_reaped(pid: usize, parent_pid: usize,
 fn workload_peer_read_progress(bytes: usize, checksum: usize) -> usize {
     let guard = process_run_lock();
     let pid: usize = kernel_process_current_pid();
-    if (workload_busy_pair.peer_read_pid == 0) {
+    if (atomic_word_load(&workload_busy_pair.peer_read_pid) == 0) {
         if (kernel_process_parent_is_root_locked(guard) == false) {
-            workload_busy_pair.refused = workload_busy_pair.refused + 1;
+            atomic_word_store(&workload_busy_pair.refused, atomic_word_load(&workload_busy_pair.refused) + 1);
             process_run_unlock(guard);
             return 0;
         } else {
-            workload_busy_pair.peer_read_pid = pid;
+            atomic_word_store(&workload_busy_pair.peer_read_pid, pid);
         }
         process_run_unlock(guard);
         return SECONDARY_CORE_ID;
     }
-    if (pid != workload_busy_pair.peer_read_pid ||
-        workload_busy_pair.peer_read_reported || bytes != 98304 ||
+    if (pid != atomic_word_load(&workload_busy_pair.peer_read_pid) ||
+        (atomic_word_load(&workload_busy_pair.peer_read_reported) != 0) || bytes != 98304 ||
         checksum != 8847360 || cpu_id() != SECONDARY_CORE_ID) {
-        workload_busy_pair.refused = workload_busy_pair.refused + 1;
+        atomic_word_store(&workload_busy_pair.refused, atomic_word_load(&workload_busy_pair.refused) + 1);
         process_run_unlock(guard);
         return 0;
     }
@@ -1383,7 +1393,7 @@ fn workload_peer_read_progress(bytes: usize, checksum: usize) -> usize {
         process_run_unlock(guard);
         return 0;
     }
-    workload_busy_pair.peer_read_reported = true;
+    atomic_word_store(&workload_busy_pair.peer_read_reported, 1);
     kernel_boot_log(
         "workload: peer read 98304 pattern bytes; block device mutex contended on both cpus\n");
     process_run_unlock(guard);
@@ -1400,17 +1410,17 @@ fn workload_peer_read_reaped(pid: usize) {
     // GitHub issue #861: the process told to become /bin/peer-read left
     // before its registration (a refused tag-3 call, or a fault or kill
     // before its first call). Its report will never come either.
-    if (pid != 0 && workload_busy_pair.peer_read_pid == 0 &&
-        pid == workload_busy_pair.peer_read_exec_pid &&
-        workload_busy_pair.peer_read_failed == false) {
-        workload_busy_pair.peer_read_failed = true;
+    if (pid != 0 && atomic_word_load(&workload_busy_pair.peer_read_pid) == 0 &&
+        pid == atomic_word_load(&workload_busy_pair.peer_read_exec_pid) &&
+        atomic_word_load(&workload_busy_pair.peer_read_failed) == 0) {
+        atomic_word_store(&workload_busy_pair.peer_read_failed, 1);
         kernel_boot_log(
             "workload: peer read FAILED: /bin/peer-read exited before it registered\n");
     }
-    if (pid != 0 && pid == workload_busy_pair.peer_read_pid &&
-        workload_busy_pair.peer_read_reported == false &&
-        workload_busy_pair.peer_read_failed == false) {
-        workload_busy_pair.peer_read_failed = true;
+    if (pid != 0 && pid == atomic_word_load(&workload_busy_pair.peer_read_pid) &&
+        atomic_word_load(&workload_busy_pair.peer_read_reported) == 0 &&
+        atomic_word_load(&workload_busy_pair.peer_read_failed) == 0) {
+        atomic_word_store(&workload_busy_pair.peer_read_failed, 1);
         kernel_boot_log(
             "workload: peer read FAILED: /bin/peer-read exited without an accepted report, block reads on cpu 1=");
         uart_put_udec(block_read_call_count(SECONDARY_CORE_ID));
@@ -1419,9 +1429,9 @@ fn workload_peer_read_reaped(pid: usize) {
         kernel_boot_log(" cpu 1=");
         uart_put_udec(block_device_wait_count(SECONDARY_CORE_ID));
         kernel_boot_log(" ready core=");
-        if (workload_busy_pair.peer_read_core_ready) { uart_put_udec(1); } else { uart_put_udec(0); }
+        if ((atomic_word_load(&workload_busy_pair.peer_read_core_ready) != 0)) { uart_put_udec(1); } else { uart_put_udec(0); }
         kernel_boot_log(" peer=");
-        if (workload_busy_pair.peer_read_peer_ready) { uart_put_udec(1); } else { uart_put_udec(0); }
+        if ((atomic_word_load(&workload_busy_pair.peer_read_peer_ready) != 0)) { uart_put_udec(1); } else { uart_put_udec(0); }
         kernel_boot_log("\n");
     }
     process_run_unlock(guard);
@@ -1433,12 +1443,12 @@ fn workload_peer_read_reaped(pid: usize) {
 fn workload_peer_core_read_ready() -> usize {
     let guard = process_run_lock();
     if (kernel_process_parent_is_root_locked(guard) == false || cpu_id() != 0) {
-        workload_busy_pair.refused = workload_busy_pair.refused + 1;
+        atomic_word_store(&workload_busy_pair.refused, atomic_word_load(&workload_busy_pair.refused) + 1);
         process_run_unlock(guard);
         return 0;
     }
-    workload_busy_pair.peer_read_core_ready = true;
-    let ready: bool = workload_busy_pair.peer_read_peer_ready;
+    atomic_word_store(&workload_busy_pair.peer_read_core_ready, 1);
+    let ready: bool = (atomic_word_load(&workload_busy_pair.peer_read_peer_ready) != 0);
     process_run_unlock(guard);
     if (ready) { return 1; }
     return 0;
@@ -1450,14 +1460,14 @@ fn workload_peer_core_read_ready() -> usize {
 fn workload_peer_read_peer_ready() -> usize {
     let guard = process_run_lock();
     if (kernel_process_parent_is_root_locked(guard) == false ||
-        kernel_process_current_pid() != workload_busy_pair.peer_read_pid ||
+        kernel_process_current_pid() != atomic_word_load(&workload_busy_pair.peer_read_pid) ||
         cpu_id() != SECONDARY_CORE_ID) {
-        workload_busy_pair.refused = workload_busy_pair.refused + 1;
+        atomic_word_store(&workload_busy_pair.refused, atomic_word_load(&workload_busy_pair.refused) + 1);
         process_run_unlock(guard);
         return 0;
     }
-    workload_busy_pair.peer_read_peer_ready = true;
-    let ready: bool = workload_busy_pair.peer_read_core_ready;
+    atomic_word_store(&workload_busy_pair.peer_read_peer_ready, 1);
+    let ready: bool = (atomic_word_load(&workload_busy_pair.peer_read_core_ready) != 0);
     process_run_unlock(guard);
     if (ready) { return 1; }
     return 0;
@@ -1482,7 +1492,7 @@ fn workload_peer_net_wake_progress(current_authority: borrow ProcessCurrent[curr
     if (pid != owner ||
         cpu_id() != SECONDARY_CORE_ID) {
         workload_peer_put(guard, record);
-        workload_busy_pair.refused = workload_busy_pair.refused + 1;
+        atomic_word_store(&workload_busy_pair.refused, atomic_word_load(&workload_busy_pair.refused) + 1);
         process_run_unlock(guard);
         return WorkloadPeerNetWakeResult::Refused;
     }
@@ -1499,7 +1509,7 @@ fn workload_peer_net_wake_progress(current_authority: borrow ProcessCurrent[curr
         process_run_unlock(guard);
         return WorkloadPeerNetWakeResult::Resumed;
     }
-    workload_busy_pair.refused = workload_busy_pair.refused + 1;
+    atomic_word_store(&workload_busy_pair.refused, atomic_word_load(&workload_busy_pair.refused) + 1);
     process_run_unlock(guard);
     return WorkloadPeerNetWakeResult::Refused;
 }
@@ -1523,9 +1533,9 @@ private let mut workload_ddb_hold_park_since: AtomicWord;
 fn workload_peer_console_progress(first: usize, total: usize) -> usize {
     let guard = process_run_lock();
     let pid: usize = kernel_process_current_pid();
-    if (workload_busy_pair.peer_console_pid == 0) {
+    if (atomic_word_load(&workload_busy_pair.peer_console_pid) == 0) {
         if (kernel_process_parent_is_root_locked(guard) == false) {
-            workload_busy_pair.refused = workload_busy_pair.refused + 1;
+            atomic_word_store(&workload_busy_pair.refused, atomic_word_load(&workload_busy_pair.refused) + 1);
             process_run_unlock(guard);
             return 0;
         }
@@ -1534,14 +1544,15 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
         // So hold the name back until the filesystem reader has its
         // verdict, which the admission rule used to do. Not a refusal: init
         // starts this writer long before that, and it asks again.
-        if (workload_busy_pair.peer_read_reported == false) {
+        if (atomic_word_load(&workload_busy_pair.peer_read_reported) == 0) {
             // GitHub issue #843: the reader is gone without its report, so
             // this turn will never come. Say so and send the writer away
             // instead of letting it ask forever.
-            if (workload_busy_pair.peer_read_failed) {
-                workload_busy_pair.refused = workload_busy_pair.refused + 1;
-                if (workload_busy_pair.peer_console_abandoned == false) {
-                    workload_busy_pair.peer_console_abandoned = true;
+            if ((atomic_word_load(&workload_busy_pair.peer_read_failed) != 0)) {
+                atomic_word_store(&workload_busy_pair.refused,
+                    atomic_word_load(&workload_busy_pair.refused) + 1);
+                if (atomic_word_load(&workload_busy_pair.peer_console_abandoned) == 0) {
+                    atomic_word_store(&workload_busy_pair.peer_console_abandoned, 1);
                     kernel_boot_log(
                         "workload: peer console FAILED: its turn follows the filesystem reader's report, which never came\n");
                 }
@@ -1551,7 +1562,7 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
             process_run_unlock(guard);
             return 0;
         }
-        workload_busy_pair.peer_console_pid = pid;
+        atomic_word_store(&workload_busy_pair.peer_console_pid, pid);
         process_run_unlock(guard);
         return SECONDARY_CORE_ID;
     }
@@ -1560,14 +1571,14 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
     // The opcode is outside the first-write count range [0, 1071].
     if (first == 0x663) {
         let parent: usize = kernel_process_current_parent_pid(guard);
-        let writer: bool = pid == workload_busy_pair.peer_console_pid;
-        let child: bool = parent == workload_busy_pair.peer_console_pid;
+        let writer: bool = pid == atomic_word_load(&workload_busy_pair.peer_console_pid);
+        let child: bool = parent == atomic_word_load(&workload_busy_pair.peer_console_pid);
         if (writer == false && child == false) {
             process_run_unlock(guard);
             return 0;
         }
         if (total == 0) {
-            let step: usize = workload_busy_pair.peer_console_order_step;
+            let step: usize = atomic_word_load(&workload_busy_pair.peer_console_order_step);
             process_run_unlock(guard);
             return step;
         }
@@ -1576,51 +1587,52 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
         let mut expected_writer: bool = writer;
         if (total == 5) { expected_writer = child; }
         if (expected_writer == false || cpu_id() != expected_cpu ||
-            total != workload_busy_pair.peer_console_order_step + 1 || total > 6) {
+            total != atomic_word_load(&workload_busy_pair.peer_console_order_step) + 1 || total > 6) {
             process_run_unlock(guard);
             return 0;
         }
-        workload_busy_pair.peer_console_order_step = total;
+        atomic_word_store(&workload_busy_pair.peer_console_order_step, total);
         process_run_unlock(guard);
         return total;
     }
-    if (pid != workload_busy_pair.peer_console_pid ||
-        workload_busy_pair.peer_console_reported ||
+    if (pid != atomic_word_load(&workload_busy_pair.peer_console_pid) ||
+        (atomic_word_load(&workload_busy_pair.peer_console_reported) != 0) ||
         cpu_id() != SECONDARY_CORE_ID) {
-        workload_busy_pair.refused = workload_busy_pair.refused + 1;
+        atomic_word_store(&workload_busy_pair.refused, atomic_word_load(&workload_busy_pair.refused) + 1);
         process_run_unlock(guard);
         return 0;
     }
-    if (workload_busy_pair.peer_console_initial_reported == false) {
+    if (atomic_word_load(&workload_busy_pair.peer_console_initial_reported) == 0) {
         // Record the actual first count and require the same count when
         // all 1071 input bytes have been admitted. Queue drain timing can
         // change that count without changing the terminal's ordering.
-        if (workload_busy_pair.peer_console_first_seen == false) {
-            if (workload_busy_pair.peer_read_reported == false ||
+        if (atomic_word_load(&workload_busy_pair.peer_console_first_seen) == 0) {
+            if (atomic_word_load(&workload_busy_pair.peer_read_reported) == 0 ||
                 first == 0 || first > 1071 || total != 0 ||
-                workload_busy_pair.peer_console_order_step != 6) {
-                workload_busy_pair.refused = workload_busy_pair.refused + 1;
+                atomic_word_load(&workload_busy_pair.peer_console_order_step) != 6) {
+                atomic_word_store(&workload_busy_pair.refused,
+                    atomic_word_load(&workload_busy_pair.refused) + 1);
                 process_run_unlock(guard);
                 return 0;
             }
-            workload_busy_pair.peer_console_first_count = first;
-            workload_busy_pair.peer_console_first_seen = true;
+            atomic_word_store(&workload_busy_pair.peer_console_first_count, first);
+            atomic_word_store(&workload_busy_pair.peer_console_first_seen, 1);
             process_run_unlock(guard);
             return 1;
         }
-        if (first != workload_busy_pair.peer_console_first_count || total != 1071) {
-            workload_busy_pair.refused = workload_busy_pair.refused + 1;
+        if (first != atomic_word_load(&workload_busy_pair.peer_console_first_count) || total != 1071) {
+            atomic_word_store(&workload_busy_pair.refused, atomic_word_load(&workload_busy_pair.refused) + 1);
             process_run_unlock(guard);
             return 0;
         }
-        workload_busy_pair.peer_console_initial_reported = true;
+        atomic_word_store(&workload_busy_pair.peer_console_initial_reported, 1);
         kernel_boot_log(
             "workload: peer console accepted all 1071 bytes through the shared queue after ordered writes on both CPUs\n");
         // GitHub issue #640: the boot's last stretch, so a number any earlier
         // stage reached is in the table by now.
         syscall_unimplemented_report();
         if (kernel_ddb_console_test_enabled == false) {
-            workload_busy_pair.peer_console_reported = true;
+            atomic_word_store(&workload_busy_pair.peer_console_reported, 1);
             process_run_unlock(guard);
             return 2;
         }
@@ -1629,7 +1641,7 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
     }
     // A late host arm cannot hold up the ordinary boot or UART wake.
     if (first != 0 || total != 0) {
-        workload_busy_pair.refused = workload_busy_pair.refused + 1;
+        atomic_word_store(&workload_busy_pair.refused, atomic_word_load(&workload_busy_pair.refused) + 1);
         process_run_unlock(guard);
         return 0;
     }
@@ -1657,7 +1669,7 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
             return 4;
         }
     }
-    workload_busy_pair.peer_console_reported = true;
+    atomic_word_store(&workload_busy_pair.peer_console_reported, 1);
     process_run_unlock(guard);
     // Console is innermost. No run guard may survive this hold: the BREAK
     // and its world-stop must be able to inspect and wake the workload.
@@ -1692,31 +1704,31 @@ const PEER_TTY_LINE_CHECKSUM: usize = 13224;
 fn workload_peer_tty_progress(count: usize, checksum: usize) -> usize {
     let guard = process_run_lock();
     let pid: usize = kernel_process_current_pid();
-    if (workload_busy_pair.peer_tty_pid == 0) {
-        if (workload_busy_pair.peer_console_initial_reported == false) {
-            workload_busy_pair.refused = workload_busy_pair.refused + 1;
+    if (atomic_word_load(&workload_busy_pair.peer_tty_pid) == 0) {
+        if (atomic_word_load(&workload_busy_pair.peer_console_initial_reported) == 0) {
+            atomic_word_store(&workload_busy_pair.refused, atomic_word_load(&workload_busy_pair.refused) + 1);
             process_run_unlock(guard);
             return 0;
         }
-        workload_busy_pair.peer_tty_pid = pid;
+        atomic_word_store(&workload_busy_pair.peer_tty_pid, pid);
         process_run_unlock(guard);
         return SECONDARY_CORE_ID;
     }
-    if (pid != workload_busy_pair.peer_tty_pid ||
-        workload_busy_pair.peer_tty_reported ||
+    if (pid != atomic_word_load(&workload_busy_pair.peer_tty_pid) ||
+        (atomic_word_load(&workload_busy_pair.peer_tty_reported) != 0) ||
         cpu_id() != SECONDARY_CORE_ID) {
-        workload_busy_pair.refused = workload_busy_pair.refused + 1;
+        atomic_word_store(&workload_busy_pair.refused, atomic_word_load(&workload_busy_pair.refused) + 1);
         process_run_unlock(guard);
         return 0;
     }
-    if (workload_busy_pair.peer_tty_reading == false) {
+    if (atomic_word_load(&workload_busy_pair.peer_tty_reading) == 0) {
         if (count != PEER_TTY_IDENTITY_CALLS ||
             checksum != PEER_TTY_MACHINE_CHECKSUM) {
-            workload_busy_pair.refused = workload_busy_pair.refused + 1;
+            atomic_word_store(&workload_busy_pair.refused, atomic_word_load(&workload_busy_pair.refused) + 1);
             process_run_unlock(guard);
             return 0;
         }
-        workload_busy_pair.peer_tty_reading = true;
+        atomic_word_store(&workload_busy_pair.peer_tty_reading, 1);
         kernel_boot_log(
             "workload: peer tty answered every peer-safe per-process call on the secondary cpu, reads and writes, each checked for content\n");
         kernel_boot_log(
@@ -1725,11 +1737,11 @@ fn workload_peer_tty_progress(count: usize, checksum: usize) -> usize {
         return 1;
     }
     if (count != PEER_TTY_LINE_BYTES || checksum != PEER_TTY_LINE_CHECKSUM) {
-        workload_busy_pair.refused = workload_busy_pair.refused + 1;
+        atomic_word_store(&workload_busy_pair.refused, atomic_word_load(&workload_busy_pair.refused) + 1);
         process_run_unlock(guard);
         return 0;
     }
-    workload_busy_pair.peer_tty_reported = true;
+    atomic_word_store(&workload_busy_pair.peer_tty_reported, 1);
     kernel_boot_log(
         "workload: peer tty read its 17-byte line on the secondary cpu, none lost, repeated or reordered\n");
     process_run_unlock(guard);
@@ -1941,14 +1953,14 @@ fn workload_peer_socket_served(is_write: bool) {
     if (cpu_id() != SECONDARY_CORE_ID) { return; }
     let guard = process_run_lock();
     if (is_write) {
-        workload_busy_pair.peer_socket_write = true;
+        atomic_word_store(&workload_busy_pair.peer_socket_write, 1);
     } else {
-        workload_busy_pair.peer_socket_read = true;
+        atomic_word_store(&workload_busy_pair.peer_socket_read, 1);
     }
-    if (workload_busy_pair.peer_socket_reported == false &&
-        workload_busy_pair.peer_socket_read &&
-        workload_busy_pair.peer_socket_write) {
-        workload_busy_pair.peer_socket_reported = true;
+    if (atomic_word_load(&workload_busy_pair.peer_socket_reported) == 0 &&
+        (atomic_word_load(&workload_busy_pair.peer_socket_read) != 0) &&
+        (atomic_word_load(&workload_busy_pair.peer_socket_write) != 0)) {
+        atomic_word_store(&workload_busy_pair.peer_socket_reported, 1);
         kernel_boot_log(
             "workload: pinned httpd read and wrote a connected socket on the secondary cpu\n");
         // GitHub issue #592: the handler reaches the secondary only because
@@ -1968,15 +1980,15 @@ fn workload_peer_socket_teardown(is_shutdown: bool) {
     if (cpu_id() != SECONDARY_CORE_ID) { return; }
     let guard = process_run_lock();
     if (is_shutdown) {
-        workload_busy_pair.peer_socket_shut_down = true;
+        atomic_word_store(&workload_busy_pair.peer_socket_shut_down, 1);
     } else {
-        workload_busy_pair.peer_socket_closed = true;
+        atomic_word_store(&workload_busy_pair.peer_socket_closed, 1);
     }
-    if (workload_busy_pair.peer_socket_teardown_reported == false &&
-        workload_busy_pair.peer_socket_reported &&
-        workload_busy_pair.peer_socket_closed &&
-        workload_busy_pair.peer_socket_shut_down) {
-        workload_busy_pair.peer_socket_teardown_reported = true;
+    if (atomic_word_load(&workload_busy_pair.peer_socket_teardown_reported) == 0 &&
+        (atomic_word_load(&workload_busy_pair.peer_socket_reported) != 0) &&
+        (atomic_word_load(&workload_busy_pair.peer_socket_closed) != 0) &&
+        (atomic_word_load(&workload_busy_pair.peer_socket_shut_down) != 0)) {
+        atomic_word_store(&workload_busy_pair.peer_socket_teardown_reported, 1);
         kernel_boot_log(
             "workload: pinned httpd closed and shut down a connected socket on the secondary cpu\n");
     }
@@ -1990,8 +2002,8 @@ fn workload_peer_socket_teardown(is_shutdown: bool) {
 fn workload_peer_daemon_handoff() {
     if (cpu_id() != SECONDARY_CORE_ID) { return; }
     let guard = process_run_lock();
-    if (workload_busy_pair.peer_daemon_handoff_reported == false) {
-        workload_busy_pair.peer_daemon_handoff_reported = true;
+    if (atomic_word_load(&workload_busy_pair.peer_daemon_handoff_reported) == 0) {
+        atomic_word_store(&workload_busy_pair.peer_daemon_handoff_reported, 1);
         kernel_boot_log(
             "workload: pinned httpd exec'd BusyBox Extras on the secondary cpu\n");
     }
@@ -2003,31 +2015,31 @@ private fn workload_busy_start_profile(pid: usize, input_steps: usize)
     match world_stop_machine_begin(WORKLOAD_PROFILE_WORLD_STOP_SPINS) {
         MachineStopResult::Busy => {
             let retry_guard = process_run_lock();
-            workload_busy_pair.start_requested = false;
+            atomic_word_store(&workload_busy_pair.start_requested, 0);
             process_run_unlock(retry_guard);
         }
         MachineStopResult::Partial(partial) => {
             machine_stop_partial_release(partial, &kernel_world_stop);
             let retry_guard = process_run_lock();
-            workload_busy_pair.start_requested = false;
+            atomic_word_store(&workload_busy_pair.start_requested, 0);
             process_run_unlock(retry_guard);
         }
         MachineStopResult::Complete(stopped) => {
             let start_guard = process_run_lock();
-            if (workload_busy_pair.start_requested &&
-                    workload_busy_pair.both_running == false &&
-                    workload_busy_pair.a_pid != 0 &&
-                    workload_busy_pair.b_pid != 0) {
+            if ((atomic_word_load(&workload_busy_pair.start_requested) != 0) &&
+                    atomic_word_load(&workload_busy_pair.both_running) == 0 &&
+                    atomic_word_load(&workload_busy_pair.a_pid) != 0 &&
+                    atomic_word_load(&workload_busy_pair.b_pid) != 0) {
                 // Both have spoken and remain serialized. Reset every CPU at
                 // the actual stopped boundary, not at the earlier request.
-                workload_busy_pair.both_running = true;
-                workload_busy_pair.start_requested = false;
-                workload_busy_pair.a_base = workload_busy_pair.a_rounds;
-                workload_busy_pair.b_base = workload_busy_pair.b_rounds;
-                workload_busy_pair.start_ticks = read_cntpct() as usize;
-                workload_busy_pair.profile_cpu = cpu_id();
+                atomic_word_store(&workload_busy_pair.both_running, 1);
+                atomic_word_store(&workload_busy_pair.start_requested, 0);
+                atomic_word_store(&workload_busy_pair.a_base, atomic_word_load(&workload_busy_pair.a_rounds));
+                atomic_word_store(&workload_busy_pair.b_base, atomic_word_load(&workload_busy_pair.b_rounds));
+                atomic_word_store(&workload_busy_pair.start_ticks, read_cntpct() as usize);
+                atomic_word_store(&workload_busy_pair.profile_cpu, cpu_id());
                 workload_profile_start(
-                    stopped, start_guard, workload_busy_pair.start_ticks, pid);
+                    stopped, start_guard, atomic_word_load(&workload_busy_pair.start_ticks), pid);
                 kernel_boot_log("profile: begin name=busy-pair input_steps=");
                 uart_put_udec(input_steps);
                 kernel_boot_log(" cpu_count=");
@@ -2035,9 +2047,9 @@ private fn workload_busy_start_profile(pid: usize, input_steps: usize)
                 kernel_boot_log(" iterations_goal=");
                 uart_put_udec(WORKLOAD_BUSY_ROUNDS * 2);
                 kernel_boot_log(" pid_a=");
-                uart_put_udec(workload_busy_pair.a_pid);
+                uart_put_udec(atomic_word_load(&workload_busy_pair.a_pid));
                 kernel_boot_log(" pid_b=");
-                uart_put_udec(workload_busy_pair.b_pid);
+                uart_put_udec(atomic_word_load(&workload_busy_pair.b_pid));
                 kernel_boot_log("\n");
             }
             process_run_unlock(start_guard);
@@ -2065,8 +2077,8 @@ fn workload_ordinary_placement_note_syscall(number: usize) {
     if (is_busybox_sleep && parent_pid != 0 &&
         kernel_process_current_affinity_mask(guard) == 0 &&
         (kernel_process_online_mask() & (1 << cpu)) != 0) {
-        workload_busy_pair.ordinary_busybox_peer_reported = true;
-        workload_busy_pair.ordinary_busybox_peer_parent_pid = parent_pid;
+        atomic_word_store(&workload_busy_pair.ordinary_busybox_peer_reported, 1);
+        atomic_word_store(&workload_busy_pair.ordinary_busybox_peer_parent_pid, parent_pid);
     }
     process_run_unlock(guard);
 }
@@ -2076,9 +2088,9 @@ private fn workload_ordinary_placement_report() -> usize {
     let reported: bool =
         kernel_process_parent_is_root_locked(guard) == false &&
         kernel_process_current_affinity_mask(guard) == 0 &&
-        workload_busy_pair.ordinary_busybox_peer_reported &&
+        (atomic_word_load(&workload_busy_pair.ordinary_busybox_peer_reported) != 0) &&
         kernel_process_current_parent_pid(guard) ==
-            workload_busy_pair.ordinary_busybox_peer_parent_pid;
+            atomic_word_load(&workload_busy_pair.ordinary_busybox_peer_parent_pid);
     process_run_unlock(guard);
     if (reported) { return 1; }
     return 0;
@@ -2088,9 +2100,9 @@ private fn workload_ordinary_placement_guard_complete() -> usize {
     let guard = process_run_lock();
     let complete: bool =
         kernel_process_current_affinity_mask(guard) == 1 &&
-        workload_busy_pair.ordinary_busybox_peer_reported &&
+        (atomic_word_load(&workload_busy_pair.ordinary_busybox_peer_reported) != 0) &&
         kernel_process_current_parent_pid(guard) ==
-            workload_busy_pair.ordinary_busybox_peer_parent_pid;
+            atomic_word_load(&workload_busy_pair.ordinary_busybox_peer_parent_pid);
     process_run_unlock(guard);
     if (complete) { return 1; }
     return 0;
@@ -2387,13 +2399,13 @@ fn workload_busy_record_progress(
     match world_stop_machine_begin(WORKLOAD_PROFILE_WORLD_STOP_SPINS) {
         MachineStopResult::Busy => {
             let retry_guard = process_run_lock();
-            workload_busy_pair.finish_requested = false;
+            atomic_word_store(&workload_busy_pair.finish_requested, 0);
             process_run_unlock(retry_guard);
         }
         MachineStopResult::Partial(partial) => {
             machine_stop_partial_release(partial, &kernel_world_stop);
             let retry_guard = process_run_lock();
-            workload_busy_pair.finish_requested = false;
+            atomic_word_store(&workload_busy_pair.finish_requested, 0);
             process_run_unlock(retry_guard);
         }
         MachineStopResult::Complete(stopped) => {
@@ -2401,13 +2413,13 @@ fn workload_busy_record_progress(
             // The reservation is still serialized by ProcessRunGuard. With
             // peers stopped, no producer can resume between the final charge
             // and publication of inactive state.
-            if (workload_busy_pair.finish_requested &&
-                    workload_busy_pair.reported == false) {
-                workload_busy_pair.end_ticks = read_cntpct() as usize;
+            if ((atomic_word_load(&workload_busy_pair.finish_requested) != 0) &&
+                    atomic_word_load(&workload_busy_pair.reported) == 0) {
+                atomic_word_store(&workload_busy_pair.end_ticks, read_cntpct() as usize);
                 workload_profile_finish(
-                    stopped, finish_guard, workload_busy_pair.end_ticks);
-                workload_busy_pair.reported = true;
-                workload_busy_pair.finish_requested = false;
+                    stopped, finish_guard, atomic_word_load(&workload_busy_pair.end_ticks));
+                atomic_word_store(&workload_busy_pair.reported, 1);
+                atomic_word_store(&workload_busy_pair.finish_requested, 0);
                 workload_busy_pair_report();
             }
             process_run_unlock(finish_guard);
@@ -2432,24 +2444,26 @@ fn workload_busy_record_progress(
 // while A was away (it kept running rather than waiting on its sibling).
 private fn workload_busy_restart_step(
         guard: borrow ProcessRunGuard[process_run], tag: usize) -> usize !{unsafe} {
-    if (workload_busy_pair.restart_requested == false) {
+    let restart_state_cell: &mut Atomic(WorkloadRestartReportState) = &workload_busy_pair.restart_report_state;
+    if (atomic_word_load(&workload_busy_pair.restart_requested) == 0) {
         if (tag != WORKLOAD_BUSY_TAG_A) { return 0; }
-        workload_busy_pair.restart_requested = true;
-        workload_busy_pair.restart_b_pid_before = workload_busy_pair.b_pid;
-        workload_busy_pair.restart_b_rounds_before =
-            workload_busy_pair.b_rounds;
+        atomic_word_store(&workload_busy_pair.restart_requested, 1);
+        atomic_word_store(&workload_busy_pair.restart_b_pid_before,
+            atomic_word_load(&workload_busy_pair.b_pid));
+        atomic_word_store(&workload_busy_pair.restart_b_rounds_before,
+            atomic_word_load(&workload_busy_pair.b_rounds));
         return 3;
     }
     // A's replacement has spoken once the restart counter moved -- that is
     // a report under tag A from a pid that is not the one told to terminate.
-    if (workload_busy_pair.a_restarts == 0) { return 0; }
+    if (atomic_word_load(&workload_busy_pair.a_restarts) == 0) { return 0; }
     // Then wait for B to finish another round before judging. Asking at A's
     // replacement instead made "B kept going" a race against how fast the
     // board respawns: on RPi5 the fork and exec beat B's next round and the
     // check failed on a boot where nothing was wrong. Waiting for B's own
     // next report asks the same question with no clock in it.
     if (tag != WORKLOAD_BUSY_TAG_B) { return 0; }
-    workload_busy_pair.restart_report_state = WorkloadRestartReportState::Pending;
+    atomic_enum_store(restart_state_cell, WorkloadRestartReportState::Pending);
     // B alone establishes the original predicate. A later progress call on
     // core 0 only prints that frozen result; it cannot count another round
     // or change the success/failure decision while the report is pending.
@@ -2459,35 +2473,36 @@ private fn workload_busy_restart_step(
 }
 
 private fn workload_busy_report_restart(guard: borrow ProcessRunGuard[lock]) {
-    if (workload_busy_pair.a_restarts == 1 &&
-        workload_busy_pair.b_restarts == 0 &&
-        workload_busy_pair.b_pid == workload_busy_pair.restart_b_pid_before &&
-        workload_busy_pair.b_rounds >
-            workload_busy_pair.restart_b_rounds_before) {
+    let restart_state_cell: &mut Atomic(WorkloadRestartReportState) = &workload_busy_pair.restart_report_state;
+    if (atomic_word_load(&workload_busy_pair.a_restarts) == 1 &&
+        atomic_word_load(&workload_busy_pair.b_restarts) == 0 &&
+        atomic_word_load(&workload_busy_pair.b_pid) == atomic_word_load(&workload_busy_pair.restart_b_pid_before) &&
+        atomic_word_load(&workload_busy_pair.b_rounds) >
+            atomic_word_load(&workload_busy_pair.restart_b_rounds_before)) {
         kernel_boot_log(
             "workload: busy pair init restarted a only, b kept its pid and its counter\n");
     } else {
         kernel_boot_log("workload: busy pair RESTART a=");
-        uart_put_udec(workload_busy_pair.a_restarts);
+        uart_put_udec(atomic_word_load(&workload_busy_pair.a_restarts));
         kernel_boot_log(" b=");
-        uart_put_udec(workload_busy_pair.b_restarts);
+        uart_put_udec(atomic_word_load(&workload_busy_pair.b_restarts));
         kernel_boot_log(" b_pid_moved=");
-        if (workload_busy_pair.b_pid !=
-                workload_busy_pair.restart_b_pid_before) {
+        if (atomic_word_load(&workload_busy_pair.b_pid) !=
+                atomic_word_load(&workload_busy_pair.restart_b_pid_before)) {
             kernel_boot_log("yes");
         } else {
             kernel_boot_log("no");
         }
         kernel_boot_log(" b_rounds=");
-        uart_put_udec(workload_busy_pair.b_rounds -
-                      workload_busy_pair.restart_b_rounds_before);
+        uart_put_udec(atomic_word_load(&workload_busy_pair.b_rounds) -
+                      atomic_word_load(&workload_busy_pair.restart_b_rounds_before));
         kernel_boot_log("\n");
     }
     // The host starts its interactive workload at this marker. That supplies
     // the third runnable context which lets the two currently Running busy
     // processes become Ready in turn and exchange CPUs.
     kernel_boot_log("workload: busy pair done\n");
-    workload_busy_pair.restart_report_state = WorkloadRestartReportState::Reported;
+    atomic_enum_store(restart_state_cell, WorkloadRestartReportState::Reported);
 }
 
 // The verdict, and the numbers behind it.
@@ -2499,12 +2514,12 @@ private fn workload_busy_report_restart(guard: borrow ProcessRunGuard[lock]) {
 // two-core comparison) rather than in a fixture's expected output.
 private fn workload_busy_pair_report() !{unsafe} {
     let online: usize = kernel_online_core_count();
-    if (workload_busy_pair.a_pid != workload_busy_pair.b_pid) {
+    if (atomic_word_load(&workload_busy_pair.a_pid) != atomic_word_load(&workload_busy_pair.b_pid)) {
         kernel_boot_log("workload: busy pair two pids under init, ");
         uart_put_udec(WORKLOAD_BUSY_ROUNDS);
         kernel_boot_log(
             " rounds each completed beside the init-managed httpd service\n");
-    } else if (workload_busy_pair.a_pid == workload_busy_pair.b_pid) {
+    } else if (atomic_word_load(&workload_busy_pair.a_pid) == atomic_word_load(&workload_busy_pair.b_pid)) {
         kernel_boot_log("workload: busy pair ONE pid reported both tags\n");
     }
     // GitHub issue #572: fixed text when both bounds held, and the word a
@@ -2523,48 +2538,48 @@ private fn workload_busy_pair_report() !{unsafe} {
     // core has to change. Both in counter ticks, with the frequency beside
     // them so a reader needs nothing else to turn them into seconds.
     kernel_boot_log("workload: busy pair measured skew=");
-    uart_put_udec(workload_busy_pair.max_skew);
+    uart_put_udec(atomic_word_load(&workload_busy_pair.max_skew));
     kernel_boot_log(" rounds=");
     uart_put_udec(WORKLOAD_BUSY_ROUNDS * 2);
     kernel_boot_log(" elapsed=");
-    uart_put_udec(workload_busy_pair.end_ticks -
-                  workload_busy_pair.start_ticks);
+    uart_put_udec(atomic_word_load(&workload_busy_pair.end_ticks) -
+                  atomic_word_load(&workload_busy_pair.start_ticks));
     kernel_boot_log(" cpu_a=");
-    uart_put_udec(workload_busy_pair.a_ticks);
+    uart_put_udec(atomic_word_load(&workload_busy_pair.a_ticks));
     kernel_boot_log(" cpu_b=");
-    uart_put_udec(workload_busy_pair.b_ticks);
+    uart_put_udec(atomic_word_load(&workload_busy_pair.b_ticks));
     kernel_boot_log(" slices=");
-    uart_put_udec(workload_busy_pair.a_slices);
+    uart_put_udec(atomic_word_load(&workload_busy_pair.a_slices));
     kernel_boot_log("/");
-    uart_put_udec(workload_busy_pair.b_slices);
+    uart_put_udec(atomic_word_load(&workload_busy_pair.b_slices));
     kernel_boot_log(" tickfreq=");
     uart_put_udec(read_cntfrq() as usize);
     kernel_boot_log(" restarts=");
-    uart_put_udec(workload_busy_pair.a_restarts +
-                  workload_busy_pair.b_restarts);
+    uart_put_udec(atomic_word_load(&workload_busy_pair.a_restarts) +
+                  atomic_word_load(&workload_busy_pair.b_restarts));
     kernel_boot_log("\n");
     workload_busy_waits_report();
     kernel_boot_log("profile: end name=busy-pair elapsed_cycles=");
-    uart_put_udec(workload_busy_pair.end_ticks -
-                  workload_busy_pair.start_ticks);
+    uart_put_udec(atomic_word_load(&workload_busy_pair.end_ticks) -
+                  atomic_word_load(&workload_busy_pair.start_ticks));
     kernel_boot_log(" tick_frequency=");
     uart_put_udec(read_cntfrq() as usize);
     kernel_boot_log(" iterations_a=");
-    uart_put_udec(workload_busy_pair.a_rounds - workload_busy_pair.a_base);
+    uart_put_udec(atomic_word_load(&workload_busy_pair.a_rounds) - atomic_word_load(&workload_busy_pair.a_base));
     kernel_boot_log(" iterations_b=");
-    uart_put_udec(workload_busy_pair.b_rounds - workload_busy_pair.b_base);
+    uart_put_udec(atomic_word_load(&workload_busy_pair.b_rounds) - atomic_word_load(&workload_busy_pair.b_base));
     kernel_boot_log(" result_count=2 checksum_a=");
-    uart_put_udec(workload_busy_pair.a_checksum);
+    uart_put_udec(atomic_word_load(&workload_busy_pair.a_checksum));
     kernel_boot_log(" checksum_b=");
-    uart_put_udec(workload_busy_pair.b_checksum);
+    uart_put_udec(atomic_word_load(&workload_busy_pair.b_checksum));
     kernel_boot_log("\n");
     for cpu: usize in 0..<KERNEL_MAX_CORES {
         if (cpu < online) {
         kernel_boot_log("profile: cpu name=busy-pair cpu=");
         uart_put_udec(cpu);
         kernel_boot_log(" wall_cycles=");
-        uart_put_udec(workload_busy_pair.end_ticks -
-                      workload_busy_pair.start_ticks);
+        uart_put_udec(atomic_word_load(&workload_busy_pair.end_ticks) -
+                      atomic_word_load(&workload_busy_pair.start_ticks));
         kernel_boot_log(" el0_cycles=");
         uart_put_udec(atomic_word_load(&workload_profile_cores[cpu].el0_ticks));
         kernel_boot_log(" el1_cycles=");
@@ -2593,10 +2608,10 @@ private fn workload_busy_pair_report() !{unsafe} {
         }
     }
     profile_timeline_report(
-        workload_busy_pair.start_ticks, workload_busy_pair.end_ticks);
-    if (workload_busy_pair.refused != 0) {
+        atomic_word_load(&workload_busy_pair.start_ticks), atomic_word_load(&workload_busy_pair.end_ticks));
+    if (atomic_word_load(&workload_busy_pair.refused) != 0) {
         kernel_boot_log("workload: busy pair REFUSED reports=");
-        uart_put_udec(workload_busy_pair.refused);
+        uart_put_udec(atomic_word_load(&workload_busy_pair.refused));
         kernel_boot_log("\n");
     }
     // Last, because scripts/profile_kernel_samples.py requires every

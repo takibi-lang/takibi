@@ -49,10 +49,10 @@ def problems(tree: dict[str, str]) -> list[str]:
         if shape not in payload:
             result.append(f"peer payload lost operation: {shape}")
     for condition in (
-        "first != workload_busy_pair.peer_console_first_count || total != 1071",
+        "first != atomic_word_load(&workload_busy_pair.peer_console_first_count) || total != 1071",
         "first == 0 || first > 1071 || total != 0",
         "total != 1071",
-        "workload_busy_pair.peer_console_reported ||\n"
+        "(atomic_word_load(&workload_busy_pair.peer_console_reported) != 0) ||\n"
         "        cpu_id() != SECONDARY_CORE_ID",
     ):
         if condition not in evidence:
@@ -75,7 +75,7 @@ def problems(tree: dict[str, str]) -> list[str]:
     # The handout also carries the writer's TURN, which the rule used to
     # carry: the CPU is named only once the filesystem reader has reported,
     # and asking earlier is not counted as a refusal.
-    if "        workload_busy_pair.peer_console_pid = pid;\n" \
+    if "        atomic_word_store(&workload_busy_pair.peer_console_pid, pid);\n" \
        "        process_run_unlock(guard);\n" \
        "        return SECONDARY_CORE_ID;" not in evidence:
         result.append("registration no longer hands the writer its peer CPU")
@@ -83,7 +83,7 @@ def problems(tree: dict[str, str]) -> list[str]:
             not in tree["kernel/arch/arm64/kernel/peer_read.tkb"]:
         result.append("the writer no longer reports its first write before "
                       "it retries")
-    if "if (workload_busy_pair.peer_read_reported == false) {" not in evidence:
+    if "if (atomic_word_load(&workload_busy_pair.peer_read_reported) == 0) {" not in evidence:
         result.append("writer is named a CPU before the reader's verdict")
     if "return svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) == 0;" \
             not in payload:
@@ -138,11 +138,11 @@ def problems(tree: dict[str, str]) -> list[str]:
     writer = log.split("private fn uart_user_write_locked(", 1)[1].split("// Queue what fits", 1)[0]
     if "peer_console_publish" in writer or "cpu != 0" in writer:
         result.append("ordinary peer writes still use the separate record ring")
-    if "workload_busy_pair.peer_console_order_step != 6" not in evidence:
+    if "atomic_word_load(&workload_busy_pair.peer_console_order_step) != 6" not in evidence:
         result.append("verdict does not require every ordering step")
-    if "total != workload_busy_pair.peer_console_order_step + 1" not in evidence:
+    if "total != atomic_word_load(&workload_busy_pair.peer_console_order_step) + 1" not in evidence:
         result.append("ordering reports can skip a step")
-    if "parent == workload_busy_pair.peer_console_pid" not in evidence:
+    if "parent == atomic_word_load(&workload_busy_pair.peer_console_pid)" not in evidence:
         result.append("second writer is not tied to the first writer's child")
     order = tree["kernel/tests/common/views/console_order.expected"].splitlines()
     if order != ["console order: 1 migrating peer", "console order: 2 migrating core0",
@@ -197,7 +197,7 @@ def main() -> int:
         "write syscall": ("kernel/arch/arm64/kernel/peer_read.tkb",
                           "const WRITE_SYSCALL", "const OLD_WRITE_SYSCALL"),
         "short count": ("kernel/kernel/workload_evidence.tkb",
-                        "first != workload_busy_pair.peer_console_first_count || total != 1071",
+                        "first != atomic_word_load(&workload_busy_pair.peer_console_first_count) || total != 1071",
                         "first != 1071 || total != 1071"),
         "first count report": ("kernel/kernel/workload_evidence.tkb",
                                "first == 0 || first > 1071 || total != 0",
@@ -207,9 +207,9 @@ def main() -> int:
             "svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG, first, 0, 0, 0) == 0",
             "svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG, first, 0, 0, 0) == 99"),
         "placement": ("kernel/kernel/workload_evidence.tkb",
-                      "        workload_busy_pair.peer_console_reported ||\n"
+                      "        (atomic_word_load(&workload_busy_pair.peer_console_reported) != 0) ||\n"
                       "        cpu_id() != SECONDARY_CORE_ID",
-                      "        workload_busy_pair.peer_console_reported ||\n"
+                      "        (atomic_word_load(&workload_busy_pair.peer_console_reported) != 0) ||\n"
                       "        cpu_id() == SECONDARY_CORE_ID"),
         "ddb gate": ("kernel/kernel/workload_evidence.tkb",
                      "kernel_ddb_console_test_enabled == false",
@@ -225,15 +225,15 @@ def main() -> int:
         # rewrite a sibling fixture's handout and prove nothing.
         "peer cpu handout": (
             "kernel/kernel/workload_evidence.tkb",
-            "        workload_busy_pair.peer_console_pid = pid;\n"
+            "        atomic_word_store(&workload_busy_pair.peer_console_pid, pid);\n"
             "        process_run_unlock(guard);\n"
             "        return SECONDARY_CORE_ID;",
-            "        workload_busy_pair.peer_console_pid = pid;\n"
+            "        atomic_word_store(&workload_busy_pair.peer_console_pid, pid);\n"
             "        process_run_unlock(guard);\n"
             "        return 0;"),
         "turn before the reader": ("kernel/kernel/workload_evidence.tkb",
-                                   "if (workload_busy_pair.peer_read_reported == false) {",
-                                   "if (workload_busy_pair.peer_read_reported) {"),
+                                   "if (atomic_word_load(&workload_busy_pair.peer_read_reported) == 0) {",
+                                   "if ((atomic_word_load(&workload_busy_pair.peer_read_reported) != 0)) {"),
         "self pin": ("kernel/arch/arm64/kernel/peer_read.tkb",
                      "return svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) == 0;",
                      "return true;"),
@@ -298,14 +298,14 @@ def main() -> int:
     })
     mutations.update({
         "all ordering steps": ("kernel/kernel/workload_evidence.tkb",
-                               "workload_busy_pair.peer_console_order_step != 6",
-                               "workload_busy_pair.peer_console_order_step != 0"),
+                               "atomic_word_load(&workload_busy_pair.peer_console_order_step) != 6",
+                               "atomic_word_load(&workload_busy_pair.peer_console_order_step) != 0"),
         "ordered reports": ("kernel/kernel/workload_evidence.tkb",
-                            "total != workload_busy_pair.peer_console_order_step + 1",
-                            "total != workload_busy_pair.peer_console_order_step"),
+                            "total != atomic_word_load(&workload_busy_pair.peer_console_order_step) + 1",
+                            "total != atomic_word_load(&workload_busy_pair.peer_console_order_step)"),
         "child identity": ("kernel/kernel/workload_evidence.tkb",
-                           "parent == workload_busy_pair.peer_console_pid",
-                           "parent != workload_busy_pair.peer_console_pid"),
+                           "parent == atomic_word_load(&workload_busy_pair.peer_console_pid)",
+                           "parent != atomic_word_load(&workload_busy_pair.peer_console_pid)"),
         "shared peer admission": ("kernel/printk/log.tkb",
                                   "    let mut taken: usize = 0;",
                                   "    if (cpu_id() != 0) { return (peer_console_publish(cpu_id(), bytes), false); }\n    let mut taken: usize = 0;"),

@@ -123,7 +123,7 @@ def problems(tree: dict[str, str]) -> list[str]:
     ):
         if shape not in payload:
             result.append(f"payload placement or bounded-read shape changed: {shape}")
-    if "tag == workload_busy_pair.peer_exit_tag" not in evidence:
+    if "tag == atomic_word_load(&workload_busy_pair.peer_exit_tag)" not in evidence:
         result.append("post-reap routing no longer survives pid reuse")
     marker = expected.strip()
     if marker != (
