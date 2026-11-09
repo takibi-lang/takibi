@@ -2,15 +2,14 @@
   "date": "2026-11-09",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "d97b6a52e6beeba3e5571d2263c519d513feca5242ba286168c972fe41566f9e",
-  "workload": "Combined exception CPU-store and real-lock virtio-net queue migration: maintained boot/network, Complete-stop DDB, guarded fault and terminal diagnostic capture/console. Static storage remains until reboot; no new heap, pool or per-process allocation.",
+  "source_sha256": "b55ce86cb1b421d05b854dca770b4e7b05753aafee1ffefc53c03d9c3aa2f1ae",
+  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 88c1912c: this branch's review, rebound to the merged sources (upstream's record was 2026-11-09 milestone/measured). Compiler authority-derived linear-guard and named synchronous borrowed-callback foundation on published fd283841/e15 production sources. Full cross-tree allbuild and actual BootPhase/LockedCell native scope; scheduler Mutex integration remains separate.",
   "evidence": [
-    "docs/EXCEPTION_NET_INTEGRATION_SPACE_2026-11-09.md",
-    "docs/EXCEPTION_NET_INTEGRATION_SPACE_2026-11-09.json",
-    "docs/EXCEPTION_CPU_SPACE.md",
-    "docs/EXCEPTION_CPU_SPACE.json",
-    "docs/GLOBAL_PROTECTION.md"
+    "docs/AUTHORITY_GUARD_CALLBACK_SPACE_2026-11-09.txt",
+    "SPEC.md",
+    "TRUSTED_BASE.md",
+    "kernel/MEMORY_MAP.md"
   ],
-  "assessment": "Verified published e15 ELF hashes. Combined QEMU text+2636/data+16/BSSspan+16384 and reservation+32768 (eight pages); RPi5 text+2268/data+16/BSSspan+12288, reservation unchanged within alignment. Snapshot fixed payload+16544 is retained for separate capture/publication/per-CPU scratch safety; net512/block256/lock8 unchanged. No unsafe reuse, stack-path sum or whole-stack proof.",
-  "next_trigger": "Changed crash schema/capture-reader lifetime, queue storage or lock ownership, or next kernel feature changing image/allocation workload."
+  "assessment": "Both rebuilt production kernels retain identical .text/.rodata/.data bytes and BSS size. Native fixture text total+988B; actual BSS+24B plus RELRO padding+3112B. Actual inlined callsite direct; retained generic scope49B still indirect. QEMU compiler allocated584542607 words (+1.0155 percent vs published578666141), below589000000; no ceiling edit. No new production storage/allocation or completed scheduler/hardware cost claim.",
+  "next_trigger": "Rebased production-source combination or scheduler Mutex integration; changed guard/callback representation or allocation workload."
 }
