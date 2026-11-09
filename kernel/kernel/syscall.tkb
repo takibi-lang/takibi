@@ -67,8 +67,7 @@ const AARCH64_NR_RT_SIGSUSPEND: usize = 133;
 const AARCH64_NR_RT_SIGRETURN: usize = 139;
 const AARCH64_NR_SYSLOG: usize = 116;
 const AARCH64_NR_GETCWD: usize = 17;
-// GitHub issue #581: the filesystem read path, named where the rest of this
-// table's numbers are rather than as literals inside syscall_peer_safe.
+// Filesystem operations named at the syscall ABI boundary.
 const AARCH64_NR_OPENAT: usize = 56;
 const AARCH64_NR_CLOSE: usize = 57;
 const AARCH64_NR_NEWFSTATAT: usize = 79;
@@ -5220,11 +5219,8 @@ fn kernel_syscall_clone_parent_return(parent_sp: usize) {
 }
 
 // GitHub issue #9: peer-safety. Since #583 a syscall runs where it is
-// called unless syscall_peer_refused names it or syscall_peer_safe narrows
-// it by descriptor; the migration gate reruns those on core 0. read and
-// write are split by descriptor in the order their handlers use. Of the
-// ext2 mutations, only a file write stays core 0's (by descriptor, below);
-// the directory mutations run anywhere since #597.
+// called. Descriptor validation remains in each handler, with the same
+// errno and ownership rules on every CPU (#1330).
 // GitHub issue #533: the five ext2 MUTATIONS, each under the filesystem
 // lock for exactly as long as its own linear tokens live.
 //
@@ -5794,292 +5790,6 @@ private fn syscall_accept_claimed(current_authority: borrow ProcessCurrent[curre
     }
 }
 
-// GitHub issue #583: the REFUSAL LIST. Every syscall this kernel implements
-// is callable from any CPU unless it is named here with the reason it stays
-// core 0's, so a syscall added later is peer-callable by default rather than
-// silently core-0-only. syscall_peer_safe below still narrows some admitted
-// calls by descriptor kind; that is a statement about a path, not a refusal
-// of the call. What each group needs before it can leave the list is on
-// issue #583.
-fn syscall_peer_refused(number: usize) -> bool {
-    // reboot (142) left this list in #933: its world stop takes the owner
-    // from cpu_id(), and the console is owned on any core since #830.
-    // The payload fixture's parent report, the last of the process
-    // lifecycle here. Every multicore defect this project has closed lived in
-    // that lifecycle (#532, #552, #569, #571), each found with its operations
-    // on core 0, and they left this list one at a time: wait4 in #609, once
-    // #550 had made its decision and its Blocked publication one critical
-    // section; execve and execveat in #610, once exec's per-call state was
-    // per CPU and its record writes one hold (#618), with the three execs
-    // that stayed core 0's handed there from the handler (the last, the
-    // BusyBox Extras exec, runs where it is called since #828); clone, clone3, fork
-    // and vfork in #611, whose child's first return on its parent's stack
-    // StackOwnership.tla already models on either core. syslog, the one
-    // entry that was not lifecycle, left in #612: its reader takes no lock
-    // and drops a record overwritten while it copied (LogRing.tla, #613).
-    if (number == AARCH64_NR_TAKIBI_PARENT_PROGRESS) {
-        return true;
-    }
-    return false;
-}
-
-fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
-    if (syscall_peer_refused(number)) { return false; }
-    // Session lookups and changes hold the process-run lock.
-    if (number == AARCH64_NR_GETSID || number == AARCH64_NR_SETSID) {
-        return true;
-    }
-    // The caller's own record, or architectural state: getpid, getppid,
-    // the uid/gid family, gettid, clock_gettime, and getcpu (#533).
-    if (number == 172 || number == 173 || number == 178 ||
-        (number >= 174 && number <= 177) || number == 113 ||
-        number == AARCH64_NR_GETRESUID || number == AARCH64_NR_GETRESGID ||
-        number == AARCH64_NR_GETCPU) {
-        return true;
-    }
-    // The affinity ABI takes the run lock for everything it reads or writes.
-    if (number == AARCH64_NR_SCHED_SETAFFINITY ||
-        number == AARCH64_NR_SCHED_GETAFFINITY) {
-        return true;
-    }
-    // GitHub issue #665: sched_yield only asks this CPU for a reschedule.
-    if (number == AARCH64_NR_SCHED_YIELD) {
-        return true;
-    }
-    // A per-process deadline, held in the caller's own record (86fb1cbd).
-    // The sleeper is queued on this CPU's tick-wake list and this CPU's
-    // own tick wakes it (#829; kernel_process_tick_wake_scan).
-    if (number == AARCH64_NR_NANOSLEEP ||
-        number == AARCH64_NR_CLOCK_NANOSLEEP) {
-        return true;
-    }
-    // A peer exit returns to architectural idle (#552, bcaf4419).
-    if (number == AARCH64_NR_EXIT || number == AARCH64_NR_EXIT_GROUP) {
-        return true;
-    }
-    // GitHub issue #9 phase B entry 6: the system-identity reads.
-    //
-    // uname answers from fixed string literals into the bounded per-CPU scratch array,
-    // and that scratch is `[SyscallScratch; KERNEL_MAX_CORES]` indexed by
-    // `cpu_id()` -- two cores never share the buffer, so a peer cannot see
-    // half of core 0's fill. sysinfo keeps no kernel scratch at all: it
-    // zero-fills the caller's own range and writes one word read from the
-    // architectural generic counter, which is system-wide on AArch64 and
-    // readable from any CPU.
-    //
-    // Neither reaches the filesystem, the network, the console, or a device.
-    // What they do reach is the user-memory boundary -- a range check against
-    // the caller's own root, then a copy -- and that is not new on a peer: a
-    // terminal write has crossed it from one since #534. Nothing here widens
-    // WHICH processes run on a peer, so the default-mask decision that #514
-    // and #516 gate is untouched.
-    if (number == AARCH64_NR_UNAME || number == AARCH64_NR_SYSINFO) {
-        return true;
-    }
-    // The workload fixtures' own progress report. Every handler in
-    // kernel/kernel/workload_evidence.tkb takes the process run lock, and
-    // these fixtures have reported from a peer since #533, #534 and #547.
-    if (number == AARCH64_NR_TAKIBI_WORKLOAD_PROGRESS) { return true; }
-    // GitHub issue #9 phase B entry 6, second increment: the per-process
-    // reads that answer from the caller's own record and take no lock.
-    //
-    // getcwd writes `/` and a NUL into the caller's own range and keeps no
-    // kernel scratch. This kernel has exactly one directory, so the answer
-    // is a constant; even if it stops being one, a process's cwd is its own
-    // and no other CPU writes it.
-    //
-    // set_tid_address returns the current pid, which is a read of
-    // `execution_here().current_handle` -- this CPU's own current process --
-    // and of that record's own pid word.
-    if (number == AARCH64_NR_GETCWD || number == AARCH64_NR_SET_TID_ADDRESS) {
-        return true;
-    }
-    // GitHub issue #9 phase B entry 6, third increment: prlimit64 in both
-    // directions. The increment before admitted the read only and said the
-    // WRITE belonged to the increment that answered whether a peer may
-    // mutate its own record. This is that answer, and for THESE two words it
-    // is yes -- by enumeration rather than by analogy.
-    //
-    // `fd_limit_soft`/`fd_limit_hard` live in the process's own
-    // ProcessFdContext. Written: at creation, by its own prlimit64, and by
-    // its own clone copying them into a child that is still Constructing.
-    // Read: by `unified_fd_alloc`/`unified_fd_install` for the slot whose
-    // syscall is running, by that same clone as the parent, and by boot
-    // probes that use slot 0 -- the boot process, which is never admitted to
-    // a peer. A reaper reaches a child's fd table only once that child has
-    // Exited, and #552 put a peer's stack release before PID 1 collects it.
-    // So while a process runs on a peer, no other CPU touches the two words
-    // it is writing.
-    //
-    // No argument-dependent admission is left, so this takes the number and
-    // the descriptor again. One number being two questions did not stop
-    // being true -- read and write still turn on their descriptor -- only
-    // this instance of it did.
-    if (number == AARCH64_NR_PRLIMIT64) { return true; }
-    // Calls whose only WRITE is into the caller's own user memory, touching
-    // no kernel state at all:
-    //
-    //   chdir         copies two bytes into the per-CPU path buffer,
-    //                 compares them against `/` and `.`, and stores nothing.
-    //                 This kernel has one directory, so there is no cwd to
-    //                 move.
-    //   rt_sigaction  validates signum and zero-fills a non-null oldact.
-    //                 Handlers are never installed, so nothing is stored.
-    //
-    // Each crosses the user-memory boundary against its own root, which a
-    // peer terminal write has crossed since #534.
-    if (number == AARCH64_NR_CHDIR || number == AARCH64_NR_RT_SIGACTION) {
-        return true;
-    }
-    // GitHub issue #1172: setitimer and getitimer read and write the
-    // caller's own ITIMER_REAL under the process-run lock, which the tick
-    // that fires it takes too, so the caller's CPU is not part of it.
-    if (number == AARCH64_NR_SETITIMER || number == AARCH64_NR_GETITIMER) {
-        return true;
-    }
-    // rt_sigprocmask (GitHub issue #570). The process's own signal_mask is
-    // read by a sender on any CPU and written only by the process itself,
-    // and pending_signals is read-modify-written by both; every such access
-    // is under the process-run lock now (process_signal_pending_raise and
-    // _clear take its guard), so a peer writing its own mask is one more
-    // locked party rather than an unsynchronized one.
-    //
-    // kill joined in GitHub issue #583's first increment. Delivery runs
-    // under the same lock and a wake publishes through the guarded Blocked
-    // take (#589), so the sender's CPU is not part of the argument. A
-    // self-directed SIGTERM exits, and a peer exit is admitted already.
-    if (number == 135 || number == AARCH64_NR_KILL) { return true; }
-    // GitHub issue #1138: sigaltstack reads and writes only the caller's
-    // own record (signal_altstack, which nothing else on any CPU touches)
-    // and the caller's own memory.
-    if (number == AARCH64_NR_SIGALTSTACK) { return true; }
-    // GitHub issue #581: read and write on a connected TCP descriptor. Every
-    // field of the connection is read and written under its owner
-    // (tcp_connection_take's TaskMutex, revalidated by generation after the
-    // acquire), and the receive and transmit paths hold the sole network
-    // capability, which is itself behind a Mutex. So a peer's call and core
-    // 0's call on the same connection serialize on the owner, and two
-    // connections serialize on the capability.
-    //
-    // GitHub issue #598 adds close, dup3 and shutdown, which reach the
-    // transport release through kernel_connected_descriptor_close or the
-    // shutdown arm, both under the connection's owner; and getpeername and
-    // setsockopt, which write or check only the caller's memory. A
-    // connection duplicated onto a standard descriptor is not the terminal.
-    if (kernel_connected_fd_is_open(fd)) {
-        return number == 63 || number == AARCH64_NR_WRITE ||
-            number == AARCH64_NR_READV || number == AARCH64_NR_WRITEV ||
-            number == AARCH64_NR_CLOSE || number == 24 || number == 210 ||
-            number == 205 || number == 208;
-    }
-    // The terminal: a peer's output goes through its console ring (#534),
-    // and input is ordered by the run lock (#547).
-    // An ext2 file since GitHub issue #602: the write, its position and
-    // its bound are one section under the mutation guard, which waits for
-    // every CPU's counted readers.
-    // A pipe since GitHub issue #1042: every field of a pipe is read and
-    // written under its own TaskMutex, and its wait and wake under the run
-    // lock (kernel/kernel/pipe.tkb), so a reader and a writer on two CPUs
-    // serialize there.
-    if (number == AARCH64_NR_WRITE || number == AARCH64_NR_WRITEV) {
-        return kernel_syscall_terminal_is_open(fd) ||
-            kernel_syscall_file_is_open(fd) ||
-            kernel_syscall_pipe_is_open(fd);
-    }
-    // GitHub issue #581: the filesystem READ path, which is the first
-    // subsystem in this table rather than another per-process word.
-    //
-    // What makes it admissible is already built and already exercised from a
-    // peer, by /bin/peer-read under the per-pid rule: ext2 mutation excludes
-    // itself through kernel/fs/ext2/mutation_lock.tkb at lock rank 20, the
-    // block cache publishes its write epoch with release ordering and sums
-    // it with acquire loads (#533), and the per-CPU ext2 scratch means two
-    // cores never share a staging buffer. A reader still takes no lock --
-    // readers have to stay concurrent or `peer_filesystem.expected`'s
-    // both-CPU device contention disappears -- and instead asks at syscall
-    // entry whether a mutation is in flight. `syscall_reaches_filesystem`
-    // below is what keeps that question being asked now that the table
-    // admits these calls rather than refusing them.
-    //
-    // NOT the file write path, which stays core 0's by descriptor. The
-    // directory mutations are admitted since #597, and
-    // scripts/buildcheck_ext2_mutation_guard.py, over the compiler's call
-    // graph, is what proves each mutator is reached with the guard held.
-    //
-    // #559 closed the in-flight window: a reader is counted until its
-    // syscall is done, and a mutation waits for the count to drain.
-    if (number == AARCH64_NR_OPENAT || number == AARCH64_NR_CLOSE ||
-        number == AARCH64_NR_NEWFSTATAT) {
-        return true;
-    }
-    if (number == 63 || number == AARCH64_NR_READV) {
-        if (kernel_syscall_terminal_is_open(fd)) { return true; }
-        if (kernel_syscall_pipe_is_open(fd)) { return true; }
-        return kernel_syscall_file_readable(fd);
-    }
-    // GitHub issue #583, second increment: the descriptor table.
-    //
-    // fcntl (F_SETFD, F_DUPFD, F_DUPFD_CLOEXEC) and dup3 edit the CALLER's
-    // own table through unified_fd_*, keyed by its own slot, and the only
-    // shared state they touch is an open object's reference count -- which
-    // close, admitted since #581, already drops from a peer through the same
-    // functions. Both are admitted only between terminal, file and directory
-    // descriptors: dup3 onto a connected socket runs
-    // kernel_connected_descriptor_close, whose close is core 0's, and a
-    // listener is accept's state.
-    if (number == AARCH64_NR_FCNTL) {
-        return syscall_fd_is_plain(fd);
-    }
-    if (number == 24) {
-        return syscall_fd_is_plain(fd) && syscall_fd_is_socket(second) == false;
-    }
-    // getdents64 over an ext2 directory is a read like read's, and owes the
-    // same mutation question. NOT the procfs root: listing it walks the
-    // process pool with no guard, which is GitHub issue #482's open walk,
-    // and a peer would be one more walker of it.
-    if (number == 61) {
-        return kernel_syscall_directory_is_open(fd) &&
-            kernel_syscall_directory_inode(fd) != PROCFS_ROOT_INODE;
-    }
-    // access, faccessat and faccessat2 look a path up and read one inode's
-    // mode, the same read newfstatat is admitted for.
-    if (number == 21 || number == 48 || number == 439) { return true; }
-    // GitHub issue #583, third increment: the caller's own memory.
-    //
-    // brk and mmap move the heap break, a word in the caller's own fd
-    // context that the process alone writes after exec -- prlimit64's
-    // argument for its limit words. The arena is mapped at exec, so neither
-    // allocates. munmap does nothing. mprotect rewrites the caller's own
-    // page-table entries through address_space_pte_write, whose
-    // mmu_pte_update invalidates with `tlbi vae1is`, broadcast to every
-    // core, so a core the process ran on before keeps no stale entry. Data
-    // aborts already rewrite the same tables from a peer since #580.
-    if (number == 214 || number == 215 || number == 222 || number == 226) {
-        return true;
-    }
-    // Fourth increment: rt_sigtimedwait. Its take runs under the process-run
-    // lock (#570), and its block re-checks the pending set inside the
-    // critical section that publishes Blocked (kernel_process_block_reserved),
-    // so a signal raised from any CPU between the take and the block is
-    // either seen there or delivered to a Blocked waiter.
-    if (number == AARCH64_NR_RT_SIGTIMEDWAIT) { return true; }
-    // Fifth increment: the terminal waits. ppoll combines paths a peer is
-    // admitted for already -- the RX ring's pending check, the UartRx block
-    // whose decisive look is inside the critical section that publishes
-    // Blocked (#547), the deadline wait nanosleep uses, and the connected
-    // socket's deliberately lockless readiness hint. It blocks whether or
-    // not a successor is Ready on this CPU, because a block with none now
-    // idles the CPU instead of declining. The fixture wait blocks on UartRx
-    // the same way, taking its byte under the run lock.
-    if (number == AARCH64_NR_PPOLL ||
-        number == AARCH64_NR_TAKIBI_UART_RX_WAIT) {
-        return true;
-    }
-    // Everything the refusal list above does not name, and the descriptor
-    // rules above do not narrow, runs where it was called (#583).
-    return true;
-}
-
 // Does this call reach ext2, and therefore owe the mutation question?
 //
 // GitHub issue #581: this used to be answered by `syscall_peer_safe` saying
@@ -6139,10 +5849,9 @@ fn syscall_fd_is_socket(fd: usize) -> bool {
     }
 }
 
-// Step 9/9: action 9 (.Lsyscall_migrate). The gate chose core 0 for this
-// syscall. Rewind it, mark the process core-0-only until the call
-// completes, and leave this CPU; the process becomes Ready only once this
-// core is off its stack (kernel_process_stack_idle_yield).
+// Step 9/9: action 9 (.Lsyscall_migrate). Affinity excluded this CPU.
+// Rewind the call and leave; the process becomes Ready only once this core
+// is off its stack (kernel_process_stack_idle_yield).
 fn kernel_syscall_migrate_return(frame_sp: usize) {
     let frame =
         frame_ref_from_el0_entry(frame_sp, kernel_process_entry_generation());
@@ -8014,11 +7723,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     };
     let exception_class: usize = (esr >> 26) & 0x3F;
     if (exception_class != 0x15) { return syscall_finish_current(frame, SyscallAction::Unreachable, current_authority); }
-    // GitHub issue #9: the migration gate, before this syscall touches any
-    // kernel state. A process on a peer because its affinity mask put it
-    // there runs only what syscall_peer_safe allows; any other syscall is
-    // rerun on core 0. A fixture the per-pid rule admits keeps its own
-    // audit instead.
+    // Affinity exclusion is independent of syscall admission (#1330).
     // GitHub issue #579: this CPU may no longer run this process AT ALL --
     // its affinity mask has stopped naming this CPU, which is what happens
     // the moment a process re-pins itself with sched_setaffinity. Hand it
@@ -8058,11 +7763,6 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // return parks this one Ready and idles core 0 (#592).
         kernel_process_reschedule_if_excluded_here();
     }
-    // core-role: calls outside the peer-safety table run on core 0 (the
-    // parent-progress report)
-    if (cpu_id() != 0 && syscall_peer_safe(number, x0, x1) == false) {
-        return syscall_finish_current(frame, SyscallAction::Migrate, current_authority);
-    }
     // GitHub issue #533: a reader must not read a tree that is being
     // rewritten. The mutators hold kernel/fs/ext2/mutation_lock.tkb; this
     // asks, with one acquire-load and no wait, whether one is inside right
@@ -8079,8 +7779,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // reader that finds no mutation in flight is counted until this syscall
     // is done (kernel_syscall_dispatch releases it), and a mutation that
     // starts meanwhile waits for it -- the entry question alone let a
-    // mutation start during an admitted read. A call the peer-safety table
-    // refuses has been sent to core 0 above already.
+    // mutation start during an admitted read.
     if (syscall_reaches_filesystem(number, x0, x2)) {
         if (ext2_read_enter() == false) {
             // GitHub issue #775: every core waits in place. A peer used to
@@ -9894,19 +9593,9 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
     }
 }
 
-// GitHub issue #453. Persistent syscall state belongs to ProcessRecord, the
-// transient buffers are SyscallSlot pool slots (#638), and the ext2 reader
-// registration is a local of the dispatch (#1323); those survive preemption
-// as they are. What still depends on the executing core is the placement
-// gate: kernel_syscall_dispatch_action answers syscall_peer_safe for the CPU
-// it asked on, and a core-only handler relies on staying there until it
-// returns, because the switch is deferred to
-// kernel_process_syscall_return_schedule. The stage 8 window does not disturb
-// that: its one syscall is peer-safe.
-fn syscall_execution_model_assumption() {
-    static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "the syscall placement gate answers for the CPU it asked on; a core-0-only handler preempted and moved would run on a peer");
-}
+// Persistent syscall state belongs to ProcessRecord; temporary buffers are
+// linear SyscallSlot pool slots, and ext2 reader registration belongs to the
+// dispatch invocation. Syscall admission does not depend on the CPU (#1330).
 
 // Complete a syscall while retaining its current authority through signal delivery.
 private fn syscall_finish_current(

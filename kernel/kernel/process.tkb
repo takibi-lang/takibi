@@ -6912,31 +6912,19 @@ fn kernel_process_reschedule_if_excluded_here() {
 // as an exit to idle does; the process stays Running, and so unselectable,
 // until kernel_process_stack_idle_yield has moved this CPU off its stack.
 //
-// GitHub issue #579: WHERE it goes depends on why it was handed away, and
-// asking that here is what lets one action serve both reasons.
-//
-// If this CPU may still run the process, the reason is the syscall -- it is
-// outside the peer-safety table and core 0 is the only place it may run --
-// so the process is pinned there for the duration of the call. If this CPU
-// may NOT run it, the reason is the process's own affinity mask, which
-// already names where it may go; pinning it to core 0 would override the
-// mask the process just set and send it to a CPU it excluded.
+// Affinity excluded this CPU at dispatch (#1330). A remote affinity update
+// may admit it again before this lock is acquired; publish the saved frame
+// and yield without inferring a core-0-only call from that changed answer.
 fn kernel_process_migrate_current(frame: borrow FrameRef[process, level]) -> bool !{changes_witness_ProcessCurrent} {
-    // core-role: a peer hands a refused call to core 0; core 0 has nowhere to
-    // hand it
+    // core-role: affinity exclusion on a peer returns to architectural idle;
+    // core 0 uses its syscall-return scheduling path
     if (cpu_id() == 0) { return false; }
     let guard = process_run_lock();
     if (execution_state[execution_cpu_index()].current_live == false) {
         process_run_unlock(guard);
         return false;
     }
-    let mut slot: ProcessSlot = process_slot_of(execution_state[execution_cpu_index()].current_handle.pool_index);
-    let syscall_needs_core0: bool =
-        kernel_process_cpu_allows_slot(guard, cpu_id(), slot);
     scheduled_process_record_live_locked(guard, execution_state[execution_cpu_index()].current_handle).saved_sp = frame_ref_address(frame);
-    if (syscall_needs_core0) {
-        scheduled_process_set_core0_for_call(guard, slot, true);
-    }
     execution_state[execution_cpu_index()].current_live = false;
     execution_state[execution_cpu_index()].scheduler_enabled = false;
     execution_state[execution_cpu_index()].reschedule_pending = false;
