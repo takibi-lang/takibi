@@ -157,14 +157,17 @@ def problems(source):
 
 
 def main():
-    found = problems(Path(PATH).read_text())
+    source = Path(PATH).read_text()
+    code = code_skeleton(source)
+    found = problems(source)
     if found:
         for message in found:
             print('FAIL exception-cpu-snapshots: ' + message)
         return 1
     report_pass('exception-cpu-snapshots',
                 'four CPU stores expose only exact borrowed payloads; publication fields match own capture and terminal slots never rearm',
-                stores=len(STORES), schemas=2)
+                stores=sum(bool(re.search(r'\blet\s+mut\s+' + name + r'\s*:', code)) for name in STORES),
+                schemas=len([name for name in ('CrashCapture', 'CrashSnapshot') if fields(code, name)]))
     return 0
 
 

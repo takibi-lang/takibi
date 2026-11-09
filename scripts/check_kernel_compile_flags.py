@@ -48,6 +48,7 @@ OPT_OUT_EXEMPT = {
     "scripts/buildcheck_backing_exists.py": "overlay cases add functions nothing calls",
     "scripts/buildcheck_process_current_phase.py": "overlay cases add functions nothing calls",
     "scripts/buildcheck_user_write_result.py": "overlay cases add functions nothing calls",
+    "scripts/buildcheck_exception_cpu_access.py": "overlay cases add functions nothing calls; production compiles keep strict defaults",
 }
 EXEMPT_DEFINES = {
     # EL0 user payloads: separate programs linked into the image as data,

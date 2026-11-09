@@ -172,7 +172,7 @@ owners are TaskMutex, the spare stack stays masked). #980
    `!{interrupt}` function is called only masked and mints CPU authority
    there, D2 (i) a fallible `preempt_off (cpu) { } else { }`); (5) site migration (process_image's
    target root is explicit and carried by ProcessImagePages, #981; the log's partial line with an owner word, done (#1159),
-   `syscall_ext2_reader`, done (#1323: a dispatch local), exception_evidence);
+   `syscall_ext2_reader`, done (#1323: a dispatch local), exception_evidence retained CPU rows, done (#1486: existing per_cpu/stopped_read plus scoped crash publication));
    (6) the slot pools'
    capacity premise (#993, done 2026-11-01: capacity unchanged, a full pool retries unmasked for the tick, the mutation lock before any slot, `SlotPool.tla`); (7) the lock-holder group with the `PreemptOff`
    token (lifecycle spans done 2026-11-01, #1323; the span's may_block ban is a compile-time rule, #1350 done 2026-11-06; #789 is not needed for the flip: #638 comment); (8) the EL1 switch at IRQ return when the count is zero,
