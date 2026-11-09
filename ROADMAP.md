@@ -108,6 +108,13 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
 
 ### Territory A: the trunk, in this order
 
+**Priority update, 2026-11-09.** Repair #1482 (stale UART evidence after
+launch/connection refusal) and restore fresh validation first. Then #1330
+removes the remaining core-0 placement exceptions with actual path evidence;
+ExecutionState moves to existing per_cpu/CpuHere authority and #1472 adds
+RootHeld before the flip. The coordinator sequences shared scheduler edits
+with the sleeping-Mutex work below.
+
 **Assigned queue (maintainer, 2026-10-23, pruned 2026-10-25).** Memory
 safety and multicore backbone only. Taken in order whenever the numbered
 trunk items below have no step ready; an item that reaches a decision is
@@ -190,6 +197,11 @@ owners are TaskMutex, the spare stack stays masked). #980
    has a negative control and an RPi5 measurement.
 
 ### Territory B: supporting the pillars, by priority
+
+**Priority update, 2026-11-09.** Implement #1481, scheduler-backed waiting
+Mutexes with non-sleeping paths preserved, before the preemption flip. When a
+design gate blocks it, continue the already-approved #1159 units and #1475
+counter records, preserving their separate recovery branch.
 
 **Assigned queue (maintainer, 2026-10-23, re-cut 2026-10-25).**
 Low-dependency issues A does not hold, in this order; compiler work in
