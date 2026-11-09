@@ -179,13 +179,25 @@ def main() -> int:
             assert missing != "network.ready"
             return True
 
+        closing_ack = b"closing ACK"
+
+        def handshake(*args):
+            probe(*args)
+            if args[1] == namespace["RECONNECT_CLIENT_PORT"]:
+                assert len(args) == 4 and args[3] == closing_ack
+            else:
+                assert args[1] == namespace["HANDSHAKE_CLIENT_PORT"]
+                assert len(args) == 3
+            return True
+
         exchange = Mock(side_effect=AssertionError(
             "init exchange started without its listener"))
         replacements = {name: probe for name in (
             "send_until_reply", "test_syn_wrong_port_silent",
-            "test_syn_bad_checksum_silent", "do_handshake",
+            "test_syn_bad_checksum_silent",
             "test_data_echo")}
-        replacements["test_close"] = lambda *args: (probe(*args), b"closing ACK")
+        replacements["do_handshake"] = handshake
+        replacements["test_close"] = lambda *args: (probe(*args), closing_ack)
         replacements.update(wait_for_marker=wait, init_script_fixture=exchange)
         with patch.dict(namespace, replacements), \
                 patch.object(namespace["socket"], "socket", return_value=Mock()), \
