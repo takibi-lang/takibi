@@ -25,6 +25,7 @@ const GETDENTS_SYSCALL: usize = 61;
 const READ_SYSCALL: usize = 63;
 const SOCKET_SYSCALL: usize = 198;
 const LINUX_EBADF: usize = 0xFFFFFFFFFFFFFFF7;
+const LINUX_ENOTCONN: usize = 0xFFFFFFFFFFFFFF95;
 const LINUX_F_DUPFD: usize = 0;
 const LINUX_AT_FDCWD: usize = 0xFFFFFFFFFFFFFF9C;
 const LINUX_R_OK: usize = 4;
@@ -83,6 +84,25 @@ private fn affinity_say(line: borrow []const u8) !{unsafe} {
 
 private fn affinity_fail(line: borrow []const u8) {
     affinity_say(line);
+    svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+}
+
+// Keep the failing ABI answer in the UART evidence, without changing success output.
+private fn affinity_expect_result(label: borrow []const u8,
+        actual: usize, expected: usize) {
+    if (actual == expected) { return; }
+    affinity_say(label);
+    let mut answer: [u8; 19];
+    answer[0] = 0x30;
+    answer[1] = 0x78;
+    for index: usize in 0..<16 {
+        let digit: usize = (actual >> ((15 - index) * 4)) & 15;
+        let mut byte: u8 = (digit + 0x30) as u8;
+        if (digit >= 10) { byte = (digit - 10 + 0x61) as u8; }
+        answer[index + 2] = byte;
+    }
+    answer[18] = 10;
+    svc5(WRITE_SYSCALL, 1, answer as *u8 as usize, 19, 0, 0);
     svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
 }
 
@@ -389,12 +409,18 @@ fn affinity_probe() !{unsafe} {
     if (listener >= AFFINITY_ERROR_FLOOR) {
         affinity_fail(bs"affinity: socket allocation failed on cpu 1\n");
     }
-    if (svc5(FCNTL_SYSCALL, listener, LINUX_F_DUPFD, AFFINITY_DUP_FLOOR, 0, 0) != LINUX_EBADF ||
-        svc5(DUP3_SYSCALL, listener, listener, 0, 0, 0) != LINUX_EINVAL ||
-        svc5(READ_SYSCALL, listener, descriptor_bytes as *u8 as usize, 1, 0, 0) != LINUX_EBADF ||
-        svc5(CLOSE_SYSCALL, listener, 0, 0, 0, 0) != 0) {
-        affinity_fail(bs"affinity: socket descriptor results changed on cpu 1\n");
-    }
+    affinity_expect_result(bs"affinity: socket fcntl on cpu 1 expected EBADF, actual=",
+        svc5(FCNTL_SYSCALL, listener, LINUX_F_DUPFD, AFFINITY_DUP_FLOOR, 0, 0),
+        LINUX_EBADF);
+    affinity_expect_result(bs"affinity: socket dup3 on cpu 1 expected EINVAL, actual=",
+        svc5(DUP3_SYSCALL, listener, listener, 0, 0, 0), LINUX_EINVAL);
+    // #1116: a socket that has never connected is valid, but cannot receive.
+    // The read handler distinguishes ENOTCONN from an invalid descriptor.
+    affinity_expect_result(bs"affinity: socket read on cpu 1 expected ENOTCONN, actual=",
+        svc5(READ_SYSCALL, listener, descriptor_bytes as *u8 as usize, 1, 0, 0),
+        LINUX_ENOTCONN);
+    affinity_expect_result(bs"affinity: socket close on cpu 1 expected zero, actual=",
+        svc5(CLOSE_SYSCALL, listener, 0, 0, 0, 0), 0);
     // Null-terminated /proc in owned storage for the raw syscall ABI.
     let mut proc_path: [u8; 6];
     proc_path[0] = 0x2f;
