@@ -115,10 +115,9 @@ the flip; #638 is not complete. The coordinator sequences shared scheduler
 edits with the sleeping-Mutex foundation (#1481). The four retained
 exception diagnostic CPU stores now use existing typed per-CPU/complete-stop
 access and a narrowly admitted publication mirror (#1486); parent #1159
-remains open for its other globals. First complete the existing QEMU timing
-policy for the reverted churn phase timeout (#692), which stopped the joint
-publication; retain functional failure signatures and evidence checks. Then
-resume RootHeld separately from the driver queue below. Its allocation route is approved:
+remains open for its other globals. The exception/net boundaries and the
+reverted-churn QEMU policy correction are published with full checks. Resume
+RootHeld next. Its allocation route is approved:
 investigate inexpensive reduction briefly, then refresh the measured budget
 if that does not resolve the ceiling. The Mutex lifetime/callback foundation
 and nonblocking boot probes are also approved; no extra bootstrap stack.
@@ -207,10 +206,9 @@ owners are TaskMutex, the spare stack stays masked). #980
 ### Territory B: supporting the pillars, by priority
 
 **Priority update, 2026-11-09.** The network queue boundary under #1159 is
-ready for joint publication, preserving nonblocking receive and pending
-IRQ/capability bookkeeping; A first repairs the QEMU timing-policy gap.
-Begin the independent compiler foundation for #1481 now, then revalidate the
-parked scheduler work on the published combination: real waiting Mutexes
+published, preserving nonblocking receive and pending IRQ/capability
+bookkeeping. Continue the approved compiler foundation for #1481, then
+revalidate the parked scheduler work on the published combination: real waiting Mutexes
 before the preemption flip: lifetime ties as the foundation, scoped borrowed
 callbacks where needed, and explicit try acquisition in secondary boot
 probes. Preserve non-sleeping paths and add no dedicated bootstrap stack.
