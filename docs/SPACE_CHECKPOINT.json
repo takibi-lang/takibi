@@ -2,12 +2,12 @@
   "date": "2026-11-09",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "ec5c130907fbd90ad9fea56aa89246b4005060135ecb2aab1dc415c79c8e45ac",
-  "workload": "Actual combined production QEMU/RPi5 ELF/object/facts for WorldStop generation and network installed-word migrations against verified published f2bf60f5. Existing occupancy reused only at unchanged allocator/pool/storage-lifetime boundary.",
+  "source_sha256": "2e27e42e2667e0789e6fc38d465db4343b59ad264204eb85d9fdddcf34728374",
+  "workload": "Production QEMU/RPi5 linked kernels and retained init display word against verified published 1a2a69ee artifacts; unchanged allocator and report readiness workload.",
   "evidence": [
-    "docs/WORLD_STOP_NETWORK_INTEGRATION_SPACE.md",
-    "docs/WORLD_STOP_NETWORK_INTEGRATION_SPACE.json"
+    "docs/INIT_REPORT_WORD_SPACE.md",
+    "docs/INIT_REPORT_WORD_SPACE.json"
   ],
-  "assessment": "Actual combined QEMU text+16B, RPi5 text+32B; data/BSS totals and usable_ram_start unchanged. WorldStop72B unchanged; network store32->40B on QEMU,24B unchanged on RPi5. Only three intended object text sections/body hashes change; contracts/effects/callers unchanged. Payload versus rounded placement is explicit; no extra page, pool or retained capacity and no physical timing/coherence claim.",
-  "next_trigger": "Changed controller/flag representation or protocol, new allocation/retention workload, or the next completed kernel stage."
+  "assessment": "Completed display-only AtomicWord migration: retained payload 8-to-8 bytes on both targets; QEMU text -16 bytes, RPi5 text unchanged; BSS/data and usable RAM start unchanged. Pure ProcessEnd projection moves to typed callback before existing pending publication. No physical timing or page-saving claim.",
+  "next_trigger": "Next completed kernel feature, changed report/projection behavior, storage lifetime or image layout."
 }

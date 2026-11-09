@@ -1074,3 +1074,8 @@ not refine its payload to a boolean or prove the lock/wait protocol.
 No fixture exemption, guard, classifier or language rule changes.
 See TRUSTED_BASE.md and NETWORK_INSTALLED_WORD_SPACE.md for the trust
 boundary, actual layouts and linked-image cost.
+The init report retains a private AtomicWord display shell-code projection,
+computed at the typed reaped callback before unchanged pending publication.
+Both production compiler tables classify it as atomic, so its former plain
+variant allowance is removed. Readiness remains pending/reported, including
+valid displayed zero; this does not convert ProcessEnd or wait4 to integers.

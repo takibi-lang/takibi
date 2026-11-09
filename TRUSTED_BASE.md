@@ -965,3 +965,10 @@ These are bounded source/callgraph policies; physical owner/root association,
 typestate transition implementations and the permanent boot root remain trusted.
 They do not prove arbitrary control flow, general returned-view lifetime, or
 page-table write authority.
+
+The private init report display word stores only the pure shell-code projection
+of the typed reaped callback. AtomicWord excludes plain cell access, not an
+incorrect projection or publication order. The existing pending/reported flags
+carry readiness; zero is a valid code. ProcessEnd, wait4 and SIGCHLD remain
+closed variants. Source review and the exhaustive native wait_status test cover
+the projection; the existing callback/publication protocol remains trusted.

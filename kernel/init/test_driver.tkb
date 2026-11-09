@@ -172,8 +172,9 @@ private fn kernel_init_mmap_region_pages() -> usize !{unsafe} {
 // AtomicWord, 1 for true (GitHub issue #1159). pending is claimed by
 // compare-and-swap, so the deferred report runs once.
 private let mut init_boot_fixture_reported: AtomicWord;
-// The reaped child's exit status, printed by kernel_init_script_success_evidence.
-private let mut init_boot_fixture_status: ProcessEnd;
+// Display-only shell-code projection of the typed reaped callback value.
+// Readiness is carried by pending/reported, never by this value (zero is valid).
+private let mut init_boot_fixture_display_shell_code: AtomicWord;
 private let mut init_boot_fixture_pending: AtomicWord;
 private let mut clone_growth_probe_ok: AtomicWord;
 
@@ -482,7 +483,8 @@ private fn dead_slot_fallback_uses() -> usize {
 fn kernel_init_boot_fixture_reaped(reaper_pid: usize, status: ProcessEnd) {
     if (atomic_word_load(&init_boot_fixture_reported) != 0) { return; }
     if (reaper_pid != 1) { return; }
-    init_boot_fixture_status = status;
+    atomic_word_store(&init_boot_fixture_display_shell_code,
+                      syscall_status_shell_code(status));
     atomic_word_store(&init_boot_fixture_pending, 1);
 }
 
@@ -1156,7 +1158,7 @@ fn kernel_init_script_success_evidence(current_authority: borrow ProcessCurrent[
     // 128+signal when a signal ended it. This line said 0 unconditionally, which hid a script that
     // a stale signal had ended halfway (found in #629's session audit).
     kernel_boot_log("init script exit: ");
-    uart_put_udec(syscall_status_shell_code(init_boot_fixture_status));
+    uart_put_udec(atomic_word_load(&init_boot_fixture_display_shell_code));
     kernel_boot_log("\n");
     kernel_boot_log("syscall write errors: ebadf efault\n");
     if (kernel_process_clone_evidence(current_authority)) {

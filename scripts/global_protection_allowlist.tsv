@@ -11,7 +11,6 @@ kernel/arch/arm64/mm/asid.tkb	asid_bits	read-by asid_width_bits: 2026-10-31 writ
 kernel/arch/arm64/mm/asid.tkb	asid_last	read-by asid_highest_value,asid_assign_locked: 2026-10-31 written once by asid_init with the MMU off, where the compiler refuses an atomic call; read lock-free after
 kernel/init/test_driver.tkb	boot_exec_windows	read-by kernel_test_driver_run: 2026-10-31 boot: the loader check's windows, core 0 once before any exec
 kernel/init/test_driver.tkb	boot_execution	read-by kernel_process_child_exec_prepare_with,kernel_exec_primary_is_busybox_extras: 2026-10-31 boot: written by the boot thread before PID 1 runs, read-only for every later exec; BootOnce would fit but reads as a two-field record
-kernel/init/test_driver.tkb	init_boot_fixture_status	read-by kernel_init_script_success_evidence: 2026-10-31 retain-fixture: stored when PID 1 reaps the fixture child, printed after by PID 1
 kernel/init/test_driver.tkb	rootfs_metadata	read-by kernel_test_driver_run: 2026-10-31 retain-boot: the boot read of the image's metadata; the exec plan borrows this permanent buffer afterward
 kernel/kernel/fd_table.tkb	fd_refcount_probe_handle	read-by fd_refcount_probe_cycle,fd_refcount_contention_probe: 2026-10-31 retain-fixture: the contention probe's two cores; published before the rendezvous, an order the probe keeps by hand
 kernel/kernel/freelist_contention_evidence.tkb	freelist_probe	read-by freelist_probe_cycle,freelist_contention_phase: 2026-10-31 retain-fixture: the probe's two cores; the core's own operations are the protocol under test

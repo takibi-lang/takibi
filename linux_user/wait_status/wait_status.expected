@@ -1,3 +1,4 @@
+shell projection: 512 typed ends preserve display and wait4/SIGCHLD cases ok
 SIGHUP: host 1 kernel 1 ok
 SIGKILL: host 9 kernel 9 ok
 SIGUSR1: host 10 kernel 10 ok

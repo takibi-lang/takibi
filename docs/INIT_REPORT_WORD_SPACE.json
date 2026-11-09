@@ -1,0 +1,947 @@
+{
+  "baseline": "1a2a69ee90349a152aa1f5f56927251f6e2067cd",
+  "boundary": "Actual production ELF/object static images; no physical timing claim",
+  "targets": {
+    "qemu": {
+      "hashes": {
+        "baseline/qemu/kernel.elf": "8d9e77e4bfe9a6a448c3f8a35fad35478245a073cfac36076947f41ed30872c6",
+        "candidate/qemu/kernel.elf": "127f7baad9e3bf5342474a69cbfb73fd51f2652da44a449e578697f24e518eb4",
+        "baseline/qemu/main.o": "054588de94be54811ca61a5ab042c317f88de1d3ec7b0bc7f04b4c8f8a7dd086",
+        "candidate/qemu/main.o": "28b1ced6abfceecac25c249d9587a025d9f2edeb9cbc6abbc33be1be08203cdc"
+      },
+      "allocated_changes": {
+        ".text": {
+          "baseline": {
+            "type": 1,
+            "flags": 6,
+            "address": 1073741824,
+            "offset": 65536,
+            "size": 645008,
+            "align": 2048
+          },
+          "candidate": {
+            "type": 1,
+            "flags": 6,
+            "address": 1073741824,
+            "offset": 65536,
+            "size": 644992,
+            "align": 2048
+          },
+          "bytes_changed": true
+        },
+        ".eh_frame": {
+          "baseline": {
+            "type": 1,
+            "flags": 2,
+            "address": 1074443896,
+            "offset": 767608,
+            "size": 122896,
+            "align": 8
+          },
+          "candidate": {
+            "type": 1,
+            "flags": 2,
+            "address": 1074443896,
+            "offset": 767608,
+            "size": 122896,
+            "align": 8
+          },
+          "bytes_changed": true
+        },
+        ".got": {
+          "baseline": {
+            "type": 1,
+            "flags": 3,
+            "address": 1074566792,
+            "offset": 890504,
+            "size": 4488,
+            "align": 8
+          },
+          "candidate": {
+            "type": 1,
+            "flags": 3,
+            "address": 1074566792,
+            "offset": 890504,
+            "size": 4488,
+            "align": 8
+          },
+          "bytes_changed": true
+        }
+      },
+      "changed_object_sections": [
+        {
+          "name": ".bss.init_boot_fixture_display_shell_code",
+          "baseline_size": null,
+          "candidate_size": 8
+        },
+        {
+          "name": ".bss.init_boot_fixture_status",
+          "baseline_size": 8,
+          "candidate_size": null
+        },
+        {
+          "name": ".eh_frame",
+          "baseline_size": 127216,
+          "candidate_size": 127216
+        },
+        {
+          "name": ".rela.text.takibi.kernel_init_boot_fixture_reaped",
+          "baseline_size": 144,
+          "candidate_size": 168
+        },
+        {
+          "name": ".rela.text.takibi.kernel_init_script_success_evidence",
+          "baseline_size": 1272,
+          "candidate_size": 1248
+        },
+        {
+          "name": ".strtab",
+          "baseline_size": 275593,
+          "candidate_size": 275605
+        },
+        {
+          "name": ".symtab",
+          "baseline_size": 457656,
+          "candidate_size": 457656
+        },
+        {
+          "name": ".text.takibi.kernel_init_boot_fixture_reaped",
+          "baseline_size": 76,
+          "candidate_size": 80
+        },
+        {
+          "name": ".text.takibi.kernel_init_script_success_evidence",
+          "baseline_size": 360,
+          "candidate_size": 340
+        }
+      ],
+      "object_symbol_changes": {
+        "init_boot_fixture_status": [
+          {
+            "address": 0,
+            "size": 8,
+            "type": 1,
+            "section": 8388
+          },
+          null
+        ],
+        "kernel_init_script_success_evidence": [
+          {
+            "address": 0,
+            "size": 360,
+            "type": 2,
+            "section": 6571
+          },
+          {
+            "address": 0,
+            "size": 340,
+            "type": 2,
+            "section": 6571
+          }
+        ],
+        "kernel_init_boot_fixture_reaped": [
+          {
+            "address": 0,
+            "size": 76,
+            "type": 2,
+            "section": 6555
+          },
+          {
+            "address": 0,
+            "size": 80,
+            "type": 2,
+            "section": 6555
+          }
+        ],
+        "init_boot_fixture_display_shell_code": [
+          null,
+          {
+            "address": 0,
+            "size": 8,
+            "type": 1,
+            "section": 8388
+          }
+        ]
+      },
+      "linked_changed_functions": [
+        "el1_resume_probe_landing",
+        "main",
+        "kernel_secondary_main",
+        "irq_mask_reset_el0",
+        "kernel_syscall_clone_child_return",
+        "kernel_syscall_clone_parent_return",
+        "kernel_syscall_block_return",
+        "kernel_syscall_migrate_return",
+        "kernel_syscall_resume_return",
+        "el1_resume_probe_run",
+        "el1_preempt_spin_begin_address",
+        "el1_preempt_spin_end_address",
+        "el1_resume_probe_landing_address",
+        "kernel_invariant_stop",
+        "kernel_invariant_stop_with_frame",
+        "kernel_process_stack_interrupt_depart",
+        "kernel_process_stack_switch_complete",
+        "boot_once_get$u32",
+        "kernel_cache_geometry_require",
+        "kernel_pan_require",
+        "enable_irq",
+        "preempt_count_idle_reset",
+        "kernel_idle_loop",
+        "tcp_pool_cost_secondary_poll",
+        "pid_contention_secondary_run",
+        "asid_contention_is_armed",
+        "asid_contention_secondary_run",
+        "pool_contention_is_armed",
+        "pool_contention_secondary_run",
+        "page_contention_is_armed",
+        "page_contention_secondary_run",
+        "schedule_contention_is_armed",
+        "schedule_contention_secondary_run",
+        "freelist_contention_is_armed",
+        "freelist_contention_secondary_run",
+        "occupancy_drain_is_armed",
+        "occupancy_drain_secondary_run",
+        "init_once_contention_is_armed",
+        "init_once_contention_secondary_run",
+        "tcp_connection_contention_is_armed",
+        "tcp_connection_contention_secondary_run",
+        "tcp_fixture_claim_contention_is_armed",
+        "tcp_fixture_claim_contention_secondary_run",
+        "signal_contention_is_armed",
+        "signal_contention_secondary_run",
+        "pool_walk_contention_is_armed",
+        "pool_walk_contention_secondary_run",
+        "ext2_mutation_contention_is_armed",
+        "ext2_mutation_contention_secondary_run",
+        "world_stop_peer_probe_secondary_run",
+        "kernel_process_secondary_start",
+        "kernel_activity_set",
+        "kernel_process_stack_idle_complete",
+        "kernel_process_stack_idle_blocked",
+        "kernel_process_stack_idle_yield",
+        "kernel_timer_tick_leave",
+        "kernel_process_tick_charge",
+        "kernel_process_timer_schedule",
+        "kernel_process_el1_preempt_consult",
+        "kernel_process_schedule",
+        "kernel_process_request_reschedule",
+        "el1_preempt_switch_note",
+        "disable_irq",
+        "preempt_count_here",
+        "preempt_count_after_switch",
+        "preempt_count_el1_resume_check",
+        "preempt_count_zero_at",
+        "preempt_assert_blockable",
+        "irq_mask_cpu_interface_ready",
+        "irq_nest_open",
+        "irq_nest_close",
+        "irq_save",
+        "irq_pmr_masked_here",
+        "irq_nest_interrupted_masked_here",
+        "kernel_log_begin_fragment",
+        "kernel_log_end_fragment",
+        "kernel_log_capture_uart_byte",
+        "kernel_log_enter_emergency",
+        "kernel_log_probe_byte",
+        "kernel_log_storm_write",
+        "profile_sample_irq",
+        "qemu_uart_attach_bootstrap",
+        "profile_session_sync",
+        "boot_once_get$usize",
+        "boot_once_get$i32",
+        "boot_once_unwritten_stop",
+        "boot_once_get$bool",
+        "boot_once_get$u64",
+        "boot_once_get$TcpMacAddress",
+        "virtio_used_lost",
+        "virtio_pkt_lost",
+        "virtio_net_rx_acquire_locked",
+        "virtio_net_tx_finish",
+        "set_once_get$ProcessPoolHandleWords",
+        "set_once_unset_stop",
+        "set_once_get$Ext2Mount",
+        "set_once_get$i32",
+        "set_once_get$bool",
+        "virtio_blk_receive_take",
+        "virtio_blk_receive_fail_cpu",
+        "virtio_blk_receive_fail_device",
+        "virtio_blk_request_take",
+        "virtio_blk_request_fail_cpu",
+        "virtio_blk_request_fail_device",
+        "virtio_blk_data_take",
+        "virtio_blk_data_fail_cpu",
+        "virtio_blk_data_fail_device",
+        "test_driver_phase_begin",
+        "page_meta_at",
+        "page_extent_at",
+        "page_allocator_init",
+        "page_allocator_init_frames",
+        "page_allocator_apply_memory",
+        "irqsoff_open",
+        "irqsoff_close",
+        "frame_any_resume",
+        "crash_snapshot_copy_leveled_frame",
+        "kernel_current_sync_fail_stop_leveled",
+        "el1_preempt_window_admits",
+        "el1_preempt_real_resume_note",
+        "el1_preempt_switch_take",
+        "address_space_active_slot_here",
+        "address_space_install_here",
+        "kernel_process_current_root",
+        "user_probe_root_write_byte",
+        "user_probe_root_read_byte",
+        "kernel_process_current_read",
+        "scheduled_process_record_locked",
+        "kernel_activity_here",
+        "scheduled_process_record_live_locked",
+        "kernel_process_current_required",
+        "scheduled_process_record_current",
+        "kernel_activity_enter",
+        "kernel_activity_leave",
+        "scheduled_process_pin_release",
+        "scheduled_process_record_owned",
+        "scheduled_process_command_line",
+        "scheduled_process_parked_frame",
+        "scheduled_process_park_stack_run",
+        "scheduled_process_take_spare_stack_run",
+        "scheduled_process_exited_take",
+        "scheduled_process_start",
+        "kernel_process_root_authorities_check",
+        "kernel_process_stack_switch_take",
+        "kernel_process_orphan_defer",
+        "kernel_init_boot_fixture_reaped",
+        "kernel_process_el1_resume_probe_fill",
+        "kernel_process_el1_resume_probe_run",
+        "kernel_process_start_handle",
+        "kernel_process_execution_reset",
+        "kernel_test_driver_phase_premise",
+        "kernel_process_boot_handoff",
+        "kernel_process_scheduler_enable",
+        "kernel_process_scheduler_disable",
+        "kernel_process_core0_leave_excluded",
+        "kernel_process_migrate_current",
+        "kernel_process_spread_timer_progress",
+        "kernel_process_spread_timer_enter",
+        "kernel_process_schedule_reserved",
+        "kernel_process_secondary_start_reserved",
+        "kernel_process_idle_starvation_note",
+        "kernel_process_claimed_pid_or_zero",
+        "kernel_process_activate_stable_root",
+        "kernel_process_activate_stable_owned_root",
+        "kernel_boot_stack_arm",
+        "kernel_process_tick_leave_excluded",
+        "el1_preempt_spin_until_switch",
+        "el1_preempt_spin_until_refused",
+        "kernel_process_el1_preempt_scenario",
+        "kernel_process_syscall_return_schedule",
+        "kernel_process_block_to_idle",
+        "kernel_process_block_current",
+        "kernel_process_block_reserved",
+        "kernel_process_signal_deliver_traced",
+        "kernel_syscall_uart_deliver",
+        "kernel_process_tick_wake_one",
+        "kernel_process_probe_blocks_to",
+        "kernel_process_probe_deferred_address",
+        "kernel_process_clone_begin",
+        "kernel_process_scheduler_probe_stack_depart",
+        "kernel_process_scheduler_probe_stack_arrive",
+        "kernel_process_fanout_probe",
+        "kernel_process_clone_rollback",
+        "kernel_process_exit_waiter_probe",
+        "execution_publication_cost_sample",
+        "execution_publication_cost_log",
+        "kernel_process_execution_observation_probe",
+        "execution_current_set_live_here",
+        "kernel_process_scheduler_probe",
+        "kernel_process_exit_continuation_probe",
+        "kernel_process_exit_reserved",
+        "kernel_process_leave_parent_ready",
+        "kernel_syscall_wait4_deliver",
+        "kernel_process_child_exit",
+        "kernel_process_last_exited_child_pid",
+        "fd_block_pool_lock",
+        "fd_block_pool_unlock",
+        "fd_context_pool_lock",
+        "fd_context_pool_unlock",
+        "object_refcount_take",
+        "object_refcount_give",
+        "object_pool_lock",
+        "object_pool_unlock",
+        "process_image_pool_lock",
+        "process_image_pool_unlock",
+        "process_image_record_lost",
+        "process_image_record_read",
+        "process_image_record_publish",
+        "process_image_clone_vm_reap",
+        "process_image_map_segments",
+        "mmap_region_pool_lock",
+        "mmap_region_pool_unlock",
+        "tcp_frame_pool_lock",
+        "tcp_frame_pool_unlock",
+        "pin_sharing_lock",
+        "pin_sharing_unlock",
+        "tcp_retx_pool_lock",
+        "tcp_retx_pool_unlock",
+        "user_access_window_open",
+        "user_access_window_close",
+        "profile_sample_start",
+        "profile_sample_finish",
+        "profile_session_irq",
+        "profile_session_start",
+        "workload_move_cost_progress",
+        "kernel_syscall_ext2_configure",
+        "kernel_syscall_uart_block_prepare",
+        "kernel_syscall_block_choose",
+        "kernel_syscall_resume_tail",
+        "kernel_syscall_child_exec_return",
+        "kernel_syscall_child_exec_enter",
+        "kernel_syscall_child_exec_refused",
+        "signal_return_exit",
+        "signal_deliver",
+        "kernel_syscall_dispatch_action",
+        "log_storm_trace_probe",
+        "syscall_clone_current",
+        "kernel_ddb_breakpoint_test_checkpoint",
+        "ddb_read_kernel_byte",
+        "ddb_walk_backtrace",
+        "kernel_ddb_enter_stopped",
+        "crash_snapshot_capture",
+        "kernel_init_script_success_evidence",
+        "httpd_image_mapping_check",
+        "kernel_record_existence_probe",
+        "kernel_record_absent_publish_probe",
+        "kernel_boot_report_security_list",
+        "kernel_test_common_probes",
+        "kernel_test_driver_run",
+        "kernel_test_platform_network",
+        "kernel_test_platform_storage",
+        "kernel_uart_rx_isr",
+        "kernel_init_process_start",
+        "kernel_boot_memory_apply",
+        "kernel_boot_prologue",
+        "ext2_write_fixture_counts_match",
+        "ext2_write_fixture_sectors_match",
+        "ext2_exhaustion_mode",
+        "ext2_exhaustion_filler",
+        "ext2_write_exhaustion_check",
+        "ext2_io_file_is",
+        "ext2_io_bitmap_matches",
+        "ext2_exhaustion_filler_remove",
+        "ext2_exhaustion_restore",
+        "ext2_exhaustion_fault_case",
+        "ext2_exhaustion_run",
+        "ext2_full_names_absent",
+        "ext2_full_refuses",
+        "ext2_full_control",
+        "ext2_full_check_one",
+        "ext2_full_check_in",
+        "ext2_full_check",
+        "ext2_write_indirect_check",
+        "ext2_create_check",
+        "ext2_create_in_directory_check",
+        "ext2_io_case",
+        "ext2_io_restore",
+        "ext2_io_fence",
+        "ext2_io_failure_check",
+        "ext2_release_lookup",
+        "ext2_release_file",
+        "ext2_release_setup",
+        "ext2_release_rmdir",
+        "ext2_release_run",
+        "ext2_release_full_file",
+        "ext2_release_names_are",
+        "ext2_release_teardown",
+        "ext2_release_case",
+        "ext2_release_failure_check",
+        "kernel_ext2_fixture_run",
+        "kernel_ext2_mount_and_run",
+        "contention_pool_lock",
+        "contention_pool_unlock",
+        "contention_pool_init",
+        "contention_hold",
+        "contention_release",
+        "contention_live_count",
+        "contention_cycle",
+        "contention_report",
+        "pool_contention_probe",
+        "freelist_probe_init",
+        "freelist_probe_rendezvous",
+        "freelist_probe_record_pop",
+        "freelist_probe_cycle",
+        "freelist_contention_report",
+        "freelist_contention_phase",
+        "freelist_contention_probe",
+        "page_probe_cycle",
+        "page_contention_report",
+        "page_contention_probe",
+        "asid_probe_cycle",
+        "asid_contention_report",
+        "asid_contention_probe",
+        "pid_probe_cycle",
+        "pid_contention_report",
+        "pid_probe_disarm_and_quiesce",
+        "pid_contention_phase",
+        "pid_contention_probe",
+        "schedule_probe_claim",
+        "schedule_probe_cycle",
+        "schedule_contention_report",
+        "schedule_contention_run_phase",
+        "schedule_contention_probe",
+        "schedule_probe_teardown",
+        "occupancy_drain_report",
+        "occupancy_probe_drain_once",
+        "occupancy_drain_probe",
+        "world_stop_probe",
+        "world_stop_peer_probe",
+        "pool_walk_lock",
+        "pool_walk_unlock",
+        "pool_walk_read",
+        "pool_walk_held_at",
+        "pool_walk_hold",
+        "pool_walk_release",
+        "pool_walk_init",
+        "pool_walk_once",
+        "pool_walk_report",
+        "pool_walk_await",
+        "pool_walk_round",
+        "pool_walk_contention_probe",
+        "init_once_probe_locked_attempt",
+        "init_once_probe_wait_arrived",
+        "init_once_probe_prepare",
+        "init_once_probe_abandon",
+        "init_once_probe_winners",
+        "init_once_contention_probe",
+        "tcp_owner_probe_run_phase",
+        "tcp_owner_probe_put_seen",
+        "tcp_connection_contention_probe",
+        "tcp_pin_cost_report",
+        "irq_mask_cost_pmr",
+        "irq_mask_cost_daif",
+        "irq_mask_cost_report",
+        "tcp_pin_cost_evidence",
+        "tcp_pool_cost_work",
+        "tcp_pool_cost_parallel",
+        "tcp_pool_cost_evidence",
+        "pin_sharing_evidence",
+        "tcp_claim_probe_meet",
+        "tcp_claim_probe_run",
+        "tcp_claim_probe_abandon",
+        "tcp_fixture_claim_contention_probe",
+        "ext2_mutation_probe_mutator",
+        "ext2_mutation_probe_reader",
+        "ext2_slot_pool_probe",
+        "ext2_mutation_probe_finish",
+        "ext2_mutation_probe_core0_reader",
+        "ext2_mutation_probe_overlap",
+        "ext2_mutation_probe_run_phase",
+        "ext2_mutation_probe_put_peers",
+        "ext2_mutation_probe_report",
+        "ext2_mutation_contention_probe",
+        "signal_probe_peer_mask",
+        "signal_probe_hold_locked",
+        "signal_probe_wait_done",
+        "signal_probe_round",
+        "signal_contention_run_phase",
+        "signal_contention_probe",
+        "log_storm_write_share",
+        "log_storm_wait_word",
+        "log_storm_wait_peers",
+        "log_storm_probe",
+        "peer_console_probe",
+        "contention_probes",
+        "contention_probes_run",
+        "kernel_secondary_boot_await",
+        "kernel_secondary_boot_attempt",
+        "kernel_secondary_boot_cpu_on",
+        "kernel_secondary_boot_report",
+        "qemu_psci_cpu_on",
+        "kernel_platform_net_link_up"
+      ],
+      "layouts": {
+        "baseline": [
+          "AtomicWord\tvalue\t0",
+          "AtomicWord\t.size\t8",
+          "AtomicWord\t.members\t1"
+        ],
+        "candidate": [
+          "AtomicWord\tvalue\t0",
+          "AtomicWord\t.size\t8",
+          "AtomicWord\t.members\t1"
+        ]
+      },
+      "display_symbols": {
+        "baseline": {
+          "init_boot_fixture_status": {
+            "address": 1075459712,
+            "size": 8,
+            "type": 1,
+            "section": 6
+          }
+        },
+        "candidate": {
+          "init_boot_fixture_display_shell_code": {
+            "address": 1075459712,
+            "size": 8,
+            "type": 1,
+            "section": 6
+          }
+        }
+      },
+      "symbols": {
+        "kernel_init_boot_fixture_reaped": {
+          "baseline": {
+            "address": 1074315728,
+            "size": 76,
+            "type": 2,
+            "section": 1
+          },
+          "candidate": {
+            "address": 1074315728,
+            "size": 80,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "kernel_init_script_success_evidence": {
+          "baseline": {
+            "address": 1074321184,
+            "size": 360,
+            "type": 2,
+            "section": 1
+          },
+          "candidate": {
+            "address": 1074321184,
+            "size": 340,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "usable_ram_start": {
+          "baseline": {
+            "address": 1075904512,
+            "size": 0,
+            "type": 0,
+            "section": 7
+          },
+          "candidate": {
+            "address": 1075904512,
+            "size": 0,
+            "type": 0,
+            "section": 7
+          }
+        }
+      }
+    },
+    "rpi5": {
+      "hashes": {
+        "baseline/rpi5/kernel.elf": "6eaa4bade940f34c154377f7fdd86eb5c721dfb7d77e0b55a08a6db6f1e4a10c",
+        "candidate/rpi5/kernel.elf": "d7b6a5407ddd0351f69406d445ea3e79a549dcf3e4ce86b3a8fa6c1c85d7b967",
+        "baseline/rpi5/main.o": "7d08c67c109fbef434707a13d8d3ea48c3e94164cd180fce81508bd2d668fa1b",
+        "candidate/rpi5/main.o": "b5b927be62d4f528fe4dbe47f8503934ea29f2d7634b9442263566829f2b3a1e"
+      },
+      "allocated_changes": {
+        ".text": {
+          "baseline": {
+            "type": 1,
+            "flags": 6,
+            "address": 2097152,
+            "offset": 65536,
+            "size": 688676,
+            "align": 2048
+          },
+          "candidate": {
+            "type": 1,
+            "flags": 6,
+            "address": 2097152,
+            "offset": 65536,
+            "size": 688676,
+            "align": 2048
+          },
+          "bytes_changed": true
+        },
+        ".eh_frame": {
+          "baseline": {
+            "type": 1,
+            "flags": 2,
+            "address": 6174520,
+            "offset": 4142904,
+            "size": 133608,
+            "align": 8
+          },
+          "candidate": {
+            "type": 1,
+            "flags": 2,
+            "address": 6174520,
+            "offset": 4142904,
+            "size": 133608,
+            "align": 8
+          },
+          "bytes_changed": true
+        },
+        ".got": {
+          "baseline": {
+            "type": 1,
+            "flags": 3,
+            "address": 6308128,
+            "offset": 4276512,
+            "size": 5264,
+            "align": 8
+          },
+          "candidate": {
+            "type": 1,
+            "flags": 3,
+            "address": 6308128,
+            "offset": 4276512,
+            "size": 5264,
+            "align": 8
+          },
+          "bytes_changed": true
+        }
+      },
+      "changed_object_sections": [
+        {
+          "name": ".bss.init_boot_fixture_display_shell_code",
+          "baseline_size": null,
+          "candidate_size": 8
+        },
+        {
+          "name": ".bss.init_boot_fixture_status",
+          "baseline_size": 8,
+          "candidate_size": null
+        },
+        {
+          "name": ".eh_frame",
+          "baseline_size": 137576,
+          "candidate_size": 137576
+        },
+        {
+          "name": ".rela.text.takibi.kernel_init_boot_fixture_reaped",
+          "baseline_size": 144,
+          "candidate_size": 168
+        },
+        {
+          "name": ".rela.text.takibi.kernel_init_script_success_evidence",
+          "baseline_size": 1272,
+          "candidate_size": 1248
+        },
+        {
+          "name": ".strtab",
+          "baseline_size": 295379,
+          "candidate_size": 295391
+        },
+        {
+          "name": ".symtab",
+          "baseline_size": 493968,
+          "candidate_size": 493968
+        },
+        {
+          "name": ".text.takibi.kernel_init_boot_fixture_reaped",
+          "baseline_size": 76,
+          "candidate_size": 84
+        },
+        {
+          "name": ".text.takibi.kernel_init_script_success_evidence",
+          "baseline_size": 360,
+          "candidate_size": 340
+        }
+      ],
+      "object_symbol_changes": {
+        "init_boot_fixture_status": [
+          {
+            "address": 0,
+            "size": 8,
+            "type": 1,
+            "section": 9056
+          },
+          null
+        ],
+        "kernel_init_script_success_evidence": [
+          {
+            "address": 0,
+            "size": 360,
+            "type": 2,
+            "section": 6703
+          },
+          {
+            "address": 0,
+            "size": 340,
+            "type": 2,
+            "section": 6703
+          }
+        ],
+        "kernel_init_boot_fixture_reaped": [
+          {
+            "address": 0,
+            "size": 76,
+            "type": 2,
+            "section": 6687
+          },
+          {
+            "address": 0,
+            "size": 84,
+            "type": 2,
+            "section": 6687
+          }
+        ],
+        "init_boot_fixture_display_shell_code": [
+          null,
+          {
+            "address": 0,
+            "size": 8,
+            "type": 1,
+            "section": 9056
+          }
+        ]
+      },
+      "linked_changed_functions": [
+        "main",
+        "kernel_init_boot_fixture_reaped",
+        "disk_read_sectors",
+        "disk_write_sectors",
+        "kernel_init_script_success_evidence",
+        "httpd_image_mapping_check",
+        "kernel_record_existence_probe",
+        "kernel_record_absent_publish_probe",
+        "kernel_boot_report_security_list",
+        "kernel_test_common_probes",
+        "kernel_test_driver_run",
+        "kernel_uart_rx_isr",
+        "kernel_init_process_start",
+        "msc_dma_lock",
+        "msc_dma_unlock",
+        "msc_csw_take",
+        "msc_csw_fail_cpu",
+        "msc_csw_fail_device",
+        "xhci_control_take",
+        "xhci_control_fail_cpu",
+        "xhci_control_fail_device",
+        "msc_data_take",
+        "msc_data_fail_cpu",
+        "msc_data_fail_device",
+        "xhci_receive_configuration",
+        "msc_data_receive_once",
+        "msc_csw_receive_once",
+        "msc_cbw_take",
+        "msc_cbw_fail_cpu",
+        "msc_cbw_fail_device",
+        "msc_data_out_take",
+        "msc_data_out_fail_cpu",
+        "msc_data_out_fail_device",
+        "msc_cbw_send_once",
+        "msc_data_send_once",
+        "xhci_ring_event",
+        "xhci_ring_publish",
+        "xhci_ring_lock",
+        "xhci_ring_unlock",
+        "xhci_ring_lost",
+        "xhci_ring_base_dma",
+        "xhci_ring_format",
+        "xhci_ring_claim",
+        "xhci_ring_cursor",
+        "xhci_ring_store_cursor",
+        "xhci_ring_set_cursor",
+        "xhci_ring_restart",
+        "xhci_ring_dma",
+        "xhci_ring_close",
+        "xhci_ring_submit",
+        "xhci_erst_park",
+        "xhci_scratch_array_park",
+        "xhci_scratch_buf_park",
+        "xhci_input_park",
+        "xhci_erst_restart",
+        "xhci_scratch_array_restart",
+        "xhci_scratch_buf_restart",
+        "xhci_input_recover",
+        "xhci_input_take",
+        "xhci_events_park",
+        "xhci_output_park",
+        "xhci_events_start",
+        "xhci_event_next",
+        "xhci_output_start",
+        "xhci_output_word",
+        "msc_cbw_header",
+        "msc_cbw_set",
+        "xhci_halt_and_reset",
+        "msc_csw_receive_attempt",
+        "msc_run_command",
+        "xhci_setup_rings_and_start",
+        "xhci_configure",
+        "usb_disk_initialize_stages"
+      ],
+      "layouts": {
+        "baseline": [
+          "AtomicWord\tvalue\t0",
+          "AtomicWord\t.size\t8",
+          "AtomicWord\t.members\t1"
+        ],
+        "candidate": [
+          "AtomicWord\tvalue\t0",
+          "AtomicWord\t.size\t8",
+          "AtomicWord\t.members\t1"
+        ]
+      },
+      "display_symbols": {
+        "baseline": {
+          "init_boot_fixture_status": {
+            "address": 7685696,
+            "size": 8,
+            "type": 1,
+            "section": 6
+          }
+        },
+        "candidate": {
+          "init_boot_fixture_display_shell_code": {
+            "address": 7685696,
+            "size": 8,
+            "type": 1,
+            "section": 6
+          }
+        }
+      },
+      "symbols": {
+        "kernel_init_boot_fixture_reaped": {
+          "baseline": {
+            "address": 2682432,
+            "size": 76,
+            "type": 2,
+            "section": 1
+          },
+          "candidate": {
+            "address": 2682432,
+            "size": 84,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "kernel_init_script_success_evidence": {
+          "baseline": {
+            "address": 2687856,
+            "size": 360,
+            "type": 2,
+            "section": 1
+          },
+          "candidate": {
+            "address": 2687856,
+            "size": 340,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "usable_ram_start": {
+          "baseline": {
+            "address": 8257536,
+            "size": 0,
+            "type": 0,
+            "section": 7
+          },
+          "candidate": {
+            "address": 8257536,
+            "size": 0,
+            "type": 0,
+            "section": 7
+          }
+        }
+      }
+    }
+  }
+}

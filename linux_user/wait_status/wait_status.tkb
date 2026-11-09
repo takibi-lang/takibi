@@ -139,6 +139,7 @@ fn compare(label: *u8, host: u32, kernel: u32) {
 
 fn app_main() {
     reset_inherited_signal_state();
+    compare_shell_projection();
     // Signals whose default is to terminate without a core dump: the
     // kernel writes no cores, and a host core (SIGSEGV here) would set bit
     // 0x80 according to the host's core_pattern rather than to Linux's
@@ -166,7 +167,7 @@ fn app_main() {
     compare("SIGCHLD exit 143", host_sigchld(0, 143), kernel_sigchld(process_end_exited(143)));
     compare("SIGCHLD exit 300", host_sigchld(0, 300), kernel_sigchld(process_end_exited(300)));
     // GitHub issue #886/#896: an end kept in storage (TakenSignal's field,
-    // the boot fixture's global) comes back as the same end.
+    // an ordinary variant global) comes back as the same end.
     compare("stored SIGCHLD SIGKILL", host_sigchld(9, 0),
             kernel_sigchld(stored(process_end_signaled(9))));
     compare("stored SIGCHLD exit 0", host_sigchld(0, 0),
@@ -186,10 +187,46 @@ fn kernel_sigchld(end: ProcessEnd) -> u32 {
     return (syscall_sigchld_code(end) << 8) | syscall_sigchld_status(end);
 }
 
-// A zero-initialized global, as the boot fixture keeps one.
+// A typed end kept in storage, independently of its display projection.
 let mut kept_end: ProcessEnd;
 
 fn stored(end: ProcessEnd) -> ProcessEnd {
     kept_end = end;
     return kept_end;
+}
+
+// Exhaust the actual ProcessEnd payload domains. Compare the pure display
+// projection before and after typed storage, while keeping wait4/SIGCHLD
+// case semantics independently observable. No signal is delivered here.
+fn compare_shell_projection() {
+    let mut passed: usize = 0;
+    for payload: usize in 0..<256 {
+        let exited: ProcessEnd = ProcessEnd::Exited(payload as u8);
+        let signaled: ProcessEnd = ProcessEnd::Signaled(payload as u8);
+        let exit_ok: bool = syscall_status_shell_code(exited) == payload &&
+            syscall_status_shell_code(stored(exited)) == payload &&
+            syscall_wait_status_word(exited) == ((payload as u32) << 8) &&
+            syscall_sigchld_code(exited) == 1 &&
+            syscall_sigchld_status(exited) == payload as u32;
+        if (exit_ok) {
+            let count: usize = passed;
+            if (count < 512) { passed = count + 1; }
+        }
+        let signal_ok: bool = syscall_status_shell_code(signaled) == 128 + payload &&
+            syscall_status_shell_code(stored(signaled)) == 128 + payload &&
+            syscall_wait_status_word(signaled) == payload as u32 &&
+            syscall_sigchld_code(signaled) == 2 &&
+            syscall_sigchld_status(signaled) == payload as u32;
+        if (signal_ok) {
+            let count: usize = passed;
+            if (count < 512) { passed = count + 1; }
+        }
+    }
+    uart_puts("shell projection: ");
+    uart_print(passed);
+    if (passed == 512) {
+        uart_puts(" typed ends preserve display and wait4/SIGCHLD cases ok\n");
+    } else {
+        uart_puts(" MISMATCH\n");
+    }
 }
