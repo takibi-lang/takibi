@@ -10,6 +10,6 @@
     "TRUSTED_BASE.md",
     "kernel/MEMORY_MAP.md"
   ],
-  "assessment": "Fresh combined outputs: QEMU text/data/BSS818056/4632/1318912 and RPi54202692/5608/1937408, identical to green88. Both targets have equal code/rodata/data section hashes, BSS sizes, storage symbols and reservation boundaries. Fresh QEMU compiler585279248 words, below589000000; no additive allocation estimate or ceiling edit. Separate native fixture text total+988B, payload+24B and RELRO padding+3112B; actual callsite direct, retained generic body49B indirect. No completed scheduler/hardware cost claim.",
+  "assessment": "Fresh combined outputs: QEMU text/data/BSS818056/4632/1318912 and RPi54202692/5608/1937408, identical to green88. Both targets have equal code/rodata/data section hashes, BSS sizes, storage symbols and reservation boundaries. Fresh QEMU compiler585279248 words vs actual archived88 baseline579396188 (+5883060, 1.0154 percent), below589000000; no cross-patch estimate or ceiling edit. Separate native fixture text total+988B, payload+24B and RELRO padding+3112B; actual callsite direct, retained generic body49B indirect. No completed scheduler/hardware cost claim.",
   "next_trigger": "Scheduler Mutex integration and actual scoped acquisition entrances, or changed proof/callback representation or allocation workload."
 }

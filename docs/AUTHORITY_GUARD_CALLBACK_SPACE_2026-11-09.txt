@@ -95,10 +95,14 @@ from the earlier fd/e15 result. The native fixture cost above is separate.
 
 Fresh normal QEMU main.o allocated585279248 OCaml words; the existing
 589000000-word check passes. This is an independent measurement on the
-rebased combination, not old584542607 plus an estimated delta. The archive
-has no baseline allocwords file, so no same-source before/after allocation
-claim is made for88. Current remaining margin:3720752 words. Do not weaken
-the ceiling; later integration must measure its actual compilation again.
+rebased combination, not old584542607 plus an estimated delta. The immutable
+allcheck88 log records579396188 baseline words: actual delta5883060,
++1.0153778 percent. Current remaining margin:3720752 words. Do not weaken the
+ceiling; later integration must measure its actual compilation again.
+Baseline evidence: .git/takibi-land/allcheck-88c1912cceb8305af9158b8fd4f9e60b392946a3.log
+SHA256 8abacfbb21afe49bed135b54f5409cc7826a104dd9ba4e3163688f5a281b0c2a.
+Exact line: PASS compile-alloc-budget: qemu main.o compile allocated
+579,396,188 words, 98% of its budget.
 
 Compiler SHA256 remains
 3f3718948cb2f308a5b6f2846b6d408f4fd0dc062e1a44716e64b3a6cd6cc706.
@@ -107,3 +111,9 @@ the current production code/data bytes match the separately validated88
 baseline. Actual scheduler-backed Mutex behavior is not exercised here.
 Next measurement: scheduler integration, real scoped acquisition entrances,
 or a changed proof/callback representation or allocation workload.
+
+The subsequent origin/main ca8af441 update changes ROADMAP.md only. The
+foundation was rebased onto that published docs-only commit without changing
+production fingerprint b55ce86cb1b421d05b854dca770b4e7b05753aafee1ffefc53c03d9c3aa2f1ae.
+Final checks actually ran on a7c6e452; later report/checkpoint commits are
+metadata only. No rebuild or runtime repeat is attributed to those commits.
