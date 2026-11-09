@@ -44,7 +44,7 @@ def main():
     stale = {**WINDOWS["633"], "check": list(WINDOWS["633"]["check"])}
     file, before, after = stale["check"][1]
     stale["check"][1] = (file, before.replace(
-        "execution_state[execution_cpu_index()]", "execution_here()"), after)
+        "execution_state[execution_cpu]", "execution_state[execution_cpu_index()]"), after)
     if not validate(sources, {"633": stale}):
         errors.append("control: the obsolete per-CPU accessor was accepted")
     for mutation, replacement in (("absent", ""), ("duplicate", before + before)):

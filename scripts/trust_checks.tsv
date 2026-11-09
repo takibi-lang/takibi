@@ -6,7 +6,7 @@
 buildcheck_allowed_callers.py	which functions may call a mint	#1008 module visibility: private constructors
 buildcheck_kernel_asm_invariants.py	properties of handwritten assembly no type sees	permanent (assembly is outside the checker)
 check_assume_init_sites.py	the empty list of assume_init sites	#945 local array tracking, or stays as a zero-ratchet
-buildcheck_cpu_authority_mints.py	the one boot-probe mint outside preempt_off	#638 removes the exception
+buildcheck_cpu_authority_mints.py	approved unscoped exception constructor plus exact compiled callers	#641 ties exception authority to entry exclusion; #1159 audits the mint uses
 check_el0_raw_deref_audit.py	every EL0 Takibi object stays on the raw dereference gate	permanent (ledger infrastructure)
 check_frame_api.py	a mint file's public API returns capabilities	#1017 frame modules
 check_irq_eoi.py	GICC_EOIR is written only in its named paths	#1017 frame modules: the register leaves public reach
@@ -20,3 +20,4 @@ lz4_image.py	the embedded image's bytes, host encoder and decoder	permanent (hos
 measure_trusted_base.py	the raw dereference ratchet and the inventory	permanent (ledger infrastructure)
 run_litmus_checks.py	the herd7 tie of orderings to emitted instructions	permanent (ledger infrastructure)
 buildcheck_dma_mint_files.py	which files may declare a dma_fixed record and so call dma_finish_owned_*	#720 device protocols absorb the dma_fixed records
+check_execution_state_publication.py	closed placement setters and guarded PID/live publication	#955 or a typed transition binding can express coupled publication; #638 retains the actual trace regression

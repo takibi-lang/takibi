@@ -1,5 +1,5 @@
 const KERNEL_STACK_SHIFT: usize = 14;
-fn cpu_id() -> usize { return 0; }
+fn cpu_id() -> {0..<KERNEL_MAX_CORES as usize} { return 0; }
 fn virtio_blk_capacity_sectors(guard: borrow BlockDeviceGuard[&block_device_lock]) -> usize { return 0; }
 fn virtio_blk_read_block(guard: borrow BlockDeviceGuard[&block_device_lock], sector: u32, buf: borrow []u8) -> bool { return false; }
 fn virtio_blk_write_block(guard: borrow BlockDeviceGuard[&block_device_lock], sector: u32, buf: borrow []u8) -> bool { return false; }

@@ -46,8 +46,8 @@ CALL = re.compile(r"\bcpu_id\s*\(\s*\)")
 LISTED = {
     "kernel/arch/arm64/kernel/exception_evidence.tkb": (9, FLIP, "not yet reviewed for migration"),
     "kernel/fs/ext2/mutation_lock.tkb": (2, FLIP, "not yet reviewed for migration"),
-    "kernel/kernel/cpu_authority.tkb": (2, MINT, "the CpuHere mint itself and its availability test (#638 stage 4)"),
-    "kernel/kernel/process.tkb": (30, FLIP, "not yet reviewed for migration"),
+    "kernel/kernel/cpu_authority.tkb": (3, MINT, "normal region entry and availability, plus the approved exception-only unscoped constructor (#1159, #638)"),
+    "kernel/kernel/process.tkb": (29, FLIP, "remaining raw callers after typed ExecutionState selection removed execution_cpu_index (#638)"),
     "kernel/kernel/profile_session.tkb": (4, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/protocol_trace.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/stall_probe.tkb": (3, FLIP, "not yet reviewed for migration"),

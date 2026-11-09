@@ -603,8 +603,8 @@ private fn kernel_log_cut_line(core: {0..<KERNEL_MAX_CORES as usize}, wire: bool
 }
 
 // The stack's owner for a line on this core.
-private fn kernel_log_owner_here(core: {0..<KERNEL_MAX_CORES as usize}) -> usize {
-    return kernel_process_cpu_stack_owner(core);
+private fn kernel_log_owner_here(cpu: CpuHere) -> usize {
+    return kernel_process_cpu_stack_owner(cpu);
 }
 
 // GitHub issue #454: what the console costs its callers, in the units the
@@ -1513,20 +1513,22 @@ fn uart_tx_flush() !{unsafe} {
 fn kernel_log_capture_uart_byte(value: u8) -> bool !{unsafe} {
     let mut direct: bool = true;
     preempt_off (cpu) {
-        direct = kernel_log_capture_here(value, true);
+        direct = kernel_log_capture_here(cpu, value, true);
     } else {
-        direct = kernel_log_capture_here(value, true);
+        // No admitted CPU authority: preserve the byte on the direct UART
+        // path rather than attributing it to a per-CPU owner we cannot name.
+        direct = true;
     }
     return direct;
 }
 
-private fn kernel_log_capture_here(value: u8, wire: bool) -> bool !{unsafe} {
-    let core: {0..<KERNEL_MAX_CORES as usize} = kernel_log_core_here();
+private fn kernel_log_capture_here(cpu: CpuHere, value: u8, wire: bool) -> bool !{unsafe} {
+    let core: {0..<KERNEL_MAX_CORES as usize} = cpu_here_index(cpu);
     if (kernel_log_core_state[core].emergency ||
         kernel_log_core_state[core].capturing == false) {
         return true;
     }
-    return kernel_log_stage_byte(core, kernel_log_owner_here(core), value, wire);
+    return kernel_log_stage_byte(core, kernel_log_owner_here(cpu), value, wire);
 }
 
 // Read-only per-core mode query, through the one checked selection of the
@@ -2205,7 +2207,9 @@ fn kernel_log_raw_text_byte(seq: usize, index: usize) -> u8 !{unsafe} {
 // One byte of a probe line: staged and retained like any other, but never
 // written to the UART, so the destructive probe emits no console lines.
 private fn kernel_log_probe_byte(value: u8) -> bool !{unsafe} {
-    return kernel_log_capture_here(value, false);
+    let mut direct: bool = true;
+    preempt_off (cpu) { direct = kernel_log_capture_here(cpu, value, false); }
+    return direct;
 }
 
 // One retained record "<byte><byte>\n", written the way any CPU writes one.

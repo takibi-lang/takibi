@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """Task context reaches current through one accessor (#1321).
 
-execution_state selects by cpu_id(), so at the preemption flip a task moved
-between reading current_live and current_handle would read a peer's current.
+execution_state is per_cpu; the earlier raw cpu_id selection let a task move
+between reading current_live and current_handle and read a peer's current.
 kernel_process_current_read takes the pair once inside a preempt_off region
 and hands back a snapshot, which stays valid because a running task's own
 current does not change when it moves.
 
 This check keeps the direct reads closed: every function that indexes
-`execution_state[execution_cpu_index()].current_live` or `.current_handle` is
-listed with why it does not need the accessor. A new one is refused, and so
-is an entry whose function no longer does it. The indexed-by-`core` readers
-(DDB, the protocol observation) do not select by this CPU and are not counted.
+`execution_state[cpu].current_live` or `.current_handle` is listed with why
+it does not need the accessor. A new one is refused, and so is an entry whose
+function no longer does it. Every bare authority-indexed reader is counted.
+Cross-CPU DDB reads the scalar stop snapshot rather than borrowing an
+ExecutionState element.
 
 It does not prove a listed function's authority; kernel/kernel/process.tkb's
 comments and the reasons below state it.
@@ -33,35 +34,30 @@ EVIDENCE = "a report taken under the run lock (IRQs masked) on the way to a look
 FIXTURE = "boot fixture rewriting current with process dispatch closed, pinned by the boot sequence"
 
 LISTED = {
-    "kernel_process_current_read": ACCESSOR,
     "execution_current_publish": WRITER,
     "execution_current_set_handle": WRITER,
     "execution_current_set_live": WRITER,
-    "kernel_process_stopped_entry_generation": STOPPED,
-    "kernel_process_stopped_current_slot": STOPPED,
-    "kernel_process_crash_frame_usable": STOPPED,
-    "kernel_process_current_stopped_crash_detail": STOPPED,
-    "kernel_process_crash_state": STOPPED,
-    "kernel_process_crash_wait_reason": STOPPED,
-    "scheduled_process_record_locked": EVIDENCE,
-    "kernel_process_execution_reset": FIXTURE,
-    "kernel_process_fanout_probe": FIXTURE,
-    "kernel_process_scheduler_probe": FIXTURE,
-    "kernel_process_exit_continuation_probe": FIXTURE,
+    "kernel_process_block_reserved": WRITER,
+    "kernel_process_block_to_idle": WRITER,
     "kernel_process_boot_handoff": WRITER,
     "kernel_process_core0_leave_excluded": WRITER,
-    "kernel_process_migrate_current": WRITER,
-    "kernel_process_secondary_start_reserved": WRITER,
-    "kernel_process_schedule_reserved": WRITER,
-    "kernel_process_tick_leave_excluded": WRITER,
-    "kernel_process_block_to_idle": WRITER,
-    "kernel_process_block_reserved": WRITER,
-    "kernel_process_clone_rollback": WRITER,
+    "kernel_process_crash_frame_usable": STOPPED,
+    "kernel_process_current_read": ACCESSOR,
+    "kernel_process_current_stopped_crash_detail": STOPPED,
+    "kernel_process_execution_stop_publish": STOPPED,
     "kernel_process_exit_reserved": WRITER,
+    "kernel_process_migrate_current": WRITER,
+    "kernel_process_schedule_reserved": WRITER,
+    "kernel_process_scheduler_probe": FIXTURE,
+    "kernel_process_secondary_start_reserved": WRITER,
+    "kernel_process_stopped_current_slot": STOPPED,
+    "kernel_process_stopped_entry_generation": STOPPED,
+    "kernel_process_tick_leave_excluded": WRITER,
+    "scheduled_process_record_locked": EVIDENCE,
 }
 
 READ = re.compile(
-    r"execution_state\s*\[\s*(?:execution_cpu_index\s*\(\s*\)|index)\s*\]\s*\.\s*current_(?:live|handle)")
+    r"execution_state\s*\[\s*(?:execution_cpu_index\s*\(\s*\)|\w+)\s*\]\s*\.\s*current_(?:live|handle)")
 FN = function_header()
 
 

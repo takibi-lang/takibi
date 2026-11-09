@@ -471,21 +471,31 @@ rules globally.
   reviewed.
 - Per-CPU storage (`struct per_cpu`, indexed only by the `cpu_authority`
   value) is checked by the compiler. Trusted: `kernel/kernel/cpu_authority.tkb`
-  reports the CPU it runs on (`cpu_id()`), and a `preempt_off` block, which
-  the compiler keeps free of `may_block` and does not let the authority
-  leave (#638), stays on that CPU because nothing switches a CPU at EL1
-  while the kernel is not preemptible (`KERNEL_PREEMPTIBLE == 0`, asserted
-  there). The block raises and lowers a per-CPU preempt count on every exit
-  (the compiler places the exits); the file finds the count through
-  TPIDR_EL1, which is trusted to hold the core index times the per-core
-  stack group stride (each core's entry path sets it before any Takibi code
-  runs; both linker scripts assert the stride; it is read by the one-move
-  assembly helper `kernel_cpu_offset`, whose one caller
-  `scripts/buildcheck_allowed_callers.py` fixes; each region entry
-  checks it against `cpu_id()` at run time). Nothing mints one outside a
-  block: `scripts/buildcheck_cpu_authority_mints.py` refuses a public function
-  of that file returning the authority (the boot probe's any-CPU mint was
-  retired with execve's per-CPU argv slot, #1080).
+  reports the CPU it runs on (`cpu_id()`). Normal `preempt_off` regions hold
+  the stack-local preempt count, exclude `may_block`, and keep their authority
+  inside the block. The IRQ-return consult reads the interrupted stack's
+  count before admitting an EL1 switch. TPIDR_EL1 is a layout assertion at
+  normal entry, not the storage location of that count.
+  The approved `exception_cpu_here` constructor is different: it changes no
+  count, checks no TPIDR, and creates unscoped authority. Its physical
+  non-migration premise is the reviewed masked exception, complete-stop or
+  fail-stop context, not a consequence of a successful compile. The private
+  index must be constructed in the authority's definition module; all uses
+  are confined to exact exception_evidence callers. The compiled caller and
+  function-value checks in `scripts/buildcheck_allowed_callers.py` and
+  `scripts/buildcheck_cpu_authority_mints.py` enforce that boundary; they do
+  not grant general ordinary-code mint permission.
+- ExecutionState's stopped diagnostic copy contains scalar slot/generation
+  words and live bits, not handles or mutable loans. Each peer captures its
+  own typed store before the holding pen acknowledges the stop; the debugger
+  captures its own CPU with the world stopped. Complete-stop readers use
+  `stopped_read` and revalidate the pool generation before the existing
+  stopped record inspection. Retiring the capture and restricting its two
+  entry/exit callers are part of the reviewed stop protocol. The always-on
+  run-guarded PID/live trace publication is separate; its coupling to the
+  four placement setters is checked by
+  `scripts/check_execution_state_publication.py`, a source-shape boundary,
+  not a proof of arbitrary control flow or whole-call-graph stack use.
 - DDB's lock-free GEM RX look (`kernel_net_rx_frame_pending` in
   `kernel/drivers/net/rp1_gem.tkb`) answers no only after cleaning and
   invalidating the descriptor line to the point of coherency (#1095).

@@ -1139,9 +1139,11 @@ fn kernel_ddb_stopped_root_publish(frame_sp: usize, pid: usize,
 // compiler holds everything reachable from here to taking none.
 fn kernel_world_stop_serve(frame: borrow FrameRef[process, level]) !{nmi, unsafe} {
     kernel_ddb_stopped_root_publish(
-        frame_ref_address(frame), kernel_process_frame_pid_or_zero(frame),
+        frame_ref_address(frame), kernel_process_frame_pid_or_zero(exception_cpu_here(), frame),
         kernel_process_claimed_pid_or_zero());
+    kernel_process_execution_stop_publish(exception_cpu_here());
     world_stop_interrupt_hold();
+    kernel_process_execution_stop_retire(exception_cpu_here());
     kernel_ddb_stopped_root_retire();
     // GitHub issue #497: a profile session DDB started or stopped while
     // this core was held arms or disarms this core's own counter.
@@ -1288,9 +1290,9 @@ private fn ddb_current_unwind_root(stopped: borrow MachineStopped[&kernel_world_
     let mut root: DdbUnwindRoot = {
         1,
         guarded_ref(stopped, ddb_state.snapshot).cpu,
-        kernel_process_leveled_frame_pid_or_zero(
+        kernel_process_leveled_frame_pid_or_zero(exception_cpu_here(),
             frame_ref_from_entry(guarded_ref(stopped, ddb_state.snapshot).frame_sp,
-                                 kernel_process_stopped_entry_generation())),
+                                 kernel_process_stopped_entry_generation(exception_cpu_here()))),
         frame.elr_el1,
         frame.x29,
         guarded_ref(stopped, ddb_state.snapshot).frame_sp + EXC_CONTEXT_SIZE,
@@ -1844,8 +1846,8 @@ private fn ddb_render_current(stopped: borrow MachineStopped[&kernel_world_stop]
             ddb_puts(kernel_activity_name(kernel_activity_of(stopped, core)));
             // GitHub issue #609: and whose stack it stands on, which is not
             // always the process it runs.
-            ddb_puts(" current="); ddb_put_udec(kernel_process_cpu_current_pid(core));
-            ddb_puts(" stack="); ddb_put_udec(kernel_process_cpu_stack_pid(core));
+            ddb_puts(" current="); ddb_put_udec(kernel_process_cpu_current_pid(stopped, core));
+            ddb_puts(" stack="); ddb_put_udec(kernel_process_cpu_stack_pid(stopped, core));
             ddb_puts("\n");
         }
     }
@@ -2777,6 +2779,7 @@ private fn kernel_ddb_enter_stopped(
         stopped_world: borrow MachineStopped[&kernel_world_stop],
         frame_sp: usize, entry_kind: usize, entry_source: usize)
         !{interrupt, unsafe} {
+    kernel_process_execution_stop_publish(exception_cpu_here());
     atomic_word_store(&ddb_snapshot_published_sequence, 0);
     guarded_ref(stopped_world, ddb_state.snapshot).sequence = guarded_ref(stopped_world, ddb_state.snapshot).sequence + 1;
     // The logical core, not MPIDR: RPi5 numbers cores in Aff1 and keeps Aff0
@@ -2803,18 +2806,18 @@ private fn kernel_ddb_enter_stopped(
         guarded_ref(stopped_world, ddb_state.snapshot).esr_el1 = mrs_esr_el1();
         guarded_ref(stopped_world, ddb_state.snapshot).far_el1 = mrs_far_el1();
     }
-    guarded_ref(stopped_world, ddb_state.snapshot).scheduler_enabled = kernel_process_ddb_scheduler_enabled();
-    guarded_ref(stopped_world, ddb_state.snapshot).reschedule_pending = kernel_process_ddb_reschedule_pending();
+    guarded_ref(stopped_world, ddb_state.snapshot).scheduler_enabled = kernel_process_ddb_scheduler_enabled(stopped_world, cpu_here_index(exception_cpu_here()));
+    guarded_ref(stopped_world, ddb_state.snapshot).reschedule_pending = kernel_process_ddb_reschedule_pending(stopped_world, cpu_here_index(exception_cpu_here()));
     guarded_ref(stopped_world, ddb_state.snapshot).frame_sp = frame_sp;
     if (kernel_process_stopped_metadata_busy(stopped_world)) {
         ddb_puts("ddb: process metadata unavailable reason=pool-busy\n");
     }
-    let mut current_record = kernel_process_current_stopped_record(stopped_world);
+    let mut current_record = kernel_process_current_stopped_record(stopped_world, exception_cpu_here());
     guarded_ref(stopped_world, ddb_state.snapshot).process_pid = current_record.pid;
     guarded_ref(stopped_world, ddb_state.snapshot).parent_pid = current_record.ppid;
     guarded_ref(stopped_world, ddb_state.snapshot).process_state = current_record.state;
     guarded_ref(stopped_world, ddb_state.snapshot).wait_reason = current_record.wait_reason;
-    guarded_ref(stopped_world, ddb_state.snapshot).root_slot = process_slot_address(kernel_process_stopped_current_slot());
+    guarded_ref(stopped_world, ddb_state.snapshot).root_slot = process_slot_address(kernel_process_stopped_current_slot(exception_cpu_here()));
     let mut vm: AddressSpaceDiagnosticSnapshot =
         ddb_vm_snapshot_stopped(stopped_world, scheduled_process_address_space_root_stopped(stopped_world, root_slot_of_key(guarded_ref(stopped_world, ddb_state.snapshot).root_slot)), guarded_ref(stopped_world, ddb_state.snapshot).process_pid);
     guarded_ref(stopped_world, ddb_state.snapshot).root_live = 0;
@@ -3122,6 +3125,7 @@ fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
         MachineStopResult::Complete(stopped_world) => {
             kernel_ddb_enter_stopped(
                 stopped_world, frame_sp, entry_kind, entry_source);
+            kernel_process_execution_stop_retire(exception_cpu_here());
             machine_stop_release(stopped_world, &kernel_world_stop);
         }
     }
@@ -3151,7 +3155,7 @@ fn kernel_ddb_sync_dispatch(frame_sp: usize) -> usize !{interrupt, unsafe} {
         return frame_sp;
     }
     kernel_current_sync_fail_stop_leveled(
-        frame_ref_from_entry(frame_sp, kernel_process_stopped_entry_generation()));
+        frame_ref_from_entry(frame_sp, kernel_process_stopped_entry_generation(exception_cpu_here())));
 }
 
 
@@ -3497,9 +3501,9 @@ private fn crash_world_stop_report(origin: usize, frame_sp: usize)
             ddb_puts("oops: world-stop complete mask="); ddb_put_hex(mask);
             ddb_puts("\n"); crash_report_release();
             if (origin == 1 && frame_sp != 0 &&
-                kernel_process_crash_frame_usable(stopped, frame_sp)) {
+                kernel_process_crash_frame_usable(stopped, exception_cpu_here(), frame_sp)) {
                 crash_snapshot_copy_leveled_frame(
-                    frame_ref_from_entry(frame_sp, kernel_process_stopped_entry_generation()),
+                    frame_ref_from_entry(frame_sp, kernel_process_stopped_entry_generation(exception_cpu_here())),
                     &snapshot.saved_sp_el0);
                 crash_snapshot_here().saved_frame_available = 1;
             }
@@ -3682,8 +3686,8 @@ private fn crash_snapshot_translate_stopped(
 private fn crash_snapshot_shared_stopped(
         stopped: borrow MachineStopped[&kernel_world_stop]) !{unsafe} {
     if (kernel_process_stopped_metadata_busy(stopped)) { return; }
-    let mut current: ProcessDdbRecord = kernel_process_current_stopped_record(stopped);
-    let (wait4, image) = kernel_process_current_stopped_crash_detail(stopped);
+    let mut current: ProcessDdbRecord = kernel_process_current_stopped_record(stopped, exception_cpu_here());
+    let (wait4, image) = kernel_process_current_stopped_crash_detail(stopped, exception_cpu_here());
     crash_snapshot_here().process_pid = current.pid;
     crash_snapshot_here().parent_pid = current.ppid;
     crash_snapshot_here().process_state = current.state;
@@ -3780,12 +3784,12 @@ private fn crash_snapshot_capture(slot: usize, frame_sp: usize, origin: usize, c
     crash_snapshot_here().sp_el0 = crash_snapshot_read_sp_el0();
     crash_snapshot_here().tpidr_el0 = crash_snapshot_read_tpidr_el0();
     crash_snapshot_here().ttbr0_el1 = crash_snapshot_read_ttbr0_el1();
-    crash_snapshot_here().root_slot = process_slot_address(kernel_process_stopped_current_slot());
+    crash_snapshot_here().root_slot = process_slot_address(kernel_process_stopped_current_slot(exception_cpu_here()));
     crash_snapshot_here().activity = kernel_activity_code_here();
     crash_snapshot_here().saved_frame_available = 0;
     if (origin == 0 && frame_sp != 0) {
         crash_snapshot_copy_leveled_frame(
-            frame_ref_from_entry(frame_sp, kernel_process_stopped_entry_generation()),
+            frame_ref_from_entry(frame_sp, kernel_process_stopped_entry_generation(exception_cpu_here())),
             &snapshot.saved_sp_el0);
         crash_snapshot_here().saved_frame_available = 1;
     }

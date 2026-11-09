@@ -4,12 +4,15 @@
 // (`struct per_cpu`) be indexed only by one: `store[cpu]`. It is never
 // stored -- not in a global, a field or a place.
 //
-// GitHub issue #638: a CpuHere is minted only by a preemption-disabled
+// GitHub issue #638: task code mints CpuHere in a preemption-disabled
 // region, `preempt_off (cpu) { ... }`, which the compiler lowers to a call
 // of the private preempt_off_enter below. The compiler keeps the CpuHere
 // inside the block (no function outside this file returns one) and rejects
 // a block that can reach may_block. A span the block cannot express holds the
 // same count through the linear PreemptOff below (#638 option A).
+// The approved exception_cpu_here constructor below is an unscoped trusted
+// exception: its compiled callers are confined to exception_evidence.tkb.
+// Compile-only construction does not prove that those paths cannot migrate.
 //
 // Stage 2 (#638, maintainer 2026-10-25): the region is a preempt count, as
 // Linux's preempt_disable/preempt_enable. preempt_off_enter raises it and
@@ -58,8 +61,9 @@
 //   builtin, DECISIONS 2026-10-25), and preempt_slot_index() is its one
 //   caller (scripts/buildcheck_allowed_callers.py). With
 //   KERNEL_PREEMPT_ASSERTS, every region entry checks it agrees with MPIDR.
-//   No public function mints one (scripts/buildcheck_cpu_authority_mints.py);
-//   the boot probe's any-CPU mint went with the exec argv slot (#1080).
+//   The only public mint is the confined exception constructor below
+//   (scripts/buildcheck_cpu_authority_mints.py); the boot probe's any-CPU
+//   mint went with the exec argv slot (#1080).
 //
 // Current limitations (2026-11-06):
 // - KERNEL_PREEMPTIBLE is 0. The EL1 IRQ return consults the count
@@ -85,6 +89,17 @@ struct cpu_authority CpuHere {
 // This reveals an index only; it neither mints nor extends CPU authority.
 inline fn cpu_here_index(cpu: CpuHere) -> {0..<KERNEL_MAX_CORES as usize} {
     return cpu.id;
+}
+
+// The exception-only path authorized for crash/stop capture. CpuHere's
+// private field is constructed here; all callers are confined to the
+// reviewed exception_evidence.tkb entries (allowed_callers.tsv).
+// Exception entries already exclude migration and must not change a damaged
+// stack's preempt count or consult TPIDR_EL1 while reporting its failure.
+inline fn exception_cpu_here() -> CpuHere {
+    let index: {0..<KERNEL_MAX_CORES as usize} = cpu_id();
+    let mut cpu: CpuHere = { index };
+    return cpu;
 }
 
 // The runtime checks of the preempt count: that every region entry finds

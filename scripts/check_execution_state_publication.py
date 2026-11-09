@@ -13,6 +13,7 @@ import sys
 
 from pass_line import report_pass
 from source_scan import code_skeleton, function_header, per_file
+from check_lock_rank_wrappers import body_start
 
 SOURCE = Path('kernel/kernel/process.tkb')
 SETTERS = {
@@ -29,10 +30,17 @@ HEADER = function_header()
 @per_file
 def functions(text):
     code = code_skeleton(text)
-    headers = tuple(HEADER.finditer(code))
-    return tuple((hit[1], code[hit.start():headers[i + 1].start()
-                               if i + 1 < len(headers) else len(code)])
-                 for i, hit in enumerate(headers))
+    found = []
+    for hit in HEADER.finditer(code):
+        start = body_start(code, hit.end())
+        if start is None:
+            continue
+        depth, end = 1, start + 1
+        while depth and end < len(code):
+            depth += {'{': 1, '}': -1}.get(code[end], 0)
+            end += 1
+        found.append((hit[1], code[hit.start():end]))
+    return tuple(found)
 
 
 def problems(text):
@@ -56,8 +64,8 @@ def problems(text):
         wanted = rf'\.{field}=[^;]+;{publish}\(guard,cpu\);\}}$'
         if at < 0 or re.search(wanted, body[at:]) is None:
             errors.append(f'{name}: write must be followed directly by {publish}')
-        if 'cpu:CpuHere' not in body or 'cpu_here_index(cpu)' not in body:
-            errors.append(f'{name}: derive selection from its CpuHere')
+        if 'cpu:CpuHere' not in body or f'execution_state[cpu].{field}=' not in body:
+            errors.append(f'{name}: index the typed store directly by its CpuHere')
     for kind in ('current', 'stack'):
         name = f'execution_{kind}_publish'
         body = re.sub(r'\s+', '', bodies.get(name, ''))

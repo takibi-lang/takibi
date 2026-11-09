@@ -125,7 +125,8 @@ WINDOWS = {
     "609": {
         "spin": ("kernel/process.tkb",
                  "fn kernel_process_stack_idle_blocked() {\n"
-                 "    let core: usize = cpu_id();\n",
+                 "    preempt_off (execution_cpu) {\n"
+                 "        let core: usize = cpu_id();\n",
                  True),
         "check": ("kernel/process.tkb",
                   "    if (scheduled_process_record_owned(owner).stack_owner_cpu !=\n"
@@ -217,9 +218,9 @@ WINDOWS = {
              "                return syscall_wait4_resume(frame,\n"
              "                    kernel_process_last_reaped_pid(current_authority), current_authority, status_word as usize);\n"),
             ("kernel/process.tkb",
-             "    execution_state[execution_cpu_index()].last_exited_child_pid =\n"
+             "    execution_state[execution_cpu].last_exited_child_pid =\n"
              "        scheduled_process_pid_of_handle(child);\n",
-             "    execution_state[execution_cpu_index()].last_exited_child_pid =\n"
+             "    execution_state[execution_cpu].last_exited_child_pid =\n"
              "        scheduled_process_pid_of_handle(child);\n"
              "    let reverted_guard = process_run_guard_forge_unlocked();\n"
              "    scheduled_process_record_live_locked(reverted_guard, parent).last_reaped_pid =\n"
