@@ -370,8 +370,10 @@ def build_tcp_frame(client_port: int, seq: int, ack: int, flags: int,
     return eth + ip + tcp
 
 
-def send_and_wait(sock: socket.socket, frame: bytes):
+def send_and_wait(sock: socket.socket, frame: bytes, replay_frame: bytes | None = None):
     for _attempt in range(RETRIES):
+        if replay_frame is not None:
+            sock.sendto(replay_frame, (QEMU_HOST, QEMU_PORT))
         sock.sendto(frame, (QEMU_HOST, QEMU_PORT))
         sock.settimeout(RETRY_TIMEOUT_SECS)
         try:
@@ -392,9 +394,10 @@ def expect_silence(sock: socket.socket, frame: bytes) -> bool:
         return True
 
 
-def do_handshake(sock: socket.socket, client_port: int, client_isn: int) -> bool:
+def do_handshake(sock: socket.socket, client_port: int, client_isn: int,
+                 closing_ack: bytes | None = None) -> bool:
     syn = build_tcp_frame(client_port, client_isn, 0, FLAG_SYN)
-    reply = send_and_wait(sock, syn)
+    reply = send_and_wait(sock, syn, closing_ack)
     if reply is None:
         print("  no SYN-ACK reply")
         return False
@@ -467,7 +470,7 @@ def test_data_echo(sock: socket.socket) -> bool:
     return ok
 
 
-def test_close(sock: socket.socket) -> bool:
+def test_close(sock: socket.socket) -> tuple[bool, bytes | None]:
     client_seq = HANDSHAKE_CLIENT_ISN + 1 + len(DATA_ECHO_PAYLOAD)
     server_seq = seq_add(server_isn(HANDSHAKE_CLIENT_PORT), 1 + len(DATA_ECHO_PAYLOAD))
 
@@ -476,7 +479,7 @@ def test_close(sock: socket.socket) -> bool:
     reply = send_and_wait(sock, fin)
     if reply is None:
         print("  no FIN-ACK reply")
-        return False
+        return False, None
 
     ip = reply[14:34]
     tcp = reply[34:]
@@ -491,14 +494,16 @@ def test_close(sock: socket.socket) -> bool:
     )
     if not fin_ack_ok:
         print("  bad FIN-ACK: seq=%d ack=%d flags=0x%02x" % (rseq, rack, flags))
-        return False
+        return False, None
 
     final_ack = build_tcp_frame(HANDSHAKE_CLIENT_PORT, client_seq + 1,
                                 server_seq + 1, FLAG_ACK)
     silent_ok = expect_silence(sock, final_ack)
     if not silent_ok:
         print("  server replied to the final closing ACK (should stay silent)")
-    return silent_ok
+    # Silence cannot confirm delivery of this ACK. Retain its exact bytes so
+    # reconnect can replay it before each bounded SYN attempt if it was lost.
+    return silent_ok, final_ack
 
 
 def recv_matching(sock: socket.socket, predicate, timeout: float = 5.0):
@@ -1019,11 +1024,11 @@ def main() -> int:
     ok_echo = ok_handshake and test_data_echo(sock)
     print("  data echo:                          %s" % ("PASS" if ok_echo else "FAIL"))
 
-    ok_close = ok_echo and test_close(sock)
+    ok_close, closing_ack = test_close(sock) if ok_echo else (False, None)
     print("  connection close:                   %s" % ("PASS" if ok_close else "FAIL"))
 
     ok_reconnect = ok_close and do_handshake(
-        sock, RECONNECT_CLIENT_PORT, RECONNECT_CLIENT_ISN)
+        sock, RECONNECT_CLIENT_PORT, RECONNECT_CLIENT_ISN, closing_ack)
     print("  reconnect after close:              %s" % ("PASS" if ok_reconnect else "FAIL"))
 
     http_ok = False

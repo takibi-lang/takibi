@@ -162,7 +162,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_rpi5_postmortem_controls.py` | The GEM fixture runner and the shell smoke take #869's SWD snapshot before one BREAK and the full DDB walk after a post-load failure (#872), and nothing before the load |
 | `check_rpi5_shell_smoke_controls.py` | Interactive RPi5 shell smoke checks two HTTP responses, fresh HTTPd process snapshots and optional bulk measurement completion; absent readiness, echoed markers, extra workers and bad responses fail |
 | `check_kernel_http_peer_controls.py` | Delayed replies from earlier HTTP phases cannot answer a new handshake; malformed current replies still fail |
-| `check_kernel_net_wait_controls.py` | UART progress renews readiness waits; silence and the outer ceiling still fail, with bounded DDB protection |
+| `check_kernel_net_wait_controls.py` | UART progress renews readiness waits; silence and the outer ceiling still fail, with bounded DDB protection; closing ACK replay recovers loss within the existing reconnect bounds while missing or invalid replies still fail |
 | `check_kernel_interactive_httpd_protocol.py` | interactive HTTP runners avoid listener/request deadlock; every required step is read with its file's comments blanked (#818) |
 | `check_kernel_interactive_httpd_protocol_controls.py` | a protocol step kept only in a shell, Python, inittab or .tkb comment is refused, and a forbidden name in a comment is not (#818) |
 | `check_kernel_lib_limitations_header.py` | core kernel files state their current limitations |

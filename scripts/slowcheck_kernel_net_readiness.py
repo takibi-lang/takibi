@@ -184,7 +184,8 @@ def main() -> int:
         replacements = {name: probe for name in (
             "send_until_reply", "test_syn_wrong_port_silent",
             "test_syn_bad_checksum_silent", "do_handshake",
-            "test_data_echo", "test_close")}
+            "test_data_echo")}
+        replacements["test_close"] = lambda *args: (probe(*args), b"closing ACK")
         replacements.update(wait_for_marker=wait, init_script_fixture=exchange)
         with patch.dict(namespace, replacements), \
                 patch.object(namespace["socket"], "socket", return_value=Mock()), \
