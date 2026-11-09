@@ -461,7 +461,15 @@ rules globally.
   virtio used rings (`kernel/drivers/virtio_used.tkb`, block and net, on
   the modern transport) are rx owners on backing globals of their own and
   are read only through snapshots: trusted, that a confirmed reset (status
-  read back zero) ends the device's writes to a used ring. A transmit the bounded wait cannot confirm parks its buffer
+  read back zero) ends the device's writes to a used ring. The block reset
+  path's final MMIO read now constructs a private linear
+  VirtioUsedResetConfirmation[&virtio_blk_regs], consumed by the quiescence
+  action. The compiler excludes fabrication outside its file and reuse;
+  hardware reset semantics remain trusted. The mint selects only
+  VIRTIO_USED_BLK, and its sole compiled caller is virtio_blk_reset, which
+  requests and polls reset while holding BlockDeviceGuard. The allowed
+  caller table checks that repository boundary, not general device/region
+  identity or the temporal meaning of a status read. A transmit the bounded wait cannot confirm parks its buffer
   in a terminal device state, so no later write to it type-checks.
   The RP1 GEM descriptor rings (`kernel/drivers/net/rp1_gem_desc.tkb`) are
   rx owners, since GEM writes back into the descriptors it owns: trusted,

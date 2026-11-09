@@ -11,7 +11,6 @@ kernel/arch/arm64/kernel/secondary.tkb	kernel_online_cores	read-by kernel_online
 kernel/arch/arm64/mm/asid.tkb	asid_bits	read-by asid_width_bits: 2026-10-31 written once by asid_init with the MMU off, where the compiler refuses an atomic call; read lock-free after
 kernel/arch/arm64/mm/asid.tkb	asid_last	read-by asid_highest_value,asid_assign_locked: 2026-10-31 written once by asid_init with the MMU off, where the compiler refuses an atomic call; read lock-free after
 kernel/drivers/net/virtio_net.tkb	virtio_net_used_addr	read-by kernel_net_rx_frame_pending: 2026-10-31 boot: written by virtio_queue_setup; DDB reads it stopped
-kernel/drivers/virtio_used.tkb	virtio_used_reset_confirmed	read-by virtio_used_quiet: 2026-10-31 lock: set just before its one read in virtio_used_reclaim_after_reset; the block driver is the only caller, under block_device_lock or on core 0 at boot
 kernel/init/test_driver.tkb	boot_exec_windows	read-by kernel_test_driver_run: 2026-10-31 boot: the loader check's windows, core 0 once before any exec
 kernel/init/test_driver.tkb	boot_execution	read-by kernel_process_child_exec_prepare_with,kernel_exec_primary_is_busybox_extras: 2026-10-31 boot: written by the boot thread before PID 1 runs, read-only for every later exec; BootOnce would fit but reads as a two-field record
 kernel/init/test_driver.tkb	init_boot_fixture_status	read-by kernel_init_script_success_evidence: 2026-10-31 retain-fixture: stored when PID 1 reaps the fixture child, printed after by PID 1

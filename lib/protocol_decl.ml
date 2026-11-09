@@ -324,8 +324,9 @@ let validate (d : protocol_decl) : t =
          borrowed, so the caller keeps it and holds L for the whole
          action; guarded_ref itself checks the guard's index. *)
       | TypeBorrow (TypeIndexed (_, [ StaticGlobal _ ])) -> ()
+      | TypeSink (TypeIndexed (_, [ StaticGlobal _ ])) -> ()
       | _ -> fail v.pv_loc "value argument '%s' of '%s' must have a scalar type, \
-               or be a borrowed guard `borrow G[&L]`" v.pv_name n) vs)
+               or be a borrowed guard `borrow G[&L]` or a private linear token `sink T[&device]`" v.pv_name n) vs)
     (List.filter_map (function
       | PTransition (n, input, _, vs, alts, _, _) ->
           Some (n, input, vs, List.map (fun a -> a.pa_state) alts, false)
@@ -903,6 +904,7 @@ let rec type_source loc = function
   | TypeNamed n -> n
   | TypeArray (t, k) -> Printf.sprintf "[%s; %d]" (type_source loc t) k
   | TypeBorrow t -> "borrow " ^ type_source loc t
+  | TypeSink t -> "sink " ^ type_source loc t
   | TypeIndexed (n, [ StaticGlobal (g, _) ]) -> Printf.sprintf "%s[&%s]" n g
   | _ -> fail loc "unsupported region element type in a protocol declaration"
 
@@ -1263,6 +1265,15 @@ let check_lowering (prog : toplevel list) (d : protocol_decl) (p : t) =
     if snapshot_observe n then [ (n ^ "_release", subj, [], None, l) ] else [])
     actions in
   List.iter (fun (n, (input : proto_ref), (vs : proto_arg list), ret, l) ->
+    List.iter (fun v -> match v.pv_type with
+      | TypeSink (TypeIndexed (token, [ StaticGlobal _ ])) ->
+          if not (List.exists (function
+            | OwnedStructDef (name, KindLinear, [ _ ], _, _, _, _, true, loc) ->
+                name = token && source_file_of_loc loc = file
+            | _ -> false) prog) then
+            fail v.pv_loc "action token '%s' must be a private linear struct \
+              with one static parameter declared in the protocol's file" token
+      | _ -> ()) vs;
     match List.find_opt (function
         | FuncDef f -> f.name = n && source_file_of_loc f.def_loc = file
         | _ -> false) prog with

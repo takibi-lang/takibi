@@ -30755,7 +30755,7 @@ fn main() -> i32 {
 }
 |}
 
-let infer_sealed ?(proto = sealed_protocol) ?(use = sealed_consumer) () =
+let infer_sealed ?(codegen = false) ?(proto = sealed_protocol) ?(use = sealed_consumer) () =
   Compilation_state.reset ();
   ignore (Llvm_gen.setup_target ~triple:"x86_64-pc-linux-gnu" ());
   let program = List.concat_map (fun (filename, src) ->
@@ -30763,10 +30763,12 @@ let infer_sealed ?(proto = sealed_protocol) ?(use = sealed_consumer) () =
     Lexing.set_filename lexbuf filename;
     Parser.program Lexer.read lexbuf) ["ring.tkb", proto; "use.tkb", use] in
   let prog = Region_builtin.run ~enabled:true (Protocol_decl.lower program) in
-  Type_inf.infer_program
-    (Declared_type_resolver.run
-       (Region_builtin.lower
-          (Monomorphize.run (Dma_fixed_record.run (Publish_record.run prog)))))
+  let prog = Declared_type_resolver.run
+      (Region_builtin.lower
+         (Monomorphize.run (Dma_fixed_record.run (Publish_record.run prog)))) in
+  let inferred = Type_inf.infer_program prog in
+  if codegen then ignore (Llvm_gen.gen_program ~prog_types:inferred prog);
+  inferred
 
 let expect_sealed_error ?(in_proto = false) ~sub ~by fragment () =
   let proto, use =
@@ -30905,7 +30907,83 @@ let guarded_consumer =
   |> replace_once ~sub:"region_release(Ring_release(again));"
        ~by:"region_release(Ring_release(again));\n            g1159a_give(g);"
 
+(* The reset confirmation is minted privately and moved into one observation. *)
+let token_protocol =
+  sealed_protocol
+  |> replace_once ~sub:"observe reset(Unconfirmed[req])"
+       ~by:"observe reset(Unconfirmed[req], confirmation: sink ResetConfirmation[&space])"
+  |> replace_once ~sub:"private let mut space: usize = 1;"
+       ~by:"private linear struct ResetConfirmation[device: addr] { private observed: usize; }\n\
+            fn reset_observed() -> ResetConfirmation[&space] { let mut c: ResetConfirmation[&space] = { 1 }; return c; }\n\
+            private let mut space: usize = 1;"
+  |> replace_once ~sub:"fn reset(s: borrow Ring_Unconfirmed[b, o, n, r]) -> Ring_reset_Raw {"
+       ~by:"fn reset(s: borrow Ring_Unconfirmed[b, o, n, r], confirmation: sink ResetConfirmation[&space]) -> Ring_reset_Raw {\n\
+            let observed: usize = confirmation.observed;"
+  |> replace_once ~sub:"private let mut space: usize = 1;" ~by:"let mut space: usize = 1;"
+
+let token_consumer =
+  sealed_consumer
+  |> replace_once ~sub:"match Ring_reset(u) {"
+       ~by:"let confirmation = reset_observed();\n                    match Ring_reset(u, confirmation) {"
+
 let protocol_value_tests = [
+  Alcotest.test_case "action token: private linear confirmation is consumed" `Quick
+    (fun () -> ignore (infer_sealed ~codegen:true ~proto:token_protocol ~use:token_consumer ()));
+  Alcotest.test_case "action token: a second consumption is refused" `Quick
+    (valued_refused ~proto:token_protocol
+       ~use:(replace_once ~sub:"let h = Ring_halt(u, c);"
+               ~by:"let again = Ring_reset(u, confirmation); let h = Ring_halt(u, c);" token_consumer)
+       "already consumed");
+  Alcotest.test_case "action token: a caller cannot forge provenance" `Quick
+    (valued_refused ~proto:token_protocol
+       ~use:(replace_once ~sub:"let confirmation = reset_observed();"
+               ~by:"let mut confirmation: ResetConfirmation[&space] = { 1 };" token_consumer)
+       "cannot construct struct");
+  Alcotest.test_case "action token: a boolean is not confirmation" `Quick
+    (valued_refused ~proto:token_protocol
+       ~use:(replace_once ~sub:"let confirmation = reset_observed();"
+               ~by:"let confirmation: bool = true;" token_consumer)
+       "cannot unify bool with ResetConfirmation[&space]");
+
+  Alcotest.test_case "action token: another static identity is refused" `Quick
+    (valued_refused ~proto:(token_protocol ^ "\nlet mut other_device: usize;\nfn other_reset() -> ResetConfirmation[&other_device] { let mut c: ResetConfirmation[&other_device] = { 1 }; return c; }\n")
+       ~use:(replace_once ~sub:"reset_observed()" ~by:"other_reset()" token_consumer)
+       "static value mismatch");
+  Alcotest.test_case "action token: a public token declaration is refused" `Quick
+    (valued_refused ~proto:(replace_once ~sub:"private linear struct ResetConfirmation"
+        ~by:"linear struct ResetConfirmation" token_protocol) ~use:token_consumer
+       "must be a private linear struct");
+  Alcotest.test_case "action token: an affine token declaration is refused" `Quick
+    (valued_refused ~proto:(replace_once ~sub:"private linear struct ResetConfirmation"
+        ~by:"private affine struct ResetConfirmation" token_protocol) ~use:token_consumer
+       "must be a private linear struct");
+  Alcotest.test_case "action token: a plain token declaration is refused" `Quick
+    (valued_refused ~proto:(replace_once ~sub:"private linear struct ResetConfirmation"
+        ~by:"private struct ResetConfirmation" token_protocol) ~use:token_consumer
+       "must be a private linear struct");
+  Alcotest.test_case "action token: another file's token declaration is refused" `Quick
+    (valued_refused ~proto:(replace_once
+         ~sub:"private linear struct ResetConfirmation[device: addr] { private observed: usize; }"
+         ~by:"" token_protocol)
+       ~use:("private linear struct ResetConfirmation[device: addr] { private observed: usize; }\n" ^ token_consumer)
+       "must be a private linear struct");
+  Alcotest.test_case "action token: the lowering cannot reuse it" `Quick
+    (valued_refused ~proto:(replace_once
+        ~sub:"let observed: usize = confirmation.observed;"
+        ~by:"spend_confirmation(confirmation); spend_confirmation(confirmation);"
+        (token_protocol ^ "\nfn spend_confirmation(c: sink ResetConfirmation[&space]) { let observed: usize = c.observed; }\n"))
+       ~use:token_consumer "already consumed");
+  Alcotest.test_case "action token: generated wrapper sinks unchanged to lowering" `Quick
+    (fun () ->
+      let lb = Lexing.from_string token_protocol in
+      Lexing.set_filename lb "ring.tkb";
+      let d = List.find_map (function Ast.ProtocolDef d -> Some d | _ -> None)
+          (Parser.program Lexer.read lb) |> Option.get in
+      let src = Protocol_decl.source_of d (Protocol_decl.validate d) in
+      Alcotest.(check bool) "sink parameter" true
+        (contains_substring src "confirmation: sink ResetConfirmation[&space]");
+      Alcotest.(check bool) "moves into observation" true
+        (contains_substring src "match reset(s, confirmation) {"));
   Alcotest.test_case "action values: a borrowed guard reaches guarded_ref, accepted" `Quick
     (fun () -> ignore (infer_sealed ~proto:guarded_protocol ~use:guarded_consumer ()));
   Alcotest.test_case "action values: a guard of another lock is refused in the lowering" `Quick

@@ -144,6 +144,14 @@ def problems_in(files):
             if i and words[i-1]=='.': continue
             if any(n==w and a<=i<=b for n,a,b in shadows): continue
             if i+1<len(words) and words[i+1]=='.': continue
+            # An erased static index in a type annotation does not read or
+            # address the runtime handle word. The compiler checks its type.
+            if i >= 4 and words[i-2:i] == ['[', '&'] and words[i+1:i+2] == [']']:
+                t = i - 3
+                if t >= 1 and NAME.match(words[t]):
+                    before = t - 1
+                    if words[before] == 'sink': before -= 1
+                    if before >= 0 and words[before] == ':': continue
             if i>=3 and words[i-3:i]==['io_handle_attach','(','&'] and i+1<len(words) and words[i+1]==',': continue
             error(i,f'{w}: handle word may only be attached directly or projected to a register')
     return problems, calls, len(handles)

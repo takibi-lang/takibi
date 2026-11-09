@@ -4749,6 +4749,16 @@ position; `protocol` itself is the one contextual keyword.
   index is `&L`. An owned or `sink` guard is rejected. In the kernel,
   `xhci_ring_event`, `xhci_input_publish` and `xhci_input_used` take
   `borrow BlockDeviceGuard[&block_device_lock]` this way.
+  A value argument may also consume a private linear token,
+  `confirmation: sink ResetConfirmation[&device]`. The token must be a
+  private linear struct with one static parameter, declared in the
+  protocol's source file. The wrapper moves it unchanged to the lowering;
+  ordinary linear checking rejects reuse by the caller; the sink lowering
+  is the destruction boundary. The
+  existing private constructor rules reject fabrication by another file,
+  and the static device identity must match. This does not verify a token
+  mint's hardware observation or tie a protocol region to that device:
+  those remain the concrete mint and caller boundary's trusted obligations.
 - `property disjoint;` checks that CPU and device authority never overlap,
   `property prepared_before_read;` that the device never reads an unwritten
   cell. At least one is required.

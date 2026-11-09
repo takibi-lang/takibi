@@ -1010,3 +1010,18 @@ measures fixed storage and linked code, without a new physical timing/cache
 or allocator-occupancy claim. The small code cost is adopted for the explicit
 authority and retry boundary. Measure again when queue capacity, DMA ownership,
 retention or the lock/wait backend changes.
+
+### Virtio used-ring reset confirmation (2026-11-09)
+
+The transient reset flag is replaced by a private linear
+VirtioUsedResetConfirmation[&virtio_blk_regs], handed to the quiescence
+action as a sink value argument. Its sole mint observes the actual block
+status register under BlockDeviceGuard and selects only VIRTIO_USED_BLK.
+The compiled allowed-caller boundary confines that entry to virtio_blk_reset,
+which requested and polled reset; the same guard prevents reset/rearm
+interleaving while the used-slot lock is acquired. No boolean input can mint
+confirmation. The compiler checks provenance, index agreement and consumption;
+hardware reset semantics and the concrete device/slot association remain
+trusted. See TRUSTED_BASE.md and RESET_CONFIRMATION_SPACE.md for the exact
+boundary and linked-space measurement. The parent global migration is larger
+than this one removed flag.

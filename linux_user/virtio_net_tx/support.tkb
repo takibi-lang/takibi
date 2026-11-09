@@ -1,6 +1,9 @@
 // Execute the actual virtio-net driver with deterministic clock and used-ring
 // responses. RAM stands in for MMIO and device-written queue memory; these
 // tests do not claim interrupt delivery, DMA ordering or cache evidence.
+// The shared used-ring protocol names the block device's erased identity.
+// This net-only fixture never attaches or invokes the block reset entry.
+let mut virtio_blk_regs: IoHandle(VirtioMmioRegs);
 let mut fake_regs: [i32; 128];
 let mut fake_now: i64;
 let mut done_at: i64;

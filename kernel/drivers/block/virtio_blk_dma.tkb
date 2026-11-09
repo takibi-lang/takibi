@@ -255,13 +255,14 @@ fn virtio_blk_reset(guard: borrow BlockDeviceGuard[&block_device_lock])
     while (read_cntpct() - reset_start < reset_ticks &&
            virtio_blk_regs.status != 0) {
     }
-    if (virtio_blk_regs.status != 0) {
-        status.disabled = true;
-        virtio_blk_status_store(guard, status);
-        return false;
+    match virtio_used_reclaim_block_after_reset(guard) {
+        VirtioUsedResetOutcome::Unconfirmed => {
+            status.disabled = true;
+            virtio_blk_status_store(guard, status);
+            return false;
+        }
+        VirtioUsedResetOutcome::Confirmed => { return true; }
     }
-    virtio_used_reclaim_after_reset(VIRTIO_USED_BLK);
-    return true;
 }
 
 must_use variant VirtioBlkReceiveUsed {

@@ -68,7 +68,7 @@ exempt kernel/drivers/serial/terminal_echo_ring.tkb  GitHub issue #638 stage 9 l
 exempt kernel/tests/qemu/dma/virtio_blk_fixture.tkb  test-only entry boots no peers and keeps IRQs masked; independent of the production scheduler execution model
 exempt kernel/drivers/block/virtio_blk.tkb  device state; every command is issued under device_lock.tkb's block_device_lock (GitHub issue #533)
 exempt kernel/drivers/block/virtio_blk_dma.tkb  the receive allocation's owner slot and its mint functions, reached only from virtio_blk.tkb under block_device_lock (GitHub issue #716)
-exempt kernel/drivers/virtio_used.tkb  the virtio used rings' owner slots, exchanged under their own Mutexes, and the reset record its quiesces lowering reads (GitHub issue #740)
+exempt kernel/drivers/virtio_used.tkb  the virtio used rings' owner slots, exchanged under their own Mutexes, and the private linear reset confirmation consumed by its quiesces lowering (GitHub issue #740)
 exempt kernel/drivers/block/memory.tkb  GitHub issue #638: counters and read-ahead run are a slot pool handed out by compare-exchange under a linear BlockSlot, which holds for any core count and with preemption; the device is reached only under block_device_lock (GitHub issue #533)
 exempt kernel/drivers/block/block_slot.tkb  GitHub issue #638: the BlockSlot pool's acquire words, taken by compare-exchange and given back by a release store, which holds for any core count and with preemption
 exempt kernel/drivers/block/block_cache.tkb  per-writer sets sized by KERNEL_MAX_CORES and owned_by the BlockSlot that indexes them (GitHub issues #638, #1159); another writer's writes arrive through the write epoch

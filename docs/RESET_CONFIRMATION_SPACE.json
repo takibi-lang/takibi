@@ -1,0 +1,79 @@
+{
+  "base_head": "7e6653707d6de83fb56dd1541e50a3eff158aeaa",
+  "scope": "Linked production kernels; private linear reset-confirmation token, no allocation workload change. Baseline verified against retained manifest. Candidate working tree before first commit.",
+  "targets": {
+    "qemu": {
+      "baseline_sha256": "4935e2cae06840c787709d9e485a1e105b33ab64cdbacbff8b75cc1f55faba4d",
+      "candidate_sha256": "f956394295dad1ab09dd79008972a0b07b9d3c5f675dd901e602d701c708d7c0",
+      "before": {
+        "text": 822824,
+        "data": 4632,
+        "bss": 1318912
+      },
+      "after": {
+        "text": 822792,
+        "data": 4624,
+        "bss": 1318912
+      },
+      "delta": {
+        "text": -32,
+        "data": -8,
+        "bss": 0
+      },
+      "usable_ram_start_before": 1075904512,
+      "usable_ram_start_after": 1075904512,
+      "changed_data_bss_symbols": {
+        "virtio_used_reset_confirmed": {
+          "before": 1,
+          "after": null
+        }
+      },
+      "production_object": {
+        "baseline_sha256": "f092ce54514f2a9c6958d5d1a369493db523a247530bd512590d997094d19fd0",
+        "candidate_sha256": "8aef3c34f5415beb009461e0b6f3b19fd028a3856ad52888f785a95f6daf2125"
+      },
+      "facts_sha256": {
+        "callgraph.tsv": "8491e48d005a345fe649dd7c0ebe4c1e4ed379694df1a839762796085a34e7dc",
+        "globals.tsv": "913b284b0f5442af6abebf2469b5c7eaa7b95eb5f25a9b7d34989c1d39e72a58",
+        "structs.tsv": "9eb4370e6278103ffc06b877c3298d50509269ffb998cd62d0fb818eea2877e8"
+      }
+    },
+    "rpi5": {
+      "baseline_sha256": "a7c71b1a6cb5a3e265cdf0fa103f6883874302da2fcaeef4ab6dfe5a05945c2c",
+      "candidate_sha256": "52a1a95e2adace47b9b1e5a2005cc05a369cee84b8a78bb8bdfbdf773447f1fd",
+      "before": {
+        "text": 4207428,
+        "data": 5608,
+        "bss": 1933312
+      },
+      "after": {
+        "text": 4207396,
+        "data": 5600,
+        "bss": 1933312
+      },
+      "delta": {
+        "text": -32,
+        "data": -8,
+        "bss": 0
+      },
+      "usable_ram_start_before": 8257536,
+      "usable_ram_start_after": 8257536,
+      "changed_data_bss_symbols": {
+        "virtio_used_reset_confirmed": {
+          "before": 1,
+          "after": null
+        }
+      },
+      "production_object": {
+        "baseline_sha256": "20f08fa7a30ef905e9ba13196fbdb8601cea3d34be2a5ebbe4e9ae9e9c87bf0f",
+        "candidate_sha256": "4c44e5808f8f6d2e6546966d204e8d76333452b1d4e5f61a909527d0f18215da"
+      },
+      "facts_sha256": {
+        "callgraph.tsv": "1c2b64a5d2509d8456e0fe50a8666dda434b74b3ca1780d8f5b61610bccab715",
+        "globals.tsv": "4b37f26bc4cc9a1b5be616fdeebc20b449c7194ae94433c4b99bb2008dc280a2",
+        "structs.tsv": "a5e5dd5926ec5ef8f8ec1fd510ccd6ea00e380101575b4645e3deffa48f64c7e"
+      }
+    }
+  },
+  "production_source_sha256": "63668296316ac27e697f44029d41304855abb143c3c5d05d501217653688e48f"
+}

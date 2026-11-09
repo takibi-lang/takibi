@@ -13,7 +13,7 @@
 //     device access and grants nothing, so it always answers UsedCopy. The
 //     drivers' own completes observations (virtio_net_tx_dma.tkb,
 //     virtio_blk_dma.tkb) decide from the copy's idx.
-//   - virtio_used_quiet: virtio_used_reclaim is called only after the
+//   - virtio_used_quiet: the block reset entry observes that the
 //     device's status register read back zero following a reset (virtio
 //     1.x, 2.1): the device no longer writes the used ring.
 //   - Ready is `addressed`: the queue registers are programmed from the
@@ -29,6 +29,7 @@
 
 use "kernel/lib/mutex.tkb";
 use "kernel/lib/task_mutex.tkb";
+use "kernel/drivers/block/device_lock.tkb";
 use "kernel/drivers/virtio_ring.tkb";
 use "kernel/drivers/dma_address.tkb";
 
@@ -59,15 +60,17 @@ protocol VirtioUsed[inst: usize] retains region(VirtqUsedRing)[b, VIRTIO_USED_ON
     init Ready;
     transition virtio_used_publish(Ready) -> Live[fresh req];
     observe virtio_used_peek(Live[req]) -> UsedCopy snapshot | UsedUnread;
-    observe virtio_used_quiet(Live[req]) -> UsedQuiet[req] quiesces | UsedBusy;
+    observe virtio_used_quiet(Live[req], confirmation: sink VirtioUsedResetConfirmation[&virtio_blk_regs]) -> UsedQuiet[req] quiesces | UsedBusy;
     transition virtio_used_reclaim(Live[req], UsedQuiet[req]) -> Ready;
     property disjoint;
     model cells 2;
 }
 
-// Set by virtio_used_reclaim just before its quiesces observation (see the
-// header for the caller's obligation).
-private let mut virtio_used_reset_confirmed: bool = false;
+// Only the block reset observation below constructs this confirmation.
+// Its device index is erased; ownership transfers through the action wrapper.
+private linear struct VirtioUsedResetConfirmation[device: addr] {
+    private observed: usize;
+}
 
 fn virtio_used_publish(s: borrow VirtioUsed_Live[b, o, 1, r]) {}
 fn virtio_used_peek(s: borrow VirtioUsed_Live[b, o, 1, r], value: VirtqUsedRing)
@@ -75,13 +78,11 @@ fn virtio_used_peek(s: borrow VirtioUsed_Live[b, o, 1, r], value: VirtqUsedRing)
     return VirtioUsed_virtio_used_peek_Raw::UsedCopy;
 }
 fn virtio_used_peek_release(s: borrow VirtioUsed_Live[b, o, 1, r]) {}
-fn virtio_used_quiet(s: borrow VirtioUsed_Live[b, o, 1, r])
+fn virtio_used_quiet(s: borrow VirtioUsed_Live[b, o, 1, r],
+        confirmation: sink VirtioUsedResetConfirmation[&virtio_blk_regs])
         -> VirtioUsed_virtio_used_quiet_Raw {
-    if (virtio_used_reset_confirmed) {
-        virtio_used_reset_confirmed = false;
-        return VirtioUsed_virtio_used_quiet_Raw::UsedQuiet;
-    }
-    return VirtioUsed_virtio_used_quiet_Raw::UsedBusy;
+    let observed: usize = confirmation.observed;
+    return VirtioUsed_virtio_used_quiet_Raw::UsedQuiet;
 }
 fn virtio_used_reclaim(s: borrow VirtioUsed_Live[b, o, 1, r]) {}
 
@@ -200,26 +201,37 @@ fn virtio_used_snapshot(i: usize) -> VirtioUsedSeen {
     }
 }
 
-// Called only after the device's status read back zero after a reset (see
-// the header): a live ring returns to Ready. An unclaimed or Ready ring is
-// left as it is.
-fn virtio_used_reclaim_after_reset(i: usize) {
-    let Place::Full(held) = virtio_used_take(i) else {
-        Place::Empty => { return; }
+// Called after requesting and polling a block-device reset. This final MMIO
+// read is the observation, never a boolean supplied by a caller. The outer
+// guard prevents reset/rearm interleaving through the slot take and action.
+// The block slot ties this device observation to its actual used ring; no net
+// queue can be reclaimed through this entry. The caller retains its guard.
+must_use variant VirtioUsedResetOutcome {
+    Confirmed;
+    Unconfirmed;
+}
+
+fn virtio_used_reclaim_block_after_reset(guard: borrow BlockDeviceGuard[&block_device_lock])
+        -> VirtioUsedResetOutcome {
+    if (virtio_blk_regs.status != 0) { return VirtioUsedResetOutcome::Unconfirmed; }
+    let Place::Full(held) = virtio_used_take(VIRTIO_USED_BLK) else {
+        Place::Empty => { return VirtioUsedResetOutcome::Confirmed; }
     };
     let VirtioUsedHeld::Live(live) = held else {
         VirtioUsedHeld::Ready(ready) => {
-            virtio_used_park(i, VirtioUsedHeld::Ready(ready));
-            return;
+            virtio_used_park(VIRTIO_USED_BLK, VirtioUsedHeld::Ready(ready));
+            return VirtioUsedResetOutcome::Confirmed;
         }
     };
-    virtio_used_reset_confirmed = true;
-    match VirtioUsed_virtio_used_quiet(live) {
+    let mut confirmation: VirtioUsedResetConfirmation[&virtio_blk_regs] = { 1 };
+    match VirtioUsed_virtio_used_quiet(live, confirmation) {
         VirtioUsed_virtio_used_quiet_Outcome::UsedQuiet(quiet) => {
-            virtio_used_park(i, VirtioUsedHeld::Ready(VirtioUsed_virtio_used_reclaim(live, quiet)));
+            virtio_used_park(VIRTIO_USED_BLK,
+                VirtioUsedHeld::Ready(VirtioUsed_virtio_used_reclaim(live, quiet)));
         }
         VirtioUsed_virtio_used_quiet_Outcome::UsedBusy => {
-            virtio_used_park(i, VirtioUsedHeld::Live(live));
+            virtio_used_park(VIRTIO_USED_BLK, VirtioUsedHeld::Live(live));
         }
     }
+    return VirtioUsedResetOutcome::Confirmed;
 }

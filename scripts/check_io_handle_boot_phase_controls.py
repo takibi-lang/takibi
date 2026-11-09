@@ -56,6 +56,11 @@ def main():
     case('whole-word assignment',BASE+'fn copy() { regs = other; }',False)
     case('parenthesized assignment',BASE+'fn copy() { (regs) = other; }',False)
     case('whole-word address',BASE+'fn escape() { let pointer = &regs; }',False)
+    case('erased token parameter',BASE+'fn quiet(c: sink Confirmation[&regs]) {}',True)
+    case('erased token local',BASE+'fn quiet() { let mut c: Confirmation[&regs] = { 1 }; }',True)
+    case('runtime array address',BASE+'fn escape() { let pointers = [&regs]; }',False)
+    case('type index followed by runtime escape',BASE+'fn escape(c: sink Confirmation[&regs]) { save(&regs); }',False)
+
     case('generic write bypass',BASE+'fn escape() { replace(&regs, other); }',False)
     case('global initializer copy',BASE+'let mut other: IoHandle(Regs) = regs;',False)
     case('register-field address is not handle word',BASE+'fn field() { observe(&regs.status); }',True)
