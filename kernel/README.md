@@ -167,8 +167,8 @@ canonical read on the secondary CPU), and the pair
 twice with different ELF entry points so each knows which `respawn` entry it
 is without parsing `argv`. The ash session backgrounds a bounded placement
 guard pinned to CPU 0, then runs the real `/bin/sleep` BusyBox applet as a
-foreground child. Before sleep's nanosleep can be redirected by the
-peer-safety gate, the kernel records its actual CPU, exact command line,
+foreground child. At sleep's syscall entry, before affinity exclusion is
+checked, the kernel records its actual CPU, exact command line,
 unset affinity, and parent. After the shell reports that evidence, it waits
 for and reaps the guard. This verifies ordinary placement of the real applet
 without teaching a test ELF to imitate one.
@@ -299,7 +299,7 @@ make kernelcheck-uart-wake-qemu  # type into ash while gdb holds each read insid
 make kernelcheck-affinity-gdb-qemu  # force exec argv ENOMEM on both CPUs and verify EL0 retry,
                                    # refuse an exec's page reservation (ENOMEM) and fail
                                    # its image read after the teardown (SIGSEGV, #1079),
-                                   # see a peer's unaudited syscall handed to core 0,
+                                   # see a syscall dispatch and its handler stay on CPU 1,
                                    # hold core 0 between wait4's two child-list walks
                                    # while a peer child exits in between
                                    # and make an exec's ASID rollover meet Busy
@@ -1450,9 +1450,9 @@ carrying bits no accepted signal number stands for is shown rather than
 dropped: `masked=sigterm,sigchld+0x0000000020000a07` is BusyBox init's own
 mask. Each line ends with `owner=`, the CPU that holds the process's kernel
 stack (`none` when no CPU does), `mask=`, its affinity mask (0 is every
-online CPU), and `core0=1` while a syscall the refusal list keeps on core 0
-is pending: a Ready process that no idle CPU starts is explained by one of
-the three. After those comes `cmd="..."`: the first 24 bytes of the command
+online CPU), and the retained `core0=` compatibility field. No current
+syscall or affinity handoff sets that field to 1 (#1330); mask and stack
+ownership still determine whether an idle CPU may start a Ready process. After those comes `cmd="..."`: the first 24 bytes of the command
 line the process record caches for procfs, argv joined by spaces, a byte the
 quoting could misread printed as `?`, and a `+` after the closing quote when
 the line goes on. The kernel log names each exit of a direct child of PID 1
@@ -1637,9 +1637,9 @@ the end of initialization, so this wait covers the remaining boot fixtures.
 Breakpoint steps and command-response waits keep their fixed deadlines.
 Each boot phase writes `uart.log.await-<phase>.jsonl` with arrivals measured
 against the remaining batch ceiling, including an explicit missing arrival.
-The affinity gate, reap and rollover GDB drivers use the same boot-progress
-rule under their existing 600-second batch ceiling. Gate and reap record
-shell readiness against the remaining batch time; gate records its final
+The affinity dispatch, reap and rollover GDB drivers use the same boot-progress
+rule under their existing 600-second batch ceiling. Dispatch and reap record
+shell readiness against the remaining batch time; dispatch records its final
 answer against the separate fixed response budget. Rollover and STARVED
 record their required reports against the shared batch ceiling, preserving
 retry ordering and the injected failure verdicts.

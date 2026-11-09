@@ -222,7 +222,7 @@ ppoll-probe: a byte written during a timed ppoll was reported
 ppoll: pause blocked until a signal
 ppoll-probe: pause() blocked until SIGTERM ended it
 affinity: default covers cpu 0; cpu 0 alone reads back and is inherited; empty and offline-only masks, short and odd sizes refused; absent pid ESRCH
-affinity: pinned to cpu 1, where parent_progress, outside the peer-safe table, still answered
+affinity: pinned to cpu 1, where parent_progress answered without rerouting
 affinity: the napping spinner took the SIGTERM
 affinity: every cpu the kernel reports online ran this process, each confirmed by getcpu
 affinity: a spinner napping on cpu 1 took a SIGTERM sent from core 0

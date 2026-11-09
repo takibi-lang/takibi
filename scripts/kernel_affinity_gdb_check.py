@@ -1,26 +1,9 @@
-"""GitHub issue #9: the migration gate, watched from outside the kernel.
+"""Observe affinity-preserving syscall dispatch on CPU 1 (#1330).
 
-Runs inside gdb-multiarch (`gdb -batch -x`), started by
-scripts/run_kernel_affinity_gdb_qemutest.sh, which launches QEMU and the
-network peer and passes the ports and paths in the environment.
-
-A process on a peer because its affinity mask put it there runs every
-syscall there except those the kernel's refusal list (syscall_peer_refused,
-GitHub issue #583) keeps on core 0. Those are rewound, and the process is
-handed to core 0, which runs the syscall from the start.
-Nothing at EL0 can tell where a syscall ran: /bin/affinity's parent-progress report answers
-the same either way. So this watches the kernel instead, without the kernel
-printing anything for it.
-
-The probe pins itself to CPU 1 and asks for the parent-progress report, which is outside the
-table. The only breakpoint armed while it runs is the gate's own tail,
-kernel_syscall_migrate_return, so the probe's many other syscalls run at
-full speed. That breakpoint must be hit on CPU 1, and the rewound frame
-must hold that syscall's number in its saved x8. Only then is core 0's rerun
-watched for: kernel_syscall_dispatch entered on CPU 0 with the same number. A
-kernel without the gate never reaches the first breakpoint; one that
-rewound the frame but never gave the process to core 0 never reaches the
-second.
+The existing affinity GDB lane watches a parent-progress syscall enter
+on CPU 1, reach its real handler there, and then dispatch getcpu on CPU 1.
+No frame is read through a potentially different address-space root (#585).
+Explicit affinity migrations remain covered by /bin/affinity's other phases.
 """
 
 import os
@@ -57,19 +40,14 @@ STEP_TICKS = 64 * 60
 LABEL = "kernel/qemu affinity-gdb"
 SHELL_READY = b"interactive shell: uart blocked\n"
 COMMAND = b"/bin/affinity\n"
-PINNED = b"affinity: pinned to cpu 1, where parent_progress, outside the peer-safe table, still answered"
+PINNED = b"affinity: pinned to cpu 1, where parent_progress answered without rerouting"
 # The entry addresses themselves, where x0 and x1 are still the call's
 # arguments. With a debug image (KERNEL_QEMU_AFFINITY_GDB_ELF), a function
 # breakpoint would land after the prologue, where they may be gone.
-GATE = "*kernel_syscall_migrate_return"
+HANDLER = "*kernel_process_uart_record_parent_progress"
 DISPATCH = "*kernel_syscall_dispatch"
-# The syscall /bin/affinity uses to make the gate fire. It must stay
-# OUTSIDE syscall_peer_safe: this was uname until entry 6 admitted it, and
-# getcwd until the increment after that, rt_sigprocmask until #570 admitted
-# it, kill until #583's first increment, execve until #610 and syslog until
-# #612. The check
-# holds the two together.
-MIGRATED_SYSCALL = 452
+DISPATCHED_SYSCALL = 452
+GETCPU_SYSCALL = 168
 # QEMU's gdbstub numbers vCPUs from 1: thread 1 is CPU0, thread 2 is CPU1.
 CPU0_THREAD = 1
 CPU1_THREAD = 2
@@ -207,36 +185,10 @@ def run() -> None:
     gdb.execute("set pagination off")
     gdb.execute("set confirm off")
     gdb.execute(f"target remote 127.0.0.1:{GDB_PORT}")
-    # GitHub issue #585: registers only, no frame read.
-    #
-    # This used to select the probe's gate hit by reading the rewound frame's
-    # saved x8 at `$x0 + 64` and skipping any hit whose frame it could not
-    # read, on the reasoning that such a hit was another process's. That
-    # reasoning was wrong, and about one boot in ten proved it: gdb reads
-    # guest memory through the translation the stopped CPU has active, which
-    # at the gate is the PROCESS's root -- and a process root maps the kernel
-    # image's identity block, not every page the page allocator hands out for
-    # a kernel stack. Whether a given boot's stack run lands inside that block
-    # is luck, so the probe's OWN hit came back `Cannot access memory at
-    # address 0x406afd10` and was counted as somebody else's.
-    #
-    # The syscall number does not have to come out of memory. The dispatcher
-    # takes it as its second argument, which the rerun breakpoint below
-    # already matches on, so the same condition identifies the CALL on CPU 1
-    # before the gate fires for it. Three register-only conditions, in the
-    # order they must happen:
-    #
-    #   1. kernel_syscall_dispatch entered on CPU 1 with this syscall,
-    #   2. kernel_syscall_migrate_return reached on CPU 1 after that,
-    #   3. kernel_syscall_dispatch entered on CPU 0 with the same syscall.
-    #
-    # Other fixtures still take the gate throughout the session -- that has
-    # not changed -- but (1) is what says the next (2) belongs to the probe.
+    # The function entry preserves the ABI arguments (#585).
     asked = gdb.Breakpoint(DISPATCH)
-    asked.condition = (f"$x1 == {MIGRATED_SYSCALL} && "
+    asked.condition = (f"$x1 == {DISPATCHED_SYSCALL} && "
                        f"$_thread == {CPU1_THREAD}")
-    # The probe's line fits the 16-byte PL011 FIFO, so it can go at once
-    # while the guest is held.
     connection.sendall(COMMAND)
     outcome = continue_bounded(asked)
     if outcome == STALLED:
@@ -244,57 +196,42 @@ def run() -> None:
         gdb.execute("detach")
         return
     if asked.hit_count == 0:
-        verdict(False, "/bin/affinity never asked parent_progress from CPU 1, so "
-                f"the migration gate had nothing to fire for. {where()}. "
-                f"UART tail: {uart_tail()!r}")
+        verdict(False, f"/bin/affinity never asked parent_progress from CPU 1. {where()}")
         gdb.execute("detach")
         return
     asked.delete()
 
-    gate = gdb.Breakpoint(GATE)
-    gate.condition = f"$_thread == {CPU1_THREAD}"
-    outcome = continue_bounded(gate)
+    handler = gdb.Breakpoint(HANDLER)
+    handler.condition = f"$_thread == {CPU1_THREAD}"
+    outcome = continue_bounded(handler)
     if outcome == STALLED:
-        verdict(False, stalled("gate"))
+        verdict(False, stalled("handler"))
         gdb.execute("detach")
         return
-    if gate.hit_count == 0:
-        verdict(False, "/bin/affinity asked parent_progress from CPU 1 and the "
-                "migration gate did not fire for it: that syscall was not "
-                f"handed to core 0. {where()}. "
-                f"UART tail: {uart_tail()!r}")
+    if handler.hit_count != 1:
+        verdict(False, f"parent_progress handler did not run on CPU 1. {where()}")
         gdb.execute("detach")
         return
-    gate.delete()
+    handler.delete()
 
-    rerun = gdb.Breakpoint(DISPATCH)
-    rerun.condition = f"$x1 == {MIGRATED_SYSCALL} && $_thread == {CPU0_THREAD}"
-    outcome = continue_bounded(rerun)
+    resumed = gdb.Breakpoint(DISPATCH)
+    resumed.condition = f"$x1 == {GETCPU_SYSCALL} && $_thread == {CPU1_THREAD}"
+    outcome = continue_bounded(resumed)
     if outcome == STALLED:
-        verdict(False, stalled("rerun"))
+        verdict(False, stalled("return"))
         gdb.execute("detach")
         return
-    if rerun.hit_count != 1:
-        verdict(False, "the gate handed parent_progress off on CPU1, but core 0 never "
-                f"dispatched it again. {where()}. "
-                f"UART tail: {uart_tail()!r}")
+    if resumed.hit_count != 1:
+        verdict(False, f"the caller never dispatched getcpu again on CPU 1. {where()}")
         gdb.execute("detach")
         return
-    rerun.delete()
+    resumed.delete()
     gdb.execute("detach")
-
     if not seen(lambda text: PINNED in text, STEP_TIMEOUT, phase="affinity-answer"):
-        # Stop the machine again only to say where it is.
-        gdb.execute(f"target remote 127.0.0.1:{GDB_PORT}")
-        verdict(False, "core 0 reran parent_progress, but /bin/affinity never printed "
-                f"its pinned line. {where()}. "
-                f"UART tail: {uart_tail()!r}")
-        gdb.execute("detach")
+        verdict(False, "/bin/affinity did not confirm the unchanged result and CPU")
         return
-    verdict(True, "parent_progress asked from CPU1 took the migration gate there, "
-            "watched as three register-only steps in order, and core 0 "
-            "dispatched it again; "
-            "/bin/affinity then reported its answer")
+    verdict(True, "parent_progress dispatched and handled on CPU 1; the caller "
+            "then dispatched getcpu there and checked its EINVAL result and affinity")
 
 
 try:

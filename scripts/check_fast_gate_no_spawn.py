@@ -42,7 +42,6 @@ REVIEWED = {
     "check_kernel_memory_map_controls.py": SHORT_CHILDREN,
     "check_lane_artifact_root_controls.py": SHORT_CHILDREN,
     "check_slot_proof_dropped_to_index_controls.py": SHORT_CHILDREN,
-    "check_affinity_probe_migrates_controls.py": SHORT_CHILDREN,
     "check_documented_counts_controls.py": SHORT_CHILDREN,
     "check_ddb_command_inventory_controls.py": SHORT_CHILDREN,
     "check_xhci_register_offsets_controls.py": SHORT_CHILDREN,

@@ -14,10 +14,9 @@ state in this kernel is safe *because of* them:
   runtime online prefix is 2 in maintained QEMU lanes and 4 on RPi5. Every
   online core takes timer interrupts and enters the syscall and scheduler
   paths. A process with no affinity mask is eligible on every online core;
-  a peer syscall runs where it was called unless `syscall_peer_refused`
-  names it (GitHub issue #583; since #612 only the payload fixture's
-  parent report, with its reason) or `syscall_peer_safe` narrows it by
-  descriptor; those are rerun on core 0. syslog reads the retained log on
+  syscalls are dispatched on their affinity-admitted CPU, with descriptor
+  validation, errno results and subsystem synchronization in the handlers
+  (#1330). syslog reads the retained log on
   any CPU with no lock: a writer commits each record with a release
   compare-swap of its slot's state word, and a reader re-checks that word
   after copying and drops and counts a record reused while it copied
@@ -27,8 +26,8 @@ state in this kernel is safe *because of* them:
   filesystem boundary is now a LOCK rather than an
   admission claim -- ext2 mutation excludes itself through
   `kernel/fs/ext2/mutation_lock.tkb`, and a reader that finds a mutation
-  in flight is rerun: on core 0 from a peer, after an interrupt on core 0
-  (GitHub issues #533 and #9). mkdirat, unlinkat and renameat run on any
+  in flight waits for an interrupt and reruns on its admitted CPU
+  (GitHub issue #775). mkdirat, unlinkat and renameat run on any
   core since #597: each takes the guard before its path lookup, and a
   mutation waits for every CPU's counted readers, including a child
   execve's until its exec prepare has read the image.
@@ -394,7 +393,6 @@ Special, with the reason it stays so today:
 | Boot | `boot/entry.S` parks every MPIDR but 0; core 0 runs `main()`, the GIC distributor, device bring-up and the boot fixtures (on the boot thread, pinned there by its mask), and its idle loop takes the first process after `main()` hands off (`kernel_process_secondary_start`) | the firmware hands off one core, and machine-wide state is initialized once; PID 1's first entry is then deterministic, which the oops lane's fault injection relies on | no: one core has to come first |
 | Test-driver phase | `kernel_test_driver_phase_premise` (`kernel/kernel/process.tkb`), the begin of the TestDriverPhase the ext2 and gem_tx fixtures borrow (#1462) | the fixtures run on the boot thread, which only core 0 runs before the boot handoff; the begin stops on any other core | no: it names the boot core's phase |
 | PSCI start authority | `cpu_start_reserve` (`lib/occupancy.tkb`) | starting cores is a boot phase; no hotplug exists | only with CPU hotplug, which nothing needs |
-| Syscalls outside the peer-safety table | `syscall_peer_refused`, `syscall_peer_safe`; rerun on core 0 with the process pinned for the call | no subsystem entry is left: the BusyBox Extras exec left in #828, and the TCP pool drain it ran is gone since #836. The payload fixture's parent-progress report is the one call still refused by number: parent progress (452) is the probe `/bin/affinity` and `kernel_affinity_gdb_check.py` use to drive the rerun path, so it stays refused while that path exists. reboot (142) left in #933 and stops the world from the calling core; since #980 through the debug stop (`world_stop_debug_begin`, lock-taking drain first), with `EAGAIN` only on a stop still partial after the escalation | yes, one entry at a time; each is its own follow-up |
 | Tick SEV | `timer_irq_handler` sends `interrupt_notify()` only on core 0 | every `interrupt_wait()` caller is wake-and-recheck, and some count wakes as time (`usb_xhci.tkb`'s `timeout_ms` loop); a SEV from every core would multiply wakes, and shorten those bounds, by the online core count. A waiter's own tick wakes it regardless | yes, once no wait counts wakes as time; until then one elected core keeps today's rate (#932) |
 | dmesg's cpu column | `kernel_log_snapshot_line` prints `cpuN ` for every core but 0 (#465) | only so that core 0's lines keep the format every view and the single-core boot already read; the old reason, "the console owner", stopped holding with #830 | yes, by printing the column on every line; that changes the dmesg format every view parses, a maintainer choice recorded on #775 |
 | Two-core probes and fixtures | the spread-timer and busy-pair fixtures | each is an experiment written for core 0 against CPU 1 | no: the fixed pair is the experiment |

@@ -6848,7 +6848,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     kernel_activity_set(KernelActivity::Syscall);
     workload_profile_note_syscall(number);
     // GitHub issue #580: sample the real BusyBox sleep applet at syscall
-    // entry, before peer-safety policy can migrate its frame to core 0.
+    // entry, before affinity exclusion can yield its current CPU.
     workload_ordinary_placement_note_syscall(number);
     let mut caller_slot: ProcessSlot = kernel_syscall_process_slot();
     let mut ext2_reader: SyscallExt2Reader = { false };
@@ -6862,9 +6862,8 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     // exception (#597) and never returns here: its prepare reads the image,
     // and kernel_syscall_child_exec_return releases the registration then.
     if (syscall_ext2_reader_take(&ext2_reader)) { ext2_read_leave(); }
-    // A call that completed no longer needs core 0 (GitHub issue #9). A
-    // blocked or waiting one keeps the mark until it completes, and a
-    // migrated one has only just been given it.
+    // Compatibility clear until the old placement field is retired. No
+    // syscall admission or affinity handoff now sets the mark (#1330).
     if (action_code != 5 && action_code != 6 && action_code != 9) {
         kernel_process_clear_core0_for_call(caller_slot);
     }
@@ -7754,9 +7753,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (current_cpu_allows == false) { return syscall_finish_current(frame, SyscallAction::Migrate, current_authority); }
     } else {
         // GitHub issue #581: the same question on core 0. A process whose
-        // mask excludes core 0 is here only because it was born here (clone
-        // runs on core 0) or because the gate above sent it one syscall that
-        // has now finished. Without this it stayed until the next timer
+        // mask excludes core 0 can be here after an affinity change.
+        // Without this it stayed until the next timer
         // tick, which a short-lived process such as an HTTPd connection
         // handler never reaches. The reschedule lets the syscall return
         // switch to another process core 0 may run; with none Ready, that

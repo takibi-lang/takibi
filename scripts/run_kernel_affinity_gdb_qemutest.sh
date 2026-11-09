@@ -3,10 +3,9 @@
 # are the ash lane's. A gdb script types /bin/affinity into the first
 # interactive shell, and which script it is depends on the mode:
 #
-#   gate (default)  GitHub issue #9's migration gate. The probe pins itself
-#                   to CPU 1 and asks for a syscall on the refusal list
-#                   (#583); gdb must see the gate fire on CPU 1 for it, then
-#                   core 0 dispatch it again.
+#   gate (default)  Affinity-preserving dispatch (#1330): CPU 1 dispatches
+#                   parent_progress, runs its handler, and dispatches getcpu
+#                   again without a special core-0 reroute.
 #   reap            GitHub issue #571's wait4 window. gdb stops CPU0 between
 #                   wait4's two walks of its child list and lets only CPU1
 #                   run, which is the interleaving that used to answer ECHILD

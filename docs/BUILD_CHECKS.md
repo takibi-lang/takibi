@@ -38,7 +38,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_pool_retention_controls.py` | real-kernel retention accounting, workload completion, repeated counts, platform clock separation, and malformed capture rejection |
 | `check_pool_replay_controls.py` | equal-workload Takibi/SLUB/UMA sample coverage, storage arithmetic, recorded comparison freshness, and failed or incomplete capture controls |
 | `check_pool_space_controls.py` | pool-space capture framing, complete production-pool coverage, allocation accounting, and malformed numeric samples |
-| `check_affinity_probe_migrates.py` | the syscall /bin/affinity uses to make the migration gate fire is the one the gdb watcher waits for, and is still on the refusal list (`syscall_peer_refused`) |
+| `check_affinity_probe_migrates.py`, `check_affinity_probe_migrates_controls.py` | The affinity probe and GDB watcher agree on symmetric CPU-1 dispatch, the real handler and the post-call getcpu observation; a retired peer-admission predicate or mismatched/missing evidence is refused (#1330) |
 | `check_affinity_probe_migrates_controls.py` | Controls for the affinity-probe premise check, including an svc5 call present only in a comment (#815) |
 | `check_boot_log_snapshot.py` | the boot dmesg snapshot precedes the variable-length protocol report |
 | `check_boot_log_snapshot_controls.py` | Controls reject old snapshot ordering and missing, duplicate or commented commands |

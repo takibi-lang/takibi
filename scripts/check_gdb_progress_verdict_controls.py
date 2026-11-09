@@ -174,17 +174,17 @@ def check(name, reachable, after, text, expected, guest, physical=0):
 def main():
     for after in (0, 1000):
         stalled = after == 0
-        for stage, quiet in ((0, "never asked"), (1, "did not fire"),
-                             (2, "never dispatched it again")):
+        for stage, quiet in ((0, "never asked"), (1, "handler did not run"),
+                             (2, "never dispatched getcpu again")):
             affinity_case(stage, after, INCONCLUSIVE + " at the " +
-                          ("ask", "gate", "rerun")[stage] if stalled else quiet)
+                          ("ask", "handler", "return")[stage] if stalled else quiet)
         for stage in (0, 1):
             peer_exit_case(stage, after, INCONCLUSIVE if stalled
                            else "was not reached within")
         exec_enomem_case(after, INCONCLUSIVE if stalled else
                          "was not reached within")
     report_pass("gdb_progress verdict controls",
-                "affinity-gdb (ask, gate, rerun), peer-exit (armed, reply) and "
+                "affinity-gdb (ask, handler, return), peer-exit (armed, reply) and "
                 "exec-enomem read a stalled guest as inconclusive and a quiet "
                 "one as a finding, and every tick read restores the caller's "
                 "PhyMemMode (#878)", cases=CASES.ran)

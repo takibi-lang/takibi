@@ -16,13 +16,16 @@ def main() -> int:
     assert not problems(sources), problems(sources)
     kernel = sources[SYSCALL_TKB]
     probe = sources[PROBE]
-    assert kernel.count(YIELD_ARM) == 2  # syscall_peer_safe, then dispatch
+    assert kernel.count(YIELD_ARM) == 1  # the real dispatch arm
     controls = {
         # #665 itself: the probe issues 124 and the kernel has no arm for it.
         # Only the dispatch function's arm counts; the peer-safety helper's
         # comparison with the same constant is not a dispatch.
         'sched_yield arm removed': {SYSCALL_TKB: 'if (number == 99999) {'.join(
             kernel.rsplit(YIELD_ARM, 1))},
+        'matching comparison outside dispatch is not an arm': {
+            SYSCALL_TKB: 'if (number == 99999) {'.join(kernel.rsplit(YIELD_ARM, 1)) +
+            '\nfn control(number: usize) -> bool { ' + YIELD_ARM + ' return true; } return false; }\n'},
         'unused probe constant for an undispatched number': {
             PROBE: probe + '\nconst SCHED_RR_INTERVAL_SYSCALL: usize = 127;\n'},
         'literal svc for an undispatched number': {

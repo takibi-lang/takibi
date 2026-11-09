@@ -20,12 +20,11 @@ FIRST_COMMANDS = (
 def peer_affinity_gate_is_guarded(syscall: str, process: str) -> bool:
     dispatch = syscall.find("fn kernel_syscall_dispatch_action(")
     gate_start = syscall.find("if (cpu_id() != 0) {", dispatch)
-    peer_safe = syscall.find(
-        "if (cpu_id() != 0 && syscall_peer_safe(number, x0, x1) == false)",
-        gate_start)
-    gate = (syscall[gate_start:peer_safe]
+    reader = syscall.find(
+        "if (syscall_reaches_filesystem(number, x0, x2))", gate_start)
+    gate = (syscall[gate_start:reader]
             if dispatch >= 0 and gate_start >= dispatch and
-            peer_safe > gate_start else "")
+            reader > gate_start else "")
     return (
         re.search(
             r"fn kernel_process_current_cpu_allows\(\s*"

@@ -4,11 +4,9 @@
  * transcript, so they say only what holds on every platform: the online
  * set differs between two-vCPU QEMU and four-core RPi5.
  *
- * A mask is an admission request. This process pins itself to CPU 1 and
- * calls the parent-progress report, which the kernel's refusal list
- * (syscall_peer_refused)
- * keeps on core 0, so the migration gate reruns it there. Whether that happened on core 0 is
- * not visible from EL0; the affinity gdb lane watches for it.
+ * A mask is an admission request. The parent-progress fixture is dispatched
+ * on CPU 1 without a special reroute; the affinity GDB lane observes the
+ * real handler there. Explicit affinity changes still migrate the task.
  */
 
 const WRITE_SYSCALL: usize = 64;
@@ -16,14 +14,17 @@ const EXIT_SYSCALL: usize = 93;
 const SETAFFINITY_SYSCALL: usize = 122;
 const GETAFFINITY_SYSCALL: usize = 123;
 const KILL_SYSCALL: usize = 129;
-// The payload fixture's parent-progress report, the one syscall the refusal
-// list still keeps on core 0. This process has no child blocked on the
-// UART, so it answers EINVAL and records nothing.
+// This process has no child blocked on UART, so the report returns EINVAL.
 const PARENT_PROGRESS_SYSCALL: usize = 452;
 const DUP3_SYSCALL: usize = 24;
 const FCNTL_SYSCALL: usize = 25;
 const FACCESSAT_SYSCALL: usize = 48;
 const CLOSE_SYSCALL: usize = 57;
+const OPENAT_SYSCALL: usize = 56;
+const GETDENTS_SYSCALL: usize = 61;
+const READ_SYSCALL: usize = 63;
+const SOCKET_SYSCALL: usize = 198;
+const LINUX_EBADF: usize = 0xFFFFFFFFFFFFFFF7;
 const LINUX_F_DUPFD: usize = 0;
 const LINUX_AT_FDCWD: usize = 0xFFFFFFFFFFFFFF9C;
 const LINUX_R_OK: usize = 4;
@@ -34,25 +35,7 @@ const MUNMAP_SYSCALL: usize = 215;
 const LINUX_PROT_READ_WRITE: usize = 3;
 const LINUX_MAP_PRIVATE_ANONYMOUS: usize = 0x22;
 const LINUX_NO_FD: usize = 0xFFFFFFFFFFFFFFFF;
-// The probe's example of a syscall the refusal list keeps on core 0 (the
-// allow-list it replaced, GitHub issue #583, is what the history below is
-// about).
-// It has to be one that STAYS outside, and phase B entry 6 is a sequence of
-// widenings of exactly that table: this was uname until entry 6's first
-// increment admitted it, getcwd until its second, and newfstatat until
-// GitHub issue #581 admitted the filesystem read path.
-//
-// rt_sigprocmask is the one with a REASON to stay, rather than the next in
-// line: `kernel_process_signal_deliver_to` reads the target's signal_mask
-// and read-modify-writes its pending_signals from whichever CPU the sender
-// is on, under no lock, so admitting a peer's own mask write would make it
-// a third party to two words already touched from two CPUs. That is #570,
-// and until it closes this syscall does not move.
-//
-// scripts/check_affinity_probe_migrates.py holds this number against
-// `syscall_peer_safe`, so a widening that reaches it fails in langcheck
-// rather than in a QEMU lane reporting a gate that stopped firing. It has
-// now earned itself three times.
+// Signal-mask operations are protected by the process-run lock.
 const RT_SIGPROCMASK_SYSCALL: usize = 135;
 // rt_sigprocmask(how, set, oldset, sigsetsize): a null `set` changes
 // nothing and fills `oldset` with the current mask, so the probe reads
@@ -395,20 +378,57 @@ fn affinity_probe() !{unsafe} {
     if (svc5(MUNMAP_SYSCALL, page, 4096, 0, 0, 0) != 0) {
         affinity_fail(bs"affinity: munmap asked from cpu 1 did not answer\n");
     }
-    // The parent-progress report is outside the peer-safety table, so
-    // asked from CPU 1 it is rerun on core 0 and must still answer. With no
-    // child blocked on the UART it answers EINVAL, which an unimplemented
-    // number would not (that is ENOSYS), so a call that went nowhere cannot
-    // pass for one that ran. This was execve until GitHub issue #610
-    // admitted it, and syslog until #612.
+    // #1330: descriptor rejection is a handler result, not CPU placement.
+    let mut descriptor_bytes: [u8; 256];
+    for index: usize in 0..<256 { descriptor_bytes[index] = 0; }
+    if (svc5(READ_SYSCALL, AFFINITY_ABSENT_PID, descriptor_bytes as *u8 as usize, 1, 0, 0) != LINUX_EBADF ||
+        svc5(WRITE_SYSCALL, AFFINITY_ABSENT_PID, descriptor_bytes as *u8 as usize, 1, 0, 0) != LINUX_EBADF) {
+        affinity_fail(bs"affinity: invalid descriptor results changed on cpu 1\n");
+    }
+    let listener: usize = svc5(SOCKET_SYSCALL, 2, 1, 0, 0, 0);
+    if (listener >= AFFINITY_ERROR_FLOOR) {
+        affinity_fail(bs"affinity: socket allocation failed on cpu 1\n");
+    }
+    if (svc5(FCNTL_SYSCALL, listener, LINUX_F_DUPFD, AFFINITY_DUP_FLOOR, 0, 0) != LINUX_EBADF ||
+        svc5(DUP3_SYSCALL, listener, listener, 0, 0, 0) != LINUX_EINVAL ||
+        svc5(READ_SYSCALL, listener, descriptor_bytes as *u8 as usize, 1, 0, 0) != LINUX_EBADF ||
+        svc5(CLOSE_SYSCALL, listener, 0, 0, 0, 0) != 0) {
+        affinity_fail(bs"affinity: socket descriptor results changed on cpu 1\n");
+    }
+    // Null-terminated /proc in owned storage for the raw syscall ABI.
+    let mut proc_path: [u8; 6];
+    proc_path[0] = 0x2f;
+    proc_path[1] = 0x70;
+    proc_path[2] = 0x72;
+    proc_path[3] = 0x6f;
+    proc_path[4] = 0x63;
+    proc_path[5] = 0;
+    let directory: usize = svc5(OPENAT_SYSCALL, LINUX_AT_FDCWD,
+        proc_path as *u8 as usize, 0x10000, 0, 0);
+    if (directory >= AFFINITY_ERROR_FLOOR) {
+        affinity_fail(bs"affinity: procfs open failed on cpu 1\n");
+    }
+    let directory_bytes: usize = svc5(GETDENTS_SYSCALL, directory,
+        descriptor_bytes as *u8 as usize, 256, 0, 0);
+    if (directory_bytes < 26 || directory_bytes > 256 ||
+        descriptor_bytes[19] != 0x74 || descriptor_bytes[20] != 0x61 ||
+        descriptor_bytes[21] != 0x6b || descriptor_bytes[22] != 0x69 ||
+        descriptor_bytes[23] != 0x62 || descriptor_bytes[24] != 0x69 ||
+        descriptor_bytes[25] != 0 ||
+        svc5(CLOSE_SYSCALL, directory, 0, 0, 0, 0) != 0) {
+        affinity_fail(bs"affinity: procfs directory result changed on cpu 1\n");
+    }
+    if (affinity_cpu(cpu_bytes as []u8) != 1) {
+        affinity_fail(bs"affinity: descriptor calls moved the pinned caller\n");
+    }
+    // The same handler and errno run on the CPU admitted by this task's mask.
     if (svc5(PARENT_PROGRESS_SYSCALL, 0, 0, 0, 0, 0) != LINUX_EINVAL) {
         affinity_fail(bs"affinity: parent_progress asked from cpu 1 did not answer\n");
     }
-    // Say it BEFORE the spinner goes. Written when a line from CPU 1 waited
-    // in a per-CPU console ring for core 0's syscall drain, which the
-    // spinner's naps kept running; every CPU now appends to the one UART
-    // queue itself (#544, #613), and the order is kept as it was.
-    affinity_say(bs"affinity: pinned to cpu 1, where parent_progress, outside the peer-safe table, still answered\n");
+    if (affinity_cpu(cpu_bytes as []u8) != 1) {
+        affinity_fail(bs"affinity: parent_progress moved the pinned caller\n");
+    }
+    affinity_say(bs"affinity: pinned to cpu 1, where parent_progress answered without rerouting\n");
     // GitHub issue #579: every OTHER online cpu, while the same spinner is
     // still keeping core 0 occupied. Cpu 1 is proved above; this walks the
     // rest of the reported online set, which is empty on two-vCPU QEMU and
