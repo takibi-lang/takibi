@@ -411,8 +411,8 @@ private fn tcp_pool_cost_parallel(round: usize, mode: usize, online: usize)
 // CPU 0 alone records these fields; combine reports with the sharing pair
 // so the finite retained log gains no timing records.
 struct TcpPoolCostSample {
-    lock_serial: usize; lock_parallel: usize;
-    owner_serial: usize; owner_parallel: usize;
+    lock_serial: AtomicWord; lock_parallel: AtomicWord;
+    owner_serial: AtomicWord; owner_parallel: AtomicWord;
 }
 private let mut tcp_pool_cost_samples: [TcpPoolCostSample; 3];
 
@@ -446,10 +446,10 @@ fn tcp_pool_cost_evidence(ready: borrow NetRxCanAcquire[net]) -> TcpPinCostEvide
             TcpPoolCostResult::Failed => { return TcpPinCostEvidence::Failed; }
             TcpPoolCostResult::Measured(value) => { value }
         };
-        tcp_pool_cost_samples[sample].lock_serial = lock_serial;
-        tcp_pool_cost_samples[sample].lock_parallel = lock_parallel;
-        tcp_pool_cost_samples[sample].owner_serial = owner_serial;
-        tcp_pool_cost_samples[sample].owner_parallel = owner_parallel;
+        atomic_word_store(&tcp_pool_cost_samples[sample].lock_serial, lock_serial);
+        atomic_word_store(&tcp_pool_cost_samples[sample].lock_parallel, lock_parallel);
+        atomic_word_store(&tcp_pool_cost_samples[sample].owner_serial, owner_serial);
+        atomic_word_store(&tcp_pool_cost_samples[sample].owner_parallel, owner_parallel);
     }
     atomic_word_store(&tcp_pool_cost_round, 0);
     for cpu: usize in 0..<KERNEL_MAX_CORES {
@@ -489,10 +489,10 @@ fn pin_sharing_evidence() -> TcpPinCostEvidence !{unsafe} {
         }
         kernel_boot_log("tcp pool cost: sample="); uart_put_udec(sample);
         kernel_boot_log(" cores="); uart_put_udec(online);
-        kernel_boot_log(" rounds=4096 lock="); uart_put_udec(tcp_pool_cost_samples[sample].lock_serial);
-        kernel_boot_log("/"); uart_put_udec(tcp_pool_cost_samples[sample].lock_parallel);
-        kernel_boot_log(" owner="); uart_put_udec(tcp_pool_cost_samples[sample].owner_serial);
-        kernel_boot_log("/"); uart_put_udec(tcp_pool_cost_samples[sample].owner_parallel);
+        kernel_boot_log(" rounds=4096 lock="); uart_put_udec(atomic_word_load(&tcp_pool_cost_samples[sample].lock_serial));
+        kernel_boot_log("/"); uart_put_udec(atomic_word_load(&tcp_pool_cost_samples[sample].lock_parallel));
+        kernel_boot_log(" owner="); uart_put_udec(atomic_word_load(&tcp_pool_cost_samples[sample].owner_serial));
+        kernel_boot_log("/"); uart_put_udec(atomic_word_load(&tcp_pool_cost_samples[sample].owner_parallel));
         kernel_boot_log(" sharing="); uart_put_udec(shared);
         kernel_boot_log("/"); uart_put_udec(separate);
         kernel_boot_log(" frequency="); uart_put_udec(read_cntfrq() as usize);

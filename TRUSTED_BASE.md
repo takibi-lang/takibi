@@ -972,3 +972,9 @@ incorrect projection or publication order. The existing pending/reported flags
 carry readiness; zero is a valid code. ProcessEnd, wait4 and SIGCHLD remain
 closed variants. Source review and the exhaustive native wait_status test cover
 the projection; the existing callback/publication protocol remains trusted.
+
+The three retained TCP cost records use existing AtomicWord fields. Typed
+access excludes plain field loads/stores; CPU-0-only writer/reader ordering
+and valid sample phases remain trusted. The four stores follow all four
+lock/owner timings, and the four loads follow each timed sharing pair. No
+atomic multiword snapshot or whole mailbox protocol proof is implied.

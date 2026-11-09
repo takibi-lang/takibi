@@ -1,0 +1,1271 @@
+{
+  "baseline": "1a2a69ee90349a152aa1f5f56927251f6e2067cd",
+  "boundary": "Actual production linked kernels and objects; static images only",
+  "layout_details": {
+    "qemu": {
+      "functions": {
+        "tcp_pool_cost_evidence": {
+          "baseline": {
+            "symbol": {
+              "address": 1074369824,
+              "size": 464,
+              "type": 2,
+              "section": 1
+            },
+            "next_symbol": [
+              1074370288,
+              "pin_sharing_evidence"
+            ],
+            "padding": 0,
+            "instruction_histogram": {
+              "sub": 2,
+              "stp": 8,
+              "add": 14,
+              "mov": 29,
+              "bl": 11,
+              "cmp": 9,
+              "b": 14,
+              "adrp": 4,
+              "ldr": 5,
+              "cbz": 3,
+              "stlr": 3,
+              "ldar": 5,
+              "str": 1,
+              "cbnz": 1,
+              "ldp": 6,
+              "ret": 1
+            }
+          },
+          "candidate": {
+            "symbol": {
+              "address": 1074369824,
+              "size": 492,
+              "type": 2,
+              "section": 1
+            },
+            "next_symbol": [
+              1074370320,
+              "pin_sharing_evidence"
+            ],
+            "padding": 4,
+            "instruction_histogram": {
+              "sub": 2,
+              "stp": 6,
+              "add": 17,
+              "mov": 29,
+              "bl": 11,
+              "cmp": 9,
+              "b": 14,
+              "adrp": 4,
+              "ldr": 5,
+              "cbz": 3,
+              "stlr": 7,
+              "nop": 2,
+              "ldar": 5,
+              "str": 1,
+              "cbnz": 1,
+              "ldp": 6,
+              "ret": 1
+            }
+          },
+          "histogram_delta": {
+            "add": 3,
+            "nop": 2,
+            "stp": -2,
+            "stlr": 4
+          }
+        },
+        "pin_sharing_evidence": {
+          "baseline": {
+            "symbol": {
+              "address": 1074370288,
+              "size": 464,
+              "type": 2,
+              "section": 1
+            },
+            "next_symbol": [
+              1074370752,
+              "tcp_fixture_claim_contention_is_armed"
+            ],
+            "padding": 0,
+            "instruction_histogram": {
+              "stp": 6,
+              "mov": 20,
+              "bl": 26,
+              "cmp": 8,
+              "b": 7,
+              "ldp": 6,
+              "ret": 1,
+              "nop": 12,
+              "adr": 10,
+              "add": 7,
+              "bfxil": 1,
+              "cbz": 1,
+              "csel": 2,
+              "adrp": 2,
+              "ldr": 5,
+              "stlr": 1,
+              "cset": 1
+            }
+          },
+          "candidate": {
+            "symbol": {
+              "address": 1074370320,
+              "size": 476,
+              "type": 2,
+              "section": 1
+            },
+            "next_symbol": [
+              1074370800,
+              "tcp_fixture_claim_contention_is_armed"
+            ],
+            "padding": 4,
+            "instruction_histogram": {
+              "stp": 6,
+              "mov": 20,
+              "bl": 26,
+              "cmp": 8,
+              "b": 7,
+              "ldp": 6,
+              "ret": 1,
+              "nop": 12,
+              "adr": 10,
+              "add": 10,
+              "bfxil": 1,
+              "cbz": 1,
+              "csel": 2,
+              "adrp": 2,
+              "ldar": 4,
+              "ldr": 1,
+              "stlr": 1,
+              "cset": 1
+            }
+          },
+          "histogram_delta": {
+            "add": 3,
+            "ldar": 4,
+            "ldr": -4
+          }
+        }
+      },
+      "function_address_deltas": {
+        "48": 63,
+        "0": 3666,
+        "32": 1
+      },
+      "got_changed_slots": 5
+    },
+    "rpi5": {
+      "functions": {
+        "tcp_pool_cost_evidence": {
+          "baseline": {
+            "symbol": {
+              "address": 2767200,
+              "size": 504,
+              "type": 2,
+              "section": 1
+            },
+            "next_symbol": [
+              2767712,
+              "pin_sharing_evidence"
+            ],
+            "padding": 8,
+            "instruction_histogram": {
+              "sub": 2,
+              "stp": 8,
+              "add": 18,
+              "mov": 35,
+              "bl": 11,
+              "cmp": 9,
+              "b": 14,
+              "adrp": 4,
+              "nop": 4,
+              "cbz": 3,
+              "stlr": 3,
+              "stur": 1,
+              "ldar": 5,
+              "ldur": 1,
+              "cbnz": 1,
+              "ldp": 6,
+              "ret": 1
+            }
+          },
+          "candidate": {
+            "symbol": {
+              "address": 2767200,
+              "size": 536,
+              "type": 2,
+              "section": 1
+            },
+            "next_symbol": [
+              2767744,
+              "pin_sharing_evidence"
+            ],
+            "padding": 8,
+            "instruction_histogram": {
+              "sub": 2,
+              "stp": 6,
+              "add": 21,
+              "mov": 35,
+              "bl": 11,
+              "cmp": 9,
+              "b": 14,
+              "adrp": 4,
+              "nop": 7,
+              "cbz": 3,
+              "stlr": 7,
+              "stur": 1,
+              "ldar": 5,
+              "ldur": 1,
+              "cbnz": 1,
+              "ldp": 6,
+              "ret": 1
+            }
+          },
+          "histogram_delta": {
+            "add": 3,
+            "nop": 3,
+            "stp": -2,
+            "stlr": 4
+          }
+        },
+        "pin_sharing_evidence": {
+          "baseline": {
+            "symbol": {
+              "address": 2767712,
+              "size": 456,
+              "type": 2,
+              "section": 1
+            },
+            "next_symbol": [
+              2768176,
+              "tcp_fixture_claim_contention_is_armed"
+            ],
+            "padding": 8,
+            "instruction_histogram": {
+              "stp": 6,
+              "mov": 20,
+              "bl": 26,
+              "cmp": 8,
+              "b": 7,
+              "ldp": 6,
+              "ret": 1,
+              "adrp": 12,
+              "add": 18,
+              "bfxil": 1,
+              "cbz": 1,
+              "csel": 2,
+              "ldr": 4,
+              "stlr": 1,
+              "cset": 1
+            }
+          },
+          "candidate": {
+            "symbol": {
+              "address": 2767744,
+              "size": 468,
+              "type": 2,
+              "section": 1
+            },
+            "next_symbol": [
+              2768224,
+              "tcp_fixture_claim_contention_is_armed"
+            ],
+            "padding": 12,
+            "instruction_histogram": {
+              "stp": 6,
+              "mov": 20,
+              "bl": 26,
+              "cmp": 8,
+              "b": 7,
+              "ldp": 6,
+              "ret": 1,
+              "adrp": 12,
+              "add": 21,
+              "bfxil": 1,
+              "cbz": 1,
+              "csel": 2,
+              "ldar": 4,
+              "stlr": 1,
+              "cset": 1
+            }
+          },
+          "histogram_delta": {
+            "ldar": 4,
+            "ldr": -4,
+            "add": 3
+          }
+        }
+      },
+      "function_address_deltas": {
+        "64": 65,
+        "0": 3997,
+        "48": 2,
+        "32": 1
+      },
+      "got_changed_slots": 5
+    }
+  },
+  "targets": {
+    "qemu": {
+      "hashes": {
+        "baseline/qemu/kernel.elf": "8d9e77e4bfe9a6a448c3f8a35fad35478245a073cfac36076947f41ed30872c6",
+        "candidate/qemu/kernel.elf": "622ee90ffd03b45be552b42e7b5b7e6e1fd5aa5264fb86950682aa573f9d4094",
+        "baseline/qemu/main.o": "054588de94be54811ca61a5ab042c317f88de1d3ec7b0bc7f04b4c8f8a7dd086",
+        "candidate/qemu/main.o": "32da6f1535112f11e6031327b560dfc098d76baa18f4dccdf826601bcbab7a03"
+      },
+      "allocated_changes": {
+        ".text": {
+          "baseline": {
+            "type": 1,
+            "flags": 6,
+            "address": 1073741824,
+            "offset": 65536,
+            "size": 645008,
+            "align": 2048
+          },
+          "candidate": {
+            "type": 1,
+            "flags": 6,
+            "address": 1073741824,
+            "offset": 65536,
+            "size": 645056,
+            "align": 2048
+          },
+          "bytes_changed": true
+        },
+        ".eh_frame": {
+          "baseline": {
+            "type": 1,
+            "flags": 2,
+            "address": 1074443896,
+            "offset": 767608,
+            "size": 122896,
+            "align": 8
+          },
+          "candidate": {
+            "type": 1,
+            "flags": 2,
+            "address": 1074443896,
+            "offset": 767608,
+            "size": 122896,
+            "align": 8
+          },
+          "bytes_changed": true
+        },
+        ".got": {
+          "baseline": {
+            "type": 1,
+            "flags": 3,
+            "address": 1074566792,
+            "offset": 890504,
+            "size": 4488,
+            "align": 8
+          },
+          "candidate": {
+            "type": 1,
+            "flags": 3,
+            "address": 1074566792,
+            "offset": 890504,
+            "size": 4488,
+            "align": 8
+          },
+          "bytes_changed": true
+        }
+      },
+      "changed_object_sections": [
+        {
+          "name": ".eh_frame",
+          "baseline_size": 127216,
+          "candidate_size": 127216
+        },
+        {
+          "name": ".rela.text.takibi.pin_sharing_evidence",
+          "baseline_size": 1200,
+          "candidate_size": 1200
+        },
+        {
+          "name": ".rela.text.takibi.tcp_pool_cost_evidence",
+          "baseline_size": 456,
+          "candidate_size": 456
+        },
+        {
+          "name": ".symtab",
+          "baseline_size": 457656,
+          "candidate_size": 457656
+        },
+        {
+          "name": ".text.takibi.pin_sharing_evidence",
+          "baseline_size": 464,
+          "candidate_size": 476
+        },
+        {
+          "name": ".text.takibi.tcp_pool_cost_evidence",
+          "baseline_size": 464,
+          "candidate_size": 492
+        }
+      ],
+      "object_symbol_changes": {
+        "tcp_pool_cost_evidence": [
+          {
+            "address": 0,
+            "size": 464,
+            "type": 2,
+            "section": 6927
+          },
+          {
+            "address": 0,
+            "size": 492,
+            "type": 2,
+            "section": 6927
+          }
+        ],
+        "pin_sharing_evidence": [
+          {
+            "address": 0,
+            "size": 464,
+            "type": 2,
+            "section": 6929
+          },
+          {
+            "address": 0,
+            "size": 476,
+            "type": 2,
+            "section": 6929
+          }
+        ]
+      },
+      "linked_changed_functions": [
+        "el1_resume_probe_landing",
+        "main",
+        "irq_mask_reset_el0",
+        "kernel_syscall_clone_child_return",
+        "kernel_syscall_clone_parent_return",
+        "kernel_syscall_block_return",
+        "kernel_syscall_migrate_return",
+        "kernel_syscall_resume_return",
+        "el1_resume_probe_run",
+        "el1_preempt_spin_begin_address",
+        "el1_preempt_spin_end_address",
+        "el1_resume_probe_landing_address",
+        "kernel_invariant_stop",
+        "kernel_invariant_stop_with_frame",
+        "kernel_process_stack_interrupt_depart",
+        "kernel_process_stack_switch_complete",
+        "kernel_cache_geometry_require",
+        "kernel_pan_require",
+        "enable_irq",
+        "preempt_count_idle_reset",
+        "kernel_idle_loop",
+        "tcp_fixture_claim_contention_is_armed",
+        "tcp_fixture_claim_contention_secondary_run",
+        "signal_contention_is_armed",
+        "signal_contention_secondary_run",
+        "ext2_mutation_contention_is_armed",
+        "ext2_mutation_contention_secondary_run",
+        "kernel_process_secondary_start",
+        "kernel_activity_set",
+        "kernel_process_stack_idle_complete",
+        "kernel_process_stack_idle_blocked",
+        "kernel_process_stack_idle_yield",
+        "kernel_timer_tick_leave",
+        "kernel_process_tick_charge",
+        "kernel_process_timer_schedule",
+        "kernel_process_el1_preempt_consult",
+        "kernel_process_schedule",
+        "kernel_process_request_reschedule",
+        "el1_preempt_switch_note",
+        "disable_irq",
+        "preempt_count_here",
+        "preempt_count_after_switch",
+        "preempt_count_el1_resume_check",
+        "preempt_count_zero_at",
+        "preempt_assert_blockable",
+        "irq_mask_cpu_interface_ready",
+        "irq_nest_open",
+        "irq_nest_close",
+        "irq_save",
+        "irq_pmr_masked_here",
+        "irq_nest_interrupted_masked_here",
+        "kernel_log_begin_fragment",
+        "kernel_log_end_fragment",
+        "kernel_log_capture_uart_byte",
+        "kernel_log_enter_emergency",
+        "kernel_log_probe_byte",
+        "kernel_log_storm_write",
+        "profile_sample_irq",
+        "qemu_uart_attach_bootstrap",
+        "profile_session_sync",
+        "boot_once_unwritten_stop",
+        "virtio_used_lost",
+        "virtio_pkt_lost",
+        "virtio_net_rx_acquire_locked",
+        "virtio_net_tx_finish",
+        "set_once_unset_stop",
+        "virtio_blk_receive_take",
+        "virtio_blk_receive_fail_cpu",
+        "virtio_blk_receive_fail_device",
+        "virtio_blk_request_take",
+        "virtio_blk_request_fail_cpu",
+        "virtio_blk_request_fail_device",
+        "virtio_blk_data_take",
+        "virtio_blk_data_fail_cpu",
+        "virtio_blk_data_fail_device",
+        "test_driver_phase_begin",
+        "page_meta_at",
+        "page_extent_at",
+        "page_allocator_init",
+        "page_allocator_init_frames",
+        "page_allocator_apply_memory",
+        "irqsoff_open",
+        "irqsoff_close",
+        "frame_any_resume",
+        "crash_snapshot_copy_leveled_frame",
+        "kernel_current_sync_fail_stop_leveled",
+        "el1_preempt_window_admits",
+        "el1_preempt_real_resume_note",
+        "el1_preempt_switch_take",
+        "address_space_active_slot_here",
+        "address_space_install_here",
+        "kernel_process_current_root",
+        "user_probe_root_write_byte",
+        "user_probe_root_read_byte",
+        "kernel_process_current_read",
+        "scheduled_process_record_locked",
+        "kernel_activity_here",
+        "scheduled_process_record_live_locked",
+        "kernel_process_current_required",
+        "scheduled_process_record_current",
+        "kernel_activity_enter",
+        "kernel_activity_leave",
+        "scheduled_process_pin_release",
+        "scheduled_process_record_owned",
+        "scheduled_process_command_line",
+        "scheduled_process_parked_frame",
+        "scheduled_process_park_stack_run",
+        "scheduled_process_take_spare_stack_run",
+        "scheduled_process_exited_take",
+        "scheduled_process_start",
+        "kernel_process_root_authorities_check",
+        "kernel_process_stack_switch_take",
+        "kernel_process_orphan_defer",
+        "kernel_process_el1_resume_probe_fill",
+        "kernel_process_el1_resume_probe_run",
+        "kernel_process_start_handle",
+        "kernel_process_execution_reset",
+        "kernel_test_driver_phase_premise",
+        "kernel_process_boot_handoff",
+        "kernel_process_scheduler_enable",
+        "kernel_process_scheduler_disable",
+        "kernel_process_core0_leave_excluded",
+        "kernel_process_migrate_current",
+        "kernel_process_spread_timer_progress",
+        "kernel_process_spread_timer_enter",
+        "kernel_process_schedule_reserved",
+        "kernel_process_secondary_start_reserved",
+        "kernel_process_idle_starvation_note",
+        "kernel_process_claimed_pid_or_zero",
+        "kernel_process_activate_stable_root",
+        "kernel_process_activate_stable_owned_root",
+        "kernel_boot_stack_arm",
+        "kernel_process_tick_leave_excluded",
+        "el1_preempt_spin_until_switch",
+        "el1_preempt_spin_until_refused",
+        "kernel_process_el1_preempt_scenario",
+        "kernel_process_syscall_return_schedule",
+        "kernel_process_block_to_idle",
+        "kernel_process_block_current",
+        "kernel_process_block_reserved",
+        "kernel_process_signal_deliver_traced",
+        "kernel_syscall_uart_deliver",
+        "kernel_process_tick_wake_one",
+        "kernel_process_probe_blocks_to",
+        "kernel_process_probe_deferred_address",
+        "kernel_process_clone_begin",
+        "kernel_process_scheduler_probe_stack_depart",
+        "kernel_process_scheduler_probe_stack_arrive",
+        "kernel_process_fanout_probe",
+        "kernel_process_clone_rollback",
+        "kernel_process_exit_waiter_probe",
+        "execution_publication_cost_sample",
+        "execution_publication_cost_log",
+        "kernel_process_execution_observation_probe",
+        "execution_current_set_live_here",
+        "kernel_process_scheduler_probe",
+        "kernel_process_exit_continuation_probe",
+        "kernel_process_exit_reserved",
+        "kernel_process_leave_parent_ready",
+        "kernel_syscall_wait4_deliver",
+        "kernel_process_child_exit",
+        "kernel_process_last_exited_child_pid",
+        "fd_block_pool_lock",
+        "fd_block_pool_unlock",
+        "fd_context_pool_lock",
+        "fd_context_pool_unlock",
+        "object_refcount_take",
+        "object_refcount_give",
+        "object_pool_lock",
+        "object_pool_unlock",
+        "process_image_pool_lock",
+        "process_image_pool_unlock",
+        "process_image_record_lost",
+        "process_image_record_read",
+        "process_image_record_publish",
+        "process_image_clone_vm_reap",
+        "process_image_map_segments",
+        "mmap_region_pool_lock",
+        "mmap_region_pool_unlock",
+        "tcp_frame_pool_lock",
+        "tcp_frame_pool_unlock",
+        "pin_sharing_lock",
+        "pin_sharing_unlock",
+        "tcp_retx_pool_lock",
+        "tcp_retx_pool_unlock",
+        "user_access_window_open",
+        "user_access_window_close",
+        "profile_sample_start",
+        "profile_sample_finish",
+        "profile_session_irq",
+        "profile_session_start",
+        "workload_move_cost_progress",
+        "kernel_syscall_ext2_configure",
+        "kernel_syscall_uart_block_prepare",
+        "kernel_syscall_block_choose",
+        "kernel_syscall_resume_tail",
+        "kernel_syscall_child_exec_return",
+        "kernel_syscall_child_exec_enter",
+        "kernel_syscall_child_exec_refused",
+        "signal_return_exit",
+        "signal_deliver",
+        "kernel_syscall_dispatch_action",
+        "log_storm_trace_probe",
+        "syscall_clone_current",
+        "kernel_ddb_breakpoint_test_checkpoint",
+        "ddb_read_kernel_byte",
+        "ddb_walk_backtrace",
+        "kernel_ddb_enter_stopped",
+        "crash_snapshot_capture",
+        "kernel_test_driver_run",
+        "kernel_test_platform_network",
+        "kernel_test_platform_storage",
+        "kernel_init_process_start",
+        "tcp_pool_cost_evidence",
+        "pin_sharing_evidence",
+        "tcp_claim_probe_meet",
+        "tcp_claim_probe_run",
+        "tcp_claim_probe_abandon",
+        "tcp_fixture_claim_contention_probe",
+        "ext2_mutation_probe_mutator",
+        "ext2_mutation_probe_reader",
+        "ext2_slot_pool_probe",
+        "ext2_mutation_probe_finish",
+        "ext2_mutation_probe_core0_reader",
+        "ext2_mutation_probe_overlap",
+        "ext2_mutation_probe_run_phase",
+        "ext2_mutation_probe_put_peers",
+        "ext2_mutation_probe_report",
+        "ext2_mutation_contention_probe",
+        "signal_probe_peer_mask",
+        "signal_probe_hold_locked",
+        "signal_probe_wait_done",
+        "signal_probe_round",
+        "signal_contention_run_phase",
+        "signal_contention_probe",
+        "log_storm_write_share",
+        "log_storm_wait_word",
+        "log_storm_wait_peers",
+        "log_storm_probe",
+        "peer_console_probe",
+        "contention_probes",
+        "contention_probes_run",
+        "kernel_secondary_boot_await",
+        "kernel_secondary_boot_attempt",
+        "kernel_secondary_boot_cpu_on",
+        "kernel_secondary_boot_report",
+        "qemu_psci_cpu_on",
+        "kernel_platform_net_link_up"
+      ],
+      "layouts": {
+        "baseline": [
+          "AtomicWord\tvalue\t0",
+          "AtomicWord\t.size\t8",
+          "AtomicWord\t.members\t1",
+          "TcpPoolCostSample\tlock_serial\t0",
+          "TcpPoolCostSample\tlock_parallel\t8",
+          "TcpPoolCostSample\towner_serial\t16",
+          "TcpPoolCostSample\towner_parallel\t24",
+          "TcpPoolCostSample\t.size\t32",
+          "TcpPoolCostSample\t.members\t4"
+        ],
+        "candidate": [
+          "AtomicWord\tvalue\t0",
+          "AtomicWord\t.size\t8",
+          "AtomicWord\t.members\t1",
+          "TcpPoolCostSample\tlock_serial\t0",
+          "TcpPoolCostSample\tlock_parallel\t8",
+          "TcpPoolCostSample\towner_serial\t16",
+          "TcpPoolCostSample\towner_parallel\t24",
+          "TcpPoolCostSample\t.size\t32",
+          "TcpPoolCostSample\t.members\t4"
+        ]
+      },
+      "symbols": {
+        "tcp_pool_cost_samples": {
+          "baseline": {
+            "address": 1075478160,
+            "size": 96,
+            "type": 1,
+            "section": 6
+          },
+          "candidate": {
+            "address": 1075478160,
+            "size": 96,
+            "type": 1,
+            "section": 6
+          }
+        },
+        "tcp_pool_cost_evidence": {
+          "baseline": {
+            "address": 1074369824,
+            "size": 464,
+            "type": 2,
+            "section": 1
+          },
+          "candidate": {
+            "address": 1074369824,
+            "size": 492,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "pin_sharing_evidence": {
+          "baseline": {
+            "address": 1074370288,
+            "size": 464,
+            "type": 2,
+            "section": 1
+          },
+          "candidate": {
+            "address": 1074370320,
+            "size": 476,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "usable_ram_start": {
+          "baseline": {
+            "address": 1075904512,
+            "size": 0,
+            "type": 0,
+            "section": 7
+          },
+          "candidate": {
+            "address": 1075904512,
+            "size": 0,
+            "type": 0,
+            "section": 7
+          }
+        }
+      }
+    },
+    "rpi5": {
+      "hashes": {
+        "baseline/rpi5/kernel.elf": "6eaa4bade940f34c154377f7fdd86eb5c721dfb7d77e0b55a08a6db6f1e4a10c",
+        "candidate/rpi5/kernel.elf": "a4dd1dddbefcaeec3b612788279b42209462a544c85a37f1d7dedd2a13f6157e",
+        "baseline/rpi5/main.o": "7d08c67c109fbef434707a13d8d3ea48c3e94164cd180fce81508bd2d668fa1b",
+        "candidate/rpi5/main.o": "0949035034218d863cec252bf5d7c01d96c44933f6331d9bc16f04f5bbbf276c"
+      },
+      "allocated_changes": {
+        ".text": {
+          "baseline": {
+            "type": 1,
+            "flags": 6,
+            "address": 2097152,
+            "offset": 65536,
+            "size": 688676,
+            "align": 2048
+          },
+          "candidate": {
+            "type": 1,
+            "flags": 6,
+            "address": 2097152,
+            "offset": 65536,
+            "size": 688740,
+            "align": 2048
+          },
+          "bytes_changed": true
+        },
+        ".eh_frame": {
+          "baseline": {
+            "type": 1,
+            "flags": 2,
+            "address": 6174520,
+            "offset": 4142904,
+            "size": 133608,
+            "align": 8
+          },
+          "candidate": {
+            "type": 1,
+            "flags": 2,
+            "address": 6174520,
+            "offset": 4142904,
+            "size": 133608,
+            "align": 8
+          },
+          "bytes_changed": true
+        },
+        ".got": {
+          "baseline": {
+            "type": 1,
+            "flags": 3,
+            "address": 6308128,
+            "offset": 4276512,
+            "size": 5264,
+            "align": 8
+          },
+          "candidate": {
+            "type": 1,
+            "flags": 3,
+            "address": 6308128,
+            "offset": 4276512,
+            "size": 5264,
+            "align": 8
+          },
+          "bytes_changed": true
+        }
+      },
+      "changed_object_sections": [
+        {
+          "name": ".eh_frame",
+          "baseline_size": 137576,
+          "candidate_size": 137576
+        },
+        {
+          "name": ".rela.text.takibi.pin_sharing_evidence",
+          "baseline_size": 1200,
+          "candidate_size": 1200
+        },
+        {
+          "name": ".rela.text.takibi.tcp_pool_cost_evidence",
+          "baseline_size": 456,
+          "candidate_size": 456
+        },
+        {
+          "name": ".symtab",
+          "baseline_size": 493968,
+          "candidate_size": 493968
+        },
+        {
+          "name": ".text.takibi.pin_sharing_evidence",
+          "baseline_size": 456,
+          "candidate_size": 468
+        },
+        {
+          "name": ".text.takibi.tcp_pool_cost_evidence",
+          "baseline_size": 504,
+          "candidate_size": 536
+        }
+      ],
+      "object_symbol_changes": {
+        "tcp_pool_cost_evidence": [
+          {
+            "address": 0,
+            "size": 504,
+            "type": 2,
+            "section": 7495
+          },
+          {
+            "address": 0,
+            "size": 536,
+            "type": 2,
+            "section": 7495
+          }
+        ],
+        "pin_sharing_evidence": [
+          {
+            "address": 0,
+            "size": 456,
+            "type": 2,
+            "section": 7497
+          },
+          {
+            "address": 0,
+            "size": 468,
+            "type": 2,
+            "section": 7497
+          }
+        ]
+      },
+      "linked_changed_functions": [
+        "main",
+        "irq_mask_reset_el0",
+        "kernel_syscall_clone_child_return",
+        "kernel_syscall_clone_parent_return",
+        "kernel_syscall_block_return",
+        "kernel_syscall_migrate_return",
+        "kernel_syscall_resume_return",
+        "el1_preempt_spin_begin_address",
+        "el1_preempt_spin_end_address",
+        "el1_resume_probe_landing_address",
+        "kernel_invariant_stop",
+        "kernel_invariant_stop_with_frame",
+        "kernel_ddb_sync_dispatch",
+        "kernel_process_stack_interrupt_depart",
+        "kernel_process_stack_switch_complete",
+        "kernel_cache_geometry_require",
+        "kernel_pan_require",
+        "enable_irq",
+        "preempt_count_idle_reset",
+        "kernel_idle_loop",
+        "tcp_fixture_claim_contention_is_armed",
+        "tcp_fixture_claim_contention_secondary_run",
+        "signal_contention_is_armed",
+        "signal_contention_secondary_run",
+        "ext2_mutation_contention_is_armed",
+        "ext2_mutation_contention_secondary_run",
+        "kernel_process_secondary_start",
+        "kernel_activity_set",
+        "kernel_process_stack_idle_complete",
+        "kernel_process_stack_idle_blocked",
+        "kernel_process_stack_idle_yield",
+        "kernel_timer_tick_leave",
+        "kernel_process_tick_charge",
+        "kernel_process_timer_schedule",
+        "kernel_process_el1_preempt_consult",
+        "kernel_process_schedule",
+        "kernel_process_request_reschedule",
+        "el1_preempt_switch_note",
+        "disable_irq",
+        "preempt_count_here",
+        "preempt_count_after_switch",
+        "preempt_count_el1_resume_check",
+        "preempt_count_zero_at",
+        "preempt_assert_blockable",
+        "irq_mask_cpu_interface_ready",
+        "irq_nest_open",
+        "irq_nest_close",
+        "irq_save",
+        "irq_pmr_masked_here",
+        "irq_nest_interrupted_masked_here",
+        "kernel_log_begin_fragment",
+        "kernel_log_end_fragment",
+        "kernel_log_capture_uart_byte",
+        "kernel_log_enter_emergency",
+        "kernel_log_probe_byte",
+        "kernel_log_storm_write",
+        "profile_sample_irq",
+        "rpi5_gem_attach_bootstrap",
+        "rpi5_xhci_attach_bootstrap",
+        "set_once_unset_stop",
+        "gem_rx_ring_lost",
+        "gem_tx_ring_lost",
+        "gem_pkt_lost",
+        "profile_session_sync",
+        "gem_rx_ring_ready",
+        "gem_rearm_rx",
+        "kernel_net_rx_frame_pending",
+        "net_rx_acquire",
+        "gem_tx_start",
+        "gem_tx_ring_write",
+        "gem_tx_pkt",
+        "gem_tx_unconfirmed",
+        "rpi5_uart_attach_bootstrap",
+        "rpi5_pcie_windows_attach",
+        "rpi5_xhci_refuse",
+        "rpi5_irq_windows_attach_bootstrap",
+        "virtio_used_lost",
+        "virtio_blk_receive_take",
+        "virtio_blk_receive_fail_cpu",
+        "virtio_blk_receive_fail_device",
+        "virtio_blk_request_take",
+        "virtio_blk_request_fail_cpu",
+        "virtio_blk_request_fail_device",
+        "virtio_blk_data_take",
+        "virtio_blk_data_fail_cpu",
+        "virtio_blk_data_fail_device",
+        "test_driver_phase_begin",
+        "page_meta_at",
+        "page_extent_at",
+        "page_allocator_init",
+        "page_allocator_init_frames",
+        "page_allocator_apply_memory",
+        "irqsoff_open",
+        "irqsoff_close",
+        "frame_any_resume",
+        "crash_snapshot_copy_leveled_frame",
+        "kernel_current_sync_fail_stop_leveled",
+        "el1_preempt_window_admits",
+        "el1_preempt_real_resume_note",
+        "el1_preempt_switch_take",
+        "mmu_init_identity_l3",
+        "address_space_active_slot_here",
+        "address_space_install_here",
+        "kernel_process_current_root",
+        "user_probe_root_write_byte",
+        "user_probe_root_read_byte",
+        "kernel_process_current_read",
+        "scheduled_process_record_locked",
+        "kernel_activity_here",
+        "scheduled_process_record_live_locked",
+        "kernel_process_current_required",
+        "scheduled_process_record_current",
+        "kernel_activity_enter",
+        "kernel_activity_leave",
+        "scheduled_process_pin_release",
+        "scheduled_process_record_owned",
+        "scheduled_process_command_line",
+        "scheduled_process_parked_frame",
+        "scheduled_process_park_stack_run",
+        "scheduled_process_take_spare_stack_run",
+        "scheduled_process_exited_take",
+        "scheduled_process_start",
+        "kernel_process_root_authorities_check",
+        "kernel_process_stack_switch_take",
+        "kernel_process_orphan_defer",
+        "kernel_process_el1_resume_probe_fill",
+        "kernel_process_el1_resume_probe_run",
+        "kernel_process_start_handle",
+        "kernel_process_execution_reset",
+        "kernel_test_driver_phase_premise",
+        "kernel_process_boot_handoff",
+        "kernel_process_scheduler_enable",
+        "kernel_process_scheduler_disable",
+        "kernel_process_core0_leave_excluded",
+        "kernel_process_migrate_current",
+        "kernel_process_spread_timer_progress",
+        "kernel_process_spread_timer_enter",
+        "kernel_process_schedule_reserved",
+        "kernel_process_secondary_start_reserved",
+        "kernel_process_idle_starvation_note",
+        "kernel_process_claimed_pid_or_zero",
+        "kernel_process_activate_stable_root",
+        "kernel_process_activate_stable_owned_root",
+        "kernel_boot_stack_arm",
+        "kernel_process_tick_leave_excluded",
+        "el1_preempt_spin_until_switch",
+        "el1_preempt_spin_until_refused",
+        "kernel_process_el1_preempt_scenario",
+        "kernel_process_syscall_return_schedule",
+        "kernel_process_block_to_idle",
+        "kernel_process_block_current",
+        "kernel_process_block_reserved",
+        "kernel_process_signal_deliver_traced",
+        "kernel_syscall_uart_deliver",
+        "kernel_process_tick_wake_one",
+        "kernel_process_probe_blocks_to",
+        "kernel_process_probe_deferred_address",
+        "kernel_process_clone_begin",
+        "kernel_process_scheduler_probe_stack_depart",
+        "kernel_process_scheduler_probe_stack_arrive",
+        "kernel_process_fanout_probe",
+        "kernel_process_clone_rollback",
+        "kernel_process_exit_waiter_probe",
+        "execution_publication_cost_sample",
+        "execution_publication_cost_log",
+        "kernel_process_execution_observation_probe",
+        "execution_current_set_live_here",
+        "kernel_process_scheduler_probe",
+        "kernel_process_exit_continuation_probe",
+        "kernel_process_exit_reserved",
+        "kernel_process_leave_parent_ready",
+        "kernel_syscall_wait4_deliver",
+        "kernel_process_child_exit",
+        "kernel_process_last_exited_child_pid",
+        "fd_block_pool_lock",
+        "fd_block_pool_unlock",
+        "fd_context_pool_lock",
+        "fd_context_pool_unlock",
+        "object_refcount_take",
+        "object_refcount_give",
+        "object_pool_lock",
+        "object_pool_unlock",
+        "process_image_pool_lock",
+        "process_image_pool_unlock",
+        "process_image_record_lost",
+        "process_image_record_read",
+        "process_image_record_publish",
+        "process_image_clone_vm_reap",
+        "process_image_map_segments",
+        "mmap_region_pool_lock",
+        "mmap_region_pool_unlock",
+        "boot_once_unwritten_stop",
+        "tcp_frame_pool_lock",
+        "tcp_frame_pool_unlock",
+        "pin_sharing_lock",
+        "pin_sharing_unlock",
+        "tcp_retx_pool_lock",
+        "tcp_retx_pool_unlock",
+        "user_access_window_open",
+        "user_access_window_close",
+        "profile_sample_start",
+        "profile_sample_finish",
+        "profile_session_irq",
+        "profile_session_start",
+        "workload_move_cost_progress",
+        "kernel_syscall_ext2_configure",
+        "kernel_syscall_uart_block_prepare",
+        "kernel_syscall_block_choose",
+        "kernel_syscall_resume_tail",
+        "kernel_syscall_child_exec_return",
+        "kernel_syscall_child_exec_enter",
+        "kernel_syscall_child_exec_refused",
+        "signal_return_exit",
+        "signal_deliver",
+        "kernel_syscall_dispatch_action",
+        "log_storm_trace_probe",
+        "syscall_clone_current",
+        "kernel_ddb_breakpoint_test_checkpoint",
+        "ddb_read_kernel_byte",
+        "ddb_pc_is_generated",
+        "ddb_pc_is_breakpoint_bridge",
+        "ddb_walk_backtrace",
+        "kernel_ddb_enter_stopped",
+        "crash_snapshot_capture",
+        "kernel_test_driver_run",
+        "kernel_test_platform_network",
+        "kernel_test_platform_storage",
+        "kernel_init_process_start",
+        "msc_csw_take",
+        "msc_csw_fail_cpu",
+        "msc_csw_fail_device",
+        "xhci_control_take",
+        "xhci_control_fail_cpu",
+        "xhci_control_fail_device",
+        "msc_data_take",
+        "msc_data_fail_cpu",
+        "msc_data_fail_device",
+        "msc_cbw_take",
+        "msc_cbw_fail_cpu",
+        "msc_cbw_fail_device",
+        "msc_data_out_take",
+        "msc_data_out_fail_cpu",
+        "msc_data_out_fail_device",
+        "xhci_ring_lost",
+        "xhci_input_lost",
+        "xhci_table_lost",
+        "xhci_live_lost",
+        "tcp_pool_cost_evidence",
+        "pin_sharing_evidence",
+        "tcp_claim_probe_meet",
+        "tcp_claim_probe_run",
+        "tcp_claim_probe_abandon",
+        "tcp_fixture_claim_contention_probe",
+        "ext2_mutation_probe_mutator",
+        "ext2_mutation_probe_reader",
+        "ext2_slot_pool_probe",
+        "ext2_mutation_probe_finish",
+        "ext2_mutation_probe_core0_reader",
+        "ext2_mutation_probe_overlap",
+        "ext2_mutation_probe_run_phase",
+        "ext2_mutation_probe_put_peers",
+        "ext2_mutation_probe_report",
+        "ext2_mutation_contention_probe",
+        "signal_probe_peer_mask",
+        "signal_probe_hold_locked",
+        "signal_probe_wait_done",
+        "signal_probe_round",
+        "signal_contention_run_phase",
+        "signal_contention_probe",
+        "log_storm_write_share",
+        "log_storm_wait_word",
+        "log_storm_wait_peers",
+        "log_storm_probe",
+        "peer_console_probe",
+        "contention_probes",
+        "contention_probes_run",
+        "kernel_secondary_boot_await",
+        "kernel_secondary_boot_attempt",
+        "kernel_secondary_boot_cpu_on",
+        "kernel_secondary_boot_report",
+        "rpi5_psci_cpu_on",
+        "kernel_platform_net_link_up",
+        "kernel_platform_net_capability_return",
+        "kernel_boot_log_usb_init_failure",
+        "kernel_boot_log_xhci_capability",
+        "kernel_usb_disk_initialize"
+      ],
+      "layouts": {
+        "baseline": [
+          "AtomicWord\tvalue\t0",
+          "AtomicWord\t.size\t8",
+          "AtomicWord\t.members\t1",
+          "TcpPoolCostSample\tlock_serial\t0",
+          "TcpPoolCostSample\tlock_parallel\t8",
+          "TcpPoolCostSample\towner_serial\t16",
+          "TcpPoolCostSample\towner_parallel\t24",
+          "TcpPoolCostSample\t.size\t32",
+          "TcpPoolCostSample\t.members\t4"
+        ],
+        "candidate": [
+          "AtomicWord\tvalue\t0",
+          "AtomicWord\t.size\t8",
+          "AtomicWord\t.members\t1",
+          "TcpPoolCostSample\tlock_serial\t0",
+          "TcpPoolCostSample\tlock_parallel\t8",
+          "TcpPoolCostSample\towner_serial\t16",
+          "TcpPoolCostSample\towner_parallel\t24",
+          "TcpPoolCostSample\t.size\t32",
+          "TcpPoolCostSample\t.members\t4"
+        ]
+      },
+      "symbols": {
+        "tcp_pool_cost_samples": {
+          "baseline": {
+            "address": 7836216,
+            "size": 96,
+            "type": 1,
+            "section": 6
+          },
+          "candidate": {
+            "address": 7836216,
+            "size": 96,
+            "type": 1,
+            "section": 6
+          }
+        },
+        "tcp_pool_cost_evidence": {
+          "baseline": {
+            "address": 2767200,
+            "size": 504,
+            "type": 2,
+            "section": 1
+          },
+          "candidate": {
+            "address": 2767200,
+            "size": 536,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "pin_sharing_evidence": {
+          "baseline": {
+            "address": 2767712,
+            "size": 456,
+            "type": 2,
+            "section": 1
+          },
+          "candidate": {
+            "address": 2767744,
+            "size": 468,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "usable_ram_start": {
+          "baseline": {
+            "address": 8257536,
+            "size": 0,
+            "type": 0,
+            "section": 7
+          },
+          "candidate": {
+            "address": 8257536,
+            "size": 0,
+            "type": 0,
+            "section": 7
+          }
+        }
+      }
+    }
+  }
+}

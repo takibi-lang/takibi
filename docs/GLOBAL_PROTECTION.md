@@ -1079,3 +1079,9 @@ computed at the typed reaped callback before unchanged pending publication.
 Both production compiler tables classify it as atomic, so its former plain
 variant allowance is removed. Readiness remains pending/reported, including
 valid displayed zero; this does not convert ProcessEnd or wait4 to integers.
+
+TcpPoolCostSample retains three records with four AtomicWord fields each.
+Both production tables classify the array as composite, naturally retiring
+only its plain allowance. The same CPU-0 driver records all four results
+before storing and reports them after the sharing pair; timings, mailboxes
+and source/caller ordering remain separate trusted premises.
