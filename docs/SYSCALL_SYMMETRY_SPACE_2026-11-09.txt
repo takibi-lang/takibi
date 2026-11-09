@@ -82,3 +82,32 @@ claim is made from image size or QEMU. Do not weaken descriptor checks,
 stack ownership or diagnostics to minimize the image. The next review trigger
 is the ExecutionState per_cpu migration, RootHeld lifetime changes, or another
 completed scheduler/storage feature (including the sleeping-Mutex foundation).
+
+Combined syscall-symmetry and settings-wake measurement
+------------------------------------------------------
+Production source: 8ad032f6 (2026-11-09). The same published baseline
+793a1d09 applies. Both production kernels were rebuilt together with the
+root kernelbuild-qemu and kernelbuild-rpi5 targets, which exited zero.
+This combines the syscall removal above with the independently measured
+WorkloadSettingsWake atomic-cell migration in docs/GLOBAL_PROTECTION.md.
+
+Boundary                         QEMU             RPi5
+llvm-size text                   808968           4193820
+data                             4600             5576
+BSS                              1302528          1933312
+text delta from 793a1d09          -1660            +964
+WorkloadSettingsWake payload     80               80
+ddb_state payload                11504            11504
+usable_ram_start                 0x40208000       0x7e0000
+
+The combined text is 160 bytes above the standalone syscall candidate on
+each platform, matching the settings-wake conversion's measured code cost.
+That record grows from 64 to 80 bytes within the existing BSS reservation;
+the RPi5 embedded provision container remains 0x32c60d bytes. The separate
+512-byte ddb_state reduction, record payload growth and unchanged section
+reservation are different boundaries and are not summed into freed RAM.
+No pool, allocator metadata, retained-page policy or lifetime change is
+introduced. Adopt the small measured atomic-access and regression-payload
+cost. This remains a measured syscall-feature milestone, not an incremental
+substitute for one; the whole globals milestone still needs its own workload
+review. No physical timing/cache or runtime peak-occupancy claim is made.
