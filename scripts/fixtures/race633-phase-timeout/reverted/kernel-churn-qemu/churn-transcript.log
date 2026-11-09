@@ -1,0 +1,100 @@
+
+ # churn.sh 100
+--- sent QEMU PL011 BREAK for Takibi DDB ---
+
+ddb: interrupt-safe UART debugger
+ddb: console lock probe phase=0 release=0 entry-held=no
+ddb: world-stop complete mask=0x0000000000000007
+ddb: break seq=2 cpu=3 elr=0x000000004000c2c8 sp_el0=0x00000000bfffe370
+ddb> 
+ddb: ps count=8 truncated=0
+ddb: ps pid=2 ppid=1 state=3 wait=3 waker=net-rx frame-pending=no connection-pending=no root=1076854864 sp=0x0000000040257cc0 pending=none masked=none owner=none mask=0x0000000000000000 cmd="/bin/httpd -f -p 8080 -h"+
+ddb: ps pid=1 ppid=0 state=3 wait=5 waker=signal root=1076857056 sp=0x000000004024fcc0 pending=none masked=sighup,sigint,sigquit,sigusr1,sigusr2,sigterm,sigchld,sigpwr owner=none mask=0x0000000000000000 cmd="init"
+ddb: ps pid=3 ppid=1 state=3 wait=2 waker=child-exit root=1076859248 sp=0x0000000040317cc0 pending=none masked=none owner=none mask=0x0000000000000000 cmd="/bin/sh -i"
+ddb: ps pid=4 ppid=3 state=2 wait=0 root=1076861440 sp=0x00000000406dfcc0 pending=none masked=sighup,sigint,sigquit,sigill,sigtrap,sigabrt,sigbus,sigfpe,sigusr1,sigsegv,sigusr2,sigpipe,sigalrm,sigterm,sigstkflt,sigchld,sigcont,sigtstp,sigttin,sigttou,sigurg,sigxcpu,sigxfsz,sigvtalrm,sigprof,sigwinch,sigio,sigpwr,sigsys+0xffffffff80000000 owner=3 mask=0x0000000000000000 cmd="/bin/sh /bin/churn.sh 10"+
+ddb: ps pid=325 ppid=4 state=2 wait=0 root=1076863632 sp=0x000000004089fcc0 pending=none masked=none owner=1 mask=0x0000000000000000 cmd="/bin/echo churn 80"
+ddb: ps pid=326 ppid=4 state=2 wait=0 root=1076865824 sp=0x0000000040897cc0 pending=none masked=sighup,sigint,sigquit,sigill,sigtrap,sigabrt,sigbus,sigfpe,sigusr1,sigsegv,sigusr2,sigpipe,sigalrm,sigterm,sigstkflt,sigchld,sigcont,sigtstp,sigttin,sigttou,sigurg,sigxcpu,sigxfsz,sigvtalrm,sigprof,sigwinch,sigio,sigpwr,sigsys+0xffffffff80000000 owner=2 mask=0x0000000000000000 cmd="/bin/sh /bin/churn.sh 10"+
+ddb: ps pid=328 ppid=326 state=5 wait=0 root=1076868016 sp=0x00000000408a7ff0 pending=none masked=sighup,sigint,sigquit,sigill,sigtrap,sigabrt,sigbus,sigfpe,sigusr1,sigsegv,sigusr2,sigpipe,sigalrm,sigterm,sigstkflt,sigchld,sigcont,sigtstp,sigttin,sigttou,sigurg,sigxcpu,sigxfsz,sigvtalrm,sigprof,sigwinch,sigio,sigpwr,sigsys+0xffffffff80000000 owner=none mask=0x0000000000000000 cmd="/bin/sh /bin/churn.sh 10"+
+ddb: ps pid=327 ppid=4 state=5 wait=0 root=1076559952 sp=0x00000000408afff0 pending=none masked=sighup,sigint,sigquit,sigill,sigtrap,sigabrt,sigbus,sigfpe,sigusr1,sigsegv,sigusr2,sigpipe,sigalrm,sigterm,sigstkflt,sigchld,sigcont,sigtstp,sigttin,sigttou,sigurg,sigxcpu,sigxfsz,sigvtalrm,sigprof,sigwinch,sigio,sigpwr,sigsys+0xffffffff80000000 owner=none mask=0x0000000000000000 cmd="/bin/sh /bin/churn.sh 10"+
+ddb> 
+ddb: sched enabled=1 pending=1 current=327 ready=0 running=3 blocked=3 exited=0 constructing=2 truncated=0
+ddb: virtio-blk completions=219059 max-ticks=3377385 total-ticks=4244377689 tickfreq=62500000
+ddb: wait current=327 state=constructing reason=none awaited=0
+ddb: wait pid=2 state=blocked waits-for event=net-rx frame-pending=no connection-pending=no tick-wake=core0 due=1 rx-cap=no
+ddb: wait pid=1 state=blocked waits-for event=signal
+ddb: wait pid=3 state=blocked waits-for child pid=4 state=running
+ddb: wait edges=3 blocked=3 unknown=0 truncated=0
+ddb> 
+ddb: wait current=327 state=constructing reason=none awaited=0
+ddb: wait pid=2 state=blocked waits-for event=net-rx frame-pending=no connection-pending=no tick-wake=core0 due=1 rx-cap=no
+ddb: wait pid=1 state=blocked waits-for event=signal
+ddb: wait pid=3 state=blocked waits-for child pid=4 state=running
+ddb: wait edges=3 blocked=3 unknown=0 truncated=0
+ddb> 
+ddb: current pid=327 parent=4 state=5 wait=0
+ddb: activity cpu=0 idle-loop current=0 stack=0
+ddb: activity cpu=1 syscall current=325 stack=325
+ddb: activity cpu=2 syscall current=328 stack=326
+ddb: activity cpu=3 syscall current=327 stack=4
+ddb> 
+ddb: stacks cpus=4 processes=8 truncated=0
+ddb: stack cpu=0 status=idle
+ddb: stack cpu=1 pid=325 stack=0x000000004089c000..0x00000000408a0000 owner=1 record=match
+ddb: stack cpu=2 pid=326 stack=0x0000000040894000..0x0000000040898000 owner=2 record=match
+ddb: stack cpu=3 pid=4 stack=0x00000000406dc000..0x00000000406e0000 owner=3 record=match
+ddb: stacks roots=3 matched=3 missing=0 duplicate-process=0 owner-mismatch=0 range-mismatch=0 duplicate-pid=0 duplicate-stack=0
+ddb> 
+ddb: events cpu=0 count=0 damaged=0 overwritten=0
+ddb: events cpu=1 count=0 damaged=0 overwritten=0
+ddb: events cpu=2 count=0 damaged=0 overwritten=0
+ddb: events cpu=3 count=0 damaged=0 overwritten=0
+ddb> 
+ddb: intr cpu=3 entry=irq source=33 live_daif=0x0000000000000340 saved_daif=0x0000000000000340
+ddb: intr esr=unavailable far=unavailable
+ddb: intr count cpu=0 intid=1 count=4
+ddb: intr count cpu=0 intid=30 count=8490
+ddb: intr count cpu=0 intid=33 count=13
+ddb: intr count cpu=1 intid=1 count=29
+ddb: intr count cpu=1 intid=2 count=8
+ddb: intr count cpu=1 intid=30 count=8505
+ddb: intr count cpu=1 intid=33 count=67
+ddb: intr count cpu=1 other=1
+ddb: intr count cpu=2 intid=1 count=29
+ddb: intr count cpu=2 intid=30 count=8545
+ddb: intr count cpu=2 intid=33 count=536
+ddb: intr count cpu=3 intid=1 count=28
+ddb: intr count cpu=3 intid=30 count=8520
+ddb: intr count cpu=3 intid=33 count=9
+ddb> 
+ddb: trace count=16
+ddb: trace seq=4267 cpu=1 event=12 pid=322 gen=378 peer=0 state=2 wait=0 root=1076865824 sp=0x000000004089fcc0 aux=0x0000000000000111
+ddb: trace seq=4268 cpu=1 event=13 pid=322 gen=378 peer=0 state=2 wait=0 root=1076865824 sp=0x000000004089fcc0 aux=0x0000000000000000
+ddb: trace seq=4269 cpu=1 event=8 pid=322 gen=378 peer=4 state=2 wait=0 root=1076865824 sp=0x000000004089fcc0 aux=0x0000000000000003
+ddb: trace seq=4270 cpu=1 event=11 pid=4 gen=60 peer=322 state=3 wait=5 root=1076861440 sp=0x00000000406dfcc0 aux=0x0000000000000111
+ddb: trace seq=4271 cpu=1 event=7 pid=4 gen=60 peer=322 state=2 wait=0 root=1076861440 sp=0x00000000406dfcc0 aux=0x0000000000000000
+ddb: trace seq=4272 cpu=1 event=12 pid=4 gen=60 peer=0 state=2 wait=0 root=1076861440 sp=0x00000000406dfcc0 aux=0x0000000000000111
+ddb: trace seq=4273 cpu=1 event=9 pid=322 gen=378 peer=0 state=4 wait=0 root=1076865824 sp=0x000000004089fcc0 aux=0x0000000000000000
+ddb: trace seq=4274 cpu=1 event=13 pid=4 gen=60 peer=322 state=2 wait=0 root=1076861440 sp=0x00000000406dfcc0 aux=0x0000000000000300
+ddb: trace seq=4275 cpu=1 event=13 pid=4 gen=60 peer=0 state=2 wait=0 root=1076861440 sp=0x00000000406dfcc0 aux=0x0000000000000000
+ddb: trace seq=4276 cpu=1 event=1 pid=325 gen=381 peer=4 state=5 wait=0 root=1076863632 sp=0x000000004089fff0 aux=0x0000000000000011
+ddb: trace seq=4277 cpu=2 event=7 pid=4 gen=60 peer=4 state=2 wait=0 root=1076861440 sp=0x00000000406dfcc0 aux=0x0000000000000000
+ddb: trace seq=4278 cpu=2 event=1 pid=326 gen=382 peer=4 state=5 wait=0 root=1076865824 sp=0x0000000040897ff0 aux=0x0000000000000011
+ddb: trace seq=4279 cpu=3 event=7 pid=4 gen=60 peer=4 state=2 wait=0 root=1076861440 sp=0x00000000406dfcc0 aux=0x0000000000000000
+ddb: trace seq=4280 cpu=1 event=2 pid=325 gen=381 peer=0 state=2 wait=0 root=1076863632 sp=0x000000004089fcc0 aux=0x0000000000000000
+ddb: trace seq=4281 cpu=3 event=1 pid=327 gen=384 peer=4 state=5 wait=0 root=1076559952 sp=0x00000000408afff0 aux=0x0000000000000011
+ddb: trace seq=4282 cpu=2 event=1 pid=328 gen=383 peer=326 state=5 wait=0 root=1076868016 sp=0x00000000408a7ff0 aux=0x0000000000000011
+ddb> Exception in thread rx:
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/threading.py", line 1073, in _bootstrap_inner
+    self.run()
+  File "/usr/lib/python3.12/threading.py", line 1010, in run
+    self._target(*self._args, **self._kwargs)
+  File "/workspaces/takibi-claude/scripts/run_kernel_shell_console.py", line 250, in reader
+    data = self.serial.read(self.serial.in_waiting or 1)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/serial/urlhandler/protocol_socket.py", line 167, in read
+    buf = self._socket.recv(size - len(read))
+          ^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'recv'
+[kernel/qemu] UART transcript saved: /workspaces/takibi-claude/_build/kernel-race-window-qemu/633/reverted/kernel-churn-qemu/uart-transcript.log
+qemu-system-aarch64: terminating on signal 15 from pid 757989 (bash)

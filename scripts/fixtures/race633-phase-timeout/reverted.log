@@ -1,0 +1,4 @@
+[lease] waiting for 4 more of 4 vCPUs (budget 24): takibi-claude scripts/run_kernel_qemutest.sh x4, takibi-claude /workspaces/takibi-claude/scripts/run_kernel_qemutest.sh x20
+[lease] got 4 vCPUs
+[churn resync] start=19181 prompt_before_start=False answered=True after=0.0s total=19205
+FAIL [kernel/qemu churn]: no heartbeat for 120 s after 0 rounds: the phase hung; DDB's views are in the transcript; transcript in _build/kernel-race-window-qemu/633/reverted/kernel-churn-qemu/churn-transcript.log

@@ -1,0 +1,15 @@
+{
+  "source_head": "dc1e69ef",
+  "source_archive": "/workspaces/takibi-claude/.git/takibi-land/failures/633-dc1e69ef-20261109T084007Z",
+  "curation": "Keep original failure log/await row; normalize CR/cursor query and retain transcript from the one phase echo through completed postmortem and shutdown. No invented progress or missing signature.",
+  "original_sha256": {
+    "reverted.log": "d5ab655a95eaf0c61fa0bd3e3636daed989708b72d5035024930381677220234",
+    "reverted/kernel-churn-qemu/churn-transcript.log": "4e729ee39952e259831ad12014a1a33bd3a0d7b2bd6fbeffb8f44fef9a37877e",
+    "reverted/kernel-churn-qemu/churn-transcript.log.await-0010.jsonl": "a5f8266d464a902ae3ccc0488025caab053e570423604e418c73ce6a2b6bcd8a"
+  },
+  "curated_sha256": {
+    "reverted.log": "d5ab655a95eaf0c61fa0bd3e3636daed989708b72d5035024930381677220234",
+    "reverted/kernel-churn-qemu/churn-transcript.log": "8413c42d0e6c8dc899d58cd3067835a363dfee97ddf218f57169381eb64afce2",
+    "reverted/kernel-churn-qemu/churn-transcript.log.await-0010.jsonl": "a5f8266d464a902ae3ccc0488025caab053e570423604e418c73ce6a2b6bcd8a"
+  }
+}

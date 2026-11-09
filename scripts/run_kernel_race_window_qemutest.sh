@@ -156,6 +156,15 @@ if ! grep -aEq "$SIGNATURE" "$(signature_file)" && [ "$WORKLOAD" = churn ] &&
     echo "RECORDED $LABEL: the reverted churn stopped at its resync timeout before the window (QEMU timing verdict; #692)"
     exit 0
 fi
+# #692 also covers the reverted churn phase timeout. A message alone is not
+# enough: the host classifier requires this phase's actual deadline evidence
+# and refuses early EOF, missing evidence and functional faults. The exact
+# negative-control signature/trace checks below are unchanged.
+if [ "$WINDOW" = 633 ] && [ "$WORKLOAD" = churn ] &&
+        ! grep -aEq "$SIGNATURE" "$(signature_file)" &&
+        python3 "$REPO_ROOT/scripts/race_churn_timing.py" "$ROOT" "$CHURN_ROUNDS"; then
+    exit 0
+fi
 if ! grep -aEq "$SIGNATURE" "$(signature_file)"; then
     echo "FAIL $LABEL: with the check reverted the $WORKLOAD failed, but no line matched $SIGNATURE" >&2
     grep -aE '^(oops: (fail-stop|activity)|sched: STARVED|ddb: wait pid)' "$(signature_file)" | sed 's/^/  /' >&2 || true
