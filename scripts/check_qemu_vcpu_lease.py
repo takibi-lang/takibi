@@ -24,6 +24,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 EXEMPT = {"scripts/qemu.sh", "scripts/check_qemu_vcpu_lease.py",
           "scripts/qemu_vcpu_lease.py", "scripts/slowcheck_resource_lease.sh"}
 DIRECT = re.compile(r"qemu-system-aarch64")
+# A colon-terminated binary name is diagnostic text, not that executable.
+# Exclude only this occurrence; another bare name on the same line still fails.
+TERMINATING_DIAGNOSTIC = re.compile(r": terminating\b")
 MATCHER = re.compile(r"\b(pgrep|pkill)\b")
 # GitHub issue #1442: a file RUNS the shim when the shim is a command, not
 # when it merely names it (a grep of it, a message about it). A command is
@@ -44,7 +47,9 @@ def problems(name, text):
     found = []
     for number, line in enumerate(text.splitlines(), 1):
         code = line.split("#", 1)[0] if name.endswith((".sh", ".py")) else line
-        if DIRECT.search(code) and not MATCHER.search(code):
+        direct = any(not TERMINATING_DIAGNOSTIC.match(code, match.end())
+                     for match in DIRECT.finditer(code))
+        if direct and not MATCHER.search(code):
             found.append(f"{name}:{number}: starts qemu-system-aarch64 directly;"
                          " use scripts/qemu.sh under a vCPU lease")
     if SHIM.search(text) and not LEASE.search(text):
@@ -76,6 +81,19 @@ def main():
             or problems("x.py", 'print("start guests through scripts/qemu.sh")\n'):
         print("FAIL qemu-vcpu-lease: the check's own controls no longer behave")
         return 1
+    diagnostic_cases = (
+        ('x.py', 'rx = rb"qemu-system-aarch64: terminating on signal 15"', False),
+        ('x.py', 'rx = rb"qemu-system-aarch64: terminating|other"', False),
+        ('x.sh', 'qemu-system-aarch64: terminating; qemu-system-aarch64 -smp 2', True),
+        ('x.sh', 'qemu-system-aarch64 -smp 2; echo "qemu-system-aarch64: terminating"', True),
+        ('x.py', 'print("qemu-system-aarch64: terminating"); subprocess.run(["qemu-system-aarch64"])', True),
+        ('x.py', 'subprocess.run(["qemu-system-aarch64", "-smp", "2"])', True),
+        ('x.py', 'rx = "qemu-system-aarch64: terminatingly"', True),
+    )
+    for name, text, refused in diagnostic_cases:
+        if bool(problems(name, text)) != refused:
+            print('FAIL qemu-vcpu-lease: diagnostic occurrence control: ' + text)
+            return 1
     files = subprocess.run(["git", "ls-files", "*.sh", "*.py"], cwd=ROOT,
                            check=True, capture_output=True, text=True).stdout.split()
     found, starters = [], 0
@@ -93,7 +111,7 @@ def main():
         return 1
     report_pass("qemu-vcpu-lease",
                 f"{starters} QEMU runners start the guest through the leased shim",
-                runners=starters)
+                runners=starters, diagnostics=len(diagnostic_cases))
     return 0
 
 
