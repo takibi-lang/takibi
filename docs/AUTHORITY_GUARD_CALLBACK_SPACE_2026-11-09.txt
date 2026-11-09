@@ -32,7 +32,8 @@ Both targets' .text/.rodata/.data section hashes match the baseline exactly;
 .bss sizes match (NOBITS has no payload hash). No pool, reservation, retained
 page or payload-capacity change is introduced by this compiler component.
 
-Native fixture space, same current compiler and original vs extended source
+Historical initial native fixture (inline-callsite coverage only)
+Space, same current compiler and original vs initially extended source
                        before     after      delta
 llvm-size text total    7359       8347       +988
 .data                  0          0          0
@@ -117,3 +118,39 @@ foundation was rebased onto that published docs-only commit without changing
 production fingerprint b55ce86cb1b421d05b854dca770b4e7b05753aafee1ffefc53c03d9c3aa2f1ae.
 Final checks actually ran on a7c6e452; later report/checkpoint commits are
 metadata only. No rebuild or runtime repeat is attributed to those commits.
+
+Out-of-line borrowed-callback ABI correction (same compiler/production sources)
+Review found that the initial positive callsite inlined the scope, so the
+retained generic function-pointer ABI had compiled but had not executed.
+The maintained fixture now additionally calls noinline
+bootstrap_cell_scope_indirect before ending the SAME actual BootPhase.
+It acquires the actual LockedCellGuard, calls the supplied pointer while
+holding it, gives the real lock, and returns. The returned value is compared
+with the inline path; a mismatch exits95. Expected stdout remains unchanged.
+
+Actual build command exited0; actual executable exited0 and matched expected
+output. SHA256865d04425c10b8538df1164701a4a0394105390d0a5ef2fe82510ddea2447471.
+Disassembly confirms the executed roundtrip call at0x2031e9 reaches wrapper
+0x203140; its callq *rbx at0x203155 is followed by real give at0x203164.
+boot_phase_end occurs after returning to the caller. The old inline-only
+receipt and executable hash above remain historical, not this ABI execution.
+Both emitted scope wrappers are49B; the roundtrip is230B. This records actual
+instruction review, not a new automated assembly-check framework.
+
+Updated native space against the SAME original-source baseline:
+                        baseline     current       delta
+llvm-size text total     7359         8475          +1116
+.text                    3932         4616          +684
+.rodata                  503          535           +32
+.eh_frame                2924         3324          +400
+.bss payload             928          952           +24
+.relro_padding           352          3336          +2984
+llvm-size BSS total      1280         4288          +3008
+The extra path adds128 text-total bytes vs the initial fixture and changes
+RELRO padding by-128B; actual state payload remains+24B. No linker settings,
+compiler semantics, kernel sources, production ELF or allocation facts changed.
+The existing native IRQ-mask stand-in and ordinary extern-sink trust remain.
+No compiler/full-allbuild/QEMU/hardware rerun was needed for this fixture-only
+extension; targeted build, execution and actual instruction path were checked.
+A receipt file size of2 bytes was briefly mistaken for exit2; its CONTENT is0.
+There was no build/invocation failure for this correction.

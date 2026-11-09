@@ -125,12 +125,24 @@ private inline fn bootstrap_cell_scope(phase: borrow BootPhase[ended],
     locked_cell_give(&cell_a, guard);
     return value;
 }
+// Execute the ordinary callback ABI as well as the inlined callsite above.
+// noinline keeps this real held-guard call/release boundary out of line.
+private noinline fn bootstrap_cell_scope_indirect(phase: borrow BootPhase[ended],
+        body: fn !{unsafe}(borrow LockedCellGuard[&cell_a]) -> usize)
+        -> usize !{unsafe} {
+    let guard = bootstrap_cell_take(phase);
+    let value = body(guard);
+    locked_cell_give(&cell_a, guard);
+    return value;
+}
 fn boot_once_unwritten_stop() { linux_exit(92); }
 private let mut bootstrap_value: BootOnce(usize);
 private fn bootstrap_cell_roundtrip() -> usize !{unsafe} {
     let phase = boot_phase_mint();
     boot_once_set(&bootstrap_value, phase, 42);
     let value = bootstrap_cell_scope(phase, bootstrap_cell_body);
+    let indirect = bootstrap_cell_scope_indirect(phase, bootstrap_cell_body);
+    if (indirect != value) { linux_exit(95); }
     boot_phase_end(phase);
     if (locked_cell_is_held(&cell_a)) { linux_exit(93); }
     // Reacquire the same real lock to prove that scope released it.
