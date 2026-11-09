@@ -73,3 +73,37 @@ This checkpoint does not claim completed sleeping-Mutex acceptance or a
 measured kernel Mutex fast/contended cost. Next measurement: rebased kernel
 source combination, real scheduler Mutex integration, or a changed callback,
 guard representation or allocation workload.
+
+Rebased production-source combination: measured after publication
+- Preserved pre-rebase checkpoint: fbfd2d1990b5a3216f54e86e3085eb1528e312e0.
+- Checkpoint rebase onto published88c1912cceb8305af9158b8fd4f9e60b392946a3
+  produced a7c6e45213adb3f20c4a919ce7748b1609382c25.
+- Final a7c6e452 langcheck, linuxcheck, compiler unit tests and
+  kernel-memory-map-check each returned0. The last target rebuilt BOTH
+  production ELFs with the normal Makefile compile, without profiling.
+- Baseline: kernel-green-88c1912c/manifest.json, exact source HEAD above,
+ 149 archived files; both archived ELF SHA256 values verified before use.
+
+              before/after text    data     BSS
+QEMU          818056               4632     1318912
+RPi5          4202692              5608     1937408
+Both targets again have byte-identical .text/.rodata/.data sections against
+their green88 baselines; .bss section sizes match. All data/BSS symbols and
+usable_ram_start addresses/sizes match; reservation boundaries are unchanged.
+This is a fresh comparison of the combined sources, not an additive estimate
+from the earlier fd/e15 result. The native fixture cost above is separate.
+
+Fresh normal QEMU main.o allocated585279248 OCaml words; the existing
+589000000-word check passes. This is an independent measurement on the
+rebased combination, not old584542607 plus an estimated delta. The archive
+has no baseline allocwords file, so no same-source before/after allocation
+claim is made for88. Current remaining margin:3720752 words. Do not weaken
+the ceiling; later integration must measure its actual compilation again.
+
+Compiler SHA256 remains
+3f3718948cb2f308a5b6f2846b6d408f4fd0dc062e1a44716e64b3a6cd6cc706.
+No worker QEMU or board test was needed for this compiler-only component;
+the current production code/data bytes match the separately validated88
+baseline. Actual scheduler-backed Mutex behavior is not exercised here.
+Next measurement: scheduler integration, real scoped acquisition entrances,
+or a changed proof/callback representation or allocation workload.

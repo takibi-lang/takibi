@@ -3,13 +3,13 @@
   "event": "milestone",
   "decision": "measured",
   "source_sha256": "b55ce86cb1b421d05b854dca770b4e7b05753aafee1ffefc53c03d9c3aa2f1ae",
-  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 88c1912c: this branch's review, rebound to the merged sources (upstream's record was 2026-11-09 milestone/measured). Compiler authority-derived linear-guard and named synchronous borrowed-callback foundation on published fd283841/e15 production sources. Full cross-tree allbuild and actual BootPhase/LockedCell native scope; scheduler Mutex integration remains separate.",
+  "workload": "Rebased compiler authority-derived guard and named borrowed-callback foundation on published88c1912c. Final host/native gates plus fresh normal builds of BOTH production kernels compared with verified green88 archive. Existing allocation workload; actual scheduler Mutex integration remains separate.",
   "evidence": [
     "docs/AUTHORITY_GUARD_CALLBACK_SPACE_2026-11-09.txt",
     "SPEC.md",
     "TRUSTED_BASE.md",
     "kernel/MEMORY_MAP.md"
   ],
-  "assessment": "Both rebuilt production kernels retain identical .text/.rodata/.data bytes and BSS size. Native fixture text total+988B; actual BSS+24B plus RELRO padding+3112B. Actual inlined callsite direct; retained generic scope49B still indirect. QEMU compiler allocated584542607 words (+1.0155 percent vs published578666141), below589000000; no ceiling edit. No new production storage/allocation or completed scheduler/hardware cost claim.",
-  "next_trigger": "Rebased production-source combination or scheduler Mutex integration; changed guard/callback representation or allocation workload."
+  "assessment": "Fresh combined outputs: QEMU text/data/BSS818056/4632/1318912 and RPi54202692/5608/1937408, identical to green88. Both targets have equal code/rodata/data section hashes, BSS sizes, storage symbols and reservation boundaries. Fresh QEMU compiler585279248 words, below589000000; no additive allocation estimate or ceiling edit. Separate native fixture text total+988B, payload+24B and RELRO padding+3112B; actual callsite direct, retained generic body49B indirect. No completed scheduler/hardware cost claim.",
+  "next_trigger": "Scheduler Mutex integration and actual scoped acquisition entrances, or changed proof/callback representation or allocation workload."
 }
