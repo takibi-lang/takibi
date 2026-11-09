@@ -112,12 +112,12 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
 per_cpu/CpuHere authority; its runtime and four-core RPi5 cost review are
 complete. Continue RootHeld (#1472) and the remaining #638 review before
 the flip; #638 is not complete. The coordinator sequences shared scheduler
-edits with the sleeping-Mutex foundation (#1481), whose ownership/phase
-question remains parked, taking independent approved steps meanwhile.
-RootHeld's compile-allocation budget decision is pending. While it waits,
-take the already-approved exception diagnostic per-CPU stores as the
-independent kernel-core leaf #1486 under #1159; keep its implementation
-separate from the driver queue below.
+edits with the sleeping-Mutex foundation (#1481). Finish the current
+exception diagnostic per-CPU leaf #1486 first, separately from the driver
+queue below, then resume RootHeld. Its compile-allocation route is approved:
+investigate inexpensive reduction briefly, then refresh the measured budget
+if that does not resolve the ceiling. The Mutex lifetime/callback foundation
+and nonblocking boot probes are also approved; no extra bootstrap stack.
 
 **Assigned queue (maintainer, 2026-10-23, pruned 2026-10-25).** Memory
 safety and multicore backbone only. Taken in order whenever the numbered
@@ -202,12 +202,13 @@ owners are TaskMutex, the spare stack stays masked). #980
 
 ### Territory B: supporting the pillars, by priority
 
-**Priority update, 2026-11-09.** Implement #1481, scheduler-backed waiting
-Mutexes with non-sleeping paths preserved, before the preemption flip. When a
-design gate blocks it, continue the already-approved #1159 units.
-The block queue's guarded CPU-access boundary is published. Continue the
-network queue boundary next, preserving nonblocking receive and pending
-IRQ/capability bookkeeping; A holds the independent exception-store leaf.
+**Priority update, 2026-11-09.** Finish the current network queue boundary
+under #1159, preserving nonblocking receive and pending IRQ/capability
+bookkeeping; the block queue boundary is published and A holds the independent
+exception-store leaf. Then resume #1481, scheduler-backed waiting Mutexes
+before the preemption flip: lifetime ties as the foundation, scoped borrowed
+callbacks where needed, and explicit try acquisition in secondary boot
+probes. Preserve non-sleeping paths and add no dedicated bootstrap stack.
 
 **Assigned queue (maintainer, 2026-10-23, re-cut 2026-10-25).**
 Low-dependency issues A does not hold, in this order; compiler work in
