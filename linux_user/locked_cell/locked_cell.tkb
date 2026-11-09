@@ -28,6 +28,7 @@
 //   0x0000002a   ... and a's is still a's
 
 use "kernel/lib/locked_cell.tkb";
+use "kernel/lib/boot_once.tkb";
 
 let mut cell_a: LockedCell(usize);
 let mut cell_b: LockedCell(usize);
@@ -102,9 +103,48 @@ fn guarded_field_roundtrip() -> usize {
     return value;
 }
 
+// Actual phase and lock APIs: the phase is borrowed at the mint, the
+// callback sees the held guard, and release precedes phase end. The native
+// IRQ-mask provider is the existing fixture stand-in; the lock word and
+// acquisition/release remain the maintained Mutex/LockedCell implementation.
+private fn bootstrap_cell_take(phase: borrow BootPhase[ended])
+        -> LockedCellGuard[&cell_a] @ ended {
+    return locked_cell_take(&cell_a);
+}
+private fn bootstrap_cell_body(guard: borrow LockedCellGuard[&cell_a])
+        -> usize !{unsafe} {
+    if (locked_cell_is_held(&cell_a) == false) { linux_exit(91); }
+    locked_cell_store(guard, &cell_a, 42);
+    return locked_cell_load(guard, &cell_a);
+}
+private inline fn bootstrap_cell_scope(phase: borrow BootPhase[ended],
+        body: fn !{unsafe}(borrow LockedCellGuard[&cell_a]) -> usize)
+        -> usize !{unsafe} {
+    let guard = bootstrap_cell_take(phase);
+    let value = body(guard);
+    locked_cell_give(&cell_a, guard);
+    return value;
+}
+fn boot_once_unwritten_stop() { linux_exit(92); }
+private let mut bootstrap_value: BootOnce(usize);
+private fn bootstrap_cell_roundtrip() -> usize !{unsafe} {
+    let phase = boot_phase_mint();
+    boot_once_set(&bootstrap_value, phase, 42);
+    let value = bootstrap_cell_scope(phase, bootstrap_cell_body);
+    boot_phase_end(phase);
+    if (locked_cell_is_held(&cell_a)) { linux_exit(93); }
+    // Reacquire the same real lock to prove that scope released it.
+    let guard = locked_cell_take(&cell_a);
+    let saved = locked_cell_load(guard, &cell_a);
+    locked_cell_give(&cell_a, guard);
+    if (saved != value || saved != boot_once_get(&bootstrap_value)) { linux_exit(94); }
+    return value;
+}
+
 fn app_main() -> i32 !{unsafe} {
     let result: i32 = locked_cell_roundtrip();
     uart_println_hex(locked_record_roundtrip() as i32);
     uart_println_hex(guarded_field_roundtrip() as i32);
+    uart_println_hex(bootstrap_cell_roundtrip() as i32);
     return result;
 }

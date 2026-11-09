@@ -167,6 +167,25 @@ index equality alone cannot establish a physical lifetime relationship.
 Existing source aliases do not transfer. The contract adds no runtime pin or
 synchronization; ordinary call overhead depends on inlining.
 
+## Returned guard loans and synchronous callbacks
+
+An authority-derived linear guard return checks the caller's consumption,
+lexical lifetime and non-escape obligations. It does not prove that the guard
+mint actually protects the phase/resource it names. The declaring API and its
+real acquisition/release remain reviewed; extern terminal declarations remain
+trusted. The relation adds no runtime pin, allocation or lock.
+
+A scoped borrowed callback accepts only ordinary named Takibi bodies with
+matching ownership modes and an explicit effect contract. It cannot be
+retained or forwarded, and its entrance cannot escape as a function value.
+The union of all named targets feeds existing rank, IRQ-restore and
+record/witness analyses; it is not context polymorphism or a blanket exemption
+for indirect calls. Existing inlining may give direct dispatch at an actual
+callsite, while a generic body may remain in the image with pointer dispatch.
+The native LockedCell fixture uses the actual BootPhase and real Mutex lock
+word; its existing IRQ-mask provider is a single-threaded stand-in, not
+hardware interrupt/scheduler evidence.
+
 ## Logical context lifetime boundaries
 
 The compiler rejects `changes_witness_<View>` calls and inferred direct

@@ -2715,6 +2715,46 @@ cast, and are invariant behind writable pointers so an alias cannot replace a
 non-blocking callback with a blocking one. Effects still erase completely:
 they add no LLVM parameter, field, instruction, or metadata.
 
+### Named synchronous borrowed callbacks
+
+A Takibi function parameter may have an explicit-effect function type whose
+arguments include `borrow IndexedOwner[...]`, for example:
+
+```
+fn with_guard(phase: borrow BootPhase[ended],
+              body: fn !{unsafe}(borrow RealGuard[lock]) -> usize) -> usize {
+    let guard = bootstrap_take(phase);
+    let result = body(guard);
+    release(guard);
+    return result;
+}
+```
+
+This is a synchronous scoped parameter, not a closure. Each actual argument
+must be an ordinary named Takibi function body with matching borrowed-owner
+modes and compatible effects. A consuming target cannot impersonate a borrow.
+The parameter may only be invoked directly: alias, cast, storage, return,
+forwarding to another entrance and capture are rejected. Rebinding or
+shadowing it is rejected too. The entrance itself cannot escape as a function
+value, and an extern cannot declare such an entrance. Ownership/authority
+results and nested callback parameters are not accepted by this contract.
+Existing erased-view function-pointer restrictions remain in force; no view
+representation changes are required by this runtime-guard entrance.
+
+The compiler unions all named targets supplied to each entrance parameter.
+Existing lock-rank, single-instance, IRQ-restore, record-mutation and witness
+checks use that closed target set. There is no per-caller context
+specialization. Unknown or unused target sets keep an opaque-call edge, and
+ordinary opaque function pointers remain rejected under a held lock. Each
+callback body is still checked under its declared borrow/effect contract;
+entering a callback does not grant implicit authority to its callees.
+
+The runtime representation is an ordinary function pointer, without a closure
+environment or new allocation. Existing inlining can turn a known callsite
+into direct dispatch; a retained generic body or multiple-target entrance may
+still contain an indirect call. Inspect the actual generated code before
+claiming erasure or cost.
+
 ## Cross-File Name Resolution
 
 Function names resolve globally and without regard to the order of files on
@@ -3295,6 +3335,48 @@ See the retired `examples/net_rx_use_after_release_wrong` for the focused
 compile-error fixture; the real positive fixtures are the network
 examples themselves, whose frame access all flows through the annotated
 `net_rx_frame`.
+
+### Authority-derived linear guards
+
+A whole return type may use `-> Guard[lock] @ phase` when `Guard` is a
+linear indexed runtime owner or linear erased view, and `phase` names a
+static index of a borrowed indexed authority parameter. The guard's own
+indices need not equal the authority index. All matching borrowed arguments
+constrain the returned guard. The authority argument must be a directly
+tracked binding, not a temporary or a field projection.
+
+The returned guard and its moves retain that authority loan. Consuming the
+authority, or leaving a local authority's lexical scope, is rejected while a
+derived guard remains live. Release the guard before ending the phase:
+
+```
+let guard = bootstrap_take(phase);
+use_guard(guard);
+release(guard);
+end_phase(phase);
+```
+
+A type used by such a return is a scoped-guard family. Borrowed and terminal
+`sink` parameters of that family are checked as non-retaining: they cannot
+return the received guard, store it durably, hide it in an aggregate or behind
+an address, or forward it to an owning retaining parameter. A terminal sink
+may release it or forward it to another checked terminal sink. Returning a
+newly derived guard requires an explicit return relation to a borrowed
+parameter. An extern terminal declaration remains trusted, as with existing
+borrowed pointer declarations; an annotated guard constructor itself must
+have a Takibi body.
+
+A call cannot take both a tied guard and its consumed authority as sibling
+arguments, including a temporary guard. Rebinding or shadowing an authority
+or derived guard is rejected while the tracked loan remains in lexical scope;
+use a nested scope to end that binding before reuse. Aggregate/global/return
+escape and function-value erasure remain rejected. The existing pointer and
+slice lifetime rules are unchanged.
+
+This relation erases completely: a runtime guard keeps its existing layout,
+and a view stays erased. The constructor's claim that its returned guard
+represents the borrowed authority remains a reviewed API contract, not a
+proof of the physical resource or scheduler state.
 
 ### Guard-derived pointers
 

@@ -2472,6 +2472,34 @@ let region_fixture =
 (* Issue #128: a pointer returned by an accessor can be tied to the static
    identity carried by a borrowed lock guard. The pointer stays ordinary
    runtime data, but its local binding cannot outlive that authority. *)
+(* Returned linear guards retain their borrowed authority until release. *)
+let authority_guard_fixture =
+  "linear view ScopePhase[id: addr];
+   linear view ScopeGuard[id: addr];
+   let mut scope_word: usize;
+   fn scope_phase() -> ScopePhase[&scope_word] { return view ScopePhase[&scope_word]; }
+   fn scope_end(p: sink ScopePhase[id]) {}
+   fn scope_begin(p: borrow ScopePhase[id]) -> ScopeGuard[id] @ id {
+     return view ScopeGuard[id];
+   }
+   fn scope_close(g: sink ScopeGuard[id]) {}
+   fn scope_read(g: borrow ScopeGuard[id]) -> usize { return 7; }
+   "
+
+let authority_runtime_guard_fixture =
+  "linear struct ScopePhase[id: addr] { private held: usize; }
+   linear struct ScopeGuard[id: addr] { private held: usize; }
+   let mut scope_word: usize;
+   fn scope_phase() -> ScopePhase[&scope_word] {
+     let mut p: ScopePhase[&scope_word] = { 1 }; return p;
+   }
+   fn scope_end(p: sink ScopePhase[id]) {}
+   fn scope_begin(p: borrow ScopePhase[id]) -> ScopeGuard[id] @ id {
+     let mut g: ScopeGuard[id] = { 1 }; return g;
+   }
+   fn scope_close(g: sink ScopeGuard[id]) {}
+   "
+
 let authority_pointer_fixture =
   "linear view AuthorityGuard[lock: addr];
    struct AuthorityData { value: i32; }
@@ -5669,6 +5697,315 @@ fn stored_release(holder: sink StoredHolder[k]) { stored_drop(holder.token); }
            run_unlock(guard, &run_lock_word);
            return blocked_take(guard, 1);
          }"));
+
+  Alcotest.test_case "authority guard: release before phase end" `Quick
+    (fun () -> ignore (infer (authority_guard_fixture ^
+      "fn scope_ok() -> usize {
+         let p = scope_phase(); let g = scope_begin(p);
+         let result = scope_read(g); scope_close(g); scope_end(p); return result;
+       }")));
+
+  Alcotest.test_case "authority guard: live guard prevents phase end" `Quick
+    (expect_type_error "cannot end authority 'p' while derived guard 'g' is live"
+      (authority_guard_fixture ^
+       "fn scope_bad() {
+          let p = scope_phase(); let g = scope_begin(p);
+          scope_end(p); scope_close(g);
+        }"));
+
+  Alcotest.test_case "authority guard: moving guard preserves loan" `Quick
+    (expect_type_error "cannot end authority 'p' while derived guard 'alias' is live"
+      (authority_guard_fixture ^
+       "fn scope_move_bad() {
+          let p = scope_phase(); let g = scope_begin(p); let alias = g;
+          scope_end(p); scope_close(alias);
+        }"));
+
+  Alcotest.test_case "authority guard: terminal consumer cannot return it" `Quick
+    (expect_type_error "cannot be returned"
+      (authority_guard_fixture ^
+       "fn scope_launder(g: sink ScopeGuard[id]) -> ScopeGuard[id] { return g; }"));
+
+  Alcotest.test_case "authority guard: borrowing cannot erase return tie" `Quick
+    (expect_type_error "cannot be returned"
+      (authority_guard_fixture ^
+       "fn scope_launder(p: borrow ScopePhase[id]) -> ScopeGuard[id] {
+          return scope_begin(p);
+        }"));
+
+  Alcotest.test_case "authority guard: tuple escape is rejected" `Quick
+    (expect_type_error "cannot be stored in a runtime tuple"
+      (authority_guard_fixture ^
+       "fn scope_tuple_bad() {
+          let p = scope_phase(); let g = scope_begin(p); let pair = (g, 1);
+        }"));
+
+  Alcotest.test_case "authority guard: runtime indexed guard releases" `Quick
+    (fun () -> ignore (infer
+      "linear view Phase[id: addr];
+       linear struct RuntimeGuard[id: addr] { private held: usize; }
+       let mut word: usize;
+       fn begin(p: borrow Phase[id]) -> RuntimeGuard[id] @ id {
+         let mut g: RuntimeGuard[id] = { 1 }; return g;
+       }
+       fn close(g: sink RuntimeGuard[id]) { let held = g.held; }
+       fn end_phase(p: sink Phase[id]) {}
+       fn f(p: Phase[&word]) {
+         let g = begin(p); close(g); end_phase(p);
+       }"));
+
+  Alcotest.test_case "authority guard: branch must release on both paths" `Quick
+    (expect_type_error "cannot end authority 'p' while derived guard 'g' is live"
+      (authority_guard_fixture ^
+       "fn scope_branch_bad(flag: bool) {
+          let p = scope_phase(); let g = scope_begin(p);
+          if (flag) { scope_close(g); } scope_end(p);
+        }"));
+
+  Alcotest.test_case "authority guard: temporary authority is rejected" `Quick
+    (expect_type_error "require directly tracked authority bindings"
+      (authority_guard_fixture ^
+       "fn scope_temporary_bad() { let g = scope_begin(scope_phase()); scope_close(g); }"));
+
+  Alcotest.test_case "authority guard: constructor function value cannot erase tie" `Quick
+    (expect_type_error "authority-derived return functions cannot be used as runtime function pointers"
+      (authority_runtime_guard_fixture ^
+       "fn scope_function_bad(p: ScopePhase[id]) {
+          let callback = scope_begin;
+          let g = callback(p); scope_end(p); scope_close(g);
+        }"));
+
+  Alcotest.test_case "authority guard: constructor cast cannot erase tie" `Quick
+    (expect_type_error "an indexed owner cannot live behind a pointer, function pointer, array, or slice"
+      (authority_runtime_guard_fixture ^
+       "fn scope_cast_bad(p: ScopePhase[id]) {
+          let callback = scope_begin as fn(ScopePhase[id]) -> ScopeGuard[id];
+          let g = callback(p); scope_end(p); scope_close(g);
+        }"));
+
+  Alcotest.test_case "authority guard: authority shadowing is rejected" `Quick
+    (expect_type_error "cannot rebind authority 'p'"
+      (authority_guard_fixture ^
+       "fn scope_shadow_bad() {
+          let p = scope_phase(); let g = scope_begin(p);
+          { let p = scope_phase(); scope_end(p); } scope_close(g); scope_end(p);
+        }"));
+
+  Alcotest.test_case "authority guard: authority assignment is rejected" `Quick
+    (expect_type_error "cannot rebind authority 'p'"
+      (authority_guard_fixture ^
+       "fn scope_rebind_bad() {
+          let mut p = scope_phase(); let g = scope_begin(p);
+          p = scope_phase(); scope_close(g); scope_end(p);
+        }"));
+
+  Alcotest.test_case "authority guard: local address cannot hide loan" `Quick
+    (expect_type_error "cannot take the address"
+      (authority_guard_fixture ^
+       "fn scope_address_bad() {
+          let p = scope_phase(); let g = scope_begin(p);
+          let alias = &g; scope_close(g); scope_end(p);
+        }"));
+
+  Alcotest.test_case "authority guard: sink consumer cannot launder through another sink" `Quick
+    (expect_type_error "cannot be returned"
+      (authority_guard_fixture ^
+       "fn leak(g: sink ScopeGuard[id]) -> ScopeGuard[id] { return g; }
+        fn launder(g: sink ScopeGuard[id]) -> ScopeGuard[id] { return leak(g); }"));
+
+  Alcotest.test_case "authority guard: ordered move and release ends loan" `Quick
+    (fun () -> ignore (infer (authority_guard_fixture ^
+       "fn scope_move_ok() {
+          let p = scope_phase(); let g = scope_begin(p); let alias = g;
+          scope_close(alias); scope_end(p);
+        }")));
+
+  Alcotest.test_case "authority guard: typed function pointer loses no annotation" `Quick
+    (expect_type_error "an indexed owner cannot live behind a pointer, function pointer, array, or slice"
+      (authority_runtime_guard_fixture ^
+       "fn scope_typed_function_bad(p: ScopePhase[id]) {
+          let callback: fn(ScopePhase[id]) -> ScopeGuard[id] = scope_begin;
+          let g = callback(p); scope_end(p); scope_close(g);
+        }"));
+
+  Alcotest.test_case "scoped callback: named borrowed owner reaches guard acquisition" `Quick
+    (fun () -> ignore (infer (authority_runtime_guard_fixture ^
+      "fn body(p: borrow ScopePhase[id]) !{} {
+         let g = scope_begin(p); scope_close(g);
+       }
+       fn run(p: borrow ScopePhase[id], callback: fn !{}(borrow ScopePhase[id]) -> void) !{} {
+         callback(p);
+       }
+       fn f() { let p = scope_phase(); run(p, body); scope_end(p); }")));
+
+  Alcotest.test_case "scoped callback: consuming target cannot impersonate borrow" `Quick
+    (expect_type_error "matching borrowed-owner parameters"
+      (authority_runtime_guard_fixture ^
+       "fn body(p: ScopePhase[id]) !{} { scope_end(p); }
+        fn run(p: borrow ScopePhase[id], callback: fn !{}(borrow ScopePhase[id]) -> void) !{} { callback(p); }
+        fn f() { let p = scope_phase(); run(p, body); scope_end(p); }"));
+
+  Alcotest.test_case "scoped callback: callback parameter cannot be aliased" `Quick
+    (expect_type_error "scoped callback may only be invoked directly"
+      (authority_runtime_guard_fixture ^
+       "fn run(p: borrow ScopePhase[id], callback: fn !{}(borrow ScopePhase[id]) -> void) !{} {
+          let alias = callback; alias(p);
+        }"));
+
+  Alcotest.test_case "scoped callback: callback parameter cannot be captured by another entry" `Quick
+    (expect_type_error "ordinary named Takibi function body"
+      (authority_runtime_guard_fixture ^
+       "fn other(p: borrow ScopePhase[id], callback: fn !{}(borrow ScopePhase[id]) -> void) !{} { callback(p); }
+        fn run(p: borrow ScopePhase[id], callback: fn !{}(borrow ScopePhase[id]) -> void) !{} {
+          other(p, callback);
+        }"));
+
+  Alcotest.test_case "scoped callback: borrowing target cannot consume authority" `Quick
+    (expect_type_error "cannot move borrowed value 'p'"
+      (authority_runtime_guard_fixture ^
+       "fn body(p: borrow ScopePhase[id]) !{} { scope_end(p); }"));
+
+  Alcotest.test_case "scoped callback: effects cannot be erased" `Quick
+    (expect_type_error "effect"
+      (authority_runtime_guard_fixture ^
+       "extern fn park() !{may_block};
+        fn body(p: borrow ScopePhase[id]) !{may_block} { park(); }
+        fn run(p: borrow ScopePhase[id], callback: fn !{}(borrow ScopePhase[id]) -> void) !{} { callback(p); }
+        fn f() { let p = scope_phase(); run(p, body); scope_end(p); }"));
+
+  Alcotest.test_case "scoped callback: effect-unknown callback contract is rejected" `Quick
+    (expect_type_error "require an explicit effect contract"
+      (authority_runtime_guard_fixture ^
+       "fn run(p: borrow ScopePhase[id], callback: fn(borrow ScopePhase[id]) -> void) { callback(p); }"));
+
+  Alcotest.test_case "scoped callback: authority must be passed to actual acquire" `Quick
+    (expect_type_error "expects 1 argument(s), got 0"
+      (authority_runtime_guard_fixture ^
+       "fn body(p: borrow ScopePhase[id]) !{} { let g = scope_begin(); scope_close(g); }"));
+
+  Alcotest.test_case "authority guard: shadow cannot hide outer loan" `Quick
+    (expect_type_error "cannot rebind derived guard 'g'"
+      (authority_runtime_guard_fixture ^
+       "fn f() {
+          let p = scope_phase(); let q = scope_phase(); let g = scope_begin(p);
+          { let g = scope_begin(q); scope_close(g); scope_end(p); }
+          scope_close(g); scope_end(q);
+        }"));
+
+  Alcotest.test_case "authority guard: sibling argument cannot end its authority" `Quick
+    (expect_type_error "another argument of the same call"
+      (authority_runtime_guard_fixture ^
+       "fn close_both(g: sink ScopeGuard[id], p: sink ScopePhase[id]) {
+          scope_end(p); scope_close(g);
+        }
+        fn f() { let p = scope_phase(); let g = scope_begin(p); close_both(g, p); }"));
+
+  Alcotest.test_case "authority guard: temporary guard retains argument loan" `Quick
+    (expect_type_error "another argument of the same call"
+      (authority_runtime_guard_fixture ^
+       "fn close_both(g: sink ScopeGuard[id], p: sink ScopePhase[id]) {
+          scope_end(p); scope_close(g);
+        }
+        fn f() { let p = scope_phase(); close_both(scope_begin(p), p); }"));
+
+  Alcotest.test_case "scoped callback: shadow cannot change borrowed call mode" `Quick
+    (expect_type_error "cannot rebind a scoped callback parameter"
+      (authority_runtime_guard_fixture ^
+       "fn consume(p: ScopePhase[id]) !{} { scope_end(p); }
+        fn run(p: borrow ScopePhase[id], callback: fn !{}(borrow ScopePhase[id]) -> void) !{} {
+          let callback = consume; callback(p);
+        }"));
+
+  Alcotest.test_case "authority guard: global escape is rejected" `Quick
+    (expect_type_error "global"
+      (authority_runtime_guard_fixture ^
+       "let mut stash: ScopeGuard[&scope_word];
+        fn f() { let p = scope_phase(); let g = scope_begin(p); stash = g; scope_end(p); }"));
+
+  Alcotest.test_case "authority guard: field escape is rejected" `Quick
+    (expect_type_error "field"
+      (authority_runtime_guard_fixture ^
+       "struct Holder { guard: ScopeGuard[&scope_word]; }
+        fn f() { let p = scope_phase(); let g = scope_begin(p); let mut h: Holder = { g }; scope_end(p); }"));
+
+  Alcotest.test_case "scoped callback: cannot run under a held lock guard" `Quick
+    (expect_type_error "call through a function pointer"
+      (authority_runtime_guard_fixture ^
+       "linear view Held[lock: addr]; let mut lock: usize;
+        fn take() -> Held[&lock] !{lock_guard_30_test, acquires_lock_30_test} { return view Held[&lock]; }
+        fn give(g: sink Held[&lock]) {}
+        fn run(p: borrow ScopePhase[id], callback: fn !{}(borrow ScopePhase[id]) -> void) !{locks} {
+          let g = take(); callback(p); give(g);
+        }"));
+
+  Alcotest.test_case "scoped callback: closed named target is valid under held guard" `Quick
+    (expect_ok {|linear struct Held[lock: addr] { private flags: usize; }
+let mut callback_lock: usize;
+fn take() -> Held[&callback_lock] !{acquires_lock_40_high, lock_guard_40_high, single_instance_lock} {
+  let mut g: Held[&callback_lock] = { 0 }; return g;
+}
+fn give(g: sink Held[&callback_lock]) {}
+fn safe(g: borrow Held[&callback_lock]) !{locks, unsafe} {}
+fn run(callback: fn !{locks, unsafe}(borrow Held[&callback_lock]) -> void) !{locks, unsafe} {
+  let g = take(); callback(g); give(g);
+}
+fn entry() !{locks, unsafe} { run(safe); }|});
+
+  Alcotest.test_case "scoped callback: target union preserves lock inversion rejection" `Quick
+    (expect_type_error "cannot acquire 'low' (rank 30) while holding 'high' (rank 40)" {|linear struct Held[lock: addr] { private flags: usize; }
+let mut callback_lock: usize;
+fn take() -> Held[&callback_lock] !{acquires_lock_40_high, lock_guard_40_high, single_instance_lock} {
+  let mut g: Held[&callback_lock] = { 0 }; return g;
+}
+fn give(g: sink Held[&callback_lock]) {}
+fn safe(g: borrow Held[&callback_lock]) !{locks, unsafe} {}
+fn run(callback: fn !{locks, unsafe}(borrow Held[&callback_lock]) -> void) !{locks, unsafe} {
+  let g = take(); callback(g); give(g);
+}
+fn low() !{acquires_lock_30_low} {}
+fn conflict(g: borrow Held[&callback_lock]) !{locks, unsafe} { low(); }
+fn entry() !{locks, unsafe} { run(safe); run(conflict); }|});
+
+  Alcotest.test_case "scoped callback: target union preserves IRQ restore rejection" `Quick
+    (expect_type_error "cannot restore IRQs" {|linear struct Held[lock: addr] { private flags: usize; }
+let mut callback_lock: usize;
+fn take() -> Held[&callback_lock] !{acquires_lock_40_high, lock_guard_40_high, single_instance_lock, irq_masking_guard} {
+  let mut g: Held[&callback_lock] = { 0 }; return g;
+}
+fn give(g: sink Held[&callback_lock]) {}
+fn safe(g: borrow Held[&callback_lock]) !{locks, unsafe} {}
+fn run(callback: fn !{locks, unsafe}(borrow Held[&callback_lock]) -> void) !{locks, unsafe} {
+  let g = take(); callback(g); give(g);
+}
+fn conflict(g: borrow Held[&callback_lock]) !{locks, unsafe} { msr_daifclr_irq(); }
+fn entry() !{locks, unsafe} { run(safe); run(conflict); }|});
+
+  Alcotest.test_case "scoped callback: closed target preserves single-instance rejection" `Quick
+    (expect_type_error "re-acquires single-instance lock 'high'" {|linear struct Held[lock: addr] { private flags: usize; }
+let mut callback_lock: usize;
+fn take() -> Held[&callback_lock] !{acquires_lock_40_high, lock_guard_40_high, single_instance_lock} {
+  let mut g: Held[&callback_lock] = { 0 }; return g;
+}
+fn give(g: sink Held[&callback_lock]) {}
+fn safe(g: borrow Held[&callback_lock]) !{locks, unsafe} {}
+fn run(callback: fn !{locks, unsafe}(borrow Held[&callback_lock]) -> void) !{locks, unsafe} {
+  let g = take(); callback(g); give(g);
+}
+fn conflict(g: borrow Held[&callback_lock]) !{locks, unsafe} { let other = take(); give(other); }
+fn entry() !{locks, unsafe} { run(safe); run(conflict); }|});
+
+  Alcotest.test_case "authority guard: affine authority cannot expire under outer guard" `Quick
+    (expect_type_error "cannot end authority 'p' while derived guard 'g' is live" {|
+      affine view Phase[id: addr]; linear view Guard[id: addr]; let mut word: usize;
+      fn phase() -> Phase[&word] { return view Phase[&word]; }
+      fn begin(p: borrow Phase[id]) -> Guard[id] @ id { return view Guard[id]; }
+      fn close(g: sink Guard[id]) {}
+      fn probe() {
+        let mut g = view Guard[&word]; close(g);
+        { let p = phase(); g = begin(p); }
+        close(g);
+      }
+    |});
 
   Alcotest.test_case
     "authority pointer: field access after unlock is rejected" `Quick
@@ -26539,6 +26876,15 @@ fn require_same(owner: borrow Owner[p], slot: {0..<2 as usize} @ p) {}
 |}
 
 let record_loan_tests = [
+  Alcotest.test_case "scoped callback retains record mutation footprint" `Quick
+    (expect_type_error "may invalidate live derived value" (record_loan_fixture ^ {|
+fn mutate(owner: borrow Owner[p]) !{record_mutates_Owner} { records[owner.slot].value = 0; }
+fn run(owner: borrow Owner[p], callback: fn !{}(borrow Owner[p]) -> void) -> usize {
+  let ptr = access(owner); callback(owner); return ptr.value;
+}
+fn entry(owner: borrow Owner[p]) -> usize { return run(owner, mutate); }
+|}));
+
   Alcotest.test_case "positive_other_record" `Quick
     (fun () -> ignore (infer (record_loan_fixture ^ {|fn probe(flag: bool) -> usize {
 let a = mint(0); let b = mint(1);

@@ -739,7 +739,16 @@ let of_ast t = match !active_static_scope with
 
 let of_ast_opt = function Some t -> of_ast t | None -> fresh ()
 
-type region_return_kind = RegionSlice | RegionPointer
+(* Scoped callback contracts are source-level parameter contracts. They
+   currently borrow indexed runtime owners; erased-view function pointers
+   and retaining callback values keep their existing rejection. *)
+let scoped_callback_signature = function
+  | Ast.TypeFn (args, ret, effects)
+    when List.exists (function Ast.TypeBorrow (Ast.TypeIndexed _) -> true | _ -> false) args ->
+      Some (args, ret, effects)
+  | _ -> None
+
+type region_return_kind = RegionSlice | RegionPointer | RegionGuard
 
 let region_return_annotation = function
   | Ast.TypeSingleton (((Ast.TypeSlice _) as base), arg) ->
@@ -747,14 +756,17 @@ let region_return_annotation = function
   | Ast.TypeSingleton
       (((Ast.TypePtr _ | Ast.TypeAlignedPtr _ | Ast.TypeRef _ | Ast.TypeRefMut _) as base), arg) ->
       Some (base, arg, RegionPointer)
+  | Ast.TypeSingleton (((Ast.TypeIndexed _ | Ast.TypeView _) as base), arg) ->
+      Some (base, arg, RegionGuard)
   | _ -> None
 
 let region_kind_word = function
   | RegionSlice -> "slice"
   | RegionPointer -> "pointer"
+  | RegionGuard -> "guard"
 
-(* An authority-derived region annotation on a slice or pointer RETURN type
-   (`-> [u8; 1514..] @ desc` / `-> *Shared @ lock`)
+(* An authority-derived annotation on a slice, pointer or linear guard return
+   (`-> [u8; 1514..] @ desc` / `-> *Shared @ lock` / `-> Guard[l] @ phase`)
    is checker-only: it feeds the region_return side table consumed by
    check_affine_func's taint tracking, and must stay invisible to HM
    unification, call_returns, the singleton machinery, and codegen. Strip
@@ -10611,10 +10623,27 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeTuple ts -> List.iter (reject_io_value loc) ts
     | _ -> ()
   in
-  let validate_param_type loc ty =
+  let rec validate_param_type loc ty =
     reject_io_value loc ty;
     validate_static_type loc ty;
     match ty with
+    | Ast.TypeFn (args, ret, effects) when scoped_callback_signature ty <> None ->
+        if effects = None then raise (TypeError (loc,
+          "scoped borrowed callbacks require an explicit effect contract"));
+        List.iter (function
+          | Ast.TypeBorrow (Ast.TypeIndexed _ as owner) as param ->
+              validate_param_type loc param;
+              validate_complete_type loc false owner
+          | param when contains_borrow param || type_mentions_indexed_owner param
+                       || type_mentions_view param || type_mentions_linear param
+                       || (match param with Ast.TypeFn _ -> true | _ -> false) ->
+              raise (TypeError (loc,
+                "scoped callbacks permit borrowed indexed owners and ordinary value arguments only"))
+          | param -> validate_param_type loc param) args;
+        if type_mentions_indexed_owner ret || type_mentions_view ret
+           || type_mentions_linear ret then raise (TypeError (loc,
+          "scoped callbacks cannot return ownership or authority"));
+        validate_nonparam_type loc ret
     | Ast.TypeBorrow (Ast.TypeSingleton ((Ast.TypeRef inner | Ast.TypeRefMut inner), _))
     | Ast.TypeBorrow (Ast.TypeRef inner | Ast.TypeRefMut inner) ->
         validate_ref_referent loc inner;
@@ -10696,8 +10725,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           raise (TypeError (loc,
             "a singleton value cannot live behind a pointer or inside array/slice storage"));
         validate_complete_type loc false ty
-  in
-  let validate_nonparam_type ?(allow_ref=false) ?(names_only=false) loc ty =
+  and validate_nonparam_type ?(allow_ref=false) ?(names_only=false) loc ty =
     if not names_only then reject_io_value loc ty;
     validate_static_type loc ty;
     if contains_borrow ty then
@@ -10876,6 +10904,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         (match Option.bind f.ret_type region_return_annotation with
          | Some (base, arg, kind) ->
              let value_kind = region_kind_word kind in
+             (match kind, base with
+              | RegionGuard, Ast.TypeIndexed (name, _)
+                when Hashtbl.find_opt indexed_struct_kinds name = Some Ast.KindLinear -> ()
+              | RegionGuard, Ast.TypeView (name, _)
+                when Hashtbl.find_opt view_kinds name = Some Ast.KindLinear -> ()
+              | RegionGuard, _ -> raise (TypeError (f.def_loc,
+                  "authority-derived guard returns require a linear indexed owner or view"))
+              | _ -> ());
              (match arg with
               | Ast.StaticGlobal _ ->
                   raise (TypeError (f.def_loc,
@@ -10907,7 +10943,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                             f.params) then begin
                     let authority_desc = match kind with
                       | RegionSlice -> "indexed-owner parameter"
-                      | RegionPointer -> "indexed-owner or indexed-view parameter"
+                      | RegionPointer | RegionGuard -> "indexed-owner or indexed-view parameter"
                     in
                     raise (TypeError (f.def_loc, Printf.sprintf
                       "%s return annotation '@ %s': '%s' does not name a \
@@ -10925,6 +10961,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         allow_implicit_static := false;
         List.iter validate_stmt_types f.body
     | Ast.ExternFuncDef (name, params, ret, effects, eloc) ->
+        if (match Option.bind ret region_return_annotation with
+            | Some (_, _, RegionGuard) -> true | _ -> false)
+           || List.exists (fun (_, ty) -> Option.bind ty scoped_callback_signature <> None) params then
+          raise (TypeError (eloc,
+            "authority-derived guards and scoped callback entrances require a Takibi function body"));
         if List.exists (fun (_, ty) ->
              Option.fold ~none:false
                ~some:type_contains_fixed_dma_authority ty) params
@@ -12197,6 +12238,22 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   in
   let is_tracked_type ty =
     is_affine_type ty || is_linear_type ty || is_must_use_type ty in
+  (* A guard constructor declares a non-retaining guard family. Borrowed
+     and terminal consumers of that family verify the same local loan rules;
+     a sink is permission to release, not to launder the returned lifetime. *)
+  let scoped_guard_names = List.fold_left (fun names -> function
+    | Ast.FuncDef f ->
+        (match Option.bind f.ret_type region_return_annotation with
+         | Some ((Ast.TypeIndexed (name, _) | Ast.TypeView (name, _)), _, RegionGuard) ->
+             StringSet.add name names
+         | _ -> names)
+    | _ -> names) StringSet.empty prog in
+  let rec is_scoped_guard_type = function
+    | Ast.TypeIndexed (name, _) | Ast.TypeView (name, _) ->
+        StringSet.mem name scoped_guard_names
+    | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
+    | Ast.TypeSingleton (t, _) -> is_scoped_guard_type t
+    | _ -> false in
   let call_params = List.fold_left (fun m -> function
     | Ast.FuncDef f ->
         StringMap.add (overload_key f.name f.params) (List.map snd f.params) m
@@ -12372,17 +12429,84 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | _ -> (acquires, guards))
       (StringMap.empty, StringMap.empty) prog
   in
+  (* Named synchronous callbacks have closed target sets. Union all callers,
+     rather than specializing by context. Unknown/unused entrances retain the
+     opaque-call edge. Entrances cannot themselves escape as function values. *)
+  let callback_slots = List.fold_left (fun slots -> function
+    | Ast.FuncDef f ->
+        let key = overload_key f.name f.params in
+        let params = List.mapi (fun i (name, ty) ->
+          match Option.bind ty scoped_callback_signature with
+          | Some _ -> Some (i, name, key ^ "#scoped:" ^ name)
+          | None -> None) f.params |> List.filter_map Fun.id in
+        if params = [] then slots else StringMap.add key params slots
+    | _ -> slots) StringMap.empty prog in
+  StringMap.iter (fun key _ ->
+    if StringMap.exists (fun _ target -> target = key) !resolved_function_values then
+      raise (TypeError (Lexing.dummy_pos,
+        "scoped-callback entrances cannot be used as runtime function pointers"))) callback_slots;
+  let call_sites = ref [] in
+  let rec visit_expr caller (e : Ast.expr) =
+    let sub = visit_expr caller in
+    match e.desc with
+    | Ast.Call (_, args) -> call_sites := (caller, e) :: !call_sites; List.iter sub args
+    | Ast.VariantCtor (_, _, e) | Ast.Bnot e | Ast.Deref e | Ast.AddrOf e
+    | Ast.Cast (_, e) | Ast.FieldGet (e, _) | Ast.Unsafe e -> sub e
+    | Ast.BinOp (_, a, b) | Ast.Assign (a, b) | Ast.Index (a, b) -> sub a; sub b
+    | Ast.StructLit xs | Ast.TupleLit xs -> List.iter sub xs
+    | Ast.SliceOf (a, b, c) -> sub a; sub b; sub c
+    | _ -> ()
+  and visit_stmt caller (s : Ast.stmt) =
+    let expr = visit_expr caller and body = List.iter (visit_stmt caller) in
+    match s.desc with
+    | Ast.Return (Some e) | Ast.Expr e | Ast.LetTuple (_, e) | Ast.Yield e -> expr e
+    | Ast.Block xs | Ast.UnsafeBlock xs -> body xs
+    | Ast.Let (_, _, _, e, _) -> Option.iter expr e
+    | Ast.If (e, a, b) -> expr e; body a; body b
+    | Ast.While (e, xs) | Ast.ForEach (_, e, xs) -> expr e; body xs
+    | Ast.For (_, _, a, b, xs) -> expr a; expr b; body xs
+    | Ast.Match (e, arms) | Ast.LetMatch (_, _, _, e, arms) ->
+        expr e; List.iter (function
+          | Ast.ArmVariant (_, _, _, xs) | Ast.ArmWild xs | Ast.ArmMiss xs
+          | Ast.ArmIntLit (_, xs) | Ast.ArmByteSliceLit (_, xs) -> body xs) arms
+    | _ -> () in
+  if not (StringMap.is_empty callback_slots) then
+    List.iter (function Ast.FuncDef f ->
+      List.iter (visit_stmt (overload_key f.name f.params)) f.body | _ -> ()) prog;
+  let callback_targets = List.fold_left (fun targets (_, (e : Ast.expr)) ->
+    match e.desc with
+    | Ast.Call (name, args) ->
+        let target = Option.value (StringMap.find_opt (loc_key e.loc) !resolved_call_targets) ~default:name in
+        List.fold_left (fun targets (index, _, node) ->
+          let actual = Option.bind (List.nth_opt args index) (fun (arg : Ast.expr) ->
+            match arg.desc with Ast.Var _ -> StringMap.find_opt (loc_key arg.loc) !resolved_function_values | _ -> None) in
+          let actual = Option.value actual ~default:"<indirect call>" in
+          let old = Option.value (StringMap.find_opt node targets) ~default:StringSet.empty in
+          StringMap.add node (StringSet.add actual old) targets)
+          targets (Option.value (StringMap.find_opt target callback_slots) ~default:[])
+    | _ -> targets) StringMap.empty !call_sites in
+  let scoped_call_sites = List.fold_left (fun sites (caller, (e : Ast.expr)) ->
+    match e.desc with
+    | Ast.Call (name, _) when StringMap.mem (loc_key e.loc) !resolved_indirect_call_effects ->
+        (match List.find_opt (fun (_, param, _) -> param = name)
+            (Option.value (StringMap.find_opt caller callback_slots) ~default:[]) with
+         | Some (_, _, node) -> StringMap.add (loc_key e.loc) node sites
+         | None -> sites)
+    | _ -> sites) StringMap.empty !call_sites in
+  let opaque_indirect_call e = StringMap.mem (loc_key e.Ast.loc) !resolved_indirect_call_effects
+    && not (StringMap.mem (loc_key e.Ast.loc) scoped_call_sites) in
+  let checked_call_target e name =
+    match StringMap.find_opt (loc_key e.Ast.loc) scoped_call_sites with
+    | Some node -> node
+    | None -> Option.value (StringMap.find_opt (loc_key e.Ast.loc) !resolved_call_targets) ~default:name in
   let lock_callees =
     let rec expr callees (e : Ast.expr) =
       let sub = expr callees in
       match e.desc with
       | Ast.Call (name, args) ->
           let callees = List.fold_left expr callees args in
-          let target = if StringMap.mem (loc_key e.loc)
-              !resolved_indirect_call_effects then "<indirect call>"
-            else Option.value
-              (StringMap.find_opt (loc_key e.loc) !resolved_call_targets)
-              ~default:name in
+          let target = if opaque_indirect_call e then "<indirect call>"
+            else checked_call_target e name in
           StringSet.add target callees
       | Ast.VariantCtor (_, _, x) | Ast.Bnot x | Ast.Deref x | Ast.AddrOf x
       | Ast.Cast (_, x) | Ast.FieldGet (x, _) | Ast.Unsafe x -> sub x
@@ -12412,10 +12536,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                 List.fold_left stmt acc xs) (expr callees subject) arms
       | _ -> callees
     in
-    List.fold_left (fun result -> function
+    let functions = List.fold_left (fun result -> function
       | Ast.FuncDef f -> StringMap.add (overload_key f.name f.params)
           (List.fold_left stmt StringSet.empty f.body) result
-      | _ -> result) StringMap.empty prog
+      | _ -> result) StringMap.empty prog in
+    StringMap.fold (fun _ slots graph -> List.fold_left (fun graph (_, _, node) ->
+      StringMap.add node (Option.value (StringMap.find_opt node callback_targets)
+        ~default:(StringSet.singleton "<indirect call>")) graph) graph slots)
+      callback_slots functions
   in
   let may_call_indirect =
     let reach = ref StringSet.empty in
@@ -12927,6 +13055,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     let returns_indexed_reference = match Option.bind fdef.ret_type region_return_annotation with
       | Some ((Ast.TypeRef _ | Ast.TypeRefMut _), _, _) -> true
       | _ -> false in
+    let scoped_callbacks = List.fold_left (fun map (name, ty) ->
+      match Option.bind ty scoped_callback_signature with
+      | Some (params, _, _) -> StringMap.add name (List.map Option.some params) map
+      | None -> map) StringMap.empty fdef.params in
     let var_types = ref finfo.local_types in
     List.iter2 (fun (name, _) (_, ty) ->
       var_types := StringMap.add name ty !var_types
@@ -13301,6 +13433,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        A dereference, index, or field read whose result is itself a pointer or
        slice does propagate, because that result is another address alias. *)
     let rec ast_region_kind = function
+      | ty when is_scoped_guard_type ty -> Some RegionGuard
       | Ast.TypeSlice _ -> Some RegionSlice
       | Ast.TypePtr _ | Ast.TypeAlignedPtr _ | Ast.TypeRef _ | Ast.TypeRefMut _ ->
           Some RegionPointer
@@ -13462,12 +13595,17 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             (StringMap.find_opt (loc_key e.loc) !resolved_call_targets)
             ~default:name in
           (match StringMap.find_opt target region_return_info with
-           | Some (indices, _) ->
+           | Some (indices, kind) ->
                List.fold_left (fun paths i ->
                  match List.nth_opt args i with
                  | Some arg ->
                      (match authority_argument_path arg with
-                      | Some path -> PathSet.add path paths | None -> paths)
+                      | Some (PVar _ as path) -> PathSet.add path paths
+                      | _ when kind = RegionGuard ->
+                          raise (TypeError (arg.loc,
+                            "authority-derived guard returns require a directly tracked authority binding"))
+                      | Some path -> PathSet.add path paths
+                      | None -> paths)
                  | None -> paths)
                  PathSet.empty indices
            | None when target = "min" || target = "max" ->
@@ -13499,6 +13637,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Some (Ast.TypeBorrow (Ast.TypeNamed name))
         when name = Dma_fixed_registry.span_type -> true
       | Some (Ast.TypeBorrow inner) -> ast_region_kind inner <> None
+      | Some (Ast.TypeBorrowMut inner) | Some (Ast.TypeSink inner) ->
+          is_scoped_guard_type inner
       | _ -> false
     in
     let rec expr_region_kind (e : Ast.expr) = match e.desc with
@@ -13612,7 +13752,29 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        binding is still in scope. Reassigning the dependent to an unrelated
        value clears its taint, and leaving its scope removes it from
        [declared], so both intentional lifetime endings remain available. *)
+    let require_no_live_guard_loans loc declared taints moved authority =
+      List.iter (fun dependent ->
+        let loan = pvar dependent in
+        let id = match loan with PVar (id, _) | PField (id, _, _) -> id in
+        if loan <> authority && PathSet.mem loan declared
+           && is_scoped_guard_type (binding_type id dependent)
+           && not (ResourceFlow.is_consumed_on_all_paths loan moved) then
+          raise (TypeError (loc, Printf.sprintf
+            "cannot end authority '%s' while derived guard '%s' is live"
+            (path_to_string authority) dependent)))
+        (TaintEnv.dependents authority taints)
+    in
     let require_no_authority_rebind loc declared taints name =
+      if StringMap.mem name scoped_callbacks then
+        raise (TypeError (loc, "cannot rebind a scoped callback parameter"));
+      let current = pvar name in
+      (match current with
+       | PVar (id, _) when PathSet.mem current declared
+           && is_scoped_guard_type (binding_type id name)
+           && not (PathSet.is_empty (TaintEnv.get name taints)) ->
+           raise (TypeError (loc, Printf.sprintf
+             "cannot rebind derived guard '%s' while its lifetime loan remains in scope" name))
+       | _ -> ());
       let live_dependent =
         List.find_opt (fun dependent ->
           PathSet.mem (pvar dependent) declared)
@@ -13700,6 +13862,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     (* Earlier call arguments remain live temporaries while later arguments
        execute. Keep their authority paths across recursive argument checking;
        a nested destructive call must not overlook these unnamed loans. *)
+    let pending_guard_arguments = ref [] in
     let pending_region_arguments = ref [] in
     let pending_witness_arguments = ref [] in
     let rec check_expr taints moved consume (e : Ast.expr) =
@@ -13712,6 +13875,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               name));
           moved
       | Ast.Var name ->
+          if StringMap.mem name scoped_callbacks then
+            raise (TypeError (e.loc,
+              "a scoped callback may only be invoked directly; it cannot be aliased, returned, stored or captured"));
           let p = pvar_expr e name in
           (* #131 place rule: a holder with an empty place cannot be used
              whole (passed, returned, borrowed) until it is refilled. *)
@@ -13728,11 +13894,18 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           require_available e.loc moved p;
           require_handle_live e.loc moved p;
           require_region_live e.loc taints moved name;
+          if consume && is_tracked_path p then
+            require_no_live_guard_loans e.loc !active_declared taints moved p;
           if consume && PathSet.mem p borrowed_params then
             raise (TypeError (e.loc, Printf.sprintf
               "cannot move borrowed value '%s'; borrow permits non-consuming access only"
               name));
-          if consume && is_tracked_path p then mv_consume p moved else moved
+          if consume && is_tracked_path p then begin
+            if List.exists (fun sources -> PathSet.mem p sources) !pending_guard_arguments then
+              raise (TypeError (e.loc,
+                "cannot consume an authority while its derived guard is another argument of the same call"));
+            mv_consume p moved
+          end else moved
       | Ast.FieldGet (base_expr, fname) ->
           require_no_region_aggregate_load e.loc e
             (expr_taint taints base_expr);
@@ -13896,8 +14069,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
            | None -> moved)
       | Ast.Call (name, args) ->
           let moved = forget_guard_facts args moved in
-          let target = Option.value
-            (StringMap.find_opt (loc_key e.loc) !resolved_call_targets) ~default:name in
+          let target = checked_call_target e name in
           let return_authority_indices =
             if StringMap.mem target loan_transfers then [0; 1]
             else match StringMap.find_opt target region_return_info with
@@ -13979,12 +14151,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              function pointer -- here, or anywhere the callee can reach --
              is invisible to them. Treat it conservatively, as the
              IRQ-restore rule does: no such call while a guard is live. *)
-          (if StringMap.mem (loc_key e.loc) !resolved_indirect_call_effects
+          (if opaque_indirect_call e
               || StringSet.mem target may_call_indirect then
              match live_guards guard_bindings with
              | (visible_name, _, _, held, _) :: _ ->
                  let what =
-                   if StringMap.mem (loc_key e.loc) !resolved_indirect_call_effects
+                   if opaque_indirect_call e
                    then "a call through a function pointer"
                    else Printf.sprintf "'%s', which may reach a call through a \
                                         function pointer%s" target
@@ -14026,7 +14198,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           if target = Instr_spec.irq_unmask || StringSet.mem target irq_restorers
              || (StringSet.mem target may_call_indirect
                  && not (StringSet.mem target irq_restore_discharged))
-             || StringMap.mem (loc_key e.loc) !resolved_indirect_call_effects
+             || opaque_indirect_call e
           then begin
             let passed = List.fold_left (fun paths (a : Ast.expr) -> match a.desc with
               | Ast.Var v -> PathSet.add (pvar_expr a v) paths
@@ -14046,7 +14218,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                 when not (PathSet.mem path passed)
                      && not (ResourceFlow.is_consumed_on_all_paths path moved) ->
                   let cause = if StringSet.mem target may_call_indirect
-                      || StringMap.mem (loc_key e.loc) !resolved_indirect_call_effects
+                      || opaque_indirect_call e
                     then " may reach an unknown indirect call"
                     else " reaches msr_daifclr_irq" ^
                       chain_text (call_chain target
@@ -14099,11 +14271,39 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                     visible_name guard_name))
               | _ -> ()) guard_bindings
           end;
-          let params = Option.value (StringMap.find_opt target call_params) ~default:[] in
+          let params = match StringMap.find_opt name scoped_callbacks with
+            | Some params -> params
+            | None -> Option.value (StringMap.find_opt target call_params) ~default:[] in
           let rec check_args moved args params = match args with
             | [] -> moved
             | arg :: rest ->
             let param = match params with p :: _ -> p | [] -> None in
+            (match Option.bind param scoped_callback_signature with
+             | None -> ()
+             | Some (expected, _, _) ->
+                 let callback = match (arg : Ast.expr).desc with
+                   | Ast.Var _ -> StringMap.find_opt (loc_key arg.loc) !resolved_function_values
+                   | _ -> None in
+                 let definition = Option.bind callback (fun key -> List.find_map (function
+                   | Ast.FuncDef f when overload_key f.name f.params = key -> Some f
+                   | _ -> None) prog) in
+                 (match definition with
+                  | Some f when not (List.exists (fun word ->
+                      Option.fold ~none:false ~some:(fun rule -> rule.Effect_rules.declaration_role)
+                        (Effect_rules.find word)) (Option.value f.effects ~default:[])) -> ()
+                  | _ -> raise (TypeError (arg.loc,
+                      "scoped callbacks require an ordinary named Takibi function body")));
+                 let actual = Option.bind callback (fun key -> StringMap.find_opt key call_params) in
+                 let compatible expected actual = match expected, actual with
+                   | Ast.TypeBorrow (Ast.TypeIndexed _), Some (Ast.TypeBorrow (Ast.TypeIndexed _)) -> true
+                   | (Ast.TypeBorrow _ | Ast.TypeBorrowMut _ | Ast.TypeSink _), _ -> false
+                   | _, Some (Ast.TypeBorrow _ | Ast.TypeBorrowMut _ | Ast.TypeSink _) -> false
+                   | _, _ -> true in
+                 (match actual with
+                  | Some actual when List.length actual = List.length expected
+                    && List.for_all2 compatible expected actual -> ()
+                  | _ -> raise (TypeError (arg.loc,
+                      "scoped callbacks require a named function with matching borrowed-owner parameters"))));
             let arg_taint = expr_taint taints arg in
             if not (PathSet.is_empty arg_taint)
                && not (Language_words.is_reserved_function_name target)
@@ -14132,6 +14332,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             in
             let moved = check_expr taints moved consume_arg arg in
             let saved_arguments = !pending_region_arguments in
+            let saved_guards = !pending_guard_arguments in
             let saved_witnesses = !pending_witness_arguments in
             let argument_type = match arg.desc with
               | Ast.Var binding -> (match pvar_expr arg binding with
@@ -14151,8 +14352,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             if not (PathSet.is_empty arg_taint) then
               pending_region_arguments :=
                 (taint_source_name arg, arg_taint) :: saved_arguments;
+            if expr_region_kind arg = Some RegionGuard
+               && not (PathSet.is_empty arg_taint) then
+              pending_guard_arguments := arg_taint :: saved_guards;
             Fun.protect
               ~finally:(fun () ->
+                pending_guard_arguments := saved_guards;
                 pending_region_arguments := saved_arguments;
                 pending_witness_arguments := saved_witnesses)
               (fun () -> check_args moved rest
@@ -14165,7 +14370,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           let record_kinds = StringMap.fold (fun seed kind kinds ->
             let reach = StringMap.find seed record_mutation_reach in
             if StringSet.mem target reach || StringSet.mem target may_call_indirect
-               || StringMap.mem (loc_key e.loc) !resolved_indirect_call_effects
+               || opaque_indirect_call e
             then StringSet.add kind kinds else kinds)
             record_mutators StringSet.empty in
           StringSet.iter (fun kind ->
@@ -14222,7 +14427,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                 check_loan (taint_source_name arg) (expr_taint taints arg)) args)
             record_kinds;
           let invalidation_target =
-            if StringMap.mem (loc_key e.loc) !resolved_indirect_call_effects
+            if opaque_indirect_call e
             then "<indirect call>" else target in
           let moved = invalidate_handles e.loc name invalidation_target
             (check_args moved args params) in
@@ -14452,6 +14657,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       let newly_declared = PathSet.diff declared initial_declared in
       PathSet.iter (fun p ->
         let loc () = Option.value (Hashtbl.find_opt decl_locs p) ~default:fdef.def_loc in
+        require_no_live_guard_loans (loc ()) declared taints moved p;
         match path_kind p with
         | Some Ast.KindLinear when
             not (ResourceFlow.is_consumed_on_all_paths p moved) ->

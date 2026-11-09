@@ -801,7 +801,7 @@ $(LINUX_USER_DIR)/boot_once/boot_once_exe.o: kernel/lib/boot_once.tkb kernel/lib
 # GitHub issue #1159 rule 3: kernel/lib/set_once.tkb, run natively.
 $(LINUX_USER_DIR)/set_once/set_once_exe.o: kernel/lib/set_once.tkb kernel/lib/atomic_word.tkb
 
-$(LINUX_USER_DIR)/locked_cell/locked_cell_exe.o: kernel/lib/spinlock.tkb kernel/lib/mutex.tkb kernel/lib/task_mutex.tkb kernel/lib/locked_cell.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
+$(LINUX_USER_DIR)/locked_cell/locked_cell_exe.o: kernel/lib/boot_once.tkb kernel/lib/execution_model.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb kernel/lib/task_mutex.tkb kernel/lib/locked_cell.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
 $(LINUX_USER_DIR)/locked_cell/locked_cell_exe.o: LINUX_USER_EXTRA_SRCS := kernel/lib/spinlock.tkb kernel/lib/mutex.tkb kernel/lib/task_mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
 
 # GitHub issue #217 (2026-08-15) closed the array-field-decay gap this

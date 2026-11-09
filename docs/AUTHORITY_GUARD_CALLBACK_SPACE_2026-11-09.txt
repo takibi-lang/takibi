@@ -1,0 +1,75 @@
+Authority-derived guard and named callback foundation: measured checkpoint
+Date: 2026-11-09
+
+Boundary
+- Compiler A/B component of the sleeping-Mutex work, not scheduler integration.
+- Tested base fd2838411848f99939d0d84b131dd8884640bd1d; its production sources
+  match archived published e15c4f54ba075b8ce467209c33e704b1c7297fdf.
+- allbuild exit0 tested staged tree a214bc0e3eed695f54fecb5513feea2f686ee82a,
+  production fingerprint e6670aba98404a375d62179de46d29fa153378688dd538d437469cb42773ae37.
+- No QEMU or board was run by this worker. Scheduler wait/stack lifecycle,
+  contention and physical RPi5 cost remain a later integration boundary.
+
+Actual workload
+- Existing complete cross-tree allbuild, including compiler tests and both
+  production kernels; no kernel source or allocation workload was changed.
+- Existing native LockedCell lane now imports actual BootPhase and uses the
+  actual Mutex/LockedCell acquisition, borrowed callback and linear release.
+  It checks held storage, writes/reads42, ends the phase after release, then
+  reacquires the same lock and checks the value. Its IRQ-mask provider is the
+  existing native stand-in; this is not a hardware concurrency test.
+- Native exit0 and byte-exact expected output; executable SHA256
+  db6b3ab0ed00230130cd0b15d11e837a47f7fa5612fa809d016ee9d90f8fe015.
+  That executable is byte-identical after the final allbuild recompilation.
+
+Production space against verified kernel-green-e15c4f54 manifest
+              text       data       BSS
+QEMU before   815420      4616       1302528
+QEMU after    815420      4616       1302528
+RPi5 before   4200424     5592       1925120
+RPi5 after    4200424     5592       1925120
+Both targets' .text/.rodata/.data section hashes match the baseline exactly;
+.bss sizes match (NOBITS has no payload hash). No pool, reservation, retained
+page or payload-capacity change is introduced by this compiler component.
+
+Native fixture space, same current compiler and original vs extended source
+                       before     after      delta
+llvm-size text total    7359       8347       +988
+.data                  0          0          0
+.bss payload           928        952        +24
+.relro_padding         352        3464       +3112
+llvm-size BSS total    1280       4416       +3136
+Text total includes .text (+588), .rodata (+32), .eh_frame (+368).
+The24 payload bytes are boot_phase_ended8 and bootstrap_value16. Padding is
+linker RELRO layout, not another ownership object or production allocation.
+The baseline was compiled and linked in a private _build directory using the
+exact native build commands, changing only the original-source/output paths.
+Two earlier measurement invocations supplied absolute --check-unused-file
+paths and were refused; the relative-path receipt is the successful result.
+No checker or linker setting was weakened to obtain it.
+
+Dispatch and proof representation
+- The actual inlined bootstrap_cell_roundtrip callsite calls
+  bootstrap_cell_body directly, as shown by disassembly.
+- Retained bootstrap_cell_scope is49 bytes and includes callq *rbx.
+- Lifetime @ annotations add no LLVM/ABI word. Existing phase and real guard
+  representations are each one word; the callback is an ordinary function
+  pointer, without a closure environment or a heap allocation.
+- This is not a claim that all indirect code disappears or image cost is0.
+- Closed named target union feeds existing lock/IRQ/record/witness checks;
+  it is not context specialization or implicit authority for descendants.
+
+Compiler allocation cost
+- Published e15 allcheck log: QEMU main.o 578666141 allocated OCaml words.
+- This allbuild: 584542607 words, +5876466 (+1.0155 percent).
+- Existing ceiling589000000: PASS, no budget edit. The remaining margin is
+  small; later kernel-source integration must remeasure against its actual
+  base. No claim of a separate timing or peak-resident-memory benchmark.
+
+Assessment
+Adopt the compiler checking and fixture costs for the authorized foundation.
+No new runtime allocation or kernel image cost on this unchanged workload.
+This checkpoint does not claim completed sleeping-Mutex acceptance or a
+measured kernel Mutex fast/contended cost. Next measurement: rebased kernel
+source combination, real scheduler Mutex integration, or a changed callback,
+guard representation or allocation workload.
