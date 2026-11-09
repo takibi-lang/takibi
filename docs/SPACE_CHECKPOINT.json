@@ -1,13 +1,13 @@
 {
   "date": "2026-11-09",
-  "event": "incremental",
+  "event": "milestone",
   "decision": "measured",
-  "source_sha256": "135cbed1fd84b82c39c41b9c9e1b654c4f4fcb79d1f9bd083e2a9b8d6eef42c3",
-  "workload": "Kernel log-ring trace ordering correction: one logical reader placed CPU1/CPU0/CPU1 through actual emission traversal, exhaustion refusal, unchanged real QEMU LogRingTrace validator window. Compare published acc2b55b production ELFs and four objects with source66a80b3d; deterministic algorithm, no hardware timing claim.",
+  "source_sha256": "746a9f049c92ac07facbc9231935506bb9e396bb24b402b06b979e2c5529d91d",
+  "workload": "Private linear block reset-confirmation action argument; maintained DMA QEMU successful-reset reuse and failed-reset retention, plus standard linked production kernels. Baseline published 7e665370, both baseline ELFs and production objects verified against its retained manifest. No allocation workload change.",
   "evidence": [
-    "docs/LOG_RING_TRACE_ORDER_SPACE.md",
-    "docs/LOG_RING_TRACE_ORDER_SPACE.json"
+    "docs/RESET_CONFIRMATION_SPACE.md",
+    "docs/RESET_CONFIRMATION_SPACE.json"
   ],
-  "assessment": "Measured text +1256 QEMU/+1192 RPi5; mutable symbols and image reservation unchanged. RPi5 BSS section -4096 is padding, not reclaimed payload/pages. Reader local grows 2 to16 bytes, selected corrected production/debug frames recorded separately without a whole-stack bound. Adopt explicit reader ordinal in spare tag bits; no event-array growth, whole-read IRQ mask, pinning or validator change.",
-  "next_trigger": "Changed trace event/reader layout, report lookup structure or window cardinality, or completion of preemption stage."
+  "assessment": "Both targets text -32 bytes and data -8; only the one-byte flag payload disappears, the other seven data bytes are section padding. BSS and usable_ram_start unchanged; no physical page freed and no queue/pool/lifetime growth. Adopt the typed single-transfer boundary; actual reset semantics and fixed device/slot association remain trusted.",
+  "next_trigger": "Another reset consumer, changed token/slot layout or allocation lifetime, or the next completed kernel stage."
 }

@@ -296,7 +296,7 @@ let validate (d : protocol_decl) : t =
     | PTransition (n, _, _, _, _, _, _) | PObserve (n, _, _, _, _) -> Some n
     | _ -> None) d.proto_items in
   check_distinct loc "transition or observation" action_names;
-  (* GitHub issue #1159: an action's value arguments are scalars handed
+  (* GitHub issue #1159: an action's value arguments are values handed
      from the caller to the lowering for this one action -- what a
      publication rings or how long its event is awaited -- not state: the
      next action does not see them and the model ignores them. Their names
@@ -324,7 +324,7 @@ let validate (d : protocol_decl) : t =
          borrowed, so the caller keeps it and holds L for the whole
          action; guarded_ref itself checks the guard's index. *)
       | TypeBorrow (TypeIndexed (_, [ StaticGlobal _ ])) -> ()
-      | TypeSink (TypeIndexed (_, [ StaticGlobal _ ])) -> ()
+      | TypeSink (TypeIndexed (_, [ StaticGlobal _ ])) -> () (* private linear shape checked below *)
       | _ -> fail v.pv_loc "value argument '%s' of '%s' must have a scalar type, \
                or be a borrowed guard `borrow G[&L]` or a private linear token `sink T[&device]`" v.pv_name n) vs)
     (List.filter_map (function
@@ -924,7 +924,7 @@ let element_bytes (prog : toplevel list) (d : protocol_decl) : int option =
         | _ -> None) prog
   | _ -> None
 
-(* GitHub issue #1159: an action's value arguments, appended to the
+(* GitHub issue #1159: an action's value arguments (including sinks), appended to the
    generated wrapper's parameters and passed unchanged to its lowering. *)
 let value_params (d : protocol_decl) (vs : proto_arg list) =
   String.concat "" (List.map (fun v ->

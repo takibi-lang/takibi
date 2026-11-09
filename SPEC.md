@@ -4746,13 +4746,16 @@ position; `protocol` itself is the one contextual keyword.
   (2026-11-08, #1159 (1a)), so the lowering reaches `guarded_by(L)` fields
   with `guarded_ref(g, ...)`. Being borrowed, the caller still holds it, so
   L is held for the whole action; `guarded_ref` checks that the guard's
-  index is `&L`. An owned or `sink` guard is rejected. In the kernel,
+  index is `&L`. A bare owned value argument is rejected. In the kernel,
   `xhci_ring_event`, `xhci_input_publish` and `xhci_input_used` take
   `borrow BlockDeviceGuard[&block_device_lock]` this way.
   A value argument may also consume a private linear token,
   `confirmation: sink ResetConfirmation[&device]`. The token must be a
   private linear struct with one static parameter, declared in the
-  protocol's source file. The wrapper moves it unchanged to the lowering;
+  protocol's source file. This is a structural restriction: there is no
+  semantic distinction between a guard and a reset token. A private linear
+  guard with this shape is also accepted as a sink and consumed. The wrapper
+  moves it unchanged to the lowering;
   ordinary linear checking rejects reuse by the caller; the sink lowering
   is the destruction boundary. The
   existing private constructor rules reject fabrication by another file,

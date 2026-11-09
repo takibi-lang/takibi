@@ -1,6 +1,6 @@
 {
   "base_head": "7e6653707d6de83fb56dd1541e50a3eff158aeaa",
-  "scope": "Linked production kernels; private linear reset-confirmation token, no allocation workload change. Baseline verified against retained manifest. Candidate working tree before first commit.",
+  "scope": "Linked production kernels; no allocation workload change. Baseline checked against retained manifest. Implementation HEAD had allbuild/modelcheck/DMA receipts before commit; final followup only corrects compiler comments and specification wording and records the checkpoint. Final audit ties the final HEAD and rechecked artifact hashes.",
   "targets": {
     "qemu": {
       "baseline_sha256": "4935e2cae06840c787709d9e485a1e105b33ab64cdbacbff8b75cc1f55faba4d",
@@ -75,5 +75,7 @@
       }
     }
   },
-  "production_source_sha256": "63668296316ac27e697f44029d41304855abb143c3c5d05d501217653688e48f"
+  "production_source_sha256": "746a9f049c92ac07facbc9231935506bb9e396bb24b402b06b979e2c5529d91d",
+  "implementation_head": "d2767b3e5d1418699a049f5ff2c6e926505e309f",
+  "implementation_production_source_sha256": "63668296316ac27e697f44029d41304855abb143c3c5d05d501217653688e48f"
 }
