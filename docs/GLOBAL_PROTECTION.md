@@ -63,13 +63,14 @@ Tried in this order; an array `[T; N]` takes the class of `T`.
 | `place` | `Place(T)` |
 | `atomic` (enum) | `Atomic(E)`: one AtomicWord holding a u8 enum's code, through `atomic_enum_store` / `atomic_enum_load` (#1159) |
 | `boot_once` | `BootOnce(T)`: written under one `BootPhase`, read after by `boot_once_get` |
+| `handle` | an actual compiler-generated `IoHandle(T)` declaration from the region builtins; the maintained boot-attach policy below protects its address word, not the registers' own synchronization |
 | `set_once` | `SetOnce(T)` (kernel/lib/set_once.tkb, #1159): published once with the linear claim `set_once_claim`'s compare-exchange hands out, read by `set_once_get`, at any time and with no lock |
 | `stop` | `StopCell(T)` (kernel/lib/occupancy.tkb, #1159): written only by `stop_cell_set`, which takes `borrow MachineStopped[&kernel_world_stop]`; read by `stop_cell_get`, a plain load, by anyone |
 | `per_cpu` | a `struct per_cpu` store |
 | `dma_fixed` | a `struct dma_fixed` record |
 | `protocol` | a struct a `protocol` declaration generated |
 | `composite` | a plain struct with at least one field, every field protected or declared `guarded_by(L)`: `Mutex` and `TaskMutex` (one `AtomicWord`), the `Place` slot structs, `PeerTally` |
-| `none` | anything else: integers, `bool`, arrays of those, structs with one unprotected field, `io` words, `IoHandle` |
+| `none` | anything else: integers, `bool`, arrays of those, structs with one unprotected field, `io` words |
 
 A `scratch` global is per-call storage that is still one cell shared by
 every core, so the ratchet counts it with `none`.
@@ -164,7 +165,7 @@ now name a reader, by what their why rests on; none of it is checked:
 | --- | --- | --- |
 | lock | 34 | every access under a named lock (`block_device_lock`, `ext2_mutation_lock`, the run lock), or core 0 at boot; a `TaskMutex` is kept across preemption |
 | boot | 27 | written on core 0 before userspace, read-only after |
-| handle | 21 | an `IoHandle` word attached once at boot; a register's own read-modify-write is not covered |
+| handle | 21 | an `IoHandle` word attached during boot; a register's own read-modify-write is not covered |
 | slot | 18 | a linear slot token (`BlockSlot`, `Ext2Slot`, `ExecWindowSlot`, `ProcessImageSlot`), kept by the task; `cpu_id()` does not select the element |
 | token | 17 | the one `NetRxCanAcquire`, or a packet's slot lock |
 | fixture | 17 | one boot fixture, a debugger arm, or one calling process |
@@ -826,3 +827,51 @@ OS comparison. The small measured cost is adopted for typed atomic field
 access, retaining all multi-field protocols. The next measurement trigger
 is changed record capacity, allocation/retention behavior or a new kernel
 feature milestone.
+
+## Device-handle boot boundary
+
+The compiler classifies only actual generated IoHandle definitions, using
+the builtin region provenance and generated type name together. A same-named
+user struct or an ordinary io pointer has no handle protection. This facts
+classification adds no language ownership rule or generated MMIO operation.
+
+The maintained kernel and native-driver fixtures additionally pass
+check_io_handle_boot_phase.py: handles have direct global declarations,
+registers are reached by projection, and only a direct io_handle_attach
+argument may take a whole handle word's address. Whole-word copies,
+assignments, escaping addresses, generated-type spellings and callable
+aliases are rejected. Aggregate/local handle storage needs a separately
+verified boundary before adoption; it is not silently exempted. Every raw
+attach's own enclosing function borrows BootPhase, including a nested
+callback rather than inheriting an outer function's phase. The type checker
+refuses reuse after boot_phase_end.
+
+BootPhase remains mutable: bootstrap and verified DTB windows can attach
+more than once during that phase. The mint and ordering before CPU_ON stay
+trusted as for BootOnce. The general language primitive remains copyable
+and phase-independent outside this maintained repository policy. There is
+no SetOnce read wrapper, new attach refusal, or per-MMIO load/check/lock.
+The register block's own concurrent read-modify-write still needs its driver
+synchronization. All 21 reviewed handle rows leave the allowlist only with
+this boundary in place.
+
+### Device-handle milestone space review (2026-11-09)
+
+Compared with published 762abced, both production kernels retain the same
+handle layout and fixed storage, data/BSS sizes and usable_ram_start. QEMU
+text/data/BSS remain 811080/4600/1302528 bytes; RPi5 text grows
+4196036 -> 4196068 bytes (+32), with data/BSS unchanged at 5576/1929216.
+The reservation boundaries stay 0x40208000 and 0x7e0000. No allocation,
+pool metadata, retained lifetime or device capacity changes. The compiler
+facts report 21 handle globals and 44 unprotected globals instead of 65.
+
+The static workload is the existing device-map bootstrap/DTB attachment
+before CPU_ON, plus the single-core DMA fake transport and the two native
+virtio driver fixtures using their existing boot token. Repeated in-phase
+attachments remain part of this workload. This is a measured fixed-state
+and linked-image boundary, not a new allocator-occupancy or physical-timing
+measurement. No backend or primitive lowering changed. The UART FIFO-full
+and TX-store accessors retain identical instruction bytes on both targets;
+there is no per-MMIO wrapper, load, branch or lock. The 32-byte boot-code
+cost is adopted for the explicit phase boundary. The next measurement is a
+changed handle capacity, device-map lifetime or allocation workload.

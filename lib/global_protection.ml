@@ -22,6 +22,8 @@
      LockedCell: the guard proves that the guarded-field lock is held, not
      which cell's (kernel/lib/locked_cell.tkb says so; one adopter today);
    - `Place(T)` -> place;  `BootOnce(T)` -> boot_once (#1013);
+   - compiler-generated `IoHandle(T)` -> handle (#1159); the maintained
+     attach boundary is checked by check_io_handle_boot_phase.py;
    - `SetOnce(T)` -> set_once (#1159);
    - `StopCell(T)` -> stop (#1159): written only under a borrowed
      MachineStopped (kernel/lib/occupancy.tkb);
@@ -37,6 +39,8 @@
    `owned_by(T.f, S)` global is `slot_owned` (GitHub issue #1159). *)
 
 open Ast
+
+module HandleNames = Set.Make (String)
 
 let format_version = 3
 
@@ -69,9 +73,13 @@ let write_table (out : out_channel) (prog : toplevel list) =
   (* Plain struct fields by name, and the structs a protocol generated. *)
   let fields = Hashtbl.create 256 and protocol = Hashtbl.create 16 in
   let init_once_here = ref false in
+  let handles = ref HandleNames.empty in
   List.iter (function
     | StructDef (name, fs, _, _, _, loc) ->
         Hashtbl.replace fields name fs;
+        if source_file_of_loc loc = Ast.builtin_region_file
+           && String.starts_with ~prefix:"IoHandle__" name then
+          handles := HandleNames.add name !handles;
         if name = "InitOnce"
            && (let f = source_file_of_loc loc in
                f = init_once_file
@@ -102,6 +110,7 @@ let write_table (out : out_channel) (prog : toplevel list) =
     | _ -> "none"
   and named seen n =
     if n = "AtomicWord" then "atomic"
+    else if HandleNames.mem n !handles then "handle"
     (* region(T) pools are generated under this prefix (Region_builtin). *)
     else if String.starts_with ~prefix:"RegionPool__" n then "lock"
     else if Per_cpu_registry.is_store n then "per_cpu"

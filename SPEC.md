@@ -5785,6 +5785,15 @@ uart.imsc = 0;
 - Trusted: the code that turns an external description into a window
   (`region_bytes_assume`) and the description itself.
 
+The maintained kernel additionally enforces its boot policy with
+`scripts/check_io_handle_boot_phase.py`: every attach function borrows
+`BootPhase`, and direct global handle words cannot be copied, reassigned
+or have their address escape that attach boundary. Repeated in-phase
+attaches are allowed. Register projection is unchanged; no per-MMIO check
+is added. This repository policy and the compiler's `handle` facts class
+are described in `docs/GLOBAL_PROTECTION.md`; the general primitive above
+keeps its existing language semantics.
+
 ## Record-only RegionPool access
 
 For a plain named struct element, `region_slot_record`, `region_pin_record`

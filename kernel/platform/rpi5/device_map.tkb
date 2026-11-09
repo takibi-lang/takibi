@@ -57,7 +57,7 @@ fn rpi5_uart_attach_window(phase: borrow BootPhase[boot], base: usize, bytes: us
 // The fixed RP1 BAR assignment is checked against the boot DTB before
 // networking starts. Attach before the GIC can dispatch a retained GEM IRQ;
 // net_init is too late for initializing an interrupt handler's handle.
-fn rpi5_gem_attach_bootstrap() !{unsafe} {
+fn rpi5_gem_attach_bootstrap(phase: borrow BootPhase[boot]) !{unsafe} {
     let RegionBytes::Assumed(window) = region_bytes_assume(RP1_GEM_BASE, 0x4000) else {};
     match io_handle_attach(&gem, window) {
         IoAttach::Attached => {}
@@ -94,7 +94,7 @@ fn rpi5_gem_attach_bootstrap() !{unsafe} {
 // pcie2, its SERDES calibration reset and bcm_reset, at the bases the
 // boot DTB readers left (the board's addresses, or DTB reg entries already
 // compared with them and checked for these sizes). Before pcie2_init.
-fn rpi5_pcie_windows_attach() !{unsafe} {
+fn rpi5_pcie_windows_attach(phase: borrow BootPhase[boot]) !{unsafe} {
     let RegionBytes::Assumed(bridge) =
         region_bytes_assume(boot_once_get(&rpi5_pcie2_base), 0x9310) else {};
     match io_handle_attach(&pcie2, bridge) {
@@ -117,7 +117,7 @@ fn rpi5_pcie_windows_attach() !{unsafe} {
 
 // The BCM2712 system timer, at a DTB reg entry its reader has already
 // compared with the board's known address.
-fn rpi5_system_timer_attach(base: usize, bytes: usize) -> Rpi5Attach !{unsafe} {
+fn rpi5_system_timer_attach(phase: borrow BootPhase[boot], base: usize, bytes: usize) -> Rpi5Attach !{unsafe} {
     let RegionBytes::Assumed(window) = region_bytes_assume(base, bytes) else {};
     match io_handle_attach(&rpi5_system_timer, window) {
         IoAttach::TooSmall => { return Rpi5Attach::Refused; }

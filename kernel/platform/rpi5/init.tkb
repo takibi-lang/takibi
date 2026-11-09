@@ -287,7 +287,7 @@ fn main() !{unsafe} {
     // not hide a parser or handoff regression behind a second data source.
     kernel_boot_memory_apply();
 
-    match rpi5_system_timer_verify_boot_dtb() {
+    match rpi5_system_timer_verify_boot_dtb(phase) {
         Rpi5SystemTimerDtbResult::Invalid => {
             kernel_boot_log("system timer: invalid boot DTB device; halting\n");
             while (true) { }

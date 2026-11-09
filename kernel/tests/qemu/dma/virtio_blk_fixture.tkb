@@ -79,19 +79,23 @@ fn dma_fixture_authority(cpu_expected: bool) {
     dma_fixture_require(data_cpu == cpu_expected, "data authority");
 }
 
-fn dma_fixture_run() !{unsafe} {
-    disable_irq();
-    let mut phase = boot_phase_mint();
-    qemu_uart_attach_bootstrap(phase);
-    boot_phase_end(phase);
-    uart_init();
-    kernel_log_init();
+fn dma_fixture_attach_registers(phase: borrow BootPhase[boot]) !{unsafe} {
     let RegionBytes::Assumed(registers) = region_bytes_assume(
         (&dma_fixture_registers) as usize, 128 * 4) else {};
     match io_handle_attach(&virtio_blk_regs, registers) {
         IoAttach::Attached => {}
         IoAttach::TooSmall => { dma_fixture_require(false, "register window"); }
     }
+}
+
+fn dma_fixture_run() !{unsafe} {
+    disable_irq();
+    let mut phase = boot_phase_mint();
+    qemu_uart_attach_bootstrap(phase);
+    uart_init();
+    kernel_log_init();
+    dma_fixture_attach_registers(phase);
+    boot_phase_end(phase);
     virtio_blk_base_set(1);
     // The driver's entries take the device guard, as memory.tkb's callers do.
     let slot: BlockSlot[0] = block_slot_acquire();

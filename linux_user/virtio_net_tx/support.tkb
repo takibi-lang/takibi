@@ -248,16 +248,20 @@ fn send_timeout_case(ready: sink NetRxCanAcquire[net], reply_timeout: bool)
     return net_transmit_ready(ready, packet as []u8, 64);
 }
 
-fn run_driver_case(reply_timeout: bool) !{may_block} {
-    let address: usize = (fake_regs as *u8) as usize;
-    check(address > 0 && address < 0x80000000, "native fake MMIO must fit the legacy i32 base");
+fn virtio_fixture_attach_registers(phase: borrow BootPhase[boot], address: usize) !{unsafe} {
     let RegionBytes::Assumed(registers) = region_bytes_assume(address, 128 * 4) else {};
     match io_handle_attach(&virtio_net_regs, registers) {
         IoAttach::Attached => {}
         IoAttach::TooSmall => { check(false, "native fake MMIO window refused"); }
     }
-    // The kernel's boot DTB walk sets these under the boot phase.
+}
+
+fn run_driver_case(reply_timeout: bool) !{may_block} {
+    let address: usize = (fake_regs as *u8) as usize;
+    check(address > 0 && address < 0x80000000, "native fake MMIO must fit the legacy i32 base");
     let phase = boot_phase_mint();
+    virtio_fixture_attach_registers(phase, address);
+    // The kernel's boot DTB walk sets these under the boot phase.
     boot_once_set(&virtio_base, phase, address as i32);
     boot_once_set(&virtio_net_gic_intid, phase, 48);
     boot_once_set(&rp1_dma_pci_offset, phase, 0);

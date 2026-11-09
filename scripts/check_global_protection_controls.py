@@ -85,6 +85,12 @@ def main():
     expect("unknown class is refused",
            refused(lambda: g.parse_table(table(row("kernel/a.tkb", "x", "locked")), "t")))
 
+    expect("handle class is accepted without an allowlist row",
+           errors(table(row("kernel/a.tkb", "h", "handle")), "") == [])
+    expect("a protected handle's old row is stale",
+           any("now protected" in e for e in errors(
+               table(row("kernel/a.tkb", "h", "handle")), "kernel/a.tkb\th\treader\n")))
+
     # 2026-11-08 #1159 (3A): a listed scalar is debugger_set; an aggregate
     # or an unlisted name is not.
     arms = table(row("kernel/a.tkb", "arm"), row("kernel/a.tkb", "free"),

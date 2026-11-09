@@ -62,7 +62,7 @@ HEADER = "# takibi globals, format "
 COLUMNS = ("file", "line", "name", "visibility", "qualifier", "type", "protection")
 PROTECTED = {"atomic", "lock", "per_cpu", "region", "place", "dma_fixed",
              "protocol", "boot_once", "set_once", "stop", "composite", "slot_owned",
-             "debugger_set"}
+             "debugger_set", "handle"}
 UNPROTECTED = {"none"}
 
 

@@ -3616,6 +3616,31 @@ let infer_tests = [
         (row "kernel/lib/init_once.tkb");
       Alcotest.(check (option string)) "a same-named struct elsewhere" (Some "none")
         (row "kernel/other.tkb"));
+  Alcotest.test_case "global protection: only generated IoHandle declarations are handles" `Quick
+    (fun () ->
+      let classify file =
+        Compilation_state.reset ();
+        let lexbuf = Lexing.from_string
+            "struct IoHandle__Proof { private address: usize; }\n\
+             let mut device: IoHandle__Proof;\n\
+             let mut devices: [IoHandle__Proof; 2];\n\
+             let mut pointer: *io u32;\n" in
+        Lexing.set_filename lexbuf file;
+        let prog = Parser.program Lexer.read lexbuf in
+        let path = Filename.temp_file "handle-globals" ".tsv" in
+        Out_channel.with_open_bin path (fun oc -> Global_protection.write_table oc prog);
+        let text = In_channel.with_open_bin path In_channel.input_all in
+        Sys.remove path;
+        List.filter_map (fun row -> match String.split_on_char '\t' row with
+          | [_; _; name; _; _; _; protection] when name <> "name" -> Some (name, protection)
+          | _ -> None) (String.split_on_char '\n' text) in
+      Alcotest.(check (list (pair string string))) "generated provenance"
+        ["device", "handle"; "devices", "handle"; "pointer", "none"]
+        (classify Ast.builtin_region_file);
+      Alcotest.(check (list (pair string string))) "user prefix is not authority"
+        ["device", "none"; "devices", "none"; "pointer", "none"]
+        (classify "kernel/fake.tkb"));
+
   Alcotest.test_case "call graph body hash ignores comments, not literals" `Quick
     (fun () ->
       let hash src = List.assoc "body_hash" (List.assoc "f" (call_graph_rows src)) in
@@ -12424,6 +12449,27 @@ linear struct Owner746b[page: usize] {
         fn tx_full7p() -> bool { return (uart7p.fr & 0x20) != 0; }
         fn clear7p() { uart7p.icr = 0x7ff; }
 "));
+
+  Alcotest.test_case "io handle boot wrapper rejects an ended phase" `Quick
+    (expect_region_error "linear value 'phase' was already consumed" {|
+      io struct PhaseRegs { status: u32 at 0; }
+      private let mut phase_regs: IoHandle(PhaseRegs);
+      linear struct BootPhase[phase: addr] { private held: usize; }
+      private let mut phase_flag: usize;
+      fn phase_mint() -> BootPhase[&phase_flag] {
+        let mut p: BootPhase[&phase_flag] = { 1 }; return p;
+      }
+      fn phase_end(p: sink BootPhase[boot]) { let held: usize = p.held; }
+      fn attach_phase(phase: borrow BootPhase[boot], base: usize) !{unsafe} {
+        let RegionBytes::Assumed(window) = region_bytes_assume(base, 4) else {};
+        match io_handle_attach(&phase_regs, window) {
+          IoAttach::Attached => {} IoAttach::TooSmall => {}
+        }
+      }
+      fn run() !{unsafe} {
+        let phase = phase_mint(); phase_end(phase); attach_phase(phase, 4096);
+      }
+    |});
 
   Alcotest.test_case "io handle: its address is private" `Quick
     (expect_region_error "private"

@@ -20,7 +20,7 @@ must_use variant Rpi5SystemTimerDtbResult {
     Verified(usize);
 }
 
-fn rpi5_system_timer_verify_boot_dtb()
+fn rpi5_system_timer_verify_boot_dtb(phase: borrow BootPhase[boot])
         -> Rpi5SystemTimerDtbResult !{unsafe} {
     let dtb: usize = boot_dtb_address_read();
     match fdt_find_compatible_reg(
@@ -40,7 +40,7 @@ fn rpi5_system_timer_verify_boot_dtb()
                     RPI5_SYSTEM_TIMER_CLO_OFFSET) {
                 return Rpi5SystemTimerDtbResult::Invalid;
             }
-            match rpi5_system_timer_attach(region.base, region.size) {
+            match rpi5_system_timer_attach(phase, region.base, region.size) {
                 Rpi5Attach::Refused => {
                     return Rpi5SystemTimerDtbResult::Invalid;
                 }
