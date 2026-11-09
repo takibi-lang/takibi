@@ -1,6 +1,6 @@
 use "kernel/drivers/block/block_slot.tkb";
 use "kernel/drivers/block/block_cache.tkb";
-use "kernel/lib/task_mutex.tkb";
+use "kernel/drivers/block/device_lock.tkb";
 use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/slot_pool_wait.tkb";
 use "kernel/kernel/cpu_authority.tkb";
@@ -192,27 +192,18 @@ fn block_device_wait_count(slot: usize) -> usize {
 // transport state are Places guarded by it, so their entries name
 // BlockDeviceGuard[&block_device_lock]. virtio_blk.tkb's state is a Place
 // guarded_by it, so its entries name BlockDeviceGuard[&block_device_lock].
-let mut block_device_lock: TaskMutex;
-
-// `[lock: addr]` names the one lock it came from, and linear, so no path
-// through a device access can leave it held.
-linear struct BlockDeviceGuard[lock: addr] {
-    private cpu: usize;
-}
-
+// The shared provider owns the lock and mint. This wrapper alone records
+// block-command contention against the caller's real accounting slot.
 fn block_device_take(slot: borrow BlockSlot[0])
         -> BlockDeviceGuard[&block_device_lock]
         !{acquires_lock_30_block_device, lock_guard_30_block_device} {
-    if (task_mutex_trylock(&block_device_lock) == false) {
-        block_note_call(slot, block_device_waits as []AtomicWord);
-        task_mutex_acquire(&block_device_lock);
+    match block_device_try_take() {
+        BlockDeviceTry::Taken(guard) => { return guard; }
+        BlockDeviceTry::Busy => {
+            block_note_call(slot, block_device_waits as []AtomicWord);
+            return block_device_take_unaccounted();
+        }
     }
-    let mut guard: BlockDeviceGuard[&block_device_lock] = { block_slot_number(slot) };
-    return guard;
-}
-
-fn block_device_give(guard: sink BlockDeviceGuard[&block_device_lock]) {
-    task_mutex_release(&block_device_lock);
 }
 
 // GitHub issue #595: a failed device read or write, on demand.

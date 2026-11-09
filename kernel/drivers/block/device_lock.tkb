@@ -1,0 +1,44 @@
+// The one block-device TaskMutex and its linear authority, shared by block
+// commands and virtio-net queue CPU accesses. Slot accounting stays in
+// memory.tkb; networking never fabricates an accounting BlockSlot.
+//
+// Current limitations (2026-11-09): this is the existing unmasked,
+// preemptible TaskMutex backend, not the pending sleeping Mutex design.
+// Blocking take is may_block; try takes one attempt and returns Busy with
+// no authority. Callers release before completion waits. The lock is
+// non-recursive; the existing rank-30/IRQ rules remain in force. The mint
+// trusts that acquiring this lock establishes the returned guard's index.
+use "kernel/lib/task_mutex.tkb";
+
+let mut block_device_lock: TaskMutex;
+
+linear struct BlockDeviceGuard[lock: addr] {
+    // Preserve the existing one-word guard representation; it carries no
+    // CPU or accounting-slot identity.
+    private held: usize;
+}
+
+must_use variant BlockDeviceTry {
+    Busy;
+    Taken(BlockDeviceGuard[&block_device_lock]);
+}
+
+fn block_device_take_unaccounted() -> BlockDeviceGuard[&block_device_lock]
+        !{acquires_lock_30_block_device, lock_guard_30_block_device} {
+    task_mutex_acquire(&block_device_lock);
+    let mut guard: BlockDeviceGuard[&block_device_lock] = { 1 };
+    return guard;
+}
+
+fn block_device_try_take() -> BlockDeviceTry
+        !{acquires_lock_30_block_device, lock_guard_30_block_device} {
+    if (task_mutex_trylock(&block_device_lock) == false) {
+        return BlockDeviceTry::Busy;
+    }
+    let mut guard: BlockDeviceGuard[&block_device_lock] = { 1 };
+    return BlockDeviceTry::Taken(guard);
+}
+
+fn block_device_give(guard: sink BlockDeviceGuard[&block_device_lock]) {
+    task_mutex_release(&block_device_lock);
+}

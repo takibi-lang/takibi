@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 def sources() -> dict[str, str]:
     names = [
         "kernel/drivers/block/memory.tkb",
+        "kernel/drivers/block/device_lock.tkb",
         "kernel/drivers/block/block_slot.tkb",
         "kernel/kernel/workload_evidence.tkb",
         "kernel/kernel/syscall.tkb",
@@ -29,6 +30,7 @@ def sources() -> dict[str, str]:
 def problems(tree: dict[str, str]) -> list[str]:
     tree = {name: LayoutSource(text) for name, text in tree.items()}
     memory = tree["kernel/drivers/block/memory.tkb"]
+    device_lock = tree["kernel/drivers/block/device_lock.tkb"]
     block_slot = tree["kernel/drivers/block/block_slot.tkb"]
     evidence = tree["kernel/kernel/workload_evidence.tkb"]
     syscall = tree["kernel/kernel/syscall.tkb"]
@@ -39,13 +41,20 @@ def problems(tree: dict[str, str]) -> list[str]:
     result = []
 
     lock_shape = (
-        "if (task_mutex_trylock(&block_device_lock) == false) {\n"
-        "        block_note_call(slot, block_device_waits as []AtomicWord);\n"
-        "        task_mutex_acquire(&block_device_lock);\n"
-        "    }"
-    )
+        "match block_device_try_take() { "
+        "BlockDeviceTry::Taken(guard) => { return guard; } "
+        "BlockDeviceTry::Busy => { "
+        "block_note_call(slot, block_device_waits as []AtomicWord); "
+        "return block_device_take_unaccounted(); } }")
     if lock_shape not in memory:
         result.append("device acquisition does not record a failed first try")
+    for shape in (
+        "if (task_mutex_trylock(&block_device_lock) == false) { return BlockDeviceTry::Busy; }",
+        "task_mutex_acquire(&block_device_lock);",
+        "task_mutex_release(&block_device_lock);",
+    ):
+        if shape not in device_lock:
+            result.append("device authority provider lost its real acquisition/release")
     # GitHub issue #638: the counters are per BlockSlot. The verdict reads
     # them by core number, which is right only while a CPU's operations take
     # the slot its number names first.
@@ -156,7 +165,10 @@ def main() -> int:
 
     controls = []
     mutations = {
-        "exclusion": ("kernel/drivers/block/memory.tkb", "task_mutex_trylock", "removed_trylock"),
+        "exclusion": ("kernel/drivers/block/device_lock.tkb", "task_mutex_trylock", "removed_trylock"),
+        "blocking exclusion": ("kernel/drivers/block/device_lock.tkb", "task_mutex_acquire", "removed_acquire"),
+        "release": ("kernel/drivers/block/device_lock.tkb", "task_mutex_release", "removed_release"),
+        "wait accounting": ("kernel/drivers/block/memory.tkb", "block_note_call(slot, block_device_waits as []AtomicWord);", "removed_wait_accounting();"),
         "slot hint": ("kernel/drivers/block/memory.tkb", "return block_slot_acquire_from(cpu_id());", "return block_slot_acquire_from(0);"),
         "cpu0 wait": ("kernel/kernel/workload_evidence.tkb", "block_device_wait_count(0) == 0 ||", "removed_cpu0_wait == 0 ||"),
         "secondary id": ("kernel/kernel/workload_evidence.tkb", "block_read_call_count(SECONDARY_CORE_ID) == 0 ||", "block_read_call_count(1) == 0 ||"),

@@ -419,6 +419,7 @@ KERNEL_UNUSED_EXEMPT := \
 	kernel/tests/qemu/dma/virtio_blk_fixture.tkb \
 	kernel/boot/fdt.tkb \
 	kernel/drivers/block/memory.tkb \
+	kernel/drivers/block/device_lock.tkb \
 	kernel/drivers/block/block_slot.tkb \
 	kernel/lib/freelist.tkb \
 	kernel/lib/task_mutex.tkb \
@@ -779,7 +780,7 @@ $(LINUX_USER_DIR)/block_cache/block_cache_exe.o: LINUX_USER_EXTRA_SRCS := kernel
 # virtio backend, the workload profile); host_stubs.S for the two assembly
 # helpers of cpu_stop_extern.tkb.
 EXT2_HOST_DIR := $(LINUX_USER_DIR)/ext2_host
-$(EXT2_HOST_DIR)/ext2_host_exe.o: kernel/fs/ext2/ext2.tkb kernel/fs/ext2/ext2_syscall.tkb kernel/fs/ext2/mutation_lock.tkb kernel/drivers/block/memory.tkb kernel/drivers/block/block_slot.tkb kernel/drivers/block/block_cache.tkb kernel/lib/execution_model.tkb kernel/lib/task_mutex.tkb kernel/lib/spinlock.tkb kernel/lib/atomic_word.tkb kernel/lib/byte_slice.tkb kernel/kernel/cpu_authority.tkb kernel/arch/arm64/kernel/cpu_stop_extern.tkb $(EXT2_HOST_DIR)/host_support.tkb $(EXT2_HOST_DIR)/ram_disk.tkb
+$(EXT2_HOST_DIR)/ext2_host_exe.o: kernel/drivers/block/device_lock.tkb kernel/fs/ext2/ext2.tkb kernel/fs/ext2/ext2_syscall.tkb kernel/fs/ext2/mutation_lock.tkb kernel/drivers/block/memory.tkb kernel/drivers/block/block_slot.tkb kernel/drivers/block/block_cache.tkb kernel/lib/execution_model.tkb kernel/lib/task_mutex.tkb kernel/lib/spinlock.tkb kernel/lib/atomic_word.tkb kernel/lib/byte_slice.tkb kernel/kernel/cpu_authority.tkb kernel/arch/arm64/kernel/cpu_stop_extern.tkb $(EXT2_HOST_DIR)/host_support.tkb $(EXT2_HOST_DIR)/ram_disk.tkb
 $(EXT2_HOST_DIR)/ext2_host_exe.o: LINUX_USER_EXTRA_SRCS := kernel/lib/execution_model.tkb $(EXT2_HOST_DIR)/host_support.tkb $(EXT2_HOST_DIR)/ram_disk.tkb
 $(LINUX_USER_BUILD_DIR)/ext2_host_stubs.o: $(EXT2_HOST_DIR)/host_stubs.S | $(LINUX_USER_BUILD_DIR)
 	$(LLVM_MC) --triple=$(LINUX_AMD64_TARGET) --filetype=obj $< -o $@
@@ -788,8 +789,8 @@ $(EXT2_HOST_DIR)/ext2_host.exe: $(LINUX_USER_BUILD_DIR)/ext2_host_stubs.o
 # GitHub issue #445: the kernel's own spinlock, compiled and run natively.
 # The same source the kernel links, not a copy -- see the freelist/slotmap
 # note below for why that distinction is the point.
-$(LINUX_USER_DIR)/spinlock/spinlock_exe.o: kernel/lib/spinlock.tkb kernel/lib/task_mutex.tkb
-$(LINUX_USER_DIR)/spinlock/spinlock_exe.o: LINUX_USER_EXTRA_SRCS := kernel/lib/spinlock.tkb kernel/lib/task_mutex.tkb
+$(LINUX_USER_DIR)/spinlock/spinlock_exe.o: kernel/lib/spinlock.tkb kernel/lib/task_mutex.tkb kernel/drivers/block/device_lock.tkb
+$(LINUX_USER_DIR)/spinlock/spinlock_exe.o: LINUX_USER_EXTRA_SRCS := kernel/lib/spinlock.tkb kernel/lib/task_mutex.tkb kernel/drivers/block/device_lock.tkb
 
 # GitHub issue #452: kernel/lib/locked_cell.tkb, the container whose value
 # cannot be named without its guard. It needs the same stand-ins the pool

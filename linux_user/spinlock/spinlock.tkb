@@ -92,7 +92,35 @@ fn task_mutex_roundtrip() -> i32 !{unsafe} {
     return 0;
 }
 
+// The shared device provider must exclude a second acquisition and release
+// the actual lock word. This is a native single-thread exclusion oracle,
+// not IRQ delivery or multicore scheduling evidence.
+fn block_device_roundtrip() -> i32 !{unsafe} {
+    let guard = block_device_take_unaccounted();
+    let held: bool = task_mutex_is_held(&block_device_lock);
+    let busy: bool = match block_device_try_take() {
+        BlockDeviceTry::Busy => { true }
+        BlockDeviceTry::Taken(other) => { block_device_give(other); false }
+    };
+    block_device_give(guard);
+    let released: bool = task_mutex_is_held(&block_device_lock) == false;
+    let taken: bool = match block_device_try_take() {
+        BlockDeviceTry::Busy => { false }
+        BlockDeviceTry::Taken(next) => {
+            let owned: bool = task_mutex_is_held(&block_device_lock);
+            block_device_give(next);
+            owned
+        }
+    };
+    if (held == false || busy == false || released == false || taken == false) {
+        uart_puts("FAIL block-device provider exclusion/release\r\n");
+        linux_exit(1);
+    }
+    return 0;
+}
+
 fn app_main() {
     spinlock_roundtrip();
     task_mutex_roundtrip();
+    block_device_roundtrip();
 }

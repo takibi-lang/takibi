@@ -33,7 +33,7 @@
 // RANK 20, OUTSIDE THE DEVICE LOCK
 //
 // A mutator holds this across several block reads and writes, each of which
-// takes memory.tkb's block_device_lock at rank 30 underneath it. The
+// takes device_lock.tkb's block_device_lock at rank 30 underneath it. The
 // compiler checks that order (GitHub issue #466): acquiring a lower rank
 // while holding a higher one is a type error, so this being 20 and the
 // device being 30 is what makes "filesystem outside device" checked rather

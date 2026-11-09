@@ -943,3 +943,23 @@ measured fixed-state/image milestone, not physical cache/timing evidence.
 The small code change is adopted for the explicit borrowed guard boundary.
 Measure again when queue capacity, DMA ownership, or allocation lifetime
 changes. CPU serialization remains distinct from device quiescence.
+
+### Shared block-device guard provider
+
+The block-device lock and its linear guard are declared in
+`kernel/drivers/block/device_lock.tkb`. Its blocking take has no slot
+accounting; its try take performs one real TaskMutex attempt and returns
+Busy or a guard. The existing block wrapper alone charges a failed first
+attempt to the caller's real BlockSlot. Guard payload remains one word
+and carries no CPU or slot identity. Native spinlock coverage exercises
+the actual shared provider's exclusion and release, without a fake guard.
+
+This shared-interface extraction preserves the existing lock/storage and
+block-I/O workload. The net queue migration is a separate consumer change.
+
+The interface-only extraction measures against archived e15c4f54: QEMU
+text 815420 -> 815540 bytes (+120), RPi5 text 4200424 -> 4200512 bytes
+(+88). Data/BSS and usable_ram_start remain unchanged on both targets;
+the one lock remains 8 bytes and the linear guard remains one word. This
+component changes no allocation capacity or retention workload. The full
+net queue consumer milestone requires its own final measurement.
