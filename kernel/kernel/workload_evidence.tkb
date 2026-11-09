@@ -280,20 +280,21 @@ private let mut workload_busy_pair: WorkloadBusyPair;
 // under the process run lock.
 const WORKLOAD_BUSY_WAIT_PIDS: usize = 8;
 
+// Word-atomic fields; the run lock still owns wait tracking and maxima.
 struct WorkloadBusyWait {
-    waiting: bool;
-    core: usize;
-    ticks: usize;
-    distinct: usize;
-    pids: [usize; WORKLOAD_BUSY_WAIT_PIDS];
-    picks: [usize; WORKLOAD_BUSY_WAIT_PIDS];
+    waiting: AtomicWord;
+    core: AtomicWord;
+    ticks: AtomicWord;
+    distinct: AtomicWord;
+    pids: [AtomicWord; WORKLOAD_BUSY_WAIT_PIDS];
+    picks: [AtomicWord; WORKLOAD_BUSY_WAIT_PIDS];
     // Picks of a pid that found the table full. Counted, not compared.
-    untracked: usize;
-    waits: usize;
-    max_ticks: usize;
+    untracked: AtomicWord;
+    waits: AtomicWord;
+    max_ticks: AtomicWord;
     // The most ticks one wait took beyond the distinct pids picked in it.
-    max_excess: usize;
-    max_picks: usize;
+    max_excess: AtomicWord;
+    max_picks: AtomicWord;
 }
 
 // Index 0 is tag A's worker and 1 is tag B's.
@@ -341,15 +342,15 @@ private fn workload_busy_worker_pid(worker: {0..<2 as usize}) -> usize {
 
 private fn workload_busy_waits_reset() {
     for worker: usize in 0..<2 {
-        workload_busy_waits[worker].waiting = false;
-        workload_busy_waits[worker].core = 0;
-        workload_busy_waits[worker].ticks = 0;
-        workload_busy_waits[worker].distinct = 0;
-        workload_busy_waits[worker].untracked = 0;
-        workload_busy_waits[worker].waits = 0;
-        workload_busy_waits[worker].max_ticks = 0;
-        workload_busy_waits[worker].max_excess = 0;
-        workload_busy_waits[worker].max_picks = 0;
+        atomic_word_store(&workload_busy_waits[worker].waiting, 0);
+        atomic_word_store(&workload_busy_waits[worker].core, 0);
+        atomic_word_store(&workload_busy_waits[worker].ticks, 0);
+        atomic_word_store(&workload_busy_waits[worker].distinct, 0);
+        atomic_word_store(&workload_busy_waits[worker].untracked, 0);
+        atomic_word_store(&workload_busy_waits[worker].waits, 0);
+        atomic_word_store(&workload_busy_waits[worker].max_ticks, 0);
+        atomic_word_store(&workload_busy_waits[worker].max_excess, 0);
+        atomic_word_store(&workload_busy_waits[worker].max_picks, 0);
     }
 }
 
@@ -361,56 +362,57 @@ private fn workload_busy_wait_begin(worker: {0..<2 as usize}, core: usize) {
         atomic_word_store(&workload_busy_starve_injection_ticks, 0);
         atomic_word_store(&workload_busy_starve_armed, 1);
     }
-    workload_busy_waits[worker].waiting = true;
-    workload_busy_waits[worker].core = core;
-    workload_busy_waits[worker].ticks = 0;
-    workload_busy_waits[worker].distinct = 0;
+    atomic_word_store(&workload_busy_waits[worker].waiting, 1);
+    atomic_word_store(&workload_busy_waits[worker].core, core);
+    atomic_word_store(&workload_busy_waits[worker].ticks, 0);
+    atomic_word_store(&workload_busy_waits[worker].distinct, 0);
     for slot: usize in 0..<WORKLOAD_BUSY_WAIT_PIDS {
-        workload_busy_waits[worker].pids[slot] = 0;
-        workload_busy_waits[worker].picks[slot] = 0;
+        atomic_word_store(&workload_busy_waits[worker].pids[slot], 0);
+        atomic_word_store(&workload_busy_waits[worker].picks[slot], 0);
     }
 }
 
 private fn workload_busy_wait_pick(worker: {0..<2 as usize}, pid: usize) {
     for slot: usize in 0..<WORKLOAD_BUSY_WAIT_PIDS {
-        if (workload_busy_waits[worker].picks[slot] != 0 &&
-            workload_busy_waits[worker].pids[slot] == pid) {
-            let picks: usize = workload_busy_waits[worker].picks[slot] + 1;
-            workload_busy_waits[worker].picks[slot] = picks;
-            if (picks > workload_busy_waits[worker].max_picks) {
-                workload_busy_waits[worker].max_picks = picks;
+        if (atomic_word_load(&workload_busy_waits[worker].picks[slot]) != 0 &&
+            atomic_word_load(&workload_busy_waits[worker].pids[slot]) == pid) {
+            let picks: usize = atomic_word_load(&workload_busy_waits[worker].picks[slot]) + 1;
+            atomic_word_store(&workload_busy_waits[worker].picks[slot], picks);
+            if (picks > atomic_word_load(&workload_busy_waits[worker].max_picks)) {
+                atomic_word_store(&workload_busy_waits[worker].max_picks, picks);
             }
             return;
         }
     }
     for slot: usize in 0..<WORKLOAD_BUSY_WAIT_PIDS {
-        if (workload_busy_waits[worker].picks[slot] == 0) {
-            workload_busy_waits[worker].pids[slot] = pid;
-            workload_busy_waits[worker].picks[slot] = 1;
-            workload_busy_waits[worker].distinct =
-                workload_busy_waits[worker].distinct + 1;
-            if (workload_busy_waits[worker].max_picks == 0) {
-                workload_busy_waits[worker].max_picks = 1;
+        if (atomic_word_load(&workload_busy_waits[worker].picks[slot]) == 0) {
+            atomic_word_store(&workload_busy_waits[worker].pids[slot], pid);
+            atomic_word_store(&workload_busy_waits[worker].picks[slot], 1);
+            atomic_word_store(&workload_busy_waits[worker].distinct,
+                atomic_word_load(&workload_busy_waits[worker].distinct) + 1);
+            if (atomic_word_load(&workload_busy_waits[worker].max_picks) == 0) {
+                atomic_word_store(&workload_busy_waits[worker].max_picks, 1);
             }
             return;
         }
     }
-    workload_busy_waits[worker].untracked =
-        workload_busy_waits[worker].untracked + 1;
+    atomic_word_store(&workload_busy_waits[worker].untracked,
+        atomic_word_load(&workload_busy_waits[worker].untracked) + 1);
 }
 
 private fn workload_busy_wait_end(worker: {0..<2 as usize}) {
-    if (workload_busy_waits[worker].waiting == false) { return; }
-    workload_busy_waits[worker].waiting = false;
-    workload_busy_waits[worker].waits = workload_busy_waits[worker].waits + 1;
-    let ticks: usize = workload_busy_waits[worker].ticks;
-    if (ticks > workload_busy_waits[worker].max_ticks) {
-        workload_busy_waits[worker].max_ticks = ticks;
+    if (atomic_word_load(&workload_busy_waits[worker].waiting) == 0) { return; }
+    atomic_word_store(&workload_busy_waits[worker].waiting, 0);
+    atomic_word_store(&workload_busy_waits[worker].waits,
+        atomic_word_load(&workload_busy_waits[worker].waits) + 1);
+    let ticks: usize = atomic_word_load(&workload_busy_waits[worker].ticks);
+    if (ticks > atomic_word_load(&workload_busy_waits[worker].max_ticks)) {
+        atomic_word_store(&workload_busy_waits[worker].max_ticks, ticks);
     }
-    let distinct: usize = workload_busy_waits[worker].distinct;
+    let distinct: usize = atomic_word_load(&workload_busy_waits[worker].distinct);
     if (ticks > distinct &&
-        ticks - distinct > workload_busy_waits[worker].max_excess) {
-        workload_busy_waits[worker].max_excess = ticks - distinct;
+        ticks - distinct > atomic_word_load(&workload_busy_waits[worker].max_excess)) {
+        atomic_word_store(&workload_busy_waits[worker].max_excess, ticks - distinct);
     }
 }
 
@@ -427,8 +429,8 @@ private fn workload_busy_wait_note_selected(core: usize, previous: usize,
                 if (previous == worker_pid) {
                     workload_busy_wait_begin(worker, core);
                 }
-                if (workload_busy_waits[worker].waiting &&
-                    workload_busy_waits[worker].core == core) {
+                if ((atomic_word_load(&workload_busy_waits[worker].waiting) != 0) &&
+                    atomic_word_load(&workload_busy_waits[worker].core) == core) {
                     workload_busy_wait_pick(worker, pid);
                 }
             }
@@ -451,10 +453,10 @@ fn workload_busy_note_tick_locked(guard: borrow ProcessRunGuard[lock]) {
     if (stop_cell_get(&workload_profile_active) == false) { return; }
     let core: usize = cpu_id();
     for worker: usize in 0..<2 {
-        if (workload_busy_waits[worker].waiting &&
-            workload_busy_waits[worker].core == core) {
-            workload_busy_waits[worker].ticks =
-                workload_busy_waits[worker].ticks + 1;
+        if ((atomic_word_load(&workload_busy_waits[worker].waiting) != 0) &&
+            atomic_word_load(&workload_busy_waits[worker].core) == core) {
+            atomic_word_store(&workload_busy_waits[worker].ticks,
+                atomic_word_load(&workload_busy_waits[worker].ticks) + 1);
             let remaining: usize =
                 atomic_word_load(&workload_busy_starve_remaining);
             if (atomic_word_load(&workload_busy_starve_armed) != 0 &&
@@ -469,9 +471,9 @@ fn workload_busy_note_tick_locked(guard: borrow ProcessRunGuard[lock]) {
 
 private fn workload_busy_waits_bounded() -> bool {
     for worker: usize in 0..<2 {
-        if (workload_busy_waits[worker].max_picks >
+        if (atomic_word_load(&workload_busy_waits[worker].max_picks) >
                 WORKLOAD_BUSY_WAIT_PICKS_BOUND ||
-            workload_busy_waits[worker].max_excess >
+            atomic_word_load(&workload_busy_waits[worker].max_excess) >
                 WORKLOAD_BUSY_WAIT_EXCESS_BOUND) {
             return false;
         }
@@ -485,15 +487,15 @@ private fn workload_busy_waits_report() {
         if (worker == 0) { kernel_boot_log(" a:"); }
         else { kernel_boot_log(" b:"); }
         kernel_boot_log(" waits=");
-        uart_put_udec(workload_busy_waits[worker].waits);
+        uart_put_udec(atomic_word_load(&workload_busy_waits[worker].waits));
         kernel_boot_log(" max_ticks=");
-        uart_put_udec(workload_busy_waits[worker].max_ticks);
+        uart_put_udec(atomic_word_load(&workload_busy_waits[worker].max_ticks));
         kernel_boot_log(" max_excess=");
-        uart_put_udec(workload_busy_waits[worker].max_excess);
+        uart_put_udec(atomic_word_load(&workload_busy_waits[worker].max_excess));
         kernel_boot_log(" max_picks=");
-        uart_put_udec(workload_busy_waits[worker].max_picks);
+        uart_put_udec(atomic_word_load(&workload_busy_waits[worker].max_picks));
         kernel_boot_log(" untracked=");
-        uart_put_udec(workload_busy_waits[worker].untracked);
+        uart_put_udec(atomic_word_load(&workload_busy_waits[worker].untracked));
     }
     kernel_boot_log("\n");
 }

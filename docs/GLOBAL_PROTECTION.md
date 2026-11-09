@@ -725,3 +725,29 @@ boundary. No physical timing/cache conclusion or cross-OS comparison is
 claimed. Adopted: the small code and payload cost makes each field access
 atomic while retaining the run-locked multi-field protocol. The next
 measurement is the next record migration or a changed fixture lifetime.
+
+- 2026-11-09: `WorkloadBusyWait` scalar fields and its PID/pick arrays use
+  `AtomicWord` cells. The process-run lock still serializes wait tracking,
+  increments and maxima, and interval reporting retains its stop protocol.
+  Atomic field access is not a multi-field snapshot or an unlocked
+  read-modify-write guarantee. Its allowlist row is removed.
+
+### Busy-wait atomic-cell space review (2026-11-09)
+
+Compared with d9f0974d, both production kernels retain a 200-byte
+WorkloadBusyWait record (400 bytes for the two workers). Field offsets are
+0, 8, 16, 24, 32, 96, 160, 168, 176, 184 and 192 bytes; both eight-word
+arrays retain their strides. Widening waiting uses existing padding.
+QEMU text grows 810788 -> 810948 bytes; RPi5 text grows
+4193016 -> 4193208 bytes. Data/BSS remain 4600/1302528 bytes on QEMU
+and 5576/1933312 bytes on RPi5. usable_ram_start remains 0x40208000
+and 0x7e0000 respectively. No allocation or lifetime changes.
+
+Reset is private and called only by workload_profile_start while holding
+MachineStopped and ProcessRunGuard. Finish/report retain both authorities.
+The run lock still serializes separate load/store increments and maxima;
+atomic cells provide only word-level accesses. Existing starvation GDB
+controls consume UART output and inject a separate unchanged atomic word;
+no raw BusyWait layout consumer was found in scripts or maintained tests.
+This incremental record migration adopts the small code cost; completion
+of the globals milestone still requires its own workload/space review.
