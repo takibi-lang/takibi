@@ -2,12 +2,11 @@
   "date": "2026-11-09",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "746a9f049c92ac07facbc9231935506bb9e396bb24b402b06b979e2c5529d91d",
-  "workload": "Private linear block reset-confirmation action argument; maintained DMA QEMU successful-reset reuse and failed-reset retention, plus standard linked production kernels. Baseline published 7e665370, both baseline ELFs and production objects verified against its retained manifest. No allocation workload change.",
+  "source_sha256": "5408a59cc17c4ec4286bf2b77dd91f14c2b3275f58dd81555fca0fe24759164b",
+  "workload": "Standard linked production QEMU and RPi5 kernels against verified immutable published34ee3015 artifacts; maintained native virtio-net TX/reply fixtures. No resource or allocation-lifetime change.",
   "evidence": [
-    "docs/RESET_CONFIRMATION_SPACE.md",
-    "docs/RESET_CONFIRMATION_SPACE.json"
+    "docs/NET_USED_ADDRESS_REVIEW.md"
   ],
-  "assessment": "Both targets text -32 bytes and data -8; only the one-byte flag payload disappears, the other seven data bytes are section padding. BSS and usable_ram_start unchanged; no physical page freed and no queue/pool/lifetime growth. Adopt the typed single-transfer boundary; actual reset semantics and fixed device/slot association remain trusted.",
-  "next_trigger": "Another reset consumer, changed token/slot layout or allocation lifetime, or the next completed kernel stage."
+  "assessment": "AtomicWord address metadata retains16B payload and all linked section sizes/reservations. QEMU setup grows4B into existing padding, one extra cold instruction; DDB metadata load becomes acquire and the setup unwind range follows its length. RPi5 production ELF is byte-identical. DMA/stop/raw-ring trust remains unchanged; no cycle or physical-page savings claim.",
+  "next_trigger": "Changed queue/setup lifetime or allocation workload, or completion of the next kernel feature/stage."
 }
