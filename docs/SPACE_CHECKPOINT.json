@@ -1,14 +1,13 @@
 {
   "date": "2026-11-09",
-  "event": "milestone",
+  "event": "incremental",
   "decision": "measured",
-  "source_sha256": "eeed604f684f1bfcc7615665fe17e0980154fe286243496b74cc78b1f805833c",
-  "workload": "Combined syscall-symmetry feature removal and WorkloadSettingsWake atomic-cell migration; maintained linked boot/rootfs against published 793a1d09. Both production ELFs rebuilt at 8ad032f6. Static image, record payload and reservation boundaries only; no runtime-occupancy or physical timing inference.",
+  "source_sha256": "d50b008b483fe355239a0d25ac11b94e8175cd8d5fc1852c3bcbd0c29ee586f9",
+  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto a761a122: this branch's review, rebound to the merged sources (upstream's record was 2026-11-09 milestone/measured). One WorkloadProfileCore record migration. Both production kernels measured against frozen BusyWait c87f9027; existing bounded-boot profile partition and stopped reporting boundary. No allocation/lifetime change.",
   "evidence": [
-    "docs/SYSCALL_SYMMETRY_SPACE_2026-11-09.txt",
     "docs/GLOBAL_PROTECTION.md",
     "kernel/MEMORY_MAP.md"
   ],
-  "assessment": "Measured combined QEMU text/data/BSS 808968/4600/1302528 B and RPi5 4193820/5576/1933312 B. Text versus 793a1d09 is -1660/+964 B, 160 B above the standalone syscall candidate on each platform. WorkloadSettingsWake is 80 B (was 64), ddb_state 11504 B (512 B less); total data/BSS reservations and usable_ram_start 0x40208000/0x7e0000 remain unchanged. RPi5 embedded provision container remains 0x32c60d B. Accept measured atomic-access and regression-payload cost; no allocator, pool, retention or lifetime change. This is still a measured feature milestone; whole-globals workload review remains separate.",
-  "next_trigger": "ExecutionState per_cpu migration, RootHeld lifetime changes, or completion of another scheduler/storage feature including the sleeping-Mutex foundation."
+  "assessment": "Both targets: record136->144 bytes, four-core array544->576. QEMU text +464 bytes, RPi5 +448 bytes; data/BSS reservations and usable_ram_start unchanged. Adopt typed word/enum cells, retaining own-CPU IRQ masks, run-locked selection/capture and world-stop interval protocols. No atomic multi-field snapshot or compound increment claim.",
+  "next_trigger": "The BusyPair record migration, any changed allocation/lifetime, or whole-globals milestone completion requiring measured workload review."
 }
