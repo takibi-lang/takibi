@@ -1,7 +1,7 @@
 Syscall symmetry and forced-core state removal: linked-space review
 Date: 2026-11-09
 Base: 793a1d090b59c47b92d476e440bdb52f6b9e9287
-Candidate production source: 0e367aca6ec77b2492abe5732b35c826896067bb
+Candidate production source: 57a8ae4a89f245d6ccb80896d40238e141f08e65
 
 Workload and boundary
 ---------------------
@@ -18,12 +18,16 @@ Run scripts/space_delta.py against origin/main. It builds both production
 kernels in the candidate and a detached temporary baseline checkout. A second
 run captured llvm-size -A and llvm-nm -S --size-sort for section/symbol
 attribution. Both runs returned the same totals and passed the memory-map
-check. No external OS comparison boundary changes in this removal.
+check for the original 0e367aca candidate. After the errno-oracle correction
+and close-evidence filter, read llvm-size, llvm-size -A and llvm-nm -S again
+from both freshly built production ELFs at 57a8ae4a; the candidate columns
+below are those final measurements. The published baseline is unchanged.
+No external OS comparison boundary changes in this removal.
 
 Total llvm-size boundaries (bytes)
 ---------------------------------
                  QEMU base  QEMU candidate  RPi5 base  RPi5 candidate
-text                810628          808792    4192856         4193260
+text                810628          808808    4192856         4193660
 data                  4600            4600       5576            5576
 bss                1302528         1302528    1933312         1933312
 usable_ram_start  0x40208000      0x40208000   0x7e0000        0x7e0000
@@ -34,19 +38,25 @@ and bss includes the separate stack reservation. These are not pool occupancy.
 Section attribution (bytes)
 ---------------------------
                    QEMU base -> candidate       RPi5 base -> candidate
-.text                 634368 -> 632944             678084 -> 676708
-.rodata                54808 -> 54568             3382520 -> 3384472
+.text                 634368 -> 632960             678084 -> 676772
+.rodata                54808 -> 54568             3382520 -> 3384808
 .eh_frame             121452 -> 121280             132252 -> 132080
 .got                    4464 -> 4464                 5240 -> 5240
 .data                    136 -> 136                   336 -> 336
 .bss                  909312 -> 909312            1540096 -> 1540096
 .stack                393216 -> 393216             393216 -> 393216
 
-QEMU total text falls 1836 B: .text -1424, .rodata -240, unwind -172.
-RPi5 total text rises 404 B: .text -1376, .rodata +1952, unwind -172.
+QEMU total text falls 1820 B: .text -1408, .rodata -240, unwind -172.
+RPi5 total text rises 804 B: .text -1312, .rodata +2288, unwind -172.
 The RPi5 read-only increase is explained by usb_provision_container:
-3324973 -> 3327168 B (+2195), which embeds the changed rootfs/probe payload;
-other read-only data falls 243 B. There is no unexplained executable growth.
+3324973 -> 3327501 B (+2528), which embeds the changed rootfs/probe payload;
+other read-only data falls 240 B.
+
+The 6da72052 errno diagnostic adds 333 B to the embedded container and 336 B
+to RPi5's aligned read-only section relative to the original measured slice.
+The 57a8ae4a state filter then adds 16 B of QEMU code and 64 B of RPi5 code,
+with no further container, data/BSS or reservation change. These are separate
+fixture-diagnostic and evidence-classification costs, not storage occupancy.
 
 Relevant symbols on both platforms
 ----------------------------------
@@ -66,8 +76,8 @@ remain tied to their old source versions, not silently rewritten here.
 
 Assessment and next trigger
 ---------------------------
-Accept the explained 404 B RPi5 read-only increase for the concrete regression
-coverage. The removal also deletes per-call clearing/locking paths; no timing
+Accept the explained 804 B RPi5 total text increase for the concrete regression
+coverage and evidence correction. The removal also deletes per-call clearing/locking paths; no timing
 claim is made from image size or QEMU. Do not weaken descriptor checks,
 stack ownership or diagnostics to minimize the image. The next review trigger
 is the ExecutionState per_cpu migration, RootHeld lifetime changes, or another
