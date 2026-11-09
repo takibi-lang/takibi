@@ -1,15 +1,13 @@
 {
   "date": "2026-11-09",
-  "event": "milestone",
+  "event": "incremental",
   "decision": "measured",
-  "source_sha256": "47068a3b7ff3f35d7dc5f44ee6a08bab99db9279505aa80954f9d5910d48accb",
-  "workload": "Combined RootHeld activation entries and authority-derived guard/synchronous callback compiler foundation. Retain both component workloads and accounting boundaries; freshly build both production ELFs and four production/debug objects. Coordinator allcheck supplies combined runtime acceptance.",
+  "source_sha256": "135cbed1fd84b82c39c41b9c9e1b654c4f4fcb79d1f9bd083e2a9b8d6eef42c3",
+  "workload": "Kernel log-ring trace ordering correction: one logical reader placed CPU1/CPU0/CPU1 through actual emission traversal, exhaustion refusal, unchanged real QEMU LogRingTrace validator window. Compare published acc2b55b production ELFs and four objects with source66a80b3d; deterministic algorithm, no hardware timing claim.",
   "evidence": [
-    "docs/ROOT_HELD_FOUNDATION_INTEGRATION_SPACE.json",
-    "docs/ROOT_HELD_ENTRY_SPACE.md",
-    "docs/ROOT_HELD_ENTRY_SPACE.json",
-    "docs/AUTHORITY_GUARD_CALLBACK_SPACE_2026-11-09.txt"
+    "docs/LOG_RING_TRACE_ORDER_SPACE.md",
+    "docs/LOG_RING_TRACE_ORDER_SPACE.json"
   ],
-  "assessment": "Fresh combined production ELFs/objects are byte-identical to measured RootHeld; debug objects differ only in debug sections, with identical complete disassemblies. Text +3512 QEMU/+3544 RPi5 versus published88; mutable payload/BSS/reservation and recorded corrected frames unchanged. Combined compiler allocates 598982878 words below approved743M ceiling. Native callback ABI cost remains separate. No whole-stack or generic reclamation proof.",
-  "next_trigger": "Sleeping Mutex scheduler/phase integration or changed root-owner lifetime, PTE authority, callback/guard representation, allocation workload or stack-helper structure."
+  "assessment": "Measured text +1256 QEMU/+1192 RPi5; mutable symbols and image reservation unchanged. RPi5 BSS section -4096 is padding, not reclaimed payload/pages. Reader local grows 2 to16 bytes, selected corrected production/debug frames recorded separately without a whole-stack bound. Adopt explicit reader ordinal in spare tag bits; no event-array growth, whole-read IRQ mask, pinning or validator change.",
+  "next_trigger": "Changed trace event/reader layout, report lookup structure or window cardinality, or completion of preemption stage."
 }

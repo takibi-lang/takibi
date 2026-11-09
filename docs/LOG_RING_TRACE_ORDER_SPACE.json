@@ -1,0 +1,181 @@
+{
+  "head": "66a80b3d5f0b61c0ddbc187a298aa25930051222",
+  "base": "acc2b55b3840f3dc3ad57a259d6ee95a2b0592ec",
+  "objects": {
+    "qemu": {
+      "base": {
+        "text": 821568,
+        "data": 4632,
+        "bss": 1318912
+      },
+      "candidate": {
+        "text": 822824,
+        "data": 4632,
+        "bss": 1318912
+      },
+      "usable_ram_start": [
+        1075904512,
+        1075904512
+      ],
+      "storage_changes": {},
+      "frames": {
+        "main.o": {
+          "base": {
+            "sha256": "dddc3a0612d3141c62dcf0e68e6594beda6507d577170e86d02e0c7587be6c2a",
+            "selected": {
+              "kernel_log_snapshot_fill": 80,
+              "log_ring_trace_line": 80,
+              "log_ring_trace_order_probe": null,
+              "log_ring_trace_reader": 64,
+              "log_ring_trace_reader_order": null,
+              "log_ring_trace_reader_position": null,
+              "log_ring_trace_report": 64,
+              "log_ring_trace_report_events": null,
+              "log_ring_trace_store": 80,
+              "log_ring_trace_store_at": null,
+              "log_storm_trace_probe": 112
+            }
+          },
+          "candidate": {
+            "sha256": "f092ce54514f2a9c6958d5d1a369493db523a247530bd512590d997094d19fd0",
+            "selected": {
+              "kernel_log_snapshot_fill": 96,
+              "log_ring_trace_line": 80,
+              "log_ring_trace_order_probe": 80,
+              "log_ring_trace_reader": 80,
+              "log_ring_trace_reader_order": 16,
+              "log_ring_trace_reader_position": 16,
+              "log_ring_trace_report": 32,
+              "log_ring_trace_report_events": 80,
+              "log_ring_trace_store": 96,
+              "log_ring_trace_store_at": 16,
+              "log_storm_trace_probe": 112
+            }
+          }
+        },
+        "main.debug.o": {
+          "base": {
+            "sha256": "065abe1b1525cbc71889672652456668dd41f97fe0ec10f306868a566a234afd",
+            "selected": {
+              "kernel_log_snapshot_fill": 112,
+              "log_ring_trace_line": 160,
+              "log_ring_trace_order_probe": null,
+              "log_ring_trace_reader": 64,
+              "log_ring_trace_reader_order": null,
+              "log_ring_trace_reader_position": null,
+              "log_ring_trace_report": 80,
+              "log_ring_trace_report_events": null,
+              "log_ring_trace_store": 128,
+              "log_ring_trace_store_at": null,
+              "log_storm_trace_probe": 208
+            }
+          },
+          "candidate": {
+            "sha256": "2fcc82070ce916d227934804256a15471ba5eb23de918a10d000b442c6e10af6",
+            "selected": {
+              "kernel_log_snapshot_fill": 112,
+              "log_ring_trace_line": 160,
+              "log_ring_trace_order_probe": 144,
+              "log_ring_trace_reader": 96,
+              "log_ring_trace_reader_order": 32,
+              "log_ring_trace_reader_position": 32,
+              "log_ring_trace_report": 48,
+              "log_ring_trace_report_events": 128,
+              "log_ring_trace_store": 128,
+              "log_ring_trace_store_at": 32,
+              "log_storm_trace_probe": 208
+            }
+          }
+        }
+      }
+    },
+    "rpi5": {
+      "base": {
+        "text": 4206236,
+        "data": 5608,
+        "bss": 1937408
+      },
+      "candidate": {
+        "text": 4207428,
+        "data": 5608,
+        "bss": 1933312
+      },
+      "usable_ram_start": [
+        8257536,
+        8257536
+      ],
+      "storage_changes": {},
+      "frames": {
+        "main.o": {
+          "base": {
+            "sha256": "a15d349f308eff46598ae113b7adcd0e202be293434913d4ca8d95dbb8f4ab09",
+            "selected": {
+              "kernel_log_snapshot_fill": 80,
+              "log_ring_trace_line": 80,
+              "log_ring_trace_order_probe": null,
+              "log_ring_trace_reader": 64,
+              "log_ring_trace_reader_order": null,
+              "log_ring_trace_reader_position": null,
+              "log_ring_trace_report": 64,
+              "log_ring_trace_report_events": null,
+              "log_ring_trace_store": 80,
+              "log_ring_trace_store_at": null,
+              "log_storm_trace_probe": 112
+            }
+          },
+          "candidate": {
+            "sha256": "20f08fa7a30ef905e9ba13196fbdb8601cea3d34be2a5ebbe4e9ae9e9c87bf0f",
+            "selected": {
+              "kernel_log_snapshot_fill": 96,
+              "log_ring_trace_line": 80,
+              "log_ring_trace_order_probe": 80,
+              "log_ring_trace_reader": 80,
+              "log_ring_trace_reader_order": 16,
+              "log_ring_trace_reader_position": 16,
+              "log_ring_trace_report": 32,
+              "log_ring_trace_report_events": 80,
+              "log_ring_trace_store": 96,
+              "log_ring_trace_store_at": 16,
+              "log_storm_trace_probe": 112
+            }
+          }
+        },
+        "main.debug.o": {
+          "base": {
+            "sha256": "bb8239cb6a662aced6809fe258d639346d78385cc107a59fe2cf0529c1ab03b3",
+            "selected": {
+              "kernel_log_snapshot_fill": 112,
+              "log_ring_trace_line": 160,
+              "log_ring_trace_order_probe": null,
+              "log_ring_trace_reader": 64,
+              "log_ring_trace_reader_order": null,
+              "log_ring_trace_reader_position": null,
+              "log_ring_trace_report": 80,
+              "log_ring_trace_report_events": null,
+              "log_ring_trace_store": 128,
+              "log_ring_trace_store_at": null,
+              "log_storm_trace_probe": 208
+            }
+          },
+          "candidate": {
+            "sha256": "9f3af33056aa97d3ed2b253b18c9e7bf6fe3cf6fc3889a9da45c9800b0b9cbf7",
+            "selected": {
+              "kernel_log_snapshot_fill": 112,
+              "log_ring_trace_line": 160,
+              "log_ring_trace_order_probe": 144,
+              "log_ring_trace_reader": 96,
+              "log_ring_trace_reader_order": 32,
+              "log_ring_trace_reader_position": 32,
+              "log_ring_trace_report": 48,
+              "log_ring_trace_report_events": 128,
+              "log_ring_trace_store": 128,
+              "log_ring_trace_store_at": 32,
+              "log_storm_trace_probe": 208
+            }
+          }
+        }
+      }
+    }
+  },
+  "method": "llvm-size-19, llvm-nm-19 -S; llvm-objdump-19 -d, first 12 lines, hexadecimal and decimal stp/sub immediate; selected single-frame observations, not whole-callpath bound"
+}

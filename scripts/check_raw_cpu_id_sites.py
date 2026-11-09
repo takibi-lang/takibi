@@ -51,7 +51,6 @@ LISTED = {
     "kernel/kernel/syscall.tkb": (4, FLIP, "not yet reviewed for migration"),
     "kernel/lib/occupancy.tkb": (6, FLIP, "not yet reviewed for migration"),
     "kernel/mm/page.tkb": (1, FLIP, "#1079 page_reserve_cpu: read only under the page pool's IRQ-masking lock, and the kernel is not preemptible (KERNEL_PREEMPTIBLE == 0), so the CPU cannot change before the lock is given back; page_alloc has no CpuHere to take"),
-    "kernel/printk/log_ring_trace.tkb": (1, FLIP, "picks the buffer an event goes to; its slot is one fetch_add (#1159)"),
 }
 
 # "file::function" -> (count, reason): calls read before the flip that hold
@@ -59,6 +58,7 @@ LISTED = {
 # function, so a new call in an already reviewed file is refused rather
 # than absorbed by the file's label.
 REVIEWED_SITES = {
+    "kernel/printk/log_ring_trace.tkb::log_ring_trace_store": (1, "#638: captured CPU selects AtomicWord event storage with a unique fetch_add slot, not execution authority; reader ordinals preserve logical order across buffer placement; current storm writers hold whole-line preempt_off or run from idle, preserving the existing per-writer stream premise; one-reader and closed-window premises remain caller-reviewed"),
     "kernel/kernel/protocol_trace.tkb::protocol_trace_record": (1, "#638 stage 9: event CPU metadata, not a CPU-array index; all observer and synthetic-open-probe callers hold the ProcessRunGuard, whose Mutex masks IRQs until after recording; this is current-caller evidence, not typed trace storage"),
     "kernel/kernel/profile_session.tkb::profile_session_sync": (1, "#638 stage 9: called only by timer_irq_handler, kernel_world_stop_serve and kernel_ddb_enter_stopped, interrupt/nmi contexts with ordinary IRQs excluded; the CPU read, core-state accesses and local PMU arm/disarm finish before exception return"),
     "kernel/kernel/profile_session.tkb::profile_session_irq": (1, "#638 stage 9: an interrupt function called by profile_sample_irq in the PMU handler; ordinary IRQs exclude migration throughout the CPU-indexed state/buffer accesses, and the nested buffer lock restores the already-masked state"),
