@@ -690,3 +690,38 @@ publication gate, including hardware.
   than the obsolete single-scheduler-core premise. Host capture/inventory
   repairs add no kernel storage or workload; the preceding incremental
   observations are reused, not reported as a fresh baseline measurement.
+- 2026-11-09: `WorkloadSettingsWake` fields are `AtomicWord`s (flags are
+  zero or one), including its refused-call counter. The existing run guard
+  still serializes registration, terminal-state checks and report claims;
+  word atomicity does not provide a multi-field snapshot. Its allowlist
+  row is removed.
+
+### 2026-11-09 settings-wake record space measurement
+
+This incremental record migration compares the production kernels at
+ac5712d1 (the recovered evidence-record slice) with the settings-wake
+AtomicWord conversion. A task-owned baseline clone under the checkout's
+ignored build directory was built from that exact commit; both baseline
+and candidate used the root kernelbuild-qemu/kernelbuild-rpi5 targets.
+No existing worktree was changed for the baseline.
+
+| Boundary | QEMU base | QEMU candidate | RPi5 base | RPi5 candidate |
+| --- | --- | --- | --- | --- |
+| llvm-size text bytes | 810628 | 810788 | 4192856 | 4193016 |
+| data bytes | 4600 | 4600 | 5576 | 5576 |
+| BSS bytes | 1302528 | 1302528 | 1933312 | 1933312 |
+| settings-wake record bytes | 64 | 80 | 64 | 80 |
+| usable_ram_start | 0x40208000 | 0x40208000 | 0x7e0000 | 0x7e0000 |
+
+Only .text changes section size: +160 B on each platform. The ioctl
+recorder grows 148 -> 184 B on each; the progress function grows
+884 -> 1020 B on QEMU and 876 -> 1004 B on RPi5. The remaining difference
+is alignment padding (-12 B QEMU, -4 B RPi5). No other text/data/BSS symbol
+changes size. The one boot-scoped record gains 16 B because adjacent bools
+become words; it fits the existing BSS reservation. There is no pool,
+allocator metadata, resource lifetime or allocation-workload change.
+The existing common settings_wake and peer_tty views remain the execution
+boundary. No physical timing/cache conclusion or cross-OS comparison is
+claimed. Adopted: the small code and payload cost makes each field access
+atomic while retaining the run-locked multi-field protocol. The next
+measurement is the next record migration or a changed fixture lifetime.
