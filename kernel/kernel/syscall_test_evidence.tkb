@@ -125,7 +125,15 @@ fn syscall_test_evidence_listen_calls() -> usize {
     return value;
 }
 
-fn syscall_test_evidence_record_socket_close() {
+// Only an endpoint that entered bind/listen belongs to this close evidence.
+// A valid but never-bound socket can be exercised by an independent probe.
+fn syscall_test_evidence_record_socket_close(state: UnifiedListenerState) {
+    match state {
+        UnifiedListenerState::Closed => { return; }
+        UnifiedListenerState::Created => { return; }
+        UnifiedListenerState::Bound => {}
+        UnifiedListenerState::Listening => {}
+    }
     if (atomic_word_load(&syscall_test_evidence.socket_fixture_active) == 0) { return; }
     let guard = process_run_lock();
     atomic_word_fetch_add(&syscall_test_evidence.socket_close_calls, 1);
