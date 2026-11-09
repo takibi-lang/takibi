@@ -33,8 +33,14 @@ from pass_line import report_pass
 # budget stays that plus about 25%. #1283 measured 585,166,850 before removing
 # a Printf per character from overload keys and 522,242,895 after; the budget
 # did not change.
+# RootHeld entry migration on published 88c1912c measured 593,876,226
+# words with the unchanged compiler. A bounded witness-propagation profile
+# found 99,139,467 words; replacing intersection with disjoint increased the
+# total to 624,878,992, so that candidate was discarded. The approved #1472
+# refresh keeps about 25% headroom. With the private Running factory and
+# its confined callers the final object measured 593,876,245 words.
 BUDGET_WORDS = {
-    "qemu": 589_000_000,
+    "qemu": 743_000_000,
 }
 
 
