@@ -5271,7 +5271,7 @@ variant ProcessCurrentRead {
 
 fn kernel_process_current_read() -> ProcessCurrentRead {
     preempt_off (cpu) {
-        let index: {0..<KERNEL_MAX_CORES as usize} = execution_cpu_index();
+        let index: {0..<KERNEL_MAX_CORES as usize} = cpu_here_index(cpu);
         if (execution_state[index].current_live == false) {
             return ProcessCurrentRead::Idle;
         }

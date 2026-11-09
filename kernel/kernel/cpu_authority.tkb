@@ -79,6 +79,14 @@ struct cpu_authority CpuHere {
     private id: {0..<KERNEL_MAX_CORES as usize};
 }
 
+// A publication outside a per_cpu store must name the same CPU as its
+// authority. Derive that ordinary array index here, where the private index
+// is visible, instead of accepting an unrelated integer beside the token.
+// This reveals an index only; it neither mints nor extends CPU authority.
+inline fn cpu_here_index(cpu: CpuHere) -> {0..<KERNEL_MAX_CORES as usize} {
+    return cpu.id;
+}
+
 // The runtime checks of the preempt count: that every region entry finds
 // TPIDR_EL1 naming the CPU cpu_id() names, that no exit lowers a count of
 // zero, and that a blocking point is reached at count zero. The compiler
