@@ -47,7 +47,6 @@ LISTED = {
     "kernel/fs/ext2/mutation_lock.tkb": (2, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/cpu_authority.tkb": (3, MINT, "normal region entry and availability, plus the approved exception-only unscoped constructor (#1159, #638)"),
     "kernel/kernel/process.tkb": (29, FLIP, "remaining raw callers after typed ExecutionState selection removed execution_cpu_index (#638)"),
-    "kernel/kernel/profile_session.tkb": (4, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/protocol_trace.tkb": (1, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/stall_probe.tkb": (3, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/syscall.tkb": (4, FLIP, "not yet reviewed for migration"),
@@ -61,6 +60,10 @@ LISTED = {
 # function, so a new call in an already reviewed file is refused rather
 # than absorbed by the file's label.
 REVIEWED_SITES = {
+    "kernel/kernel/profile_session.tkb::profile_session_sync": (1, "#638 stage 9: called only by timer_irq_handler, kernel_world_stop_serve and kernel_ddb_enter_stopped, interrupt/nmi contexts with ordinary IRQs excluded; the CPU read, core-state accesses and local PMU arm/disarm finish before exception return"),
+    "kernel/kernel/profile_session.tkb::profile_session_irq": (1, "#638 stage 9: an interrupt function called by profile_sample_irq in the PMU handler; ordinary IRQs exclude migration throughout the CPU-indexed state/buffer accesses, and the nested buffer lock restores the already-masked state"),
+    "kernel/kernel/profile_session.tkb::irqsoff_open": (1, "#638 stage 9: mutex_irq_save calls it after irq_save, and irq_mask_cost_daif calls it after msr_daifset_irq; the CPU-indexed walk and stores finish while the caller's IRQ mask is still held"),
+    "kernel/kernel/profile_session.tkb::irqsoff_close": (1, "#638 stage 9: mutex_irq_restore calls it before enable_irq, and irq_mask_cost_daif before msr_daifclr_irq; the CPU-indexed close, walks and stores finish before either caller unmasks"),
     "kernel/arch/arm64/kernel/exception_evidence.tkb::kernel_ddb_enter_stopped": (1, "#1486: interrupt root with complete MachineStopped authority; records the inspecting CPU in the guarded DDB snapshot, not an unguarded CPU-array index"),
     "kernel/kernel/workload_evidence.tkb::workload_busy_record_progress": (1, "#638 stage 9: read while the process-run lock is held (an IRQ-masking Mutex guard) (the PinThen arm pins under the same guard)"),
     "kernel/kernel/workload_evidence.tkb::workload_busy_restart_step": (1, "#638 stage 9: the function borrows the ProcessRunGuard (an IRQ-masking Mutex guard), so no tick switches the task while it reads and uses the CPU"),
