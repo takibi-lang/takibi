@@ -1050,3 +1050,15 @@ the same borrowed MachineStopped authority; typing the address metadata
 does not grant DMA ownership or establish device quiescence/cache behavior.
 The maintained native test provider uses atomic loads of the same metadata.
 The untyped allowance is removed; no setup API, queue guard or protocol changes.
+
+### WorldStop generation (2026-11-09)
+
+The private generation field joins the controller's existing AtomicWords.
+Both compiled kernels classify kernel_world_stop and the shared stale-ack
+probe controller as composite through the existing recursive field rule;
+only those two allowance rows are removed. No test-state exemption or name
+policy is added. The actual claim gate, current-generation ack test, overflow
+refusal, complete/partial token distinction and negative probes remain.
+Atomic access types do not establish those protocol properties by themselves;
+see TRUSTED_BASE.md and WORLD_STOP_GENERATION_SPACE.md for their boundary
+and the measured 8-byte field/layout and image accounting.

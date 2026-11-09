@@ -132,7 +132,7 @@ must_use variant OccupancyDrainResult[region: addr] {
 struct WorldStop {
     private claimed: AtomicWord;
     private owner: AtomicWord;
-    private generation: usize;
+    private generation: AtomicWord;
     private requested: AtomicWord;
     private ack: [AtomicWord; KERNEL_MAX_CORES];
     private participants: AtomicWord;
@@ -289,13 +289,13 @@ private fn world_stop_begin_claimed(stop: *WorldStop @ id, mask: usize,
                                     stale_ack_probe: bool, debug: bool)
         -> WorldStopResult[id] !{unsafe} {
     let raw_owner: usize = cpu_id();
-    let previous: usize = (*stop).generation;
+    let previous: usize = atomic_word_load(&(*stop).generation);
     if (previous == ~(0 as usize)) {
         atomic_word_store(&(*stop).claimed, 0);
         return WorldStopResult::Busy;
     }
     let generation: usize = previous + 1;
-    (*stop).generation = generation;
+    atomic_word_store(&(*stop).generation, generation);
     // Do not clear peer-owned ack words here. An old handler may still be
     // leaving; only an acknowledgement of THIS generation proves it stopped
     // for this request. Its old holding loop also exits if a newer request

@@ -1,0 +1,207 @@
+{
+  "baseline_head": "34ee301584868ca5bf55a9a82e58f1c37e87dfec",
+  "boundary": "Actual production ELF and main.o; copied baseline files verified against published archive manifest before read-only inspection",
+  "targets": {
+    "qemu": {
+      "hashes": {
+        "baseline/qemu/kernel.elf": "f956394295dad1ab09dd79008972a0b07b9d3c5f675dd901e602d701c708d7c0",
+        "candidate/qemu/kernel.elf": "415646a2096f953b92430030f4466a12cac3f46d07a7af5bebd1171d14338b2d",
+        "baseline/qemu/main.o": "8aef3c34f5415beb009461e0b6f3b19fd028a3856ad52888f785a95f6daf2125",
+        "candidate/qemu/main.o": "851b1277ce72a4bf0821368645433afa6bb78d176e294eba6df4b8d4e89ee426"
+      },
+      "struct_layout_rows": [
+        "AtomicWord\tvalue\t0",
+        "AtomicWord\t.size\t8",
+        "AtomicWord\t.members\t1",
+        "WorldStop\tclaimed\t0",
+        "WorldStop\towner\t8",
+        "WorldStop\tgeneration\t16",
+        "WorldStop\trequested\t24",
+        "WorldStop\tack\t32",
+        "WorldStop\tparticipants\t64",
+        "WorldStop\t.size\t72",
+        "WorldStop\t.members\t6"
+      ],
+      "controller_symbols": {
+        "kernel_world_stop": {
+          "address": 1074761408,
+          "size": 72,
+          "type": 1,
+          "section": 6
+        },
+        "world_stop_stale_probe_controller": {
+          "address": 1075476640,
+          "size": 72,
+          "type": 1,
+          "section": 6
+        },
+        "usable_ram_start": {
+          "address": 1075904512,
+          "size": 0,
+          "type": 0,
+          "section": 7
+        }
+      },
+      "allocated_layout_changes": [],
+      "allocated_byte_changes": [
+        ".text"
+      ],
+      "world_stop_begin_claimed_size": {
+        "baseline": 420,
+        "candidate": 420
+      },
+      "linked_size": {
+        "baseline": {
+          "text": 822792,
+          "data": 4624,
+          "bss": 1318912
+        },
+        "candidate": {
+          "text": 822792,
+          "data": 4624,
+          "bss": 1318912
+        }
+      }
+    },
+    "rpi5": {
+      "hashes": {
+        "baseline/rpi5/kernel.elf": "52a1a95e2adace47b9b1e5a2005cc05a369cee84b8a78bb8bdfbdf773447f1fd",
+        "candidate/rpi5/kernel.elf": "d7c01c24f792f8be145d1520a7dba716ded97fff2080fc8c39cc9dff64138aab",
+        "baseline/rpi5/main.o": "4c44e5808f8f6d2e6546966d204e8d76333452b1d4e5f61a909527d0f18215da",
+        "candidate/rpi5/main.o": "18395032fd63a29b4495816912f34dc8e5ffa468c83d31b8f34af3c47f1b198a"
+      },
+      "struct_layout_rows": [
+        "AtomicWord\tvalue\t0",
+        "AtomicWord\t.size\t8",
+        "AtomicWord\t.members\t1",
+        "WorldStop\tclaimed\t0",
+        "WorldStop\towner\t8",
+        "WorldStop\tgeneration\t16",
+        "WorldStop\trequested\t24",
+        "WorldStop\tack\t32",
+        "WorldStop\tparticipants\t64",
+        "WorldStop\t.size\t72",
+        "WorldStop\t.members\t6"
+      ],
+      "controller_symbols": {
+        "kernel_world_stop": {
+          "address": 6987424,
+          "size": 72,
+          "type": 1,
+          "section": 6
+        },
+        "world_stop_stale_probe_controller": {
+          "address": 7834712,
+          "size": 72,
+          "type": 1,
+          "section": 6
+        },
+        "usable_ram_start": {
+          "address": 8257536,
+          "size": 0,
+          "type": 0,
+          "section": 7
+        }
+      },
+      "allocated_layout_changes": [
+        ".text"
+      ],
+      "allocated_byte_changes": [
+        ".text",
+        ".eh_frame",
+        ".got"
+      ],
+      "world_stop_begin_claimed_size": {
+        "baseline": 408,
+        "candidate": 436
+      },
+      "linked_size": {
+        "baseline": {
+          "text": 4207396,
+          "data": 5600,
+          "bss": 1933312
+        },
+        "candidate": {
+          "text": 4207428,
+          "data": 5600,
+          "bss": 1933312
+        }
+      },
+      "relocation_assessment": {
+        "got_changes": [
+          {
+            "offset": 40,
+            "old": 2782092,
+            "new": 2782124,
+            "symbol_relocation": true,
+            "symbols": [
+              "kernel_ddb_breakpoint",
+              "kernel_ddb_breakpoint_start"
+            ]
+          },
+          {
+            "offset": 48,
+            "old": 2782112,
+            "new": 2782144,
+            "symbol_relocation": true,
+            "symbols": [
+              "kernel_ddb_breakpoint_end",
+              "kernel_ddb_guarded_read_u8"
+            ]
+          },
+          {
+            "offset": 56,
+            "old": 2782120,
+            "new": 2782152,
+            "symbol_relocation": true,
+            "symbols": [
+              "kernel_ddb_memory_fault_return"
+            ]
+          },
+          {
+            "offset": 1464,
+            "old": 2785796,
+            "new": 2785828,
+            "symbol_relocation": true,
+            "symbols": [
+              "kernel_text_end"
+            ]
+          },
+          {
+            "offset": 3456,
+            "old": 2780616,
+            "new": 2780648,
+            "symbol_relocation": true,
+            "symbols": [
+              "user_code_sync",
+              "kernel_generated_text_end"
+            ]
+          },
+          {
+            "offset": 3680,
+            "old": 2692976,
+            "new": 2693008,
+            "symbol_relocation": true,
+            "symbols": [
+              "kernel_uart_rx_isr"
+            ]
+          }
+        ],
+        "object_eh_frame_byte_changes": [
+          {
+            "offset": 30940,
+            "old": 152,
+            "new": 180
+          }
+        ],
+        "object_fde": {
+          "offset": "0x78d0",
+          "range_before": "0x198",
+          "range_after": "0x1b4",
+          "changed_byte_offset": 30940,
+          "description": "world_stop_begin_claimed FDE range only; all CFA/unwind instructions unchanged. Linked subsequent FDE references relocate with their unchanged functions."
+        }
+      }
+    }
+  }
+}

@@ -538,6 +538,16 @@ rules globally.
   when this policy and its compiled caller evidence hold on both platforms.
   These are bounded source/caller trust boundaries, not a generic published
   record class or a proof of arbitrary control flow and manual-mint lifetime.
+- WorldStop's private generation uses the existing AtomicWord, like its
+  other fields. The recursive composite classification checks field types;
+  it does not prove the stop protocol. The existing claim gate still
+  serializes the generation load/increment/store, exhaustion refuses rather
+  than wraps, and only current-generation acknowledgements permit a complete
+  token. Private callers, raw mints, ARM ordering, firmware and physical
+  holding remain the reviewed protocol boundary. MachineStopped and
+  WorldStopped retain their different authority. Existing bounded WorldStop
+  and WorldStopRetry models are evidence under their stated bounds and
+  assumptions, not a whole-protocol proof from atomic access alone.
 - ExecutionState's stopped diagnostic copy contains scalar slot/generation
   words and live bits, not handles or mutable loans. Each peer captures its
   own typed store before the holding pen acknowledges the stop; the debugger
