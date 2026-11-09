@@ -92,7 +92,7 @@ NET_BODY = """{
     virtio_net_regs.queue_device_low = (used & 0xFFFFFFFF) as u32;
     virtio_net_regs.queue_device_high = (used >> 32) as u32;
     virtio_net_regs.queue_ready = 1;
-    virtio_net_used_addr[queue] = used;
+    atomic_word_store(&virtio_net_used_addr[queue], used);
     return true;
 }"""
 NET_ACCESS = 'guarded_ref(guard, virtio_net_queues.queues)'

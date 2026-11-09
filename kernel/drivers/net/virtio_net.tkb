@@ -222,7 +222,7 @@ struct VirtioNetQueueStorage {
 private let mut virtio_net_queues: VirtioNetQueueStorage align(64);
 // The used rings' addresses as programmed (RX, TX), for DDB and the native
 // fixture's stand-in device.
-let mut virtio_net_used_addr: [usize; 2];
+let mut virtio_net_used_addr: [AtomicWord; 2];
 // The pool slot whose buffer each RX descriptor holds (VIRTIO_PKT_NONE
 // while a descriptor has none).
 // (The pool slot of each RX descriptor is the capability's rx_desc_pkt.)
@@ -320,7 +320,7 @@ private fn virtio_queue_setup(guard: borrow BlockDeviceGuard[&block_device_lock]
     virtio_net_regs.queue_device_low = (used & 0xFFFFFFFF) as u32;
     virtio_net_regs.queue_device_high = (used >> 32) as u32;
     virtio_net_regs.queue_ready = 1;
-    virtio_net_used_addr[queue] = used;
+    atomic_word_store(&virtio_net_used_addr[queue], used);
     return true;
 }
 
@@ -423,7 +423,7 @@ fn net_init() -> NetInitResult {
 fn kernel_net_rx_frame_pending(stopped: borrow MachineStopped[&kernel_world_stop])
         -> NetPendingState !{unsafe} {
     if (atomic_word_load(&virtio_net_ready) == 0) { return NetPendingState::No; }
-    let address: usize = virtio_net_used_addr[0];
+    let address: usize = atomic_word_load(&virtio_net_used_addr[0]);
     if (address == 0) { return NetPendingState::Unknown; }
     let word: usize = unsafe { atomic_load_acquire(address) };
     let idx: usize = (word >> 16) & 0xFFFF;

@@ -152,6 +152,16 @@ def main():
     }.items():
         net_case(label,replace_once(NET_BASE,'virtio_net_regs.queue_desc_low',statement+' virtio_net_regs.queue_desc_low'),False)
     net_case('wrong sink',NET_BASE.replace('queue_driver_high','queue_device_high'),False)
+    for label,old,new in (
+            ('plain address store', 'atomic_word_store(&virtio_net_used_addr[queue], used);',
+             'virtio_net_used_addr[queue] = used;'),
+            ('wrong address slot', '&virtio_net_used_addr[queue]', '&virtio_net_used_addr[used_queue]'),
+            ('missing address publication', 'atomic_word_store(&virtio_net_used_addr[queue], used);', ''),
+            ('address publication reordered',
+             'virtio_net_regs.queue_ready = 1;\n    atomic_word_store(&virtio_net_used_addr[queue], used);',
+             'atomic_word_store(&virtio_net_used_addr[queue], used);\n    virtio_net_regs.queue_ready = 1;')):
+        net_case(label,replace_once(NET_BASE,old,new),False)
+
     net_case('clear before try',NET_BASE.replace('    let guard = match block_device_try_take()',
              '    atomic_word_store(&virtio_rx_irq_flag, 0); let guard = match block_device_try_take()'),False)
     net_case('refill before try',NET_BASE.replace('    let guard = match block_device_try_take()',

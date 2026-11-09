@@ -911,6 +911,14 @@ Trusted: fixed physical mapping and offset-zero layout, hardware retaining
 the programmed addresses, and the existing DMA ownership/barrier protocol.
 A CPU lock does not prove device quiescence or whole-ring ownership.
 
+The net used-ring address metadata is `[AtomicWord; 2]`: queue setup publishes
+it with a release store and the stopped DDB adapter loads it acquire. The
+existing closed setup premise fixes the queue index, programmed value and
+position after queue_ready. The readiness/zero checks and subsequent raw
+acquire ring read are unchanged. Atomic address access does not prove ring
+ownership, DMA quiescence or hardware coherence; those remain the existing
+stop/device boundary. The native provider also loads the typed cells.
+
 The isolated DMA fixture also simulates the net device's RX used-entry
 publication: three explicit volatile stores of id, length and used index.
 These test inputs exercise the actual driver with the actual shared lock

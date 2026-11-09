@@ -1038,3 +1038,15 @@ The one-time actual-source host probe checked sequential policy, not cross-core
 ordering or hardware completion; it is diagnostic evidence, not a maintained
 regression. Maintained source-policy controls and both compiled kernel caller
 tables hold the changed contract.
+
+### Virtio-net used-ring address metadata (2026-11-09)
+
+`virtio_net_used_addr` is an array of the existing `AtomicWord` type. The
+reviewed queue setup stores the programmed address with release ordering;
+the stopped DDB reader loads it with acquire ordering. Readiness is still
+checked first and a zero address still answers Unknown. The subsequent
+raw acquire read of the device-written used ring remains trusted and requires
+the same borrowed MachineStopped authority; typing the address metadata
+does not grant DMA ownership or establish device quiescence/cache behavior.
+The maintained native test provider uses atomic loads of the same metadata.
+The untyped allowance is removed; no setup API, queue guard or protocol changes.
