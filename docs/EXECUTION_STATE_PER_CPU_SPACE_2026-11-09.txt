@@ -147,8 +147,8 @@ retire after pen exit; complete-stop readers validate allocation generations
 and refuse busy metadata. Coupling and those context/order premises remain
 explicit trusted review, not a new language rule or raw-pointer escape.
 
-Source inventory: 9 typed per-CPU stores, 53 reviewed ordinary arrays,
-64 unprotected globals; raw CPU calls total147, of which3 mint calls,
+Source inventory: 9 typed per-CPU stores, 53 reviewed ordinary arrays;
+raw CPU calls total147, of which3 mint calls,
 60 flip-worklist and84 reviewed calls across67 functions. The 20 direct
 current readers and27 carried fields are checked; six fields are task-
 carried. Build-inclusive ledger refresh keeps production-only raw-site

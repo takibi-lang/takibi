@@ -1,0 +1,48 @@
+Execution-state authority and device-handle integration measurement
+Date: 2026-11-09
+Baseline: 762abcedd3103cf7e94d10da3327538755ff55bf
+Measured integration tree: 32928b89799a9b8bc422465bedbbeb160195dbf5
+Production fingerprint: 5e7bfb58cc3415757e74c1e51e3268050189a08e405216d29b8388262a42654b
+
+The integration combines the ExecutionState milestone reviewed at 3e847b70
+(runtime source 521e320b) and IoHandle boot policy reviewed at 21a5a960
+(runtime source 435151e9). Rebase changed metadata and append-only context;
+the source commits retain their patches. Both production ELFs were rebuilt
+from this combined tree with the normal root Makefile.
+
+                             QEMU base  combined    RPi5 base  combined
+llvm-size text                  811080    815368      4196036   4200428
+data including GOT                4600      4616         5576      5592
+BSS including stacks           1302528   1302528      1929216   1925120
+usable_ram_start            0x40208000 0x40208000     0x7e0000  0x7e0000
+
+Text grows 4288 bytes on QEMU and 4392 on RPi5. The combined RPi5 text
+adds the measured 32-byte IoHandle boot change to the ExecutionState image.
+ExecutionState remains 544 bytes; its guarded observation is 72 bytes and
+its scalar stop capture is 192 bytes. The added static payload is 264 bytes,
+with 16 more GOT bytes. Handle layout and capacity remain unchanged.
+
+RPi5 .bss starts at 0x604000 and ends at 0x77a000. Its 4096-byte span
+decrease consumes alignment slack before the fixed DMA arena and does not
+free allocator memory. The stack section remains 393216 bytes and the
+provision container remains 3327501 bytes. Image/page reservation boundaries
+and allocation/retention behavior are unchanged.
+
+The standalone ExecutionState physical measurements and identical eleven-
+pool boot/bounded_end samples are preserved in
+EXECUTION_STATE_PER_CPU_SPACE_2026-11-09.txt and its evidence JSON. Their
+publication increment is 165.545428 ns per one current-plus-stack pair,
+from three finite 4096-pair samples. They describe source 521e320b, not a
+whole-switch latency, a worst-case bound or a statistical nonregression
+claim for this integrated tree. The handle change affects boot attachment
+and compiler facts; MMIO lowering and allocation workloads are unchanged.
+
+The corrected baseline/candidate frame observations and their partial
+callpath limits remain those recorded in the ExecutionState report. This
+integration does not change the shared frame parser or its budgets.
+
+Adopt the measured image/static-state cost for the two approved authority
+boundaries. The next measurement is a RootHeld or sleeping-Mutex scheduling
+change, a publication/capture/handle layout or lifetime change, or completion
+of the preemption flip. This records a feature milestone with measured
+evidence, not an incremental waiver of measurement.
