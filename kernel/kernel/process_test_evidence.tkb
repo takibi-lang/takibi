@@ -1,6 +1,6 @@
 // GitHub issue #303, part of #294 (consolidate kernel runtime state behind
 // explicit owners). Split out of kernel/kernel/process.tkb's own
-// execution_* globals: these ten counters/flags are read only by
+// execution_* globals: these counters/flags are read only by
 // kernel_process_*_evidence()/kernel_process_*_acceptance_evidence()
 // predicate functions (process.tkb), never by real scheduling/dispatch
 // decisions. That is what distinguishes this file's
@@ -9,17 +9,14 @@
 // kernel_process_schedule()/kernel_process_syscall_return_schedule()
 // actually branch on them.
 //
-// Current limitations: single-writer, boot-scoped, matching the rest of
-// process.tkb's execution_* state before this split -- reset only from
-// kernel_process_execution_reset() via process_test_evidence_reset(),
-// never independently. process_test_evidence_record_timer_switch() is
-// called from kernel_process_timer_schedule(), a `!{interrupt}` context;
-// this file has no locking of its own, safe only because there is one
-// core running the scheduler (see process.tkb's own "Current
-// limitations" header).
-// GitHub issue #1475: the fields are AtomicWords, so a counter another core
-// bumps is never torn or lost to a plain read-modify-write, and the UART
-// marker is claimed by one compare-and-swap.
+// Current limitations (2026-11-09): fields are AtomicWords, not a coherent
+// multi-field snapshot. Resets remain coordinated by
+// kernel_process_execution_reset() via process_test_evidence_reset(), never
+// independently. Clone accounting callers hold the process-run lock; the
+// bounded decrement is not a general completion guarantee for unlocked
+// concurrent callers. Timer-switch records also arrive from interrupt
+// context. The boot-scoped UART marker is claimed by compare-and-swap and
+// deliberately survives workload counter resets.
 
 use "kernel/lib/atomic_word.tkb";
 
