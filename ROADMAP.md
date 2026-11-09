@@ -120,7 +120,9 @@ retained exception diagnostic stores use typed per-CPU/complete-stop access
 and the narrowly admitted publication mirror; parent #1159 remains open for
 other globals. The exception/net boundaries and reverted-churn timing-policy
 correction are complete. Production boot-selftest fixture classification
-awaits its separate maintainer decision; add no blanket exclusion.
+and CPU-independent exec reservation ownership await separate maintainer
+decisions; continue independent raw-CPU reader review and add no blanket
+exclusion or reservation workaround.
 
 **Assigned queue (maintainer, 2026-10-23, pruned 2026-10-25).** Memory
 safety and multicore backbone only. Taken in order whenever the numbered
@@ -207,11 +209,14 @@ owners are TaskMutex, the spare stack stays masked). #980
 
 **Priority update, 2026-11-09.** The network queue boundary under #1159 is
 published, preserving nonblocking receive and pending IRQ/capability
-bookkeeping. Continue the approved compiler foundation for #1481, then
-revalidate the parked scheduler work on the published combination: real waiting Mutexes
-before the preemption flip: lifetime ties as the foundation, scoped borrowed
-callbacks where needed, and explicit try acquisition in secondary boot
-probes. Preserve non-sleeping paths and add no dedicated bootstrap stack.
+bookkeeping. The approved guard-lifetime and synchronous borrowed-callback
+compiler foundation for #1481 is published with RootHeld. Integrate the real
+waiting Mutex scheduler and consumer work on that combination before the
+preemption flip. Carry actual boot/driver authority to acquisition and use
+explicit try acquisition in secondary boot probes. Retain pin/stack and
+waiter lifecycle guarantees, measure actual contended scheduling and cost,
+and review the ext2 reader-drain premise separately from lock acquisition.
+Preserve non-sleeping paths and add no dedicated bootstrap stack.
 
 **Assigned queue (maintainer, 2026-10-23, re-cut 2026-10-25).**
 Low-dependency issues A does not hold, in this order; compiler work in
