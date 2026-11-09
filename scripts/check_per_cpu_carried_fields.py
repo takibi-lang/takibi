@@ -24,7 +24,10 @@ region, so its callers are a column too. There is no computed "crosses regions" 
 a read below a write can still see an earlier run's value (MoveCostOpen does).
 
 A use that is not `store[authority].field...` (an address, a whole element) is
-refused: it would carry the field out of what this list can see.
+refused: it would carry the field out of what this list can see. Two exact
+exception publication/render borrows are admitted only while the independent
+whole-file snapshot policy closes their adapters: the copy destination is a
+writer and the borrowed renderer input a reader. Other addresses still fail.
 """
 
 import re
@@ -59,9 +62,19 @@ def blocks_of(code):
     return found
 
 
-def scan_file(code):
+def scan_file(code, path=None):
     """One file's declared fields, its uses {key: (writers, readers, regions)},
     and its refused shapes."""
+    # Only the two already-reviewed snapshot borrows are admitted. Their
+    # complete adapters/whole-file alias boundary are validated by the same
+    # bounded policy as publication admission, not by file or store alone.
+    borrowed = {}
+    from check_exception_cpu_snapshots import PATH, problems as snapshot_problems
+    if path == PATH and not snapshot_problems(code):
+        borrowed = {
+            ('crash_snapshot_per_core', 'crash_snapshot_copy_published', 'observed'): 'write',
+            ('crash_snapshot_per_core', 'crash_snapshot_render_core', 'observed'): 'read',
+        }
     fields = set()
     for name, body in STRUCT.findall(code):
         fields.update((name, field) for field in FIELD.findall(body))
@@ -82,7 +95,13 @@ def scan_file(code):
         for match in shape.finditer(body):
             line = body.count("\n", 0, match.start()) + 1
             field = match.group(2)
-            if field is None or match.group(1):
+            function = "<top level>"
+            for start, name in starts:
+                if start > match.start():
+                    break
+                function = name
+            borrow_mode = borrowed.get((store, function, field)) if match.group(1) else None
+            if field is None or (match.group(1) and borrow_mode is None):
                 problems.append(f"line {line}: {store} is used other than as "
                                 f"{store}[authority].field")
                 continue
@@ -103,9 +122,9 @@ def scan_file(code):
             if re.search(r"\breturn\s+$", body[max(0, match.start() - 16):match.start()]):
                 entry[3].add(function)
             assign = match.group(4)
-            if assign:
+            if assign or borrow_mode == 'write':
                 entry[0].add(function)
-            if not assign or assign.strip() != "=":
+            if borrow_mode == 'read' or (borrow_mode is None and (not assign or assign.strip() != "=")):
                 entry[1].add(function)
     return fields, uses, problems
 
@@ -144,7 +163,7 @@ def problems_of(texts, rows):
     declared = set()
     uses = {}
     for path, text in sorted(texts.items()):
-        fields, file_uses, file_problems = scan_file(code_only(text))
+        fields, file_uses, file_problems = scan_file(code_only(text), path)
         problems += [f"{path}: {p}" for p in file_problems]
         declared |= fields
         uses.update(file_uses)
@@ -222,12 +241,49 @@ def controls():
     return len(cases) + 2
 
 
+def snapshot_controls(texts):
+    """The two field borrows require independent closed-adapter evidence."""
+    from check_exception_cpu_snapshots import PATH, problems as snapshot_problems
+    from control_patch import replace_in_function
+    source = texts[PATH]
+    if snapshot_problems(source):
+        sys.exit('ERROR per-cpu-carried-fields: snapshot policy baseline is not positive')
+    _, uses, errors = scan_file(code_only(source), PATH)
+    writers, readers, regions, accessors = uses[('CrashSnapshotCell', 'observed')]
+    if (errors or writers != {'crash_snapshot_copy_published'} or
+            readers != {'crash_snapshot_render_core', 'crash_snapshot_render_every_core'} or
+            len(regions) != 3 or accessors):
+        sys.exit('ERROR per-cpu-carried-fields: checked copy must count as writer and both render paths as readers')
+    extra = source + '\nfn escaped(cpu: CpuHere) { let alias = &crash_snapshot_per_core[cpu].capture; }\n'
+    whole = source + '\nfn escaped(cpu: CpuHere) { let alias = &crash_snapshot_per_core[cpu]; }\n'
+    overwrite = replace_in_function(source, 'fn crash_snapshot_publish(',
+        'write.process_pid = crash_snapshot_per_core[cpu].capture.process_pid;',
+        'write.process_pid = crash_snapshot_per_core[cpu].capture.process_pid; write.process_pid = 0;')
+    wrong_borrow = replace_in_function(source, 'fn crash_snapshot_copy_published(',
+        '&crash_snapshot_per_core[cpu].observed', '&crash_snapshot_per_core[cpu].capture')
+    alias = replace_in_function(source, 'fn crash_snapshot_copy_published(',
+        'return CrashSnapshotReadResult::Ready;',
+        'let alias = &crash_snapshot_per_core[cpu].observed; return CrashSnapshotReadResult::Ready;')
+    cases = [(PATH, changed) for changed in (extra, whole, overwrite, wrong_borrow, alias)]
+    cases.append(('kernel/elsewhere.tkb', source))
+    for path, changed in cases:
+        _, _, errors = scan_file(code_only(changed), path)
+        if not errors:
+            sys.exit('ERROR per-cpu-carried-fields: an unconfined snapshot borrow was admitted')
+    # Comments do not affect the independent body policy or the accounting.
+    _, changed, errors = scan_file(code_only(source + '\n// prose only\n'), PATH)
+    if errors or changed != uses:
+        sys.exit('ERROR per-cpu-carried-fields: prose changed snapshot accounting')
+    return len(cases) + 2
+
+
 def main():
     count = controls()
     texts = {}
     for path in sorted((ROOT / "kernel").rglob("*.tkb")):
         if "build" not in path.parts:
             texts[str(path.relative_to(ROOT))] = path.read_text()
+    count += snapshot_controls(texts)
     rows = read_table(TABLE)
     problems = problems_of(texts, rows)
     if problems:
