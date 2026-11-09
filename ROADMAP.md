@@ -114,6 +114,10 @@ complete. Continue RootHeld (#1472) and the remaining #638 review before
 the flip; #638 is not complete. The coordinator sequences shared scheduler
 edits with the sleeping-Mutex foundation (#1481), whose ownership/phase
 question remains parked, taking independent approved steps meanwhile.
+RootHeld's compile-allocation budget decision is pending. While it waits,
+take the already-approved exception diagnostic per-CPU stores as the
+independent kernel-core leaf #1486 under #1159; keep its implementation
+separate from the driver queue below.
 
 **Assigned queue (maintainer, 2026-10-23, pruned 2026-10-25).** Memory
 safety and multicore backbone only. Taken in order whenever the numbered
@@ -201,6 +205,9 @@ owners are TaskMutex, the spare stack stays masked). #980
 **Priority update, 2026-11-09.** Implement #1481, scheduler-backed waiting
 Mutexes with non-sleeping paths preserved, before the preemption flip. When a
 design gate blocks it, continue the already-approved #1159 units.
+The block queue's guarded CPU-access boundary is published. Continue the
+network queue boundary next, preserving nonblocking receive and pending
+IRQ/capability bookkeeping; A holds the independent exception-store leaf.
 
 **Assigned queue (maintainer, 2026-10-23, re-cut 2026-10-25).**
 Low-dependency issues A does not hold, in this order; compiler work in
