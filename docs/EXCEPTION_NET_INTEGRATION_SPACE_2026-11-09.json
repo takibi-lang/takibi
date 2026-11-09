@@ -1,0 +1,84 @@
+{
+  "baseline_head": "e15c4f54ba075b8ce467209c33e704b1c7297fdf",
+  "candidate_head": "0b11349670ae01e0d61e4189fcf3f395e9047bdc",
+  "source_sha256": "d97b6a52e6beeba3e5571d2263c519d513feca5242ba286168c972fe41566f9e",
+  "platforms": {
+    "qemu": {
+      "baseline_elf_sha256": "c377cee0f8fd28fa7f4cb4d0fa64385b5db2be35249f1724b777b40ce6e1a9cf",
+      "candidate_elf_sha256": "bbace2d96f728fc197d4840ea6e35c9aa0c93f96119cb992aeb14aaf367bf34d",
+      "baseline_size": {
+        "text": 815420,
+        "data": 4616,
+        "bss": 1302528
+      },
+      "candidate_size": {
+        "text": 818056,
+        "data": 4632,
+        "bss": 1318912
+      },
+      "baseline_usable_ram_start": 1075871744,
+      "candidate_usable_ram_start": 1075904512,
+      "changed_data_bss": {
+        "crash_snapshot_per_core": [
+          8288,
+          16544
+        ],
+        "crash_snapshot_published": [
+          0,
+          8288
+        ],
+        "ddb_stopped_root": [
+          160,
+          128
+        ],
+        "ddb_stopped_sequence": [
+          0,
+          32
+        ]
+      },
+      "candidate_queue_sizes": {
+        "block_device_lock": 8,
+        "virtio_blk_queue": 256,
+        "virtio_net_queues": 512
+      }
+    },
+    "rpi5": {
+      "baseline_elf_sha256": "2961b8d389aa0c8b3d04500ec67bf4121bbb53377b3bc0a5cde207ac413d027e",
+      "candidate_elf_sha256": "273d337b036c6f39fd2d7b9a09ff1d80d0f3ed89ac6b6b5d9c044ca3e749b5ac",
+      "baseline_size": {
+        "text": 4200424,
+        "data": 5592,
+        "bss": 1925120
+      },
+      "candidate_size": {
+        "text": 4202692,
+        "data": 5608,
+        "bss": 1937408
+      },
+      "baseline_usable_ram_start": 8257536,
+      "candidate_usable_ram_start": 8257536,
+      "changed_data_bss": {
+        "crash_snapshot_per_core": [
+          8288,
+          16544
+        ],
+        "crash_snapshot_published": [
+          0,
+          8288
+        ],
+        "ddb_stopped_root": [
+          160,
+          128
+        ],
+        "ddb_stopped_sequence": [
+          0,
+          32
+        ]
+      },
+      "candidate_queue_sizes": {
+        "block_device_lock": 8,
+        "virtio_blk_queue": 256
+      }
+    }
+  }
+}

@@ -2,14 +2,15 @@
   "date": "2026-11-09",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "fe8f78181911bbfb09a711f5900e4f1711ad0513de02f61ff9d7adce10694f0f",
-  "workload": "Four retained exception CPU stores use existing per_cpu/CpuHere, complete-stop scalar peer reads and a builtin-published crash mirror with own-CPU reader scratch. Published e15c4f54 baseline manifest hashes checked against both archived ELFs and all four objects; candidate source95512e7b linked-image and corrected frame measurement. Maintained normal boot, stopped DDB and terminal/concurrent fault paths are the functional workload; static retention lasts until reboot. No dynamic allocation or ordinary teardown is introduced.",
+  "source_sha256": "d97b6a52e6beeba3e5571d2263c519d513feca5242ba286168c972fe41566f9e",
+  "workload": "Combined exception CPU-store and real-lock virtio-net queue migration: maintained boot/network, Complete-stop DDB, guarded fault and terminal diagnostic capture/console. Static storage remains until reboot; no new heap, pool or per-process allocation.",
   "evidence": [
+    "docs/EXCEPTION_NET_INTEGRATION_SPACE_2026-11-09.md",
+    "docs/EXCEPTION_NET_INTEGRATION_SPACE_2026-11-09.json",
     "docs/EXCEPTION_CPU_SPACE.md",
     "docs/EXCEPTION_CPU_SPACE.json",
-    "docs/GLOBAL_PROTECTION.md",
-    "kernel/MEMORY_MAP.md"
+    "docs/GLOBAL_PROTECTION.md"
   ],
-  "assessment": "Retain explicit safety cost: snapshot payload +16544B (capture2064 + observed2072 perCPU, mirror2072 perCPU). Stopped root128 + atomic sequence32 replaces160 unchanged. QEMU text+2068/data+16/BSSspan+16384; RPi5 text+2180/data+16/BSSspan+12288. Whole-image reservation QEMU +32768B/eight pages; RPi5 unchanged within existing alignment, not zero payload cost. Scratch avoids a full2072B stack temporary and cannot overwrite cached capture or become shared mutable scratch under abandoned report serialization. Corrected individual frames are observations; publication and later cached-console ordered rendering are separate paths, not a summed callchain or16KiB proof; existing1485 host parser defect is separate. No cross-OS or allocator-normalization boundary changes.",
-  "next_trigger": "Changed crash schema/publication representation, capture/reader lifetime, exception callpath, or next kernel feature changing image/allocation workload."
+  "assessment": "Verified published e15 ELF hashes. Combined QEMU text+2636/data+16/BSSspan+16384 and reservation+32768 (eight pages); RPi5 text+2268/data+16/BSSspan+12288, reservation unchanged within alignment. Snapshot fixed payload+16544 is retained for separate capture/publication/per-CPU scratch safety; net512/block256/lock8 unchanged. No unsafe reuse, stack-path sum or whole-stack proof.",
+  "next_trigger": "Changed crash schema/capture-reader lifetime, queue storage or lock ownership, or next kernel feature changing image/allocation workload."
 }
