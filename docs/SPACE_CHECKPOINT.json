@@ -1,13 +1,13 @@
 {
   "date": "2026-11-09",
   "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "034fd5f684239607d4958aacebff7bbf3ca5ca505602059dadbab5ff9080c716",
-  "workload": "Recovery of the three interrupted #1475 commits only: move_cost_records, process_test_evidence and syscall_test_evidence. No new storage, allocation, lifetime or workload; reuse existing occupancy evidence at its unchanged boundary. Current linked images rebuilt; baseline text comes from the source-matched origin/main checkpoint, not a new baseline build. Integration adds only host-runner/inventory fixes and a source-header correction; the three records and their allocation workload are unchanged.",
+  "decision": "measured",
+  "source_sha256": "072672ce460905310f78d544ed8c25c849c5afc510796de11fbc76f4a56d519a",
+  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 793a1d09: this branch's review, rebound to the merged sources (upstream's record was 2026-11-09 incremental/reuse). One #1475 record: WorkloadSettingsWake, compared with recovered-source commit ac5712d1. Both production kernels built at that baseline in a task-owned clone and at the candidate. Common settings_wake/peer_tty fixture; one boot-scoped record, no allocation or lifetime change. Earlier recovery-record review remains in the same evidence document.",
   "evidence": [
     "docs/GLOBAL_PROTECTION.md",
     "kernel/MEMORY_MAP.md"
   ],
-  "assessment": "AtomicWord replaces padded scalar word slots; current records are 72 B, 112 B and 1536 B on both platforms. QEMU text/data/BSS 810628/4600/1302528 B; RPi5 4192856/5576/1933312 B; usable_ram_start 0x40208000/0x7e0000. Against the source-matched recorded baseline text 809700/4192012 B, atomic access and claim/decrement code costs +928/+844 B. Memory-map check passes. Incremental allocation evidence reuse; no new performance claim. The integration header edit changes no executable/storage constructs; reuse remains incremental at the same allocation boundary, not a feature/milestone completion or a fresh baseline measurement.",
-  "next_trigger": "Another storage or lifetime change, or completion of the remaining #1475 evidence-record migration; the globals milestone requires its own measured review."
+  "assessment": "Both kernels: .text +160 B, data/BSS reservations and usable_ram_start unchanged. The settings-wake payload grows 64 -> 80 B; adjacent bools become atomic words. ioctl recorder +36 B; progress +136/+128 B; alignment padding -12/-4 B. No other text/data/BSS symbol changes size. No allocator or pool metadata changes. Adopt the small cost for word-level atomic accesses, preserving run-lock serialization and snapshot/reset protocols.",
+  "next_trigger": "The next #1475 workload record migration, a changed fixture storage/lifetime, or completion of the globals milestone (which requires its own workload review)."
 }
