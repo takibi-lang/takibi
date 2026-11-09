@@ -2,11 +2,12 @@
   "date": "2026-11-09",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "5408a59cc17c4ec4286bf2b77dd91f14c2b3275f58dd81555fca0fe24759164b",
-  "workload": "Standard linked production QEMU and RPi5 kernels against verified immutable published34ee3015 artifacts; maintained native virtio-net TX/reply fixtures. No resource or allocation-lifetime change.",
+  "source_sha256": "03d673d990fc631135443b345baaa3dfc2e607108f5eead03be5f43bac39a978",
+  "workload": "Actual combined production QEMU/RPi5 linked kernels against immutable published34ee3015; both AtomicWord global migrations. Reuse existing occupancy only at unchanged allocator/pool/storage-lifetime boundary.",
   "evidence": [
-    "docs/NET_USED_ADDRESS_REVIEW.md"
+    "docs/ATOMIC_GLOBALS_INTEGRATION_SPACE.md",
+    "docs/ATOMIC_GLOBALS_INTEGRATION_SPACE.json"
   ],
-  "assessment": "AtomicWord address metadata retains16B payload and all linked section sizes/reservations. QEMU setup grows4B into existing padding, one extra cold instruction; DDB metadata load becomes acquire and the setup unwind range follows its length. RPi5 production ELF is byte-identical. DMA/stop/raw-ring trust remains unchanged; no cycle or physical-page savings claim.",
-  "next_trigger": "Changed queue/setup lifetime or allocation workload, or completion of the next kernel feature/stage."
+  "assessment": "Both rebuilt kernels retain linked section sizes, data/BSS payloads and usable_ram_start. QEMU23 changed instruction words stay in five intended functions, setup+4B consumes existing padding with corresponding FDE range; RPi5 only four counter instruction words. No cycle/coherence or page-saving claim.",
+  "next_trigger": "Changed resource/lifetime, allocation workload, queue/setup layout, or completion of the next kernel feature/stage."
 }

@@ -1,0 +1,281 @@
+{
+  "base_head": "34ee301584868ca5bf55a9a82e58f1c37e87dfec",
+  "implementation_head": "6f052a4bfeb4fe5abb5e22f1a84408346eea593b",
+  "production_fingerprint": "03d673d990fc631135443b345baaa3dfc2e607108f5eead03be5f43bac39a978",
+  "scope": "Actual combined linked production kernels, not a sum of component estimates; existing boot occupancy reused because allocation/storage/lifetime workload is unchanged. Instruction shape is not a physical timing/coherence measurement.",
+  "targets": {
+    "qemu": {
+      "baseline_elf_sha256": "f956394295dad1ab09dd79008972a0b07b9d3c5f675dd901e602d701c708d7c0",
+      "combined_elf_sha256": "1b30056403a15fca83ea089d45e1860ccec06558c77cf7887a805024095d992f",
+      "before": {
+        "text": 822792,
+        "data": 4624,
+        "bss": 1318912
+      },
+      "after": {
+        "text": 822792,
+        "data": 4624,
+        "bss": 1318912
+      },
+      "delta": {
+        "text": 0,
+        "data": 0,
+        "bss": 0
+      },
+      "usable_ram_start_before": 1075904512,
+      "usable_ram_start_after": 1075904512,
+      "data_bss_symbols_identical": true,
+      "allocated_layout_identical": true,
+      "changed_allocated_sections": [
+        ".text",
+        ".eh_frame"
+      ],
+      "changed_code_words": [
+        {
+          "address": "0x4000b878",
+          "function": "kernel_secondary_boot_state_clear",
+          "before": "090100f9",
+          "after": "09fd9fc8"
+        },
+        {
+          "address": "0x4000b8c0",
+          "function": "kernel_online_core_note_cpu_on",
+          "before": "090140f9",
+          "after": "09fddfc8"
+        },
+        {
+          "address": "0x4000b8d8",
+          "function": "kernel_online_core_note_cpu_on",
+          "before": "090100f9",
+          "after": "09fd9fc8"
+        },
+        {
+          "address": "0x4000b900",
+          "function": "kernel_online_core_count",
+          "before": "080140f9",
+          "after": "08fddfc8"
+        },
+        {
+          "address": "0x4001c250",
+          "function": "virtio_queue_setup",
+          "before": "1b000014",
+          "after": "1c000014"
+        },
+        {
+          "address": "0x4001c268",
+          "function": "virtio_queue_setup",
+          "before": "a00200b4",
+          "after": "c00200b4"
+        },
+        {
+          "address": "0x4001c288",
+          "function": "virtio_queue_setup",
+          "before": "48fd60d3",
+          "after": "1f2003d5"
+        },
+        {
+          "address": "0x4001c28c",
+          "function": "virtio_queue_setup",
+          "before": "2b8500b9",
+          "after": "a8776e10"
+        },
+        {
+          "address": "0x4001c290",
+          "function": "virtio_queue_setup",
+          "before": "0bfc60d3",
+          "after": "2b8500b9"
+        },
+        {
+          "address": "0x4001c294",
+          "function": "virtio_queue_setup",
+          "before": "2a9100b9",
+          "after": "4bfd60d3"
+        },
+        {
+          "address": "0x4001c298",
+          "function": "virtio_queue_setup",
+          "before": "2a008052",
+          "after": "2a9100b9"
+        },
+        {
+          "address": "0x4001c29c",
+          "function": "virtio_queue_setup",
+          "before": "289500b9",
+          "after": "0afc60d3"
+        },
+        {
+          "address": "0x4001c2a0",
+          "function": "virtio_queue_setup",
+          "before": "1f2003d5",
+          "after": "2b9500b9"
+        },
+        {
+          "address": "0x4001c2a4",
+          "function": "virtio_queue_setup",
+          "before": "e8766e10",
+          "after": "2b008052"
+        },
+        {
+          "address": "0x4001c2ac",
+          "function": "virtio_queue_setup",
+          "before": "2ba500b9",
+          "after": "080d138b"
+        },
+        {
+          "address": "0x4001c2b0",
+          "function": "virtio_queue_setup",
+          "before": "2a4500b9",
+          "after": "2aa500b9"
+        },
+        {
+          "address": "0x4001c2b4",
+          "function": "virtio_queue_setup",
+          "before": "007933f8",
+          "after": "2b4500b9"
+        },
+        {
+          "address": "0x4001c2b8",
+          "function": "virtio_queue_setup",
+          "before": "20008052",
+          "after": "00fd9fc8"
+        },
+        {
+          "address": "0x4001c2bc",
+          "function": "virtio_queue_setup",
+          "before": "f44f41a9",
+          "after": "20008052"
+        },
+        {
+          "address": "0x4001c2c0",
+          "function": "virtio_queue_setup",
+          "before": "fd7bc2a8",
+          "after": "f44f41a9"
+        },
+        {
+          "address": "0x4001c2c4",
+          "function": "virtio_queue_setup",
+          "before": "c0035fd6",
+          "after": "fd7bc2a8"
+        },
+        {
+          "address": "0x4001c2c8",
+          "function": "virtio_queue_setup",
+          "before": "00000000",
+          "after": "c0035fd6"
+        },
+        {
+          "address": "0x4001c640",
+          "function": "kernel_net_rx_frame_pending",
+          "before": "080140f9",
+          "after": "08fddfc8"
+        }
+      ],
+      "function_sizes": {
+        "kernel_secondary_boot_state_clear": {
+          "before": 84,
+          "after": 84
+        },
+        "kernel_online_core_note_cpu_on": {
+          "before": 52,
+          "after": 52
+        },
+        "kernel_online_core_count": {
+          "before": 40,
+          "after": 40
+        },
+        "virtio_queue_setup": {
+          "before": 168,
+          "after": 172
+        },
+        "kernel_net_rx_frame_pending": {
+          "before": 104,
+          "after": 104
+        }
+      },
+      "artifacts_sha256": {
+        "main.o": "809fa678691e70e8f17906f135a877103dc32343b86513b1c541c28a231b65ec",
+        "kernel.elf": "1b30056403a15fca83ea089d45e1860ccec06558c77cf7887a805024095d992f"
+      },
+      "facts_sha256": {
+        "callgraph.tsv": "7009b20f45e4d0ee6e40d3c2954ae0959da520e59f413d2cc9948ee9e02215c6",
+        "globals.tsv": "8764cc0bac1a94bbc3a762e846c24b95cf5d9d06aee0abc3acd284dcc8a01382",
+        "structs.tsv": "9eb4370e6278103ffc06b877c3298d50509269ffb998cd62d0fb818eea2877e8"
+      }
+    },
+    "rpi5": {
+      "baseline_elf_sha256": "52a1a95e2adace47b9b1e5a2005cc05a369cee84b8a78bb8bdfbdf773447f1fd",
+      "combined_elf_sha256": "0cea1dd11c72fde1f68b3ddb1e0e5452655ad97b1c1d06f28c124abade33a9c3",
+      "before": {
+        "text": 4207396,
+        "data": 5600,
+        "bss": 1933312
+      },
+      "after": {
+        "text": 4207396,
+        "data": 5600,
+        "bss": 1933312
+      },
+      "delta": {
+        "text": 0,
+        "data": 0,
+        "bss": 0
+      },
+      "usable_ram_start_before": 8257536,
+      "usable_ram_start_after": 8257536,
+      "data_bss_symbols_identical": true,
+      "allocated_layout_identical": true,
+      "changed_allocated_sections": [
+        ".text"
+      ],
+      "changed_code_words": [
+        {
+          "address": "0x20c288",
+          "function": "kernel_secondary_boot_state_clear",
+          "before": "090100f9",
+          "after": "09fd9fc8"
+        },
+        {
+          "address": "0x20c2d0",
+          "function": "kernel_online_core_note_cpu_on",
+          "before": "090140f9",
+          "after": "09fddfc8"
+        },
+        {
+          "address": "0x20c2e8",
+          "function": "kernel_online_core_note_cpu_on",
+          "before": "090100f9",
+          "after": "09fd9fc8"
+        },
+        {
+          "address": "0x20c310",
+          "function": "kernel_online_core_count",
+          "before": "080140f9",
+          "after": "08fddfc8"
+        }
+      ],
+      "function_sizes": {
+        "kernel_secondary_boot_state_clear": {
+          "before": 84,
+          "after": 84
+        },
+        "kernel_online_core_note_cpu_on": {
+          "before": 52,
+          "after": 52
+        },
+        "kernel_online_core_count": {
+          "before": 40,
+          "after": 40
+        }
+      },
+      "artifacts_sha256": {
+        "main.o": "8c0f1296064fd22eacddf44b6b34d78953b3f34acc858e2325555059d2ee0f13",
+        "kernel.elf": "0cea1dd11c72fde1f68b3ddb1e0e5452655ad97b1c1d06f28c124abade33a9c3"
+      },
+      "facts_sha256": {
+        "callgraph.tsv": "98bd3281f9fd5cc0cce7310e78d9fed3b942b16c91c525f331ff299a799bdef7",
+        "globals.tsv": "07c5897c3b4dccfaf896dc04e1848038c6369d41f415123d2100fcd8eab51054",
+        "structs.tsv": "a5e5dd5926ec5ef8f8ec1fd510ccd6ea00e380101575b4645e3deffa48f64c7e"
+      }
+    }
+  }
+}

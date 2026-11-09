@@ -4211,7 +4211,7 @@
     },
     {
       "date": "2026-11-09",
-      "head": "34ee3015",
+      "head": "6f052a4b",
       "counts": {
         "raw_mint_files": 14,
         "frame_lines": 12418,
@@ -4228,16 +4228,17 @@
         "per_cpu_ordinary_arrays": 51,
         "per_cpu_stores": 13,
         "raw_cpu_id_calls": 136,
-        "trust_build_checks": 22,
+        "trust_build_checks": 23,
         "tla_review_stamps": 146,
         "judge_defects_range": 1,
         "judge_defects_init": 0,
         "judge_defects_region_overlay": 0,
-        "unprotected_globals": 35,
+        "unprotected_globals": 34,
         "frame_api_ratchet": 7
       },
       "changes": {
-        "unprotected_globals": "AtomicWord: type the virtio-net used-ring address metadata; stopped raw ring observation and existing DMA/guard authority remain trusted"
+        "unprotected_globals": "typed protection: #1159 combines kernel_online_cores AtomicWord and virtio_net_used_addr AtomicWord[2]; ordinary accesses use existing checked atomic cells, while boot-writer and stopped raw-ring trust stay explicit.",
+        "trust_build_checks": "#1159: retain the existing secondary layout/source check as a bounded premise for online-prefix predicates and the closed boot-writer chain when combining both AtomicWord migrations."
       }
     }
   ]
