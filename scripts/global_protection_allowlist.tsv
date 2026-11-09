@@ -6,10 +6,6 @@
 # a reviewed row reads "read-by NAME[,NAME...]: why", and the build refuses a NAME that
 # is not a non-write use of the global or a file naming it. Being named shows a reader
 # exists; the rest of the cell is a reviewer's claim, not a checked one.
-kernel/arch/arm64/kernel/exception_evidence.tkb	crash_snapshot_capturing_per_core	read-by crash_snapshot_capturing_here: 2026-11-01 retain-abi: crash_snapshot_capture's flag on the calling core's element; re-audited (#1316): every entry has IRQs masked (exception entry, or msr daifset in kernel_invariant_stop*) and the capture parks, so no migration between cpu_id and the flag
-kernel/arch/arm64/kernel/exception_evidence.tkb	crash_snapshot_per_core	read-by crash_snapshot_of,scripts/kernel_crash_snapshot.gdb,scripts/kernel_state.gdb: 2026-10-31 retain-abi: the crash report and DDB through crash_snapshot_of, and the GDB scripts by name; a record is read after its valid flag is published
-kernel/arch/arm64/kernel/exception_evidence.tkb	ddb_stopped_root	read-by ddb_stopped_unwind_root,ddb_claimed_pid: 2026-10-31 retain-abi: DDB's walk of every stopped core's root; each core publishes its own element
-kernel/arch/arm64/kernel/exception_evidence.tkb	kernel_ddb_memory_access	read-by kernel_ddb_memory_access_here: 2026-10-31 retain-abi: DDB's guarded read, through a pointer to the calling core's element, or to element 0 if cpu_id is out of range
 kernel/arch/arm64/kernel/platform_uart_common.tkb	uart_rx_handler	read-by uart_rx_drain: 2026-10-31 retain-singleton: the UART receive path calls it; uart_init and uart_set_rx_handler store it at boot before the IRQ is unmasked, an order nothing checks
 kernel/arch/arm64/kernel/secondary.tkb	kernel_online_cores	read-by kernel_online_core_count,kernel_online_core_note_cpu_on: 2026-10-31 retain-partition: every online-prefix walk; only core 0's boot writes it, with the range rechecked at each read (outside 1..=max reads as 1)
 kernel/arch/arm64/mm/asid.tkb	asid_bits	read-by asid_width_bits: 2026-10-31 written once by asid_init with the MMU off, where the compiler refuses an atomic call; read lock-free after

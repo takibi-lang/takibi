@@ -239,11 +239,11 @@ def _tk_read_events():
 
 
 def _tk_read_crash():
-    # Every core's record is its element of crash_snapshot_per_core (GitHub
+    # Every core's record is its element of crash_snapshot_published (GitHub
     # issue #822). Read the first fault's: the valid record with
     # the lowest sequence (GitHub issue #664: a fault on a peer core was
     # reported as unpublished).
-    peers = _tk_eval("crash_snapshot_per_core")
+    peers = _tk_eval("crash_snapshot_published")
     snapshot = _tk_array_item(peers, 0)
     for cpu in range(1, _tk_constant("KERNEL_MAX_CORES")):
         peer = _tk_array_item(peers, cpu)

@@ -52,10 +52,6 @@ LISTED = {
     ("kernel/kernel/syscall.tkb", "syscall_slot_words"): (POOL, "SyscallSlot's acquire words"),
     ("kernel/init/test_driver.tkb", "exec_window_words"): (POOL, "ExecWindowSlot's acquire words"),
     # Read by another CPU.
-    ("kernel/arch/arm64/kernel/exception_evidence.tkb", "crash_snapshot_per_core"): (CROSS, "DDB and the crash report on a stopped machine"),
-    ("kernel/arch/arm64/kernel/exception_evidence.tkb", "crash_snapshot_capturing_per_core"): (CROSS, "DDB and the crash report on a stopped machine"),
-    ("kernel/arch/arm64/kernel/exception_evidence.tkb", "kernel_ddb_memory_access"): (CROSS, "DDB's guarded read, armed for a stopped CPU"),
-    ("kernel/arch/arm64/kernel/exception_evidence.tkb", "ddb_stopped_root"): (CROSS, "DDB walks every stopped CPU's root"),
     ("kernel/arch/arm64/kernel/secondary.tkb", "kernel_secondary_boot_state"): (CROSS, "the boot CPU's secondary handshake"),
     ("kernel/arch/arm64/kernel/secondary.tkb", "secondary_tick_count"): (CROSS, "peer tick waits and reports"),
     ("kernel/kernel/irq_counts.tkb", "irq_count_cores"): (CROSS, "DDB's intr view and the SGI fixture"),

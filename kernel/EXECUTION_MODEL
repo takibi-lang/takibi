@@ -123,3 +123,5 @@ exempt kernel/kernel/syscall_unimplemented.tkb  every slot is claimed by an atom
 exempt kernel/kernel/security_floor.tkb  GitHub issue #1245: the degraded-property word is an AtomicWord set by compare-exchange, so no core count is assumed
 exempt kernel/net/tcp_isn.tkb  GitHub issue #1227: the ISN key words are BootOnce cells, written under the boot phase and only read afterwards, so no core count is assumed
 exempt kernel/kernel/syscall.tkb  syscall state is a ProcessRecord field, a linear SyscallSlot pool element or invocation-local ext2 registration; handlers run on any admitted CPU without a core-specific gate
+
+exempt kernel/arch/arm64/kernel/exception_evidence.tkb  own writes use per_cpu with the confined masked exception CpuHere mint; peer payload reads require MachineStopped or publish_copy; other state is atomic, guarded_by(kernel_world_stop), or externally debugger-set (global-protection still checks every global); no dependency on KERNEL_PREEMPTIBLE (#1486)
