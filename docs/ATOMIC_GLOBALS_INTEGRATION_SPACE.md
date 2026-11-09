@@ -53,3 +53,13 @@ cost explicit without claiming measured time. No language, model action,
 ownership API or allocator redesign is added. Measure again after a changed
 resource/lifetime or allocation workload, or completion of the next kernel
 feature/stage.
+
+## DMA fixture correction
+
+The separate DMA fixture consumer now calls `atomic_word_load` before its
+existing integer-to-pointer cast. The maintained DMA QEMU lane passed with
+this correction. Both production ELF/object hashes and all six recorded
+compiler-fact hashes were verified identical to the measurements above.
+The fixture is included in the publication source fingerprint, so the
+checkpoint is rebound to the corrected source without changing the measured
+two-migration milestone or claiming a new production layout measurement.

@@ -1,7 +1,7 @@
 {
   "base_head": "34ee301584868ca5bf55a9a82e58f1c37e87dfec",
   "implementation_head": "6f052a4bfeb4fe5abb5e22f1a84408346eea593b",
-  "production_fingerprint": "03d673d990fc631135443b345baaa3dfc2e607108f5eead03be5f43bac39a978",
+  "production_fingerprint": "0e48f160931e5752061443965ad1dfe0a22f59012552d2a0e2da14d8ca2e34fe",
   "scope": "Actual combined linked production kernels, not a sum of component estimates; existing boot occupancy reused because allocation/storage/lifetime workload is unchanged. Instruction shape is not a physical timing/coherence measurement.",
   "targets": {
     "qemu": {
@@ -277,5 +277,7 @@
         "structs.tsv": "a5e5dd5926ec5ef8f8ec1fd510ccd6ea00e380101575b4645e3deffa48f64c7e"
       }
     }
-  }
+  },
+  "fixture_correction_head": "27e60b860e9ea98a52c93437ec87026a50ffbbab",
+  "fixture_correction_verification": "DMA fixture reads AtomicWord with atomic_word_load before its existing address cast. Actual maintained DMA QEMU lane passed. Both production ELF/object hashes and six recorded compiler fact hashes remain identical to the measured combined kernels; the fixture source is nevertheless included in the source fingerprint."
 }
