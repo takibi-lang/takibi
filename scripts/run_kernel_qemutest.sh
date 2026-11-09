@@ -337,6 +337,14 @@ trap 'archive_on_failure $?' EXIT
 trap - INT TERM HUP
 
 if [ ! -s "$UART_LOG" ]; then
+    # A launcher refusal is host evidence, not a missing kernel view (#1482).
+    if [ -s "$ARTIFACT_DIR/qemu.log" ]; then
+        echo "[$RUN_LABEL] QEMU launch/output:" >&2
+        cat "$ARTIFACT_DIR/qemu.log" >&2
+    fi
+    if [ "$uart_driver_status" -ne 0 ]; then
+        echo "[$RUN_LABEL] UART driver failed (status $uart_driver_status); no capture from this attempt" >&2
+    fi
     # GitHub issue #407: an empty UART log means the guest said nothing,
     # which is a claim about the KERNEL -- so only make it when the host
     # side actually got to ask. If the peer above failed too, it is the
@@ -345,6 +353,8 @@ if [ ! -s "$UART_LOG" ]; then
     # guest.
     if [ "$peer_status" -ne 0 ]; then
         echo "error: no UART output captured, and the host-side peer above failed too -- read the peer's error first; this says nothing about the kernel" >&2
+    elif [ "$uart_driver_status" -ne 0 ]; then
+        echo "error: UART capture failed before any output -- read the launch and connection errors above; this says nothing about the kernel" >&2
     else
         echo "error: no UART output captured -- kernel did not boot" >&2
     fi

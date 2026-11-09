@@ -590,6 +590,14 @@ def main() -> int:
 
     if args.ceiling is None:
         args.ceiling = 3 * args.timeout
+    # Invalidate the preceding attempt before connecting (#1482). A refused
+    # QEMU launch must not leave an old nonempty capture for view comparison.
+    # Failed captures from this attempt are still kept once the UART opens.
+    capture_paths = [Path(args.log), Path(args.log + ".normalized")]
+    if args.timing_log:
+        capture_paths.append(Path(args.timing_log))
+    for path in capture_paths:
+        path.unlink(missing_ok=True)
     # A failed connection must not leave the preceding run's capture arrival
     # looking like evidence from this attempt.
     try:

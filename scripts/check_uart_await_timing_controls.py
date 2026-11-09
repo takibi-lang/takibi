@@ -5,6 +5,8 @@ import contextlib
 import io
 import json
 import math
+import runpy
+import sys
 from pathlib import Path
 import tempfile
 from unittest.mock import patch
@@ -74,6 +76,10 @@ def main():
             def serial_for_url(self, url, **kwargs):
                 raise self.SerialException('scripted connection refusal')
 
+        stale = [root / name for name in ('uart.log', 'uart.log.normalized',
+                                          'uart-timing.log')]
+        for path in stale:
+            path.write_text('previous boot, not this attempt\n')
         (root / 'uart.log.await-timing.jsonl').write_text('stale capture\n')
         with patch.object(control, 'FakeSerial', UnavailableSerial), contextlib.redirect_stdout(io.StringIO()):
             outcome = control.drive(driver, TimedUart([]), root, timeout=8)
@@ -82,6 +88,27 @@ def main():
         assert connection[0]['status'] == 'not-arrived'
         assert connection[0]['timeout_seconds'] == 8
         assert not (root / 'uart.log.await-timing.jsonl').exists()
+        # Exercise the actual CLI exit path too, without wall-clock waits.
+        # A diagnostic alone must not disguise an accidental successful exit.
+        for path in stale:
+            path.write_text('previous boot, not this attempt\n')
+        argv = [str(control.DRIVER), '--port', 'socket://127.0.0.1:1',
+                '--log', str(root / 'uart.log'),
+                '--timing-log', str(root / 'uart-timing.log'),
+                '--stdin', str(root / 'ash.stdin'),
+                '--expected', str(root / 'ash.expected'), '--timeout', '8']
+        output = io.StringIO()
+        with patch.dict(sys.modules, {'serial': UnavailableSerial(TimedUart([])),
+                                      'time': control.Clock()}), \
+                patch.object(sys, 'argv', argv), contextlib.redirect_stdout(output):
+            status = 0
+            try:
+                runpy.run_path(str(control.DRIVER), run_name='__main__')
+            except SystemExit as error:
+                status = error.code
+        assert status != 0, status
+        assert 'could not open UART' in output.getvalue(), output.getvalue()
+        assert all(not path.exists() for path in stale), stale
 
     CASES.note()
     with tempfile.TemporaryDirectory() as raw:
