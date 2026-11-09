@@ -1,0 +1,742 @@
+{
+  "source_head": "40619bdb44c3af19abab8cde3202c4194b5b3b2e",
+  "baseline_head": "88c1912cceb8305af9158b8fd4f9e60b392946a3",
+  "compiler_sha256": "01ce248ef95e55f0e242a464cdf27b3fbeda6e87ee17eed3e9a2c2476a5eb2e1",
+  "uninstrumented_allocwords": 593855601,
+  "baseline_manifest_sha256": "d9f55efccf6279b8e22f0ae37fa3fc9ba1904856976f557d1701d41bf4aaf07a",
+  "scope": "Separate ELF/symbol/reservation/prologue observations and bounded pool endpoints; not peak occupancy or a whole callpath/stack bound. Local hexadecimal stp correction observes the existing frame-scanner limitation without changing its shared gate.",
+  "platforms": {
+    "qemu": {
+      "before_path": "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-88c1912c/kernel/build/qemu/kernel.elf",
+      "after_path": "kernel/build/qemu/kernel.elf",
+      "before_sha256": "bbace2d96f728fc197d4840ea6e35c9aa0c93f96119cb992aeb14aaf367bf34d",
+      "after_sha256": "e242e8d3d4af7879c157877db95af15013401e2baae8c8d2dad8f4579e9f8203",
+      "section_names": [
+        "text",
+        "data",
+        "bss"
+      ],
+      "before_sections": [
+        818056,
+        4632,
+        1318912
+      ],
+      "after_sections": [
+        821568,
+        4632,
+        1318912
+      ],
+      "section_delta": [
+        3512,
+        0,
+        0
+      ],
+      "named_mutable_payload_before": 906776,
+      "named_mutable_payload_after": 906776,
+      "changed_mutable_symbols": {},
+      "usable_ram_start_before": 1075904512,
+      "usable_ram_start_after": 1075904512,
+      "reservation_boundary_delta": 0
+    },
+    "rpi5": {
+      "before_path": "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-88c1912c/kernel/build/rpi5/kernel.elf",
+      "after_path": "kernel/build/rpi5/kernel.elf",
+      "before_sha256": "273d337b036c6f39fd2d7b9a09ff1d80d0f3ed89ac6b6b5d9c044ca3e749b5ac",
+      "after_sha256": "bea0e1f0da97a94461603665b71692fdd25079d80fa8c2fe8367e295a39776a9",
+      "section_names": [
+        "text",
+        "data",
+        "bss"
+      ],
+      "before_sections": [
+        4202692,
+        5608,
+        1937408
+      ],
+      "after_sections": [
+        4206236,
+        5608,
+        1937408
+      ],
+      "section_delta": [
+        3544,
+        0,
+        0
+      ],
+      "named_mutable_payload_before": 1176692,
+      "named_mutable_payload_after": 1176692,
+      "changed_mutable_symbols": {},
+      "usable_ram_start_before": 8257536,
+      "usable_ram_start_after": 8257536,
+      "reservation_boundary_delta": 0
+    }
+  },
+  "objects": [
+    {
+      "version": "baseline",
+      "path": "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-88c1912c/kernel/build/qemu/main.o",
+      "sha256": "33ff25b52e6a08d67ac039443f1420619b7091726899e610925b38528f525a0b",
+      "platform": "qemu",
+      "object": "main.o",
+      "selected_frames": {
+        "address_space_activate_root": 192,
+        "address_space_commit_activation": 64,
+        "address_space_prepare_activation": 288,
+        "ext2_update_regular_file": 2528,
+        "kernel_process_activate_stable_root": 112,
+        "kernel_process_scheduler_probe": 3184,
+        "process_image_commit_activation": 16
+      },
+      "maximum": 3184
+    },
+    {
+      "version": "candidate",
+      "path": "kernel/build/qemu/main.o",
+      "sha256": "dddc3a0612d3141c62dcf0e68e6594beda6507d577170e86d02e0c7587be6c2a",
+      "platform": "qemu",
+      "object": "main.o",
+      "selected_frames": {
+        "address_space_activate_boot_root": 16,
+        "address_space_activate_held": 192,
+        "address_space_activate_owned_root": 48,
+        "address_space_commit_activation": 80,
+        "address_space_commit_boot_activation": 48,
+        "address_space_commit_current_activation": 48,
+        "address_space_commit_held": 64,
+        "address_space_prepare_activation": 48,
+        "address_space_prepare_boot_activation": 16,
+        "address_space_prepare_current_activation": 16,
+        "address_space_prepare_held": 288,
+        "ext2_update_regular_file": 2528,
+        "kernel_process_activate_stable_owned_root": 112,
+        "kernel_process_activate_stable_root": 96,
+        "kernel_process_scheduler_probe": 3184,
+        "process_image_activation_committed": 48,
+        "process_image_commit_activation": 32,
+        "process_image_commit_current_activation": 16,
+        "root_held_boot": 16,
+        "root_held_current": 16,
+        "root_held_owned": 16
+      },
+      "maximum": 3184
+    },
+    {
+      "version": "baseline",
+      "path": "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-88c1912c/kernel/build/qemu/main.debug.o",
+      "sha256": "e803cf86aebf66384c2e35a26960ee364249749b787b08d73dbee2d258e47f08",
+      "platform": "qemu",
+      "object": "main.debug.o",
+      "selected_frames": {
+        "address_space_activate_root": 256,
+        "address_space_commit_activation": 144,
+        "address_space_prepare_activation": 336,
+        "ext2_update_regular_file": 2640,
+        "kernel_process_activate_stable_root": 128,
+        "kernel_process_scheduler_probe": 3312,
+        "process_image_commit_activation": 48
+      },
+      "maximum": 3312
+    },
+    {
+      "version": "candidate",
+      "path": "kernel/build/qemu/main.debug.o",
+      "sha256": "39703ee1a044d7497aa774970ad839466c2d01317f14f5f691bf239736f3d510",
+      "platform": "qemu",
+      "object": "main.debug.o",
+      "selected_frames": {
+        "address_space_activate_boot_root": 16,
+        "address_space_activate_held": 256,
+        "address_space_activate_owned_root": 64,
+        "address_space_commit_activation": 96,
+        "address_space_commit_boot_activation": 48,
+        "address_space_commit_current_activation": 48,
+        "address_space_commit_held": 160,
+        "address_space_prepare_activation": 64,
+        "address_space_prepare_boot_activation": 16,
+        "address_space_prepare_current_activation": 16,
+        "address_space_prepare_held": 336,
+        "ext2_update_regular_file": 2640,
+        "kernel_process_activate_stable_owned_root": 144,
+        "kernel_process_activate_stable_root": 96,
+        "kernel_process_scheduler_probe": 3312,
+        "process_image_activation_committed": 80,
+        "process_image_commit_activation": 96,
+        "process_image_commit_current_activation": 48,
+        "root_held_boot": 16,
+        "root_held_current": 16,
+        "root_held_owned": 48
+      },
+      "maximum": 3312
+    },
+    {
+      "version": "baseline",
+      "path": "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-88c1912c/kernel/build/rpi5/main.o",
+      "sha256": "87fd1c82c0a9cf0afa62d01b9b60e9fa072433c92da54e12820b43e88969d396",
+      "platform": "rpi5",
+      "object": "main.o",
+      "selected_frames": {
+        "address_space_activate_root": 192,
+        "address_space_commit_activation": 64,
+        "address_space_prepare_activation": 288,
+        "ext2_update_regular_file": 2528,
+        "kernel_process_activate_stable_root": 112,
+        "kernel_process_scheduler_probe": 3184,
+        "process_image_commit_activation": 16
+      },
+      "maximum": 3184
+    },
+    {
+      "version": "candidate",
+      "path": "kernel/build/rpi5/main.o",
+      "sha256": "a15d349f308eff46598ae113b7adcd0e202be293434913d4ca8d95dbb8f4ab09",
+      "platform": "rpi5",
+      "object": "main.o",
+      "selected_frames": {
+        "address_space_activate_boot_root": 16,
+        "address_space_activate_held": 192,
+        "address_space_activate_owned_root": 48,
+        "address_space_commit_activation": 80,
+        "address_space_commit_boot_activation": 48,
+        "address_space_commit_current_activation": 48,
+        "address_space_commit_held": 64,
+        "address_space_prepare_activation": 48,
+        "address_space_prepare_boot_activation": 16,
+        "address_space_prepare_current_activation": 16,
+        "address_space_prepare_held": 288,
+        "ext2_update_regular_file": 2528,
+        "kernel_process_activate_stable_owned_root": 112,
+        "kernel_process_activate_stable_root": 96,
+        "kernel_process_scheduler_probe": 3184,
+        "process_image_activation_committed": 48,
+        "process_image_commit_activation": 32,
+        "process_image_commit_current_activation": 16,
+        "root_held_boot": 16,
+        "root_held_current": 16,
+        "root_held_owned": 16
+      },
+      "maximum": 3184
+    },
+    {
+      "version": "baseline",
+      "path": "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-88c1912c/kernel/build/rpi5/main.debug.o",
+      "sha256": "080c98206c0fe6d6e6e92378377932f8e0b23b73f9513ccd5b340af8cc04e71a",
+      "platform": "rpi5",
+      "object": "main.debug.o",
+      "selected_frames": {
+        "address_space_activate_root": 256,
+        "address_space_commit_activation": 144,
+        "address_space_prepare_activation": 336,
+        "ext2_update_regular_file": 2640,
+        "kernel_process_activate_stable_root": 128,
+        "kernel_process_scheduler_probe": 3312,
+        "process_image_commit_activation": 48
+      },
+      "maximum": 3312
+    },
+    {
+      "version": "candidate",
+      "path": "kernel/build/rpi5/main.debug.o",
+      "sha256": "0b6d7f64059df20aba8c0136d7377936dfc8294845e597b169a8c201aacba2db",
+      "platform": "rpi5",
+      "object": "main.debug.o",
+      "selected_frames": {
+        "address_space_activate_boot_root": 16,
+        "address_space_activate_held": 256,
+        "address_space_activate_owned_root": 64,
+        "address_space_commit_activation": 96,
+        "address_space_commit_boot_activation": 48,
+        "address_space_commit_current_activation": 48,
+        "address_space_commit_held": 160,
+        "address_space_prepare_activation": 64,
+        "address_space_prepare_boot_activation": 16,
+        "address_space_prepare_current_activation": 16,
+        "address_space_prepare_held": 336,
+        "ext2_update_regular_file": 2640,
+        "kernel_process_activate_stable_owned_root": 144,
+        "kernel_process_activate_stable_root": 96,
+        "kernel_process_scheduler_probe": 3312,
+        "process_image_activation_committed": 80,
+        "process_image_commit_activation": 96,
+        "process_image_commit_current_activation": 48,
+        "root_held_boot": 16,
+        "root_held_current": 16,
+        "root_held_owned": 48
+      },
+      "maximum": 3312
+    }
+  ],
+  "rpi5_pool_samples": {
+    "boundary": "First boot and bounded_end blocks only; timestamped dmesg replays are not additional samples. Endpoint observations, not peak occupancy proof.",
+    "baseline": {
+      "boot": {
+        "process": {
+          "object": 2192,
+          "pool": 24,
+          "slot": 2192,
+          "chunk": 16384,
+          "chunks": 1,
+          "capacity": 7,
+          "nonfree": 1,
+          "bytes": 16384
+        },
+        "tcp": {
+          "object": 192,
+          "pool": 24,
+          "slot": 192,
+          "chunk": 4096,
+          "chunks": 0,
+          "capacity": 0,
+          "nonfree": 0,
+          "bytes": 0
+        },
+        "retx": {
+          "object": 1616,
+          "pool": 24,
+          "slot": 1616,
+          "chunk": 8192,
+          "chunks": 0,
+          "capacity": 0,
+          "nonfree": 0,
+          "bytes": 0
+        },
+        "frame": {
+          "object": 1528,
+          "pool": 24,
+          "slot": 1528,
+          "chunk": 8192,
+          "chunks": 0,
+          "capacity": 0,
+          "nonfree": 0,
+          "bytes": 0
+        },
+        "backing": {
+          "object": 40,
+          "pool": 24,
+          "slot": 40,
+          "chunk": 4096,
+          "chunks": 0,
+          "capacity": 0,
+          "nonfree": 0,
+          "bytes": 0
+        },
+        "image": {
+          "object": 96,
+          "pool": 24,
+          "slot": 96,
+          "chunk": 4096,
+          "chunks": 1,
+          "capacity": 38,
+          "nonfree": 1,
+          "bytes": 4096
+        },
+        "fd_context": {
+          "object": 56,
+          "pool": 24,
+          "slot": 56,
+          "chunk": 4096,
+          "chunks": 1,
+          "capacity": 63,
+          "nonfree": 1,
+          "bytes": 4096
+        },
+        "fd_block": {
+          "object": 400,
+          "pool": 24,
+          "slot": 400,
+          "chunk": 4096,
+          "chunks": 1,
+          "capacity": 9,
+          "nonfree": 0,
+          "bytes": 4096
+        },
+        "object": {
+          "object": 96,
+          "pool": 24,
+          "slot": 96,
+          "chunk": 4096,
+          "chunks": 1,
+          "capacity": 38,
+          "nonfree": 1,
+          "bytes": 4096
+        },
+        "pipe": {
+          "object": 4128,
+          "pool": 24,
+          "slot": 4128,
+          "chunk": 12288,
+          "chunks": 0,
+          "capacity": 0,
+          "nonfree": 0,
+          "bytes": 0
+        },
+        "mmap_region": {
+          "object": 512,
+          "pool": 24,
+          "slot": 512,
+          "chunk": 4096,
+          "chunks": 0,
+          "capacity": 0,
+          "nonfree": 0,
+          "bytes": 0
+        }
+      },
+      "bounded_end": {
+        "process": {
+          "object": 2192,
+          "pool": 24,
+          "slot": 2192,
+          "chunk": 16384,
+          "chunks": 4,
+          "capacity": 28,
+          "nonfree": 1,
+          "bytes": 65536
+        },
+        "tcp": {
+          "object": 192,
+          "pool": 24,
+          "slot": 192,
+          "chunk": 4096,
+          "chunks": 0,
+          "capacity": 0,
+          "nonfree": 0,
+          "bytes": 0
+        },
+        "retx": {
+          "object": 1616,
+          "pool": 24,
+          "slot": 1616,
+          "chunk": 8192,
+          "chunks": 1,
+          "capacity": 5,
+          "nonfree": 0,
+          "bytes": 8192
+        },
+        "frame": {
+          "object": 1528,
+          "pool": 24,
+          "slot": 1528,
+          "chunk": 8192,
+          "chunks": 0,
+          "capacity": 0,
+          "nonfree": 0,
+          "bytes": 0
+        },
+        "backing": {
+          "object": 40,
+          "pool": 24,
+          "slot": 40,
+          "chunk": 4096,
+          "chunks": 1,
+          "capacity": 84,
+          "nonfree": 1,
+          "bytes": 4096
+        },
+        "image": {
+          "object": 96,
+          "pool": 24,
+          "slot": 96,
+          "chunk": 4096,
+          "chunks": 1,
+          "capacity": 38,
+          "nonfree": 2,
+          "bytes": 4096
+        },
+        "fd_context": {
+          "object": 56,
+          "pool": 24,
+          "slot": 56,
+          "chunk": 4096,
+          "chunks": 1,
+          "capacity": 63,
+          "nonfree": 1,
+          "bytes": 4096
+        },
+        "fd_block": {
+          "object": 400,
+          "pool": 24,
+          "slot": 400,
+          "chunk": 4096,
+          "chunks": 1,
+          "capacity": 9,
+          "nonfree": 1,
+          "bytes": 4096
+        },
+        "object": {
+          "object": 96,
+          "pool": 24,
+          "slot": 96,
+          "chunk": 4096,
+          "chunks": 1,
+          "capacity": 38,
+          "nonfree": 1,
+          "bytes": 4096
+        },
+        "pipe": {
+          "object": 4128,
+          "pool": 24,
+          "slot": 4128,
+          "chunk": 12288,
+          "chunks": 0,
+          "capacity": 0,
+          "nonfree": 0,
+          "bytes": 0
+        },
+        "mmap_region": {
+          "object": 512,
+          "pool": 24,
+          "slot": 512,
+          "chunk": 4096,
+          "chunks": 1,
+          "capacity": 7,
+          "nonfree": 1,
+          "bytes": 4096
+        }
+      }
+    },
+    "candidate": {
+      "boot": {
+        "process": {
+          "object": 2192,
+          "pool": 24,
+          "slot": 2192,
+          "chunk": 16384,
+          "chunks": 1,
+          "capacity": 7,
+          "nonfree": 1,
+          "bytes": 16384
+        },
+        "tcp": {
+          "object": 192,
+          "pool": 24,
+          "slot": 192,
+          "chunk": 4096,
+          "chunks": 0,
+          "capacity": 0,
+          "nonfree": 0,
+          "bytes": 0
+        },
+        "retx": {
+          "object": 1616,
+          "pool": 24,
+          "slot": 1616,
+          "chunk": 8192,
+          "chunks": 0,
+          "capacity": 0,
+          "nonfree": 0,
+          "bytes": 0
+        },
+        "frame": {
+          "object": 1528,
+          "pool": 24,
+          "slot": 1528,
+          "chunk": 8192,
+          "chunks": 0,
+          "capacity": 0,
+          "nonfree": 0,
+          "bytes": 0
+        },
+        "backing": {
+          "object": 40,
+          "pool": 24,
+          "slot": 40,
+          "chunk": 4096,
+          "chunks": 0,
+          "capacity": 0,
+          "nonfree": 0,
+          "bytes": 0
+        },
+        "image": {
+          "object": 96,
+          "pool": 24,
+          "slot": 96,
+          "chunk": 4096,
+          "chunks": 1,
+          "capacity": 38,
+          "nonfree": 1,
+          "bytes": 4096
+        },
+        "fd_context": {
+          "object": 56,
+          "pool": 24,
+          "slot": 56,
+          "chunk": 4096,
+          "chunks": 1,
+          "capacity": 63,
+          "nonfree": 1,
+          "bytes": 4096
+        },
+        "fd_block": {
+          "object": 400,
+          "pool": 24,
+          "slot": 400,
+          "chunk": 4096,
+          "chunks": 1,
+          "capacity": 9,
+          "nonfree": 0,
+          "bytes": 4096
+        },
+        "object": {
+          "object": 96,
+          "pool": 24,
+          "slot": 96,
+          "chunk": 4096,
+          "chunks": 1,
+          "capacity": 38,
+          "nonfree": 1,
+          "bytes": 4096
+        },
+        "pipe": {
+          "object": 4128,
+          "pool": 24,
+          "slot": 4128,
+          "chunk": 12288,
+          "chunks": 0,
+          "capacity": 0,
+          "nonfree": 0,
+          "bytes": 0
+        },
+        "mmap_region": {
+          "object": 512,
+          "pool": 24,
+          "slot": 512,
+          "chunk": 4096,
+          "chunks": 0,
+          "capacity": 0,
+          "nonfree": 0,
+          "bytes": 0
+        }
+      },
+      "bounded_end": {
+        "process": {
+          "object": 2192,
+          "pool": 24,
+          "slot": 2192,
+          "chunk": 16384,
+          "chunks": 4,
+          "capacity": 28,
+          "nonfree": 1,
+          "bytes": 65536
+        },
+        "tcp": {
+          "object": 192,
+          "pool": 24,
+          "slot": 192,
+          "chunk": 4096,
+          "chunks": 0,
+          "capacity": 0,
+          "nonfree": 0,
+          "bytes": 0
+        },
+        "retx": {
+          "object": 1616,
+          "pool": 24,
+          "slot": 1616,
+          "chunk": 8192,
+          "chunks": 1,
+          "capacity": 5,
+          "nonfree": 0,
+          "bytes": 8192
+        },
+        "frame": {
+          "object": 1528,
+          "pool": 24,
+          "slot": 1528,
+          "chunk": 8192,
+          "chunks": 0,
+          "capacity": 0,
+          "nonfree": 0,
+          "bytes": 0
+        },
+        "backing": {
+          "object": 40,
+          "pool": 24,
+          "slot": 40,
+          "chunk": 4096,
+          "chunks": 1,
+          "capacity": 84,
+          "nonfree": 1,
+          "bytes": 4096
+        },
+        "image": {
+          "object": 96,
+          "pool": 24,
+          "slot": 96,
+          "chunk": 4096,
+          "chunks": 1,
+          "capacity": 38,
+          "nonfree": 2,
+          "bytes": 4096
+        },
+        "fd_context": {
+          "object": 56,
+          "pool": 24,
+          "slot": 56,
+          "chunk": 4096,
+          "chunks": 1,
+          "capacity": 63,
+          "nonfree": 1,
+          "bytes": 4096
+        },
+        "fd_block": {
+          "object": 400,
+          "pool": 24,
+          "slot": 400,
+          "chunk": 4096,
+          "chunks": 1,
+          "capacity": 9,
+          "nonfree": 1,
+          "bytes": 4096
+        },
+        "object": {
+          "object": 96,
+          "pool": 24,
+          "slot": 96,
+          "chunk": 4096,
+          "chunks": 1,
+          "capacity": 38,
+          "nonfree": 1,
+          "bytes": 4096
+        },
+        "pipe": {
+          "object": 4128,
+          "pool": 24,
+          "slot": 4128,
+          "chunk": 12288,
+          "chunks": 0,
+          "capacity": 0,
+          "nonfree": 0,
+          "bytes": 0
+        },
+        "mmap_region": {
+          "object": 512,
+          "pool": 24,
+          "slot": 512,
+          "chunk": 4096,
+          "chunks": 1,
+          "capacity": 7,
+          "nonfree": 1,
+          "bytes": 4096
+        }
+      }
+    },
+    "equal": true
+  },
+  "verification": {
+    "runtime_and_product_source_head": "40619bdb44c3af19abab8cde3202c4194b5b3b2e",
+    "phase_exit": {
+      "allbuild": 0,
+      "linuxcheck": 0,
+      "modelcheck": 0,
+      "qemu": 0,
+      "rpi5": 0,
+      "final-chain": 0
+    },
+    "policy_head": "bb8ab2b8d03d4d3c219e62efbadd46f80c2f209c",
+    "policy": "Exact source table premises plus both final compiled caller tables; 61 guarded functions, 156 QEMU and 177 RPi5 reviewed caller pairs. No runtime repeat for scripts/docs-only closure."
+  },
+  "production_source_sha256": "cc5e314908a1dab1201fa02f03a572beaf980fec620a080e792855678f1fd6c5",
+  "candidate_archive_manifest": {
+    "path": "/tmp/takibi-1472-40619-final-evidence/manifest.json",
+    "sha256": "c5bbe97fb7e49902d80477872c03b830966d14ce61a9bf7eddde3cf3e779f981"
+  }
+}

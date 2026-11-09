@@ -108,19 +108,19 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
 
 ### Territory A: the trunk, in this order
 
-**Priority update, 2026-11-09.** ExecutionState now uses existing
-per_cpu/CpuHere authority; its runtime and four-core RPi5 cost review are
-complete. Continue RootHeld (#1472) and the remaining #638 review before
-the flip; #638 is not complete. The coordinator sequences shared scheduler
-edits with the sleeping-Mutex foundation (#1481). The four retained
-exception diagnostic CPU stores now use existing typed per-CPU/complete-stop
-access and a narrowly admitted publication mirror (#1486); parent #1159
-remains open for its other globals. The exception/net boundaries and the
-reverted-churn QEMU policy correction are published with full checks. Resume
-RootHeld next. Its allocation route is approved:
-investigate inexpensive reduction briefly, then refresh the measured budget
-if that does not resolve the ceiling. The Mutex lifetime/callback foundation
-and nonblocking boot probes are also approved; no extra bootstrap stack.
+**Priority update, 2026-11-09.** ExecutionState uses existing per_cpu/CpuHere
+authority; its runtime and four-core RPi5 cost review are complete. RootHeld
+activation-entry protection now retains actual current or same-generation
+owner/Running authority through direct and prepared commit paths, with must-use
+outcomes and measured space/runtime review. It does not add page-table write
+authority. Continue the remaining #638 review before the flip; #638 remains
+open. Coordinate shared scheduler edits with the approved sleeping-Mutex
+lifetime/callback foundation (#1481); no extra bootstrap stack. The four
+retained exception diagnostic stores use typed per-CPU/complete-stop access
+and the narrowly admitted publication mirror; parent #1159 remains open for
+other globals. The exception/net boundaries and reverted-churn timing-policy
+correction are complete. Production boot-selftest fixture classification
+awaits its separate maintainer decision; add no blanket exclusion.
 
 **Assigned queue (maintainer, 2026-10-23, pruned 2026-10-25).** Memory
 safety and multicore backbone only. Taken in order whenever the numbered
