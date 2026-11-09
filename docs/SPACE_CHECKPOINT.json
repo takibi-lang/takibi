@@ -1,13 +1,13 @@
 {
   "date": "2026-11-09",
-  "event": "incremental",
+  "event": "milestone",
   "decision": "measured",
-  "source_sha256": "d50b008b483fe355239a0d25ac11b94e8175cd8d5fc1852c3bcbd0c29ee586f9",
-  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto a761a122: this branch's review, rebound to the merged sources (upstream's record was 2026-11-09 milestone/measured). One WorkloadProfileCore record migration. Both production kernels measured against frozen BusyWait c87f9027; existing bounded-boot profile partition and stopped reporting boundary. No allocation/lifetime change.",
+  "source_sha256": "eddbac28456748b7a901ee3c9390c91ed74a7db6b73388e8e433aac3c67400a8",
+  "workload": "Workload evidence-record milestone: bounded common boot, stopped profiling interval, restart, peer filesystem/console and stack-release fixtures. Fixed global payload and both production linked kernels measured before/after BusyPair at9718310f and across the three-record batch against published a761a122. No allocation/retention workload change.",
   "evidence": [
     "docs/GLOBAL_PROTECTION.md",
     "kernel/MEMORY_MAP.md"
   ],
-  "assessment": "Both targets: record136->144 bytes, four-core array544->576. QEMU text +464 bytes, RPi5 +448 bytes; data/BSS reservations and usable_ram_start unchanged. Adopt typed word/enum cells, retaining own-CPU IRQ masks, run-locked selection/capture and world-stop interval protocols. No atomic multi-field snapshot or compound increment claim.",
-  "next_trigger": "The BusyPair record migration, any changed allocation/lifetime, or whole-globals milestone completion requiring measured workload review."
+  "assessment": "BusyPair448->592 bytes. Three-record batch fixed payload+176 bytes: BusyWait400 unchanged, four-core ProfileCore544->576, BusyPair448->592. Batch text QEMU+2112 bytes/RPi5+2216; last record alone+1488/+1576. Data unchanged, QEMU BSS unchanged; RPi5 BSS reports-4096 because its start advances one page within alignment slack before the fixed DMA arena, with end unchanged. usable_ram_start unchanged on both targets. Adopt typed atomic accesses while retaining actual compound protocols; no allocator-occupancy or timing/cache claim.",
+  "next_trigger": "Changed record capacity, allocation/retention behavior, or completion of a new kernel feature milestone."
 }
