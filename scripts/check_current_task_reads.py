@@ -34,6 +34,9 @@ FIXTURE = "boot fixture rewriting current with process dispatch closed, pinned b
 
 LISTED = {
     "kernel_process_current_read": ACCESSOR,
+    "execution_current_publish": WRITER,
+    "execution_current_set_handle": WRITER,
+    "execution_current_set_live": WRITER,
     "kernel_process_stopped_entry_generation": STOPPED,
     "kernel_process_stopped_current_slot": STOPPED,
     "kernel_process_crash_frame_usable": STOPPED,
@@ -53,10 +56,8 @@ LISTED = {
     "kernel_process_tick_leave_excluded": WRITER,
     "kernel_process_block_to_idle": WRITER,
     "kernel_process_block_reserved": WRITER,
-    "kernel_process_clone_begin": WRITER,
     "kernel_process_clone_rollback": WRITER,
     "kernel_process_exit_reserved": WRITER,
-    "kernel_process_child_exit": WRITER,
 }
 
 READ = re.compile(

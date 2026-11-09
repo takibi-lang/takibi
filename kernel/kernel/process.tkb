@@ -1927,7 +1927,7 @@ private fn kernel_process_protocol_owner(owner: usize) -> usize {
 
 // A record with no parent (PID 1, the boot thread, or an orphan the
 // teardown sweep detached) names nothing.
-private fn kernel_process_protocol_observe(unlocked: bool) !{unsafe} {
+private fn kernel_process_protocol_observe(guard: borrow ProcessRunGuard[&scheduled_process_run_lock], unlocked: bool) !{unsafe} {
     protocol_trace_pass_begin(unlocked);
     let mut slot: usize = 0;
     if (atomic_word_load(&scheduled_process_pool_ready) != 0) {
@@ -1975,16 +1975,8 @@ private fn kernel_process_protocol_observe(unlocked: bool) !{unsafe} {
     }
     if (slot != 0) { protocol_trace_note_lost(); }
     for core: usize in 0..<KERNEL_MAX_CORES {
-        let mut current: usize = PROTOCOL_TRACE_NONE;
-        if (execution_state[core].current_live) {
-            current = scheduled_process_pid_of_handle(
-                execution_state[core].current_handle);
-        }
-        let mut stands: usize = PROTOCOL_TRACE_NONE;
-        if (execution_state[core].stack_live) {
-            stands = scheduled_process_pid_of_handle(
-                execution_state[core].stack_handle);
-        }
+        let current: usize = execution_observed_current_pid(guard, core);
+        let stands: usize = execution_observed_stack_pid(guard, core);
         protocol_trace_observe_core(core, current, stands);
     }
     protocol_trace_pass_end(unlocked);
@@ -2001,7 +1993,7 @@ fn kernel_process_protocol_trace_open() -> ProtocolTraceOpenResult {
         return ProtocolTraceOpenResult::Invalid;
     }
     protocol_trace_prepare_open();
-    kernel_process_protocol_observe(false);
+    kernel_process_protocol_observe(guard, false);
     let result = protocol_trace_commit_open();
     // The opening hold already observed exactly once. Ordinary unlock would
     // diff a second time and count two observations for one critical section.
@@ -4333,20 +4325,20 @@ fn process_run_lock() -> ProcessRunGuard[&scheduled_process_run_lock]
         { mutex_acquire(&scheduled_process_run_lock) };
     // GitHub issue #606: what changed while nobody held the lock.
     if (protocol_trace_is_active()) {
-        kernel_process_protocol_observe(true);
+        kernel_process_protocol_observe(guard, true);
     }
     return guard;
 }
 
 // Release an opening hold whose snapshot was already observed once.
-private fn process_run_unlock_observed(guard: sink ProcessRunGuard[process_run]) {
+private fn process_run_unlock_observed(guard: sink ProcessRunGuard[&scheduled_process_run_lock]) {
     mutex_release(&scheduled_process_run_lock, guard.flags);
 }
 
-fn process_run_unlock(guard: sink ProcessRunGuard[process_run]) {
+fn process_run_unlock(guard: sink ProcessRunGuard[&scheduled_process_run_lock]) {
     // GitHub issue #606: this hold's step, before anyone else can take one.
     if (protocol_trace_is_active()) {
-        kernel_process_protocol_observe(false);
+        kernel_process_protocol_observe(guard, false);
     }
     mutex_release(&scheduled_process_run_lock, guard.flags);
 }
@@ -5246,6 +5238,93 @@ struct ExecutionState {
 }
 
 private let mut execution_state: [ExecutionState; KERNEL_MAX_CORES];
+
+// Cross-CPU trace observation is a PID-only publication, not CPU authority.
+// The same run hold changes the owning CPU's placement and its published PID.
+// Publication consistency rests on the closed writer set below, not on per_cpu
+// typing alone. Publication is maintained even while tracing is inactive:
+// a live handle publication performs a pooled PID lookup, and separate
+// handle/live updates may publish twice. Its cost belongs in the RPi5
+// measurement; it is not an inactive-trace fast path.
+// PID 0 is the live boot thread, so absence has its own bit.
+// BSS initializes every core's live bits false, including inactive cores.
+struct ExecutionObservation {
+    private current_pid: [usize; KERNEL_MAX_CORES] guarded_by(scheduled_process_run_lock);
+    private stack_pid: [usize; KERNEL_MAX_CORES] guarded_by(scheduled_process_run_lock);
+    private current_live: [bool; KERNEL_MAX_CORES] guarded_by(scheduled_process_run_lock);
+    private stack_live: [bool; KERNEL_MAX_CORES] guarded_by(scheduled_process_run_lock);
+}
+private let mut execution_observation: ExecutionObservation;
+
+private fn execution_observed_current_pid(
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+        core: {0..<KERNEL_MAX_CORES as usize}) -> usize {
+    if (guarded_ref(guard, execution_observation.current_live)[core]) {
+        return guarded_ref(guard, execution_observation.current_pid)[core];
+    }
+    return PROTOCOL_TRACE_NONE;
+}
+
+private fn execution_observed_stack_pid(
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+        core: {0..<KERNEL_MAX_CORES as usize}) -> usize {
+    if (guarded_ref(guard, execution_observation.stack_live)[core]) {
+        return guarded_ref(guard, execution_observation.stack_pid)[core];
+    }
+    return PROTOCOL_TRACE_NONE;
+}
+
+private fn execution_current_publish(guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+        cpu: CpuHere) {
+    let index: {0..<KERNEL_MAX_CORES as usize} = cpu_here_index(cpu);
+    let mut pid: usize = 0;
+    if (execution_state[index].current_live) {
+        pid = scheduled_process_pid_of_handle(execution_state[index].current_handle);
+    }
+    guarded_ref(guard, execution_observation.current_pid)[index] = pid;
+    guarded_ref(guard, execution_observation.current_live)[index] =
+        execution_state[index].current_live;
+}
+
+private fn execution_stack_publish(guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+        cpu: CpuHere) {
+    let index: {0..<KERNEL_MAX_CORES as usize} = cpu_here_index(cpu);
+    let mut pid: usize = 0;
+    if (execution_state[index].stack_live) {
+        pid = scheduled_process_pid_of_handle(execution_state[index].stack_handle);
+    }
+    guarded_ref(guard, execution_observation.stack_pid)[index] = pid;
+    guarded_ref(guard, execution_observation.stack_live)[index] =
+        execution_state[index].stack_live;
+}
+
+private fn execution_current_set_handle(guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+        cpu: CpuHere, handle: ProcessHandle) {
+    let index: {0..<KERNEL_MAX_CORES as usize} = cpu_here_index(cpu);
+    execution_state[index].current_handle = handle;
+    execution_current_publish(guard, cpu);
+}
+
+private fn execution_current_set_live(guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+        cpu: CpuHere, live: bool) {
+    let index: {0..<KERNEL_MAX_CORES as usize} = cpu_here_index(cpu);
+    execution_state[index].current_live = live;
+    execution_current_publish(guard, cpu);
+}
+
+private fn execution_stack_set_handle(guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+        cpu: CpuHere, handle: ProcessHandle) {
+    let index: {0..<KERNEL_MAX_CORES as usize} = cpu_here_index(cpu);
+    execution_state[index].stack_handle = handle;
+    execution_stack_publish(guard, cpu);
+}
+
+private fn execution_stack_set_live(guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+        cpu: CpuHere, live: bool) {
+    let index: {0..<KERNEL_MAX_CORES as usize} = cpu_here_index(cpu);
+    execution_state[index].stack_live = live;
+    execution_stack_publish(guard, cpu);
+}
 // cpu_id's refined result is the bound; no fallback can alias core 0's state.
 private fn execution_cpu_index() -> {0..<KERNEL_MAX_CORES as usize} {
     return cpu_id();
@@ -5388,7 +5467,7 @@ fn kernel_process_stack_interrupt_depart() {
         let parked_record: &mut ProcessRecord = scheduled_process_record_live_locked(guard, physical);
         parked_record.parked_activity = kernel_activity_here();
         parked_record.stack_owner_cpu = PROCESS_STACK_UNOWNED;
-        execution_state[execution_cpu_index()].stack_live = false;
+        preempt_off (cpu) { execution_stack_set_live(guard, cpu, false); }
     }
     process_run_unlock(guard);
 }
@@ -5517,7 +5596,7 @@ private fn kernel_process_stack_switch_take(frame: borrow FrameRef[process, leve
         let parked_record: &mut ProcessRecord = scheduled_process_record_live_locked(guard, outgoing);
         parked_record.parked_activity = kernel_activity_here();
         parked_record.stack_owner_cpu = PROCESS_STACK_UNOWNED;
-        execution_state[execution_cpu_index()].stack_live = false;
+        preempt_off (cpu) { execution_stack_set_live(guard, cpu, false); }
         if (scheduled_process_state_of_locked(guard, outgoing) ==
                 ProcessSlotState::Exited) {
             workload_busy_peer_exit_stack_released(
@@ -5544,8 +5623,8 @@ private fn kernel_process_stack_switch_take(frame: borrow FrameRef[process, leve
     let incoming_record: &mut ProcessRecord = scheduled_process_record_live_locked(guard, incoming);
     incoming_record.stack_owner_cpu = core;
     kernel_activity_set(incoming_record.parked_activity);
-    execution_state[execution_cpu_index()].stack_handle = incoming;
-    execution_state[execution_cpu_index()].stack_live = true;
+    preempt_off (cpu) { execution_stack_set_handle(guard, cpu, incoming); }
+    preempt_off (cpu) { execution_stack_set_live(guard, cpu, true); }
     let reap_live: bool = execution_state[execution_cpu_index()].deferred_reap_live;
     let mut reap_child: ProcessHandle = execution_state[execution_cpu_index()].deferred_reap_handle;
     let mut reap_parent: ProcessHandle = execution_state[execution_cpu_index()].deferred_reap_parent;
@@ -5600,7 +5679,7 @@ fn kernel_process_stack_idle_complete() {
     let parked_record: &mut ProcessRecord = scheduled_process_record_live_locked(guard, outgoing);
     parked_record.parked_activity = kernel_activity_here();
     parked_record.stack_owner_cpu = PROCESS_STACK_UNOWNED;
-    execution_state[execution_cpu_index()].stack_live = false;
+    preempt_off (cpu) { execution_stack_set_live(guard, cpu, false); }
     workload_busy_peer_exit_stack_released(
         scheduled_process_pid_of_handle(outgoing), core);
     let orphan_deferred: bool = kernel_process_orphan_defer(guard, outgoing);
@@ -5645,7 +5724,7 @@ fn kernel_process_stack_idle_yield() {
     let parked_record: &mut ProcessRecord = scheduled_process_record_live_locked(guard, outgoing);
     parked_record.parked_activity = kernel_activity_here();
     parked_record.stack_owner_cpu = PROCESS_STACK_UNOWNED;
-    execution_state[execution_cpu_index()].stack_live = false;
+    preempt_off (cpu) { execution_stack_set_live(guard, cpu, false); }
     if (kernel_process_yield_handle(guard, outgoing) == false) {
         process_run_unlock(guard);
         kernel_invariant_stop();
@@ -5682,7 +5761,7 @@ fn kernel_process_stack_idle_blocked() {
     let parked_record: &mut ProcessRecord = scheduled_process_record_live_locked(guard, outgoing);
     parked_record.parked_activity = kernel_activity_here();
     parked_record.stack_owner_cpu = PROCESS_STACK_UNOWNED;
-    execution_state[execution_cpu_index()].stack_live = false;
+    preempt_off (cpu) { execution_stack_set_live(guard, cpu, false); }
     process_run_unlock(guard);
     // A wake that landed while this core stood on the stack left the
     // process Ready and unselectable; it is selectable now.
@@ -6447,7 +6526,7 @@ fn kernel_process_trace_report() {
 
 must_use variant ProcessUartProgressResult { Invalid; Recorded; }
 
-fn kernel_process_start_handle(guard: borrow ProcessRunGuard[lock],
+fn kernel_process_start_handle(guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
                                handle: ProcessHandle) -> bool {
     match scheduled_process_ready_take(guard, handle) {
         ScheduledProcessReadyTakeResult::Missing => { return false; }
@@ -6461,8 +6540,8 @@ fn kernel_process_start_handle(guard: borrow ProcessRunGuard[lock],
                 return false;
             }
             scheduled_process_record_live_locked(guard, handle).stack_owner_cpu = core;
-            execution_state[execution_cpu_index()].stack_handle = handle;
-            execution_state[execution_cpu_index()].stack_live = true;
+            preempt_off (cpu) { execution_stack_set_handle(guard, cpu, handle); }
+            preempt_off (cpu) { execution_stack_set_live(guard, cpu, true); }
             scheduled_process_release(owner, running);
             return true;
         }
@@ -6501,10 +6580,18 @@ fn kernel_process_execution_reset() !{changes_witness_ProcessCurrent} {
     // to select a half-cleared stale context.
     execution_state[execution_cpu_index()].scheduler_enabled = false;
     execution_state[execution_cpu_index()].reschedule_pending = false;
-    execution_state[execution_cpu_index()].stack_live = false;
+    {
+        let placement_guard = process_run_lock();
+        preempt_off (cpu) { execution_stack_set_live(placement_guard, cpu, false); }
+        process_run_unlock(placement_guard);
+    }
     execution_state[execution_cpu_index()].deferred_reap_live = false;
     scheduled_process_table_clear();
-    execution_state[execution_cpu_index()].current_live = false;
+    {
+        let placement_guard = process_run_lock();
+        preempt_off (cpu) { execution_current_set_live(placement_guard, cpu, false); }
+        process_run_unlock(placement_guard);
+    }
     process_test_evidence_reset();
     atomic_word_store(&kernel_process_trace_enabled,
                       atomic_word_load(&kernel_process_trace_boot_enabled));
@@ -6518,10 +6605,9 @@ fn kernel_process_execution_reset() !{changes_witness_ProcessCurrent} {
         ScheduledPooledProcessAllocResult::Allocated(pooled) => {
             let mut root: ProcessHandle =
                 scheduled_pooled_process_handle(pooled);
-            execution_state[execution_cpu_index()].current_handle = root;
             let start_guard = process_run_lock();
-            execution_state[execution_cpu_index()].current_live =
-                kernel_process_start_handle(start_guard, root);
+            preempt_off (cpu) { execution_current_set_handle(start_guard, cpu, root); }
+            preempt_off (cpu) { execution_current_set_live(start_guard, cpu, kernel_process_start_handle(start_guard, root)); }
             let root_saved_sp: usize =
                 scheduled_process_record_live_locked(start_guard, root).saved_sp;
             process_run_unlock(start_guard);
@@ -6574,8 +6660,8 @@ fn kernel_process_boot_handoff(phase: sink TestDriverPhase[driver])
     let live: bool = execution_state[execution_cpu_index()].current_live;
     let mut boot: ProcessHandle =
         execution_state[execution_cpu_index()].current_handle;
-    execution_state[execution_cpu_index()].current_live = false;
-    execution_state[execution_cpu_index()].stack_live = false;
+    preempt_off (cpu) { execution_current_set_live(guard, cpu, false); }
+    preempt_off (cpu) { execution_stack_set_live(guard, cpu, false); }
     process_run_unlock(guard);
     // The boot thread goes back as a table reset gives every record back:
     // its fd context first, then the record (it has no root, image record
@@ -6858,7 +6944,7 @@ fn kernel_process_core0_leave_excluded(frame: borrow FrameRef[process, level])
         return false;
     }
     scheduled_process_record_live_locked(guard, execution_state[execution_cpu_index()].current_handle).saved_sp = frame_ref_address(frame);
-    execution_state[execution_cpu_index()].current_live = false;
+    preempt_off (cpu) { execution_current_set_live(guard, cpu, false); }
     execution_state[execution_cpu_index()].scheduler_enabled = false;
     execution_state[execution_cpu_index()].reschedule_pending = false;
     atomic_word_store(&kernel_process_core0_idle_seen, 1);
@@ -6895,7 +6981,7 @@ fn kernel_process_migrate_current(frame: borrow FrameRef[process, level]) -> boo
         return false;
     }
     scheduled_process_record_live_locked(guard, execution_state[execution_cpu_index()].current_handle).saved_sp = frame_ref_address(frame);
-    execution_state[execution_cpu_index()].current_live = false;
+    preempt_off (cpu) { execution_current_set_live(guard, cpu, false); }
     execution_state[execution_cpu_index()].scheduler_enabled = false;
     execution_state[execution_cpu_index()].reschedule_pending = false;
     process_run_unlock(guard);
@@ -7403,8 +7489,8 @@ private fn kernel_process_secondary_start_reserved(
                 preempt_span_end(span);
                 return ProcessSecondaryStart::Idle;
             }
-            execution_state[execution_cpu_index()].current_handle = to;
-            execution_state[execution_cpu_index()].current_live = true;
+            preempt_off (cpu) { execution_current_set_handle(guard, cpu, to); }
+            preempt_off (cpu) { execution_current_set_live(guard, cpu, true); }
             execution_state[execution_cpu_index()].scheduler_enabled = true;
             execution_state[execution_cpu_index()].reschedule_pending = false;
             timer_tick_rearm();
@@ -7687,7 +7773,7 @@ private fn kernel_process_schedule_reserved(
                 preempt_span_end(span);
                 return FrameSwitch::Stay;
             }
-            execution_state[execution_cpu_index()].current_handle = to;
+            preempt_off (cpu) { execution_current_set_handle(guard, cpu, to); }
             profile_timeline_schedule(
                 scheduled_process_pid_of_handle(from),
                 scheduled_process_pid_of_handle(to));
@@ -8711,7 +8797,7 @@ private fn kernel_process_tick_leave_excluded(
     scheduled_process_record_live_locked(guard, outgoing).saved_sp = frame_ref_address(frame);
     // Leave its root before it can run elsewhere, as every idle entry does.
     address_space_activate_root(address_space_boot_root());
-    execution_state[execution_cpu_index()].current_live = false;
+    preempt_off (cpu) { execution_current_set_live(guard, cpu, false); }
     execution_state[execution_cpu_index()].scheduler_enabled = false;
     execution_state[execution_cpu_index()].reschedule_pending = false;
     if (kernel_process_yield_handle(guard, outgoing) == false) {
@@ -9078,7 +9164,7 @@ private fn kernel_process_block_to_idle(
         }
     }
     kernel_process_trace_handle(ProcessTraceBlock, from, from, trace_aux);
-    execution_state[execution_cpu_index()].current_live = false;
+    preempt_off (cpu) { execution_current_set_live(guard, cpu, false); }
     execution_state[execution_cpu_index()].scheduler_enabled = false;
     execution_state[execution_cpu_index()].reschedule_pending = false;
     return true;
@@ -9247,7 +9333,7 @@ private fn kernel_process_block_reserved(
                 preempt_span_end(span);
                 return BlockSwitch::Retry;
             }
-            execution_state[execution_cpu_index()].current_handle = to;
+            preempt_off (cpu) { execution_current_set_handle(guard, cpu, to); }
             // GitHub issue #448/#469: every blocking handoff is accounted,
             // not only the timer scheduler's switches.
             workload_busy_note_selected_locked(
@@ -11646,7 +11732,11 @@ fn kernel_process_fanout_probe() -> bool !{changes_witness_ProcessCurrent, unsaf
                 process_current_end(child_authority);
             }
         }
-        execution_state[execution_cpu_index()].current_handle = parent_handle;
+        {
+            let placement_guard = process_run_lock();
+            preempt_off (cpu) { execution_current_set_handle(placement_guard, cpu, parent_handle); }
+            process_run_unlock(placement_guard);
+        }
         if (kernel_process_current_pid() != parent_pid) { return false; }
     }
     if (pids[0] == pids[1] || pids[1] == pids[2] || pids[0] == pids[2]) {
@@ -11861,7 +11951,7 @@ private fn kernel_process_scheduler_probe_stack_depart() -> bool {
     if (valid) {
         scheduled_process_record_live_locked(guard, physical).stack_owner_cpu =
             PROCESS_STACK_UNOWNED;
-        execution_state[execution_cpu_index()].stack_live = false;
+        preempt_off (cpu) { execution_stack_set_live(guard, cpu, false); }
     }
     process_run_unlock(guard);
     return valid;
@@ -11902,11 +11992,40 @@ private fn kernel_process_scheduler_probe_stack_arrive() -> bool {
             PROCESS_STACK_UNOWNED;
     if (valid) {
         scheduled_process_record_live_locked(guard, incoming).stack_owner_cpu = core;
-        execution_state[execution_cpu_index()].stack_handle = incoming;
-        execution_state[execution_cpu_index()].stack_live = true;
+        preempt_off (cpu) { execution_stack_set_handle(guard, cpu, incoming); }
+        preempt_off (cpu) { execution_stack_set_live(guard, cpu, true); }
     }
     process_run_unlock(guard);
     return valid;
+}
+
+// The boot thread is PID 0, distinct from an absent current. Exercise the
+// same publication and reader as the cross-CPU protocol observer, under the
+// run guard, before the fixture creates user tasks or opens peer dispatch.
+private fn kernel_process_execution_observation_probe(
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock],
+        cpu: CpuHere) -> bool {
+    let core: {0..<KERNEL_MAX_CORES as usize} = cpu_here_index(cpu);
+    if (execution_observed_current_pid(guard, core) != 0 ||
+        execution_observed_stack_pid(guard, core) != 0) { return false; }
+    // Peers have no dispatched process yet. BSS zero must mean absent,
+    // rather than a second copy of the live boot thread's PID 0.
+    for peer: usize in 0..<KERNEL_MAX_CORES {
+        if (peer != core &&
+            (execution_observed_current_pid(guard, peer) != PROTOCOL_TRACE_NONE ||
+             execution_observed_stack_pid(guard, peer) != PROTOCOL_TRACE_NONE)) {
+            return false;
+        }
+    }
+    execution_current_set_live(guard, cpu, false);
+    execution_stack_set_live(guard, cpu, false);
+    let absent: bool =
+        execution_observed_current_pid(guard, core) == PROTOCOL_TRACE_NONE &&
+        execution_observed_stack_pid(guard, core) == PROTOCOL_TRACE_NONE;
+    execution_current_set_live(guard, cpu, true);
+    execution_stack_set_live(guard, cpu, true);
+    return absent && execution_observed_current_pid(guard, core) == 0 &&
+        execution_observed_stack_pid(guard, core) == 0;
 }
 
 fn kernel_process_scheduler_probe() -> bool !{changes_witness_ProcessCurrent} {
@@ -11914,11 +12033,22 @@ fn kernel_process_scheduler_probe() -> bool !{changes_witness_ProcessCurrent} {
     kernel_process_trace_enable();
     if (atomic_word_load(&scheduled_process_peer_dispatch_enabled) != 0) { return false; }
     let root_pid: usize = kernel_process_current_pid();
+    let observation_guard = process_run_lock();
+    let mut observation_ok: bool = false;
+    preempt_off (cpu) {
+        observation_ok = kernel_process_execution_observation_probe(observation_guard, cpu);
+    }
+    process_run_unlock(observation_guard);
+    if (root_pid != 0 || observation_ok == false) { return false; }
     let mut root_handle: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
     // #1307: with no process current here, no witness is minted.
     let live_before: bool = execution_state[execution_cpu_index()].current_live;
     if (live_before && kernel_activity_handoff_probe(root_handle) == false) { return false; }
-    execution_state[execution_cpu_index()].current_live = false;
+    {
+        let placement_guard = process_run_lock();
+        preempt_off (cpu) { execution_current_set_live(placement_guard, cpu, false); }
+        process_run_unlock(placement_guard);
+    }
     let idle_refused: bool = match process_running_here() {
         ProcessRunningHere::Idle => { true }
         ProcessRunningHere::Running(minted) => {
@@ -11926,7 +12056,11 @@ fn kernel_process_scheduler_probe() -> bool !{changes_witness_ProcessCurrent} {
             false
         }
     };
-    execution_state[execution_cpu_index()].current_live = live_before;
+    {
+        let placement_guard = process_run_lock();
+        preempt_off (cpu) { execution_current_set_live(placement_guard, cpu, live_before); }
+        process_run_unlock(placement_guard);
+    }
     if (idle_refused == false) { return false; }
     // The boot thread has no EL0 frame while the boot probes run (#831).
     // Prove no peer selector can take it before exercising normal tasks: its
@@ -12074,7 +12208,11 @@ fn kernel_process_scheduler_probe() -> bool !{changes_witness_ProcessCurrent} {
     scheduled_process_table_clear();
     // scheduled_process_table_clear above destroyed every pooled record,
     // the boot thread's included, so there is nothing left to clear here.
-    execution_state[execution_cpu_index()].current_live = false;
+    {
+        let placement_guard = process_run_lock();
+        preempt_off (cpu) { execution_current_set_live(placement_guard, cpu, false); }
+        process_run_unlock(placement_guard);
+    }
     kernel_process_trace_disable();
     return ok && continuation_ok;
 }
@@ -12133,7 +12271,7 @@ private fn kernel_process_exit_continuation_probe(parent: ProcessHandle) -> bool
             scheduled_process_release(owner, ready);
         }
     }
-    execution_state[execution_cpu_index()].current_handle = child;
+    preempt_off (cpu) { execution_current_set_handle(guard, cpu, child); }
     let resumed: usize = match scheduled_process_ready_take(guard, parent) {
         ScheduledProcessReadyTakeResult::Missing => {
             process_run_unlock(guard);
@@ -12367,7 +12505,7 @@ fn kernel_process_clone_begin(current_authority: ProcessCurrent[process, Process
             // `kernel_process_current_pid() != 1`, which is always true here
             // regardless of who forked).
             process_current_end(current_authority);
-            execution_state[execution_cpu_index()].current_handle = child;
+            preempt_off (cpu) { execution_current_set_handle(publish_guard, cpu, child); }
             // GitHub issue #611: clones run on any CPU now, so the count
             // moves under the lock that orders them.
             process_test_evidence_record_clone();
@@ -12456,7 +12594,7 @@ fn kernel_process_clone_rollback(current_authority: ProcessCurrent[process, Proc
             // We still run on the parent's syscall stack. Restore logical
             // current before releasing any of the failed child's resources.
             process_current_end(current_authority);
-            execution_state[execution_cpu_index()].current_handle = parent;
+            preempt_off (cpu) { execution_current_set_handle(guard, cpu, parent); }
             let exited = scheduled_process_cancel_clone(owner, constructing);
             scheduled_process_release(owner, exited);
             // The reap's two steps, as every other reaper takes them: the
@@ -12931,7 +13069,7 @@ private fn kernel_process_exit_reserved(
                 process_run_unlock(guard);
                 return ExitSwitch::Idle(span);
             }
-            execution_state[execution_cpu_index()].current_handle = successor;
+            preempt_off (cpu) { execution_current_set_handle(guard, cpu, successor); }
             // Every incoming wait4 continuation now runs with its parent's
             // root active. Consume the Ready marker even when an unrelated
             // child's exit selected this successor rather than waking it.
@@ -13241,7 +13379,7 @@ fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, Pro
         execution_state[execution_cpu_index()].deferred_reap_parent = parent;
         execution_state[execution_cpu_index()].deferred_reap_live = true;
     }
-    execution_state[execution_cpu_index()].current_live = false;
+    preempt_off (cpu) { execution_current_set_live(exit_guard, cpu, false); }
     execution_state[execution_cpu_index()].scheduler_enabled = false;
     execution_state[execution_cpu_index()].reschedule_pending = false;
     process_run_unlock(exit_guard);
