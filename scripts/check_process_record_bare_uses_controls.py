@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Controls for ProcessRecord mint scope and destructive annotation retention."""
 
-from control_patch import replace_once
+from control_patch import replace_once, replace_in_function
 from check_process_record_bare_uses import PATH, problems
 from pass_line import report_pass
 
@@ -24,8 +24,10 @@ def main() -> int:
             "        -> &mut ProcessRecord @ process !{unsafe}"),
         "public owned transfer": replace_once(source, "private inline fn scheduled_process_transfer_owned_loan(", "inline fn scheduled_process_transfer_owned_loan("),
         "slot removal marker": replace_once(source, "unsafe, record_mutates_ProcessRunGuard", "unsafe"),
-        "reap removal marker": replace_once(source, "record_mutates_ScheduledProcessOwner", ""),
-        "commented marker": replace_once(source, "record_mutates_ScheduledProcessOwner", "// record_mutates_ScheduledProcessOwner\n"),
+        "reap removal marker": replace_in_function(source, "fn scheduled_process_reap_remove(", "record_mutates_ScheduledProcessOwner", ""),
+        "commented marker": replace_in_function(source, "fn scheduled_process_reap_remove(", "record_mutates_ScheduledProcessOwner", "// record_mutates_ScheduledProcessOwner\n"),
+        "borrowed teardown marker": replace_in_function(source, "fn scheduled_process_reap_teardown(", "record_mutates_ScheduledProcessOwner", ""),
+        "commented teardown marker": replace_in_function(source, "fn scheduled_process_reap_teardown(", "record_mutates_ScheduledProcessOwner", "// record_mutates_ScheduledProcessOwner\n"),
         "public locked wrapper mint": replace_once(source, "private inline fn scheduled_process_locked_view_new(", "inline fn scheduled_process_locked_view_new("),
         "additional raw caller": source +
             "\nfn unreviewed() { scheduled_process_record_at(0); }\n",

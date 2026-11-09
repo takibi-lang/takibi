@@ -17,6 +17,7 @@ from source_scan import code_skeleton, per_file
 
 CANONICAL = 'kernel/mm/address_space.tkb'
 IMAGE = 'kernel/mm/process_image.tkb'
+PROCESS = 'kernel/kernel/process.tkb'
 MINTS = {'root_held_boot': 'returnviewRootHeld[0];',
          'root_held_current': 'returnviewRootHeld[source];',
          'root_held_owned': 'returnviewRootHeld[source];'}
@@ -100,6 +101,9 @@ def problems_in(path, source):
     found = []
     if path == IMAGE:
         found.extend(image_problems(source))
+    if path == PROCESS and not re.search(
+            r'private\s+fn\s+scheduled_process_running_state\s*\(', code):
+        found.append('Running reservation factory must remain private and compiled-caller confined')
     if path != CANONICAL:
         if re.search(r'\bRootHeld\b', code):
             found.append(f'{path}: RootHeld stays inside its entry module')
@@ -159,7 +163,7 @@ def main():
         return 1
     report_pass('root-held-entries',
                 'three erased mints/eight exact adapters retain authority; image maps and pages retain explicit target roots; compiled rows confine entries',
-                constructors=3)
+                constructors=sum(name in MINTS for name, _, _ in functions(sources[CANONICAL])))
     return 0
 
 

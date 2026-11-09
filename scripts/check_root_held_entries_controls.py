@@ -2,7 +2,7 @@
 """Planted constructor bypasses for the RootHeld entry snapshot boundary."""
 
 from pathlib import Path
-from check_root_held_entries import CANONICAL, IMAGE, problems
+from check_root_held_entries import CANONICAL, IMAGE, PROCESS, problems
 from control_patch import replace_once, replace_in_function
 from pass_line import report_pass
 
@@ -11,6 +11,9 @@ def main():
     sources = {str(path): path.read_text() for path in Path('kernel').rglob('*.tkb')
                if 'build' not in path.parts}
     assert not problems(sources)
+    assert problems({**sources, PROCESS: replace_once(
+        sources[PROCESS], 'private fn scheduled_process_running_state(',
+        'fn scheduled_process_running_state(')})
     original = sources[CANONICAL]
     mutations = [
         replace_once(original, 'private affine view RootHeld', 'affine view RootHeld'),
@@ -57,7 +60,7 @@ def main():
         assert problems({**sources, IMAGE: changed})
     report_pass('root-held-entries controls',
                 'production and prose pass; constructor/storage/escape and extra-call/alias/rebinding bypasses fail',
-                controls=len(mutations) + len(image_mutations) + 1)
+                controls=len(mutations) + len(image_mutations) + 2)
     return 0
 
 

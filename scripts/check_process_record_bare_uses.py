@@ -35,6 +35,7 @@ CONTRACTS = {
     "scheduled_process_transfer_current_loan": "loan_transfer",
     "scheduled_process_slot_remove": "record_mutates_ProcessRunGuard",
     "scheduled_process_reap_remove": "record_mutates_ScheduledProcessOwner",
+    "scheduled_process_reap_teardown": "record_mutates_ScheduledProcessOwner",
 }
 PRIVATE = (
     "scheduled_process_owner_new", "process_running_new",
@@ -99,7 +100,7 @@ def main() -> int:
         return 1
     report_pass("process-record-bare-uses",
                 "no bare lookup, eight ownership mint bodies, "
-                "private constructors, owned loan transfer and both destructive contracts",
+                "private constructors, owned loan transfer and destructive teardown/removal contracts",
                 lines=len(source.splitlines()), owner_mints=sum(OWNER_MINTS.values()))
     return 0
 

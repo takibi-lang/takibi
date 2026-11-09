@@ -898,3 +898,22 @@ masked and no peer CPU; it is absent from both production entry graphs.
 Its per-file IO budget records those exact stores, without changing a
 production raw budget or treating the file as exempt. This is CPU state
 contract evidence, not physical IRQ delivery or cache-coherence evidence.
+
+## Root activation entry association
+
+Activation borrows a Running current witness or a retained owner and its
+same-generation Running reservation; the permanent boot entry selects only
+root zero. The private erased RootHeld view stays inside the entry module.
+A prepared token alone does not retain a borrow: commit requires the actual
+current or retained-owner authority again and checks the saved backing identity
+and ASID generation. Image mapping retains its explicit target independently.
+
+`scripts/check_root_held_entries.py` closes the three constructor and eight
+small adapter source shapes, explicit image-target propagation and private
+Running reservation factory. Compiled rows in
+`scripts/buildcheck_allowed_callers.py` confine those mints and the hardware
+installation leaves, including the checked Running-state factory callers.
+These are bounded source/callgraph policies; physical owner/root association,
+typestate transition implementations and the permanent boot root remain trusted.
+They do not prove arbitrary control flow, general returned-view lifetime, or
+page-table write authority.

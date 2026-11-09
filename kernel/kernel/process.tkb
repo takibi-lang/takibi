@@ -3474,7 +3474,7 @@ private fn scheduled_process_reapable_state(
     return state;
 }
 
-fn scheduled_process_running_state(
+private fn scheduled_process_running_state(
         owner: borrow ScheduledProcessOwner[process])
         -> ScheduledProcessState[process, ProcessState::Running] {
     let mut state: ScheduledProcessState[process, ProcessState::Running] =

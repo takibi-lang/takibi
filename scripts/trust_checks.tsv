@@ -24,3 +24,4 @@ check_execution_state_publication.py	closed placement setters and guarded PID/li
 check_virtio_queue_mints.py	block queue container and integer addresses confined to guarded setup MMIO sinks	typed DMA-address publication could replace this closed source policy; no general integer noninterference is claimed
 check_exception_cpu_snapshots.py	exact exception publisher/reader adapters, terminal flag and nested-array alias closure	#1159 stronger scoped exception authority and compiler writer/reader association
 buildcheck_global_protection.py	single private exception publication admission requires source closure and compiled callers on both platforms	#1159 compiler protection provenance for coherent published CPU records
+check_root_held_entries.py	RootHeld constructor/adapter source association and explicit image-target propagation	#1472 indexed root-owner entry APIs replace this bounded source policy; no general lifetime proof
