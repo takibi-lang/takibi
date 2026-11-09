@@ -1450,9 +1450,8 @@ carrying bits no accepted signal number stands for is shown rather than
 dropped: `masked=sigterm,sigchld+0x0000000020000a07` is BusyBox init's own
 mask. Each line ends with `owner=`, the CPU that holds the process's kernel
 stack (`none` when no CPU does), `mask=`, its affinity mask (0 is every
-online CPU), and the retained `core0=` compatibility field. No current
-syscall or affinity handoff sets that field to 1 (#1330); mask and stack
-ownership still determine whether an idle CPU may start a Ready process. After those comes `cmd="..."`: the first 24 bytes of the command
+online CPU). Affinity and stack ownership determine whether an idle CPU
+may start a Ready process; there is no separate forced-core syscall state. After those comes `cmd="..."`: the first 24 bytes of the command
 line the process record caches for procfs, argv joined by spaces, a byte the
 quoting could misread printed as `?`, and a `+` after the closing quote when
 the line goes on. The kernel log names each exit of a direct child of PID 1

@@ -6850,7 +6850,6 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     // GitHub issue #580: sample the real BusyBox sleep applet at syscall
     // entry, before affinity exclusion can yield its current CPU.
     workload_ordinary_placement_note_syscall(number);
-    let mut caller_slot: ProcessSlot = kernel_syscall_process_slot();
     let mut ext2_reader: SyscallExt2Reader = { false };
     let (action_code, action_value) = syscall_action_encode(
         kernel_syscall_dispatch_action(esr, number, x0, x1, x2, x3, x4,
@@ -6862,11 +6861,6 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     // exception (#597) and never returns here: its prepare reads the image,
     // and kernel_syscall_child_exec_return releases the registration then.
     if (syscall_ext2_reader_take(&ext2_reader)) { ext2_read_leave(); }
-    // Compatibility clear until the old placement field is retired. No
-    // syscall admission or affinity handoff now sets the mark (#1330).
-    if (action_code != 5 && action_code != 6 && action_code != 9) {
-        kernel_process_clear_core0_for_call(caller_slot);
-    }
     if (action_code == 6) {
         workload_profile_syscall_wait(number);
     } else {
@@ -6931,11 +6925,9 @@ fn kernel_el0_fault_dispatch(esr: usize, fault_address: usize)
         process_current_end(current_authority);
         return (0, 0);
     }
-    let mut caller_slot: ProcessSlot = kernel_syscall_process_slot();
     let (action_code, action_value) = syscall_action_encode(
         kernel_syscall_exit_current_process(current_authority,
                                             process_end_signaled(signal)));
-    kernel_process_clear_core0_for_call(caller_slot);
     return (action_code, action_value);
 }
 
@@ -6948,7 +6940,6 @@ fn kernel_el0_fault_dispatch(esr: usize, fault_address: usize)
 private fn kernel_syscall_dispatch_child_exec(number: usize,
         frame: FrameRef[process, ExceptionLevel::El0], args_page: sink PageOwner[page],
         ext2_reader: &mut SyscallExt2Reader) !{unsafe} {
-    kernel_process_clear_core0_for_call(kernel_syscall_process_slot());
     workload_profile_syscall_complete(number);
     kernel_syscall_child_exec_return(frame, args_page, ext2_reader);
 }

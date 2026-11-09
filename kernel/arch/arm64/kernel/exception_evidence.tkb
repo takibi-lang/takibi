@@ -2217,7 +2217,7 @@ private fn ddb_render_process(
     ddb_puts(" pending="); ddb_put_signal_set(record.pending_signals);
     ddb_puts(" masked="); ddb_put_signal_set(record.signal_mask);
     // GitHub issue #593: who holds its stack and where it may run -- the
-    // three facts that told a Ready process nobody started from one no CPU
+    // facts distinguishing a Ready process nobody started from one no CPU
     // was allowed to start.
     ddb_puts(" owner=");
     if (record.stack_owner_cpu >= KERNEL_MAX_CORES) {
@@ -2226,7 +2226,6 @@ private fn ddb_render_process(
         ddb_put_udec(record.stack_owner_cpu);
     }
     ddb_puts(" mask="); ddb_put_hex(record.affinity_mask);
-    if (record.core0_for_call) { ddb_puts(" core0=1"); } else { ddb_puts(" core0=0"); }
     ddb_render_command(record);
     ddb_puts("\n");
 }
@@ -2670,7 +2669,6 @@ private fn ddb_wait_test_record(stopped: borrow MachineStopped[&kernel_world_sto
     guarded_ref(stopped, ddb_state.wait_test)[index].root_slot = 0;
     guarded_ref(stopped, ddb_state.wait_test)[index].stack_owner_cpu = KERNEL_MAX_CORES;
     guarded_ref(stopped, ddb_state.wait_test)[index].affinity_mask = 0;
-    guarded_ref(stopped, ddb_state.wait_test)[index].core0_for_call = false;
     guarded_ref(stopped, ddb_state.wait_test)[index].tick_wake_core = 0;
     guarded_ref(stopped, ddb_state.wait_test)[index].tick_wake_due = 0;
     for byte: usize in 0..<DDB_COMMAND_BYTES {

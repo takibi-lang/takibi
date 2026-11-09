@@ -527,9 +527,6 @@ struct ProcessRecord {
     // change, so no migration can move the process; it is released only
     // when the record is reaped, after the physical stack is unowned.
     private pin: Place(ProcessPin[self]) guarded_by(scheduled_process_run_lock);
-    // GitHub issue #9: the migration gate sent this process's current
-    // syscall to core 0. It stays off every peer until that call completes.
-    core0_for_call: bool;
     // GitHub issue #831 (maintainer decision 2026-10-20, item 2-2 B): the
     // boot thread, pid 0, Linux's swapper. It never enters EL0, stands on the
     // boot stack rather than a run of its own, and runs on root 0, the
@@ -1698,10 +1695,9 @@ struct ProcessDdbRecord {
     pending_signals: usize;
     signal_mask: usize;
     // GitHub issue #593: where the process may run. A Ready process no CPU
-    // starts is placement -- a mask naming one CPU, or a syscall waiting for
-    // core 0 -- and neither was visible until these were copied.
+    // starts may be excluded by affinity; keep the mask visible alongside
+    // the physical stack owner.
     affinity_mask: usize;
-    core0_for_call: bool;
     // GitHub issue #876: whether a tick will retry this wait. tick_wake_core
     // is the record's own field (its core plus one while queued on that
     // core's tick-wake list, 0 otherwise), and tick_wake_due is that core's
@@ -1782,7 +1778,6 @@ private fn scheduled_process_ddb_record(
     result.pending_signals = record.pending_signals;
     result.signal_mask = record.signal_mask;
     result.affinity_mask = record.affinity_mask;
-    result.core0_for_call = record.core0_for_call;
     result.tick_wake_core = record.tick_wake_core;
     result.tick_wake_due = 0;
     let queued_core: usize = record.tick_wake_core;
@@ -2415,25 +2410,6 @@ private fn scheduled_process_pin_release(
     }
 }
 
-fn scheduled_process_core0_for_call(guard: borrow ProcessRunGuard[lock],
-        slot: ProcessSlot) -> bool {
-    let ProcessRecordLookup::Found(found) = scheduled_process_record_locked(guard, slot) else {
-        ProcessRecordLookup::Absent => { return false; }
-    };
-    let record: &mut ProcessRecord = scheduled_process_record_found(found, guard);
-    return record.core0_for_call;
-}
-
-fn scheduled_process_set_core0_for_call(guard: borrow ProcessRunGuard[lock],
-        slot: ProcessSlot,
-        value: bool) {
-    let ProcessRecordLookup::Found(found) = scheduled_process_record_locked(guard, slot) else {
-        ProcessRecordLookup::Absent => { return; }
-    };
-    let record: &mut ProcessRecord = scheduled_process_record_found(found, guard);
-    record.core0_for_call = value;
-}
-
 fn scheduled_process_init_signal_wait_logged(
         guard: borrow ProcessRunGuard[lock], slot: ProcessSlot) -> bool {
     let ProcessRecordLookup::Found(found) = scheduled_process_record_locked(guard, slot) else {
@@ -2574,7 +2550,6 @@ private fn scheduled_process_record_reset_syscall_state(
     // the thread on the CPU that runs boot (#831), and a whole-world reset
     // of syscall state leaves it.
     if (record.kernel_thread == false) { record.affinity_mask = 0; }
-    record.core0_for_call = false;
     record.command_line_length = record.command_line_length &
         ~(PROCESS_EXEC_PENDING | PROCESS_EXEC_ARGC_MASK |
           PROCESS_EXEC_INODE_MASK);
@@ -6792,9 +6767,8 @@ private fn kernel_process_next_successor(guard: borrow ProcessRunGuard[lock], fr
 
 // GitHub issue #9: the affinity ABI. A process that never set a mask is
 // placed on every online CPU. A nonzero mask is an admission request of its
-// own: the process may run on the CPUs it names, and the migration gate in
-// kernel_syscall_dispatch_action keeps every syscall not known to be peer-safe
-// on core 0.
+// own: the process may run on the CPUs it names. Syscall admission does
+// not add a separate placement restriction (#1330).
 fn kernel_process_online_mask() -> usize {
     let online: usize = kernel_online_core_count();
     let mut mask: usize = 0;
@@ -6804,8 +6778,7 @@ fn kernel_process_online_mask() -> usize {
     return mask;
 }
 
-// One placement answer for a real process. A syscall the gate sent to core
-// 0 pins the process there until the call completes.
+// One affinity placement answer for a real process.
 fn kernel_process_cpu_allows_slot(guard: borrow ProcessRunGuard[lock], cpu: usize, slot: ProcessSlot)
         -> bool {
     if (cpu >= KERNEL_MAX_CORES) { return false; }
@@ -6813,9 +6786,6 @@ fn kernel_process_cpu_allows_slot(guard: borrow ProcessRunGuard[lock], cpu: usiz
     // GitHub issue #831: no slot is special. The boot thread is kept on the
     // CPU that runs boot by its own mask, and PID 1 is placed like every
     // other process.
-    // core-role: a call the peer-safety gate refused runs on core 0 until it
-    // completes
-    if (scheduled_process_core0_for_call(guard, slot)) { return cpu == 0; }
     let mask: usize = scheduled_process_affinity_mask(guard, slot);
     if (mask == 0) {
         return (kernel_process_online_mask() & (1 << bit)) != 0;
@@ -6930,14 +6900,6 @@ fn kernel_process_migrate_current(frame: borrow FrameRef[process, level]) -> boo
     execution_state[execution_cpu_index()].reschedule_pending = false;
     process_run_unlock(guard);
     return true;
-}
-
-// The syscall the gate sent to core 0 has completed there.
-fn kernel_process_clear_core0_for_call(slot: ProcessSlot) {
-    if (scheduled_process_slot_valid(slot) == false) { return; }
-    let guard = process_run_lock();
-    scheduled_process_set_core0_for_call(guard, slot, false);
-    process_run_unlock(guard);
 }
 
 must_use variant ProcessAffinityResult { Missing; Invalid; Mask(usize); }
