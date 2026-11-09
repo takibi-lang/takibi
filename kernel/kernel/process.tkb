@@ -12183,6 +12183,55 @@ private fn kernel_process_execution_observation_probe_held(
         execution_observed_stack_pid(guard, core) == 0;
 }
 
+// Measure the actual always-on publishers, including their live pooled PID
+// lookups, beside the same run-lock/CPU-region envelope without publication.
+// One hold per pair keeps the timing loop out of a long IRQ-masked span.
+private fn execution_publication_cost_sample(with_publication: bool) -> i64 {
+    let start: i64 = tcp_pin_cost_clock();
+    for round: usize in 0..<4096 {
+        let guard = process_run_lock();
+        preempt_off (cpu) {
+            if (with_publication) {
+                execution_current_publish(guard, cpu);
+                execution_stack_publish(guard, cpu);
+            }
+        }
+        process_run_unlock(guard);
+    }
+    return tcp_pin_cost_clock() - start;
+}
+
+private fn execution_publication_cost_log() -> bool {
+    if (protocol_trace_is_active()) { return false; }
+    let mut plain: i64 = 0;
+    let mut published: i64 = 0;
+    for sample: usize in 0..<3 {
+        let empty_ticks: i64 = execution_publication_cost_sample(false);
+        let publish_ticks: i64 = execution_publication_cost_sample(true);
+        if (sample == 0 || empty_ticks < plain) { plain = empty_ticks; }
+        if (sample == 0 || publish_ticks < published) { published = publish_ticks; }
+    }
+    // Consume the real publications and retain the boot PID0 distinction.
+    let guard = process_run_lock();
+    let mut live_zero: bool = false;
+    preempt_off (cpu) {
+        let core: {0..<KERNEL_MAX_CORES as usize} = cpu_here_index(cpu);
+        live_zero = execution_observed_current_pid(guard, core) == 0 &&
+            execution_observed_stack_pid(guard, core) == 0;
+    }
+    process_run_unlock(guard);
+    if (plain <= 0 || published <= 0 || live_zero == false ||
+        protocol_trace_is_active()) { return false; }
+    kernel_boot_log("RECORDED execution publication cost: pairs=4096 plain=");
+    uart_put_udec(plain as usize);
+    kernel_boot_log(" published=");
+    uart_put_udec(published as usize);
+    kernel_boot_log(" samples=3 live_pid=0 trace=0 freq=");
+    uart_put_udec(read_cntfrq() as usize);
+    kernel_boot_log("\n");
+    return true;
+}
+
 // Keep fixture-local guard/authority slots out of the large scheduler
 // scenario's frame. These helpers still take the real run hold and publish
 // through the same typed setters; no budget or observation is relaxed.
@@ -12194,7 +12243,7 @@ private fn kernel_process_execution_observation_probe() -> bool
         ok = kernel_process_execution_observation_probe_held(guard, cpu);
     }
     process_run_unlock(guard);
-    return ok;
+    return ok && execution_publication_cost_log();
 }
 
 private fn execution_current_set_live_here(live: bool)

@@ -408,6 +408,21 @@ WINDOWS["638-no-consult"] = {
               "    if (preempt_count_zero_at(frame_ref_address(frame)) == false && false) {\n        el1_preempt_count_refused();"),
 }
 
+# On-demand value-domain control for the scheduler's real PID0 publication
+# probe. The ordinary boot is the positive run; this restores the old zero
+# discriminator at the actual current/stack readers, not a parallel helper.
+WINDOWS["638-zero-pid"] = {
+    "spin": None,
+    "check": [
+        ("kernel/process.tkb",
+         "if (guarded_ref(guard, execution_observation.current_live)[core])",
+         "if (guarded_ref(guard, execution_observation.current_pid)[core] != 0)"),
+        ("kernel/process.tkb",
+         "if (guarded_ref(guard, execution_observation.stack_live)[core])",
+         "if (guarded_ref(guard, execution_observation.stack_pid)[core] != 0)"),
+    ],
+}
+
 WINDOWS["1211"] = {
     "spin": None,
     "prepare": [
