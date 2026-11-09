@@ -35,7 +35,7 @@ import sys
 from pathlib import Path
 
 from pass_line import report_pass
-from source_scan import code_only, function_header
+from source_scan import code_only, function_header, per_file, FrozenMap
 
 ROOT = Path(__file__).resolve().parent.parent
 TABLE = ROOT / "scripts" / "per_cpu_carried_fields.tsv"
@@ -47,6 +47,22 @@ STRUCT = re.compile(r"\bstruct\s+per_cpu\s+(\w+)\s*\{([^}]*)\}")
 FIELD = re.compile(r"(?:^|[;{\s])(?:private\s+)?(\w+)\s*:", re.M)
 GLOBAL = re.compile(r"\blet\s+mut\s+(\w+)\s*:\s*\[\s*(\w+)\s*;\s*KERNEL_MAX_CORES\s*\]")
 REGION = re.compile(r"\bpreempt_off\s*\(\s*\w+\s*\)\s*\{")
+
+
+@per_file
+def masked(source):
+    return code_only(source)
+
+
+@per_file
+def function_starts(code):
+    return tuple((m.start(), m.end(), m.group(1)) for m in FUNCTION.finditer(code))
+
+
+def frozen_scan(fields, uses, problems):
+    return (frozenset(fields),
+            FrozenMap({key: tuple(frozenset(items) for items in entry)
+                       for key, entry in uses.items()}), tuple(problems))
 
 
 def blocks_of(code):
@@ -62,6 +78,7 @@ def blocks_of(code):
     return found
 
 
+@per_file
 def scan_file(code, path=None):
     """One file's declared fields, its uses {key: (writers, readers, regions)},
     and its refused shapes."""
@@ -83,10 +100,10 @@ def scan_file(code, path=None):
     uses = {}
     problems = []
     if not stores:
-        return fields, uses, problems
+        return frozen_scan(fields, uses, problems)
     # Same length, so positions and line numbers still hold.
     body = GLOBAL.sub(lambda m: " " * len(m.group(0)), code)
-    starts = [(m.start(), m.group(1)) for m in FUNCTION.finditer(body)]
+    starts = function_starts(body)
     blocks = blocks_of(body)
     for store, element in stores.items():
         shape = re.compile(
@@ -96,7 +113,7 @@ def scan_file(code, path=None):
             line = body.count("\n", 0, match.start()) + 1
             field = match.group(2)
             function = "<top level>"
-            for start, name in starts:
+            for start, _, name in starts:
                 if start > match.start():
                     break
                 function = name
@@ -108,11 +125,6 @@ def scan_file(code, path=None):
             if (element, field) not in fields:
                 problems.append(f"line {line}: {store}.{field} is not a field of {element}")
                 continue
-            function = "<top level>"
-            for start, name in starts:
-                if start > match.start():
-                    break
-                function = name
             region = (function, None)
             for start, end in blocks:
                 if start < match.start() < end:
@@ -126,7 +138,7 @@ def scan_file(code, path=None):
                 entry[0].add(function)
             if borrow_mode == 'read' or (borrow_mode is None and (not assign or assign.strip() != "=")):
                 entry[1].add(function)
-    return fields, uses, problems
+    return frozen_scan(fields, uses, problems)
 
 
 def callers_of(texts, accessors):
@@ -136,10 +148,10 @@ def callers_of(texts, accessors):
         return found
     pattern = re.compile(r"\b(?:" + "|".join(sorted(accessors)) + r")\b")
     for text in texts.values():
-        code = code_only(text)
+        code = masked(text)
         if not pattern.search(code):
             continue
-        starts = [(m.start(), m.end(), m.group(1)) for m in FUNCTION.finditer(code)]
+        starts = function_starts(code)
         for match in pattern.finditer(code):
             function = "<top level>"
             header = False
@@ -163,7 +175,7 @@ def problems_of(texts, rows):
     declared = set()
     uses = {}
     for path, text in sorted(texts.items()):
-        fields, file_uses, file_problems = scan_file(code_only(text), path)
+        fields, file_uses, file_problems = scan_file(masked(text), path)
         problems += [f"{path}: {p}" for p in file_problems]
         declared |= fields
         uses.update(file_uses)
@@ -248,7 +260,7 @@ def snapshot_controls(texts):
     source = texts[PATH]
     if snapshot_problems(source):
         sys.exit('ERROR per-cpu-carried-fields: snapshot policy baseline is not positive')
-    _, uses, errors = scan_file(code_only(source), PATH)
+    _, uses, errors = scan_file(masked(source), PATH)
     writers, readers, regions, accessors = uses[('CrashSnapshotCell', 'observed')]
     if (errors or writers != {'crash_snapshot_copy_published'} or
             readers != {'crash_snapshot_render_core', 'crash_snapshot_render_every_core'} or
@@ -267,11 +279,11 @@ def snapshot_controls(texts):
     cases = [(PATH, changed) for changed in (extra, whole, overwrite, wrong_borrow, alias)]
     cases.append(('kernel/elsewhere.tkb', source))
     for path, changed in cases:
-        _, _, errors = scan_file(code_only(changed), path)
+        _, _, errors = scan_file(masked(changed), path)
         if not errors:
             sys.exit('ERROR per-cpu-carried-fields: an unconfined snapshot borrow was admitted')
     # Comments do not affect the independent body policy or the accounting.
-    _, changed, errors = scan_file(code_only(source + '\n// prose only\n'), PATH)
+    _, changed, errors = scan_file(masked(source + '\n// prose only\n'), PATH)
     if errors or changed != uses:
         sys.exit('ERROR per-cpu-carried-fields: prose changed snapshot accounting')
     return len(cases) + 2
