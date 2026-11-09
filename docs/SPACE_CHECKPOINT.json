@@ -2,12 +2,12 @@
   "date": "2026-11-09",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "2e27e42e2667e0789e6fc38d465db4343b59ad264204eb85d9fdddcf34728374",
-  "workload": "Production QEMU/RPi5 linked kernels and retained init display word against verified published 1a2a69ee artifacts; unchanged allocator and report readiness workload.",
+  "source_sha256": "e09d550737bcd10a69666ad2cbb09b9f64ad671a3e992ec7d0f364f2172f2828",
+  "workload": "Actual combined production QEMU/RPi5 ELF/object/facts for init display projection and retained TCP cost word migrations against verified published1a2a69ee. Existing occupancy reused only at unchanged allocation/pool/storage-lifetime boundary.",
   "evidence": [
-    "docs/INIT_REPORT_WORD_SPACE.md",
-    "docs/INIT_REPORT_WORD_SPACE.json"
+    "docs/REPORT_TCP_WORDS_INTEGRATION_SPACE.md",
+    "docs/REPORT_TCP_WORDS_INTEGRATION_SPACE.json"
   ],
-  "assessment": "Completed display-only AtomicWord migration: retained payload 8-to-8 bytes on both targets; QEMU text -16 bytes, RPi5 text unchanged; BSS/data and usable RAM start unchanged. Pure ProcessEnd projection moves to typed callback before existing pending publication. No physical timing or page-saving claim.",
-  "next_trigger": "Next completed kernel feature, changed report/projection behavior, storage lifetime or image layout."
+  "assessment": "Actual combined text+32B QEMU/+64B RPi5, unchanged data/BSS/usable RAM. Display symbol rename keeps8B and same address; TCP records stay3x32B with unchanged field offsets. Only four intended object text sections/body hashes change; contracts/effects/value identities unchanged and caller changes confined to those bodies. Typed ProcessEnd APIs, readiness and benchmark intervals remain unchanged; no page-saving or physical timing/coherence claim.",
+  "next_trigger": "Next completed kernel feature, or changed report/sample representation, timing intervals, allocation or retained lifetime."
 }

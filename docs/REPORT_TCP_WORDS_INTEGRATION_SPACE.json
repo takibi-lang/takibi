@@ -1,0 +1,436 @@
+{
+  "base_head": "1a2a69ee90349a152aa1f5f56927251f6e2067cd",
+  "integration_implementation_head": "eeb24b9fe9d74e2a5344abe7098e0557b3da9f29",
+  "production_fingerprint": "e09d550737bcd10a69666ad2cbb09b9f64ad671a3e992ec7d0f364f2172f2828",
+  "component_heads": [
+    "1171954a9e9776ed783c6a40e3313889a9acdd4a",
+    "6ddc2fee774f874eea585138d0fa4d9930729349"
+  ],
+  "scope": "Actual combined production ELF/object/facts under the existing shared kernel build lock. Component reports retain their own baseline and runtime scope. No physical cycle/coherence claim.",
+  "targets": {
+    "qemu": {
+      "baseline_size": {
+        "text": 822808,
+        "data": 4624,
+        "bss": 1318912
+      },
+      "combined_size": {
+        "text": 822840,
+        "data": 4624,
+        "bss": 1318912
+      },
+      "delta": {
+        "text": 32,
+        "data": 0,
+        "bss": 0
+      },
+      "usable_ram_start": 1075904512,
+      "data_bss_symbol_size_changes": {
+        "init_boot_fixture_display_shell_code": [
+          null,
+          8
+        ],
+        "init_boot_fixture_status": [
+          8,
+          null
+        ]
+      },
+      "selected_symbols": {
+        "init_boot_fixture_display_shell_code": {
+          "baseline": null,
+          "combined": {
+            "address": 1075459712,
+            "size": 8,
+            "type": 1,
+            "section": 6
+          }
+        },
+        "init_boot_fixture_status": {
+          "baseline": {
+            "address": 1075459712,
+            "size": 8,
+            "type": 1,
+            "section": 6
+          },
+          "combined": null
+        },
+        "kernel_init_boot_fixture_reaped": {
+          "baseline": {
+            "address": 1074315728,
+            "size": 76,
+            "type": 2,
+            "section": 1
+          },
+          "combined": {
+            "address": 1074315728,
+            "size": 80,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "kernel_init_script_success_evidence": {
+          "baseline": {
+            "address": 1074321184,
+            "size": 360,
+            "type": 2,
+            "section": 1
+          },
+          "combined": {
+            "address": 1074321184,
+            "size": 340,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "pin_sharing_evidence": {
+          "baseline": {
+            "address": 1074370288,
+            "size": 464,
+            "type": 2,
+            "section": 1
+          },
+          "combined": {
+            "address": 1074370304,
+            "size": 476,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "tcp_pool_cost_evidence": {
+          "baseline": {
+            "address": 1074369824,
+            "size": 464,
+            "type": 2,
+            "section": 1
+          },
+          "combined": {
+            "address": 1074369808,
+            "size": 492,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "tcp_pool_cost_samples": {
+          "baseline": {
+            "address": 1075478160,
+            "size": 96,
+            "type": 1,
+            "section": 6
+          },
+          "combined": {
+            "address": 1075478160,
+            "size": 96,
+            "type": 1,
+            "section": 6
+          }
+        },
+        "usable_ram_start": {
+          "baseline": {
+            "address": 1075904512,
+            "size": 0,
+            "type": 0,
+            "section": 7
+          },
+          "combined": {
+            "address": 1075904512,
+            "size": 0,
+            "type": 0,
+            "section": 7
+          }
+        }
+      },
+      "changed_object_text_sections": [
+        ".text.takibi.kernel_init_boot_fixture_reaped",
+        ".text.takibi.kernel_init_script_success_evidence",
+        ".text.takibi.pin_sharing_evidence",
+        ".text.takibi.tcp_pool_cost_evidence"
+      ],
+      "changed_object_sections": [
+        ".bss.init_boot_fixture_display_shell_code",
+        ".bss.init_boot_fixture_status",
+        ".eh_frame",
+        ".rela.text.takibi.kernel_init_boot_fixture_reaped",
+        ".rela.text.takibi.kernel_init_script_success_evidence",
+        ".rela.text.takibi.pin_sharing_evidence",
+        ".rela.text.takibi.tcp_pool_cost_evidence",
+        ".strtab",
+        ".symtab",
+        ".text.takibi.kernel_init_boot_fixture_reaped",
+        ".text.takibi.kernel_init_script_success_evidence",
+        ".text.takibi.pin_sharing_evidence",
+        ".text.takibi.tcp_pool_cost_evidence"
+      ],
+      "changed_function_bodies": [
+        "kernel_init_boot_fixture_reaped",
+        "kernel_init_script_success_evidence",
+        "pin_sharing_evidence",
+        "tcp_pool_cost_evidence"
+      ],
+      "contracts_effects_values_unchanged": true,
+      "caller_identity_changes": [
+        {
+          "function": "syscall_status_shell_code",
+          "removed": [
+            "kernel_init_script_success_evidence@kernel/init/test_driver.tkb"
+          ],
+          "added": [
+            "kernel_init_boot_fixture_reaped@kernel/init/test_driver.tkb"
+          ]
+        }
+      ],
+      "layouts": {
+        "baseline": [
+          "AtomicWord\tvalue\t0",
+          "AtomicWord\t.size\t8",
+          "AtomicWord\t.members\t1",
+          "TcpPoolCostSample\tlock_serial\t0",
+          "TcpPoolCostSample\tlock_parallel\t8",
+          "TcpPoolCostSample\towner_serial\t16",
+          "TcpPoolCostSample\towner_parallel\t24",
+          "TcpPoolCostSample\t.size\t32",
+          "TcpPoolCostSample\t.members\t4"
+        ],
+        "combined": [
+          "AtomicWord\tvalue\t0",
+          "AtomicWord\t.size\t8",
+          "AtomicWord\t.members\t1",
+          "TcpPoolCostSample\tlock_serial\t0",
+          "TcpPoolCostSample\tlock_parallel\t8",
+          "TcpPoolCostSample\towner_serial\t16",
+          "TcpPoolCostSample\towner_parallel\t24",
+          "TcpPoolCostSample\t.size\t32",
+          "TcpPoolCostSample\t.members\t4"
+        ]
+      },
+      "artifact_and_facts_sha256": {
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-1a2a69ee/kernel/build/qemu/kernel.elf": "8d9e77e4bfe9a6a448c3f8a35fad35478245a073cfac36076947f41ed30872c6",
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-1a2a69ee/kernel/build/qemu/main.o": "054588de94be54811ca61a5ab042c317f88de1d3ec7b0bc7f04b4c8f8a7dd086",
+        "kernel/build/qemu/kernel.elf": "07f08811353a2cd6895aa9e9fb53a690438d56b9e060632713e043724631e72f",
+        "kernel/build/qemu/main.o": "945fa2362d8370bd9e84ce2ec046d8f350704c616d989eafef0f3127ff7219f2",
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-1a2a69ee/kernel/build/qemu/main.o.facts/callgraph.tsv": "e530c1718a5f255129e58d7f07d9fe3a502d348ba7e9297741e0a6aa1fb2ba4d",
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-1a2a69ee/kernel/build/qemu/main.o.facts/globals.tsv": "1db7314a03c290fbf5abbaa30933ed25e0fef36a7e00a0f8171821b30659193b",
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-1a2a69ee/kernel/build/qemu/main.o.facts/structs.tsv": "1c370095977b8eee0db34aa0a86cd8a7a8c2dd5ed502932e36952e889815cca5",
+        "kernel/build/qemu/main.o.facts/callgraph.tsv": "c6022d5fb20e745ab833377c2361baa8a116f41d7c2271bb0dfe203f0f69de30",
+        "kernel/build/qemu/main.o.facts/globals.tsv": "91d5292c191bffc765432d3cd8cab021b5e02211d0a30b363d1dda8da95a5783",
+        "kernel/build/qemu/main.o.facts/structs.tsv": "1c370095977b8eee0db34aa0a86cd8a7a8c2dd5ed502932e36952e889815cca5"
+      },
+      "changed_linked_allocated_sections": [
+        ".eh_frame",
+        ".got",
+        ".text"
+      ]
+    },
+    "rpi5": {
+      "baseline_size": {
+        "text": 4207428,
+        "data": 5600,
+        "bss": 1933312
+      },
+      "combined_size": {
+        "text": 4207492,
+        "data": 5600,
+        "bss": 1933312
+      },
+      "delta": {
+        "text": 64,
+        "data": 0,
+        "bss": 0
+      },
+      "usable_ram_start": 8257536,
+      "data_bss_symbol_size_changes": {
+        "init_boot_fixture_display_shell_code": [
+          null,
+          8
+        ],
+        "init_boot_fixture_status": [
+          8,
+          null
+        ]
+      },
+      "selected_symbols": {
+        "init_boot_fixture_display_shell_code": {
+          "baseline": null,
+          "combined": {
+            "address": 7685696,
+            "size": 8,
+            "type": 1,
+            "section": 6
+          }
+        },
+        "init_boot_fixture_status": {
+          "baseline": {
+            "address": 7685696,
+            "size": 8,
+            "type": 1,
+            "section": 6
+          },
+          "combined": null
+        },
+        "kernel_init_boot_fixture_reaped": {
+          "baseline": {
+            "address": 2682432,
+            "size": 76,
+            "type": 2,
+            "section": 1
+          },
+          "combined": {
+            "address": 2682432,
+            "size": 84,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "kernel_init_script_success_evidence": {
+          "baseline": {
+            "address": 2687856,
+            "size": 360,
+            "type": 2,
+            "section": 1
+          },
+          "combined": {
+            "address": 2687856,
+            "size": 340,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "pin_sharing_evidence": {
+          "baseline": {
+            "address": 2767712,
+            "size": 456,
+            "type": 2,
+            "section": 1
+          },
+          "combined": {
+            "address": 2767744,
+            "size": 468,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "tcp_pool_cost_evidence": {
+          "baseline": {
+            "address": 2767200,
+            "size": 504,
+            "type": 2,
+            "section": 1
+          },
+          "combined": {
+            "address": 2767200,
+            "size": 536,
+            "type": 2,
+            "section": 1
+          }
+        },
+        "tcp_pool_cost_samples": {
+          "baseline": {
+            "address": 7836216,
+            "size": 96,
+            "type": 1,
+            "section": 6
+          },
+          "combined": {
+            "address": 7836216,
+            "size": 96,
+            "type": 1,
+            "section": 6
+          }
+        },
+        "usable_ram_start": {
+          "baseline": {
+            "address": 8257536,
+            "size": 0,
+            "type": 0,
+            "section": 7
+          },
+          "combined": {
+            "address": 8257536,
+            "size": 0,
+            "type": 0,
+            "section": 7
+          }
+        }
+      },
+      "changed_object_text_sections": [
+        ".text.takibi.kernel_init_boot_fixture_reaped",
+        ".text.takibi.kernel_init_script_success_evidence",
+        ".text.takibi.pin_sharing_evidence",
+        ".text.takibi.tcp_pool_cost_evidence"
+      ],
+      "changed_object_sections": [
+        ".bss.init_boot_fixture_display_shell_code",
+        ".bss.init_boot_fixture_status",
+        ".eh_frame",
+        ".rela.text.takibi.kernel_init_boot_fixture_reaped",
+        ".rela.text.takibi.kernel_init_script_success_evidence",
+        ".rela.text.takibi.pin_sharing_evidence",
+        ".rela.text.takibi.tcp_pool_cost_evidence",
+        ".strtab",
+        ".symtab",
+        ".text.takibi.kernel_init_boot_fixture_reaped",
+        ".text.takibi.kernel_init_script_success_evidence",
+        ".text.takibi.pin_sharing_evidence",
+        ".text.takibi.tcp_pool_cost_evidence"
+      ],
+      "changed_function_bodies": [
+        "kernel_init_boot_fixture_reaped",
+        "kernel_init_script_success_evidence",
+        "pin_sharing_evidence",
+        "tcp_pool_cost_evidence"
+      ],
+      "contracts_effects_values_unchanged": true,
+      "caller_identity_changes": [
+        {
+          "function": "syscall_status_shell_code",
+          "removed": [
+            "kernel_init_script_success_evidence@kernel/init/test_driver.tkb"
+          ],
+          "added": [
+            "kernel_init_boot_fixture_reaped@kernel/init/test_driver.tkb"
+          ]
+        }
+      ],
+      "layouts": {
+        "baseline": [
+          "AtomicWord\tvalue\t0",
+          "AtomicWord\t.size\t8",
+          "AtomicWord\t.members\t1",
+          "TcpPoolCostSample\tlock_serial\t0",
+          "TcpPoolCostSample\tlock_parallel\t8",
+          "TcpPoolCostSample\towner_serial\t16",
+          "TcpPoolCostSample\towner_parallel\t24",
+          "TcpPoolCostSample\t.size\t32",
+          "TcpPoolCostSample\t.members\t4"
+        ],
+        "combined": [
+          "AtomicWord\tvalue\t0",
+          "AtomicWord\t.size\t8",
+          "AtomicWord\t.members\t1",
+          "TcpPoolCostSample\tlock_serial\t0",
+          "TcpPoolCostSample\tlock_parallel\t8",
+          "TcpPoolCostSample\towner_serial\t16",
+          "TcpPoolCostSample\towner_parallel\t24",
+          "TcpPoolCostSample\t.size\t32",
+          "TcpPoolCostSample\t.members\t4"
+        ]
+      },
+      "artifact_and_facts_sha256": {
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-1a2a69ee/kernel/build/rpi5/kernel.elf": "6eaa4bade940f34c154377f7fdd86eb5c721dfb7d77e0b55a08a6db6f1e4a10c",
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-1a2a69ee/kernel/build/rpi5/main.o": "7d08c67c109fbef434707a13d8d3ea48c3e94164cd180fce81508bd2d668fa1b",
+        "kernel/build/rpi5/kernel.elf": "24c87237030838f29697e9dc5c3ab9cd450f00a338af17b88518e0793c8211be",
+        "kernel/build/rpi5/main.o": "b044256bae219a9fb7fbfe5b4ac2057cb283e4b3200372c9fbbd1af70d8557a7",
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-1a2a69ee/kernel/build/rpi5/main.o.facts/callgraph.tsv": "2d06165e6d693df486bad85fcae1881587c47fb4fb36801c512295a8cb96e653",
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-1a2a69ee/kernel/build/rpi5/main.o.facts/globals.tsv": "ac45a9db184ded178165018dbc824397b01a77ef9b1c53cd84a8074ca4167953",
+        "/workspaces/takibi-claude/.git/takibi-land/baselines/kernel-green-1a2a69ee/kernel/build/rpi5/main.o.facts/structs.tsv": "a5e5dd5926ec5ef8f8ec1fd510ccd6ea00e380101575b4645e3deffa48f64c7e",
+        "kernel/build/rpi5/main.o.facts/callgraph.tsv": "0c950e8eb922888e1055e0c3e43abff01e558cca510612bf875773b5f6f05e68",
+        "kernel/build/rpi5/main.o.facts/globals.tsv": "b9ee3b1a450d35fe254415d98f2525b90d4536acd8b78544569b9a9337e797f6",
+        "kernel/build/rpi5/main.o.facts/structs.tsv": "a5e5dd5926ec5ef8f8ec1fd510ccd6ea00e380101575b4645e3deffa48f64c7e"
+      },
+      "changed_linked_allocated_sections": [
+        ".eh_frame",
+        ".got",
+        ".text"
+      ]
+    }
+  }
+}
