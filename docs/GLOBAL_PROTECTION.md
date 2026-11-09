@@ -892,3 +892,41 @@ The accounting, artifact hashes and corrected frame/callpath boundary are
 in docs/EXECUTION_STATE_PER_CPU_SPACE_2026-11-09.txt and its evidence JSON.
 This completes the ExecutionState slice, not the globals or preemption
 milestone.
+
+### Virtio block queue guarded CPU access
+
+The virtio block descriptor/avail queue is a private guarded field of an
+offset-zero container, protected by the existing block_device_lock. Every
+CPU field read or write uses guarded_ref with the existing borrowed
+BlockDeviceGuard, including initialization and timeout evidence. Linear
+submission stages, receive/transmit owners, reset outcomes and barrier
+placement remain separate requirements. The device may still read the
+queue while CPU operations are serialized; the lock is not DMA ownership.
+
+Only the guarded setup function may mint the fixed container's two integer
+addresses. The closed source policy and resolved caller map confine those
+addresses to descriptor/driver low/high MMIO programming, including runtime
+reinitialization after confirmed reset. Container copies and other pointer
+or integer escapes are rejected by the source policy; the language's
+general guarded_ref address rejection remains unchanged. The network
+queue retains its current capability-based boundary.
+
+### Virtio block queue milestone space review (2026-11-09)
+
+Compared with the archived published 766d9e8a production ELFs, the block
+queue remains 256 bytes, aligned to 64, with descriptor offset 0 and avail
+offset 128. Its private guarded container adds no payload or allocation.
+QEMU text changes 815368 -> 815420 bytes (+52); data/BSS stay
+4616/1302528 bytes. RPi5 text changes 4200428 -> 4200424 bytes (-4);
+data/BSS stay 5592/1925120 bytes. usable_ram_start remains 0x40208000 and
+0x7e0000. The baseline ELFs were checked against the archived SHA manifest.
+
+The workload is the existing synchronous block submission, including
+initialization, descriptor-chain publication, observed completion, timeout
+and confirmed/failed reset. The kernel DMA fixture retains its real guard
+and authority branches. There is no new pool, retained allocation or device
+capacity; used-ring and buffer authority storage are unchanged. This is a
+measured fixed-state/image milestone, not physical cache/timing evidence.
+The small code change is adopted for the explicit borrowed guard boundary.
+Measure again when queue capacity, DMA ownership, or allocation lifetime
+changes. CPU serialization remains distinct from device quiescence.

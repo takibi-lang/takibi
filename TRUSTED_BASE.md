@@ -842,3 +842,18 @@ atomic intrinsic is the compiler's mint list (GitHub issue #989), not the
 inventory's.
 Language guarantee changes belong in `SPEC.md` and must also be reflected here
 when they change the meaning of a trusted boundary.
+
+### Virtio block queue setup address boundary
+
+`scripts/check_virtio_queue_mints.py` confines the private block queue
+container to its guarded payload and the two reviewed setup address
+initializers. Setup borrows the block-device guard; its closed body uses
+each immutable address only in the corresponding low/high MMIO stores.
+The compiler's ordinary guarded_ref address prohibition is unchanged.
+`buildcheck_allowed_callers.py` also restricts setup to the guarded
+initialization/reset caller. The source policy rejects other container
+copies, pointers, integer aliases, stores, returns and captures. This is
+bounded repository enforcement, not general integer noninterference.
+Trusted: fixed physical mapping and offset-zero layout, hardware retaining
+the programmed addresses, and the existing DMA ownership/barrier protocol.
+A CPU lock does not prove device quiescence or whole-ring ownership.
