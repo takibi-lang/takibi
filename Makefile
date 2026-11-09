@@ -652,7 +652,7 @@ $(LINUX_USER_DIR)/cache_geometry/cache_geometry_exe.o: kernel/arch/arm64/kernel/
 $(LINUX_USER_DIR)/cache_geometry/cache_geometry_exe.o: LINUX_USER_EXTRA_SRCS := kernel/arch/arm64/kernel/cache_geometry.tkb
 _build/virtio-net-native/driver.tkb: kernel/drivers/net/virtio_net.tkb scripts/build_virtio_net_native_fixture.py
 	python3 scripts/build_virtio_net_native_fixture.py $< $@
-$(LINUX_USER_DIR)/virtio_net_tx/virtio_net_tx_exe.o $(LINUX_USER_DIR)/virtio_net_reply/virtio_net_reply_exe.o: _build/virtio-net-native/driver.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/net/virtio_net_tx_wait.tkb kernel/drivers/net/virtio_net_tx_dma.tkb kernel/drivers/virtio_ring.tkb kernel/drivers/virtio_used.tkb kernel/drivers/dma_address.tkb kernel/lib/init_once.tkb kernel/lib/mutex.tkb kernel/lib/spinlock.tkb $(LINUX_USER_DIR)/virtio_net_tx/support.tkb
+$(LINUX_USER_DIR)/virtio_net_tx/virtio_net_tx_exe.o $(LINUX_USER_DIR)/virtio_net_reply/virtio_net_reply_exe.o: _build/virtio-net-native/driver.tkb kernel/drivers/block/device_lock.tkb kernel/lib/task_mutex.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/net/virtio_net_tx_wait.tkb kernel/drivers/net/virtio_net_tx_dma.tkb kernel/drivers/virtio_ring.tkb kernel/drivers/virtio_used.tkb kernel/drivers/dma_address.tkb kernel/lib/init_once.tkb kernel/lib/mutex.tkb kernel/lib/spinlock.tkb $(LINUX_USER_DIR)/virtio_net_tx/support.tkb
 $(LINUX_USER_DIR)/virtio_net_tx/virtio_net_tx_exe.o $(LINUX_USER_DIR)/virtio_net_reply/virtio_net_reply_exe.o: LINUX_USER_EXTRA_SRCS := _build/virtio-net-native/driver.tkb $(LINUX_USER_DIR)/virtio_net_tx/support.tkb
 $(LINUX_USER_DIR)/virtio_net_tx/virtio_net_tx_exe.o $(LINUX_USER_DIR)/virtio_net_reply/virtio_net_reply_exe.o: LINUX_USER_EXTRA_FLAGS := --regions --device-semantics-file kernel/drivers/net/virtio_net_tx_dma.tkb --device-semantics-file kernel/drivers/virtio_used.tkb
 $(LINUX_USER_DIR)/tcp_parse/tcp_parse_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb $(LINUX_USER_DIR)/common/netutil.tkb
@@ -3275,7 +3275,7 @@ KERNEL_DMA_ELF := $(KERNEL_QEMU_BUILD_DIR)/kernel-dma-fixture-positive.elf
 .PHONY: _kernelbuild-dma-qemu kernelbuild-dma-qemu kernelcheck-dma-qemu
 # Positive has no planted mutation; the four named controls change one real
 # ownership/state branch each. They are available on demand, outside allbuild.
-$(KERNEL_QEMU_BUILD_DIR)/dma-fixture-%.o: $(KERNEL_QEMU_MAIN_O) scripts/build_qemu_dma_fixture.py kernel/tests/qemu/dma/virtio_blk_fixture.tkb Makefile
+$(KERNEL_QEMU_BUILD_DIR)/dma-fixture-%.o: $(KERNEL_QEMU_MAIN_O) scripts/build_qemu_dma_fixture.py scripts/build_virtio_net_native_fixture.py kernel/tests/qemu/dma/virtio_blk_fixture.tkb Makefile
 	python3 scripts/build_qemu_dma_fixture.py . _build/qemu-dma-fixture-$* $(if $(filter positive,$*),,$*)
 	cd _build/qemu-dma-fixture-$* && $(NICE_HEAVY) $(abspath $(TAKIBI)) $(KERNEL_DMA_SRCS) $(KERNEL_DMA_FLAGS) --facts $(abspath $@).facts -o $(abspath $@)
 	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.facts/deps.d

@@ -2,6 +2,7 @@
 // Compiled only by build_qemu_dma_fixture.py; IRQs remain masked and no peer
 // is booted. The driver owns all token transitions and timeout/reset logic.
 let mut dma_fixture_registers: [i32; 128];
+let mut dma_fixture_net_registers: [i32; 128];
 let mut dma_fixture_mode: usize;
 let mut dma_fixture_submissions: usize;
 let mut dma_fixture_buffer: [u8; 1024];
@@ -88,6 +89,82 @@ fn dma_fixture_attach_registers(phase: borrow BootPhase[boot]) !{unsafe} {
     }
 }
 
+// This window is a test device, not a second CPU-side queue owner.
+fn dma_fixture_attach_network(phase: borrow BootPhase[boot]) !{unsafe} {
+    match qemu_gic_attach(phase, 0x08000000, 0x10000, 0x08010000, 0x10000) {
+        QemuAttach::Attached => {}
+        QemuAttach::Refused => { dma_fixture_require(false, "GIC window"); }
+    }
+    let address: usize = (&dma_fixture_net_registers) as usize;
+    let RegionBytes::Assumed(registers) = region_bytes_assume(address, 128 * 4) else {};
+    match io_handle_attach(&virtio_net_regs, registers) {
+        IoAttach::Attached => {}
+        IoAttach::TooSmall => { dma_fixture_require(false, "net register window"); }
+    }
+    dma_fixture_require(address < 0x80000000, "net register base domain");
+    boot_once_set(&virtio_base, phase, address as i32);
+    boot_once_set(&virtio_net_gic_intid, phase, 48);
+    dma_fixture_net_registers[1] = 2;
+    dma_fixture_net_registers[13] = 8;
+}
+
+// Like the existing native oracle, simulate only the device's used entry.
+// The actual driver and actual guard provider own every CPU-side transition.
+fn dma_fixture_net_contention() !{unsafe} {
+    let ready = match net_init() {
+        NetInitResult::Ready(cap) => { cap }
+        NetInitResult::Failed => {
+            dma_fixture_require(false, "net init");
+            return;
+        }
+    };
+    let mut before: VirtioNetShadows = virtio_net_shadows(ready);
+    let mut slots: [usize; 8];
+    for i: usize in 0..<8 { slots[i] = virtio_net_rx_slot(ready, i); }
+    let free_before: usize = virtio_pkt_free_index();
+    let out_before: usize = virtio_pkt_out_count();
+    let guard = block_device_take_unaccounted();
+    let used: *io VirtqUsedRing = unsafe { virtio_net_used_addr[0] as *io VirtqUsedRing };
+    used.ring[0].id = 0;
+    used.ring[0].len = 74;
+    used.idx = virtio_ring_index_next(before.rx_used_seen);
+    dma_publish();
+    atomic_word_store(&virtio_rx_irq_flag, 1);
+    let ready = match net_rx_acquire(ready) {
+        NetRxAcquire::None(cap) => { cap }
+        NetRxAcquire::Acquired(packet) => {
+            let cap = net_rx_release(packet);
+            dma_fixture_require(false, "net progressed under held guard");
+            cap
+        }
+    };
+    let mut after: VirtioNetShadows = virtio_net_shadows(ready);
+    dma_fixture_require(before.rx_used_seen == after.rx_used_seen &&
+        before.tx_used_seen == after.tx_used_seen &&
+        before.rx_avail_idx == after.rx_avail_idx &&
+        before.tx_avail_idx == after.tx_avail_idx, "Busy changed net shadows");
+    for i: usize in 0..<8 {
+        dma_fixture_require(slots[i] == virtio_net_rx_slot(ready, i), "Busy changed net ownership");
+    }
+    dma_fixture_require(free_before == virtio_pkt_free_index() &&
+        out_before == virtio_pkt_out_count(), "Busy changed net pool");
+    dma_fixture_require(atomic_word_load(&virtio_rx_irq_flag) == 1,
+                        "Busy lost pending RX indication");
+    // IRQs stay masked in this fixture; returning here requires the actual
+    // pending-fastpath, not another device IRQ or a periodic tick.
+    net_rx_wait();
+    block_device_give(guard);
+    let ready = match net_rx_acquire(ready) {
+        NetRxAcquire::None(cap) => { dma_fixture_require(false, "release did not drain net entry"); cap }
+        NetRxAcquire::Acquired(packet) => { net_rx_release(packet) }
+    };
+    let mut drained: VirtioNetShadows = virtio_net_shadows(ready);
+    dma_fixture_require(drained.rx_used_seen == virtio_ring_index_next(before.rx_used_seen),
+                        "net drained another entry");
+    net_shutdown(ready);
+    dma_fixture_print("PASS dma: net Busy preserves pending ownership and release drains the same entry\n");
+}
+
 fn dma_fixture_run() !{unsafe} {
     disable_irq();
     let mut phase = boot_phase_mint();
@@ -95,6 +172,7 @@ fn dma_fixture_run() !{unsafe} {
     uart_init();
     kernel_log_init();
     dma_fixture_attach_registers(phase);
+    dma_fixture_attach_network(phase);
     boot_phase_end(phase);
     virtio_blk_base_set(1);
     // The driver's entries take the device guard, as memory.tkb's callers do.
@@ -140,6 +218,7 @@ fn dma_fixture_run() !{unsafe} {
     dma_fixture_print("PASS dma: failed reset retains all Device authority and refuses reuse\n");
     block_device_give(guard);
     block_slot_release(slot);
+    dma_fixture_net_contention();
     dma_fixture_print("PASS dma: fixture complete\n");
     while (true) {}
 }

@@ -16,6 +16,21 @@ fn write(guard: borrow BlockDeviceGuard[&block_device_lock]) {
 '''
 
 
+NET_BASE = policy.NET_DECL+'\n'+policy.NET_HEADER+policy.NET_BODY+"""
+fn net_init() {
+    let guard = block_device_take_unaccounted();
+    virtio_queue_setup(guard, 0, VIRTIO_USED_NET_RX);
+    virtio_queue_setup(guard, 1, VIRTIO_USED_NET_TX);
+    block_device_give(guard);
+}
+fn touch(guard: borrow BlockDeviceGuard[&block_device_lock], queue: {0..<2 as usize}) {
+    guarded_ref(guard, virtio_net_queues.queues)[queue].desc[0].len = 1;
+}
+"""+'fn net_rx_acquire(ready: sink NetRxCanAcquire[net]) -> NetRxAcquire[net] '+policy.NET_RX_BODY+"\n"+\
+'private fn virtio_net_rx_refill(r: borrow mut NetRxCanAcquire[net]) '+policy.NET_REFILL_BODY+"\n"+\
+'fn virtio_net_tx_ring(r: borrow mut NetRxCanAcquire[net], address:usize, length:usize) '+policy.NET_TX_BODY
+
+
 def main():
     failures=[]
     def case(label,text,accept,path=policy.DRIVER,extra=None):
@@ -92,6 +107,63 @@ def main():
     case('missing guard accessor',BASE.replace('guarded_ref(guard, virtio_blk_queue.queue)','virtio_blk_queue.queue'),False)
     case('no reviewed storage',BASE.replace(policy.DECL,''),False)
     case('no real accesses',policy.DECL+'\n'+policy.HEADER+policy.BODY,False)
+    def net_case(label,text,accept,path=policy.NET_DRIVER,extra=None):
+        CASES.note()
+        files={path:text}
+        if extra: files.update(extra)
+        errors,accesses=policy.problems_in(files,net=True)
+        if bool(errors)==accept or (accept and not accesses):
+            failures.append('net '+label+': '+repr(errors))
+    CASES.note()
+    errors,accesses=policy.problems_in(policy.source_files(),net=True)
+    if errors or not accesses: failures.append('real net driver: '+repr(errors))
+    net_case('closed boundary',NET_BASE,True)
+    net_case('relayout',NET_BASE.replace('(', '\n(\n').replace(';','; /* layout */\n'),True)
+    net_case('comment/literal',NET_BASE+'// &virtio_net_queues\nfn text(){ emit("VirtioNetQueueStorage"); }',True)
+    for label,snippet in {
+        'pointer':'let p = &virtio_net_queues;',
+        'copy':'let mut copy:VirtioNetQueueStorage = virtio_net_queues;',
+        'cast':'let n:usize = &virtio_net_queues as usize;',
+        'argument':'consume(virtio_net_queues);',
+        'wrapper embedding':'let mut other:VirtioNetQueueStorage;',
+        'container shadow':'let virtio_net_queues:usize = 0;',
+        'direct read':'let n = virtio_net_queues.queues[0].avail.idx;',
+    }.items():
+        net_case(label,NET_BASE+'fn escape() !{unsafe} { '+snippet+' }',False)
+    net_case('forged file',NET_BASE,False,path='kernel/forged.tkb')
+    net_case('forged name',NET_BASE.replace('fn virtio_queue_setup','fn impostor_setup'),False)
+    net_case('foreign pointer',NET_BASE,False,extra={'kernel/other.tkb':'fn f(){ let p = &virtio_net_queues; }'})
+    net_case('wrong guard',NET_BASE.replace('&block_device_lock','&other_lock'),False)
+    net_case('owned guard',NET_BASE.replace('guard: borrow BlockDeviceGuard','guard: BlockDeviceGuard'),False)
+    net_case('wrong stride',NET_BASE.replace('queue * sizeof(VirtqNetQueue)','queue * 128'),False)
+    net_case('wrong alignment',NET_BASE.replace('align(64)','align(8)'),False)
+    net_case('queue outside domain',NET_BASE.replace('queue: {0..<2 as usize}','queue:usize'),False)
+    net_case('wrong caller',NET_BASE.replace('fn net_init()','fn other_init()'),False)
+    net_case('function value',NET_BASE+'fn f(){ let setup = virtio_queue_setup; }',False)
+    net_case('fake guard mint',NET_BASE.replace('let guard = block_device_take_unaccounted();','let guard = fake_guard();'),False)
+    net_case('guard shadow',NET_BASE.replace('    guarded_ref(guard,','    let guard = other; guarded_ref(guard,'),False)
+    for label,statement in {
+        'integer global':'saved = desc;',
+        'integer alias':'let hidden:usize = desc + 0;',
+        'integer call':'consume(desc);',
+        'integer return':'return desc;',
+        'integer capture':'let cb = fn(){ consume(desc); };',
+        'after release':'block_device_give(guard);',
+    }.items():
+        net_case(label,replace_once(NET_BASE,'virtio_net_regs.queue_desc_low',statement+' virtio_net_regs.queue_desc_low'),False)
+    net_case('wrong sink',NET_BASE.replace('queue_driver_high','queue_device_high'),False)
+    net_case('clear before try',NET_BASE.replace('    let guard = match block_device_try_take()',
+             '    atomic_word_store(&virtio_rx_irq_flag, 0); let guard = match block_device_try_take()'),False)
+    net_case('refill before try',NET_BASE.replace('    let guard = match block_device_try_take()',
+             '    virtio_net_rx_refill(ready); let guard = match block_device_try_take()'),False)
+    net_case('Busy flag loss',NET_BASE.replace('return NetRxAcquire::None(ready);',
+             'atomic_word_store(&virtio_rx_irq_flag, 0); return NetRxAcquire::None(ready);'),False)
+    net_case('Busy mutation',NET_BASE.replace('return NetRxAcquire::None(ready);',
+             'virtio_pkt_free_index(); return NetRxAcquire::None(ready);'),False)
+    net_case('blocking RX',NET_BASE.replace('let guard = match block_device_try_take()',
+             'let guard = match blocking_try()'),False)
+    net_case('wait while held',NET_BASE.replace('    virtio_notify(1);','    net_rx_wait(); virtio_notify(1);'),False)
+    net_case('early release',NET_BASE.replace('    desc_set(guard,','    block_device_give(guard); desc_set(guard,'),False)
     for failure in failures: print('FAIL virtio-queue-mints-controls: '+failure)
     if failures: return 1
     report_pass('virtio-queue-mints-controls','real driver and copy/address/integer/guard/caller/provenance/layout controls retain the bounded mint',cases=CASES.ran)

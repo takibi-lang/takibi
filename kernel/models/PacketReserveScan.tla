@@ -75,6 +75,10 @@ Refilled(s) ==
     THEN { [s EXCEPT ![f] = "Posted"] : f \in {g \in Slots : s[g] = "Free"} }
     ELSE { s }
 
+(* Queue-lock contention may skip a refill without moving any buffer. *)
+\* @type: (Int -> Str) => Set(Int -> Str);
+MayRefilled(s) == Refilled(s) \cup {s}
+
 (* net_rx_acquire: a posted buffer becomes the turn's packet; refill. *)
 Acquire ==
     /\ hphase = "Idle"
@@ -87,7 +91,7 @@ Acquire ==
 (* acquire's no-frame path: refill only. *)
 Poll ==
     /\ hphase = "Idle"
-    /\ st' \in Refilled(st)
+    /\ st' \in MayRefilled(st)
     /\ UNCHANGED <<hphase, idx, cnt>>
 
 HeldSlot == CHOOSE i \in Slots : st[i] = "Held"
@@ -95,7 +99,7 @@ HeldSlot == CHOOSE i \in Slots : st[i] = "Held"
 (* net_rx_release: the packet back Free, refill. *)
 Release ==
     /\ hphase = "Turn"
-    /\ st' \in Refilled([st EXCEPT ![HeldSlot] = "Free"])
+    /\ st' \in MayRefilled([st EXCEPT ![HeldSlot] = "Free"])
     /\ hphase' = "Idle"
     /\ UNCHANGED <<idx, cnt>>
 
@@ -120,9 +124,9 @@ TxComplete ==
     /\ hphase = "Tx"
     /\ \E t \in Slots :
         \/ /\ st[t] = "Tx"
-           /\ st' \in Refilled([st EXCEPT ![t] = "Free"])
+           /\ st' \in MayRefilled([st EXCEPT ![t] = "Free"])
         \/ /\ st[t] = "TxKept"
-           /\ st' \in Refilled([st EXCEPT ![t] = "Kept"])
+           /\ st' \in MayRefilled([st EXCEPT ![t] = "Kept"])
     /\ hphase' = "Idle"
     /\ UNCHANGED <<idx, cnt>>
 

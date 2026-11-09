@@ -66,6 +66,13 @@ Refill(p, f) ==
     /\ posted' = Min(D, p + f)
     /\ free' = f - (posted' - p)
 
+(* A one-shot queue-lock miss may defer refill. It leaves any returned *)
+(* Free buffer in the pool; this adds no fairness or wakeup assumption. *)
+MayRefill(p, f) ==
+    \/ Refill(p, f)
+    \/ /\ posted' = p
+       /\ free' = f
+
 (* net_rx_acquire: a used entry's buffer comes back Filled, and the ring *)
 (* is refilled in the same call.                                          *)
 Acquire ==
@@ -79,13 +86,13 @@ Acquire ==
 (* what off-turn frees returned.                                          *)
 Poll ==
     /\ held = 0 /\ tx = 0
-    /\ Refill(posted, free)
+    /\ MayRefill(posted, free)
     /\ UNCHANGED <<held, kept, tx, txkeep>>
 
 (* net_rx_release. *)
 Release ==
     /\ held = 1
-    /\ Refill(posted, free + 1)
+    /\ MayRefill(posted, free + 1)
     /\ held' = 0
     /\ UNCHANGED <<kept, tx, txkeep>>
 
@@ -134,9 +141,9 @@ TxComplete ==
     /\ tx = 1
     /\ IF txkeep = 1
        THEN /\ kept' = kept + 1
-            /\ Refill(posted, free)
+            /\ MayRefill(posted, free)
        ELSE /\ kept' = kept
-            /\ Refill(posted, free + 1)
+            /\ MayRefill(posted, free + 1)
     /\ tx' = 0
     /\ txkeep' = 0
     /\ UNCHANGED held

@@ -12,6 +12,7 @@ EXPECTED = [
     "PASS dma: completed error returns all CPU authority",
     "PASS dma: timeout and confirmed reset permit reuse",
     "PASS dma: failed reset retains all Device authority and refuses reuse",
+    "PASS dma: net Busy preserves pending ownership and release drains the same entry",
     "PASS dma: fixture complete",
 ]
 

@@ -1281,8 +1281,12 @@ The TCP retransmit queue keeps a sent segment in its pool buffer
 retransmission resends it in place and parks it Kept again
 (`net_packet_kept_resend`), and its free (`net_packet_free`) runs on any
 core without the RX capability and only returns the buffer to its pool
-slot. The ring is refilled only by the capability's holder, and it fills
-every empty descriptor before a buffer stays Free. If kept packets took too
+slot. The ring is refilled only by the capability's holder. A successful
+virtio acquire holds the queue guard through refill; a Busy acquire is a
+stuttering step. Poll, release and transmit completion may defer refill
+when their one-shot queue attempt is busy, leaving returned buffers Free.
+The count and scan models include this optional refill without adding a
+fairness or timer assumption. If kept packets took too
 many buffers, either no RX descriptor would be posted (no frame arrives, no
 acquire runs, nothing refills: a stall), or the refill would post every
 buffer left and a kernel-built frame (`net_transmit_ready`) would find none.
@@ -1293,13 +1297,19 @@ left).
 
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |
-| `Acquire`, `Poll` | `net_rx_acquire`, `virtio_net_rx_refill`, `gem_rearm_rx` | a used entry's buffer becomes the turn's packet and the ring is refilled in the same call; with no frame, the call still refills | the used-ring snapshot and descriptor ids -- irrelevant to `RingNeverDrains`: only how many buffers are posted matters; `gem_rearm_rx` recording the posted index only after the arm (#959) -- irrelevant to `RingNeverDrains`: the count posted per call is unchanged | `f3111187dbaf` |
-| `Release` | `net_rx_release` | the buffer returns Free and the ring is refilled | nothing | `c7baf0589e83` |
-| `Reply`, `TxComplete` | `net_rx_send_reply`, `net_tx_complete`, `virtio_net_tx_finish`, `gem_tx_finish` | the turn's packet goes out as TX; completion returns it Free, or Kept for a kept send, and refills | the transmit itself and its bounded wait -- modelled elsewhere: `FixedDmaOwnership.Timeout` | `f289ae5be665` |
-| `SendBuilt` | `net_transmit_ready` | a kernel-built frame takes a Free buffer; completion refills | the payload copy -- irrelevant to `RingNeverDrains`: it does not move a buffer | `1eaea3a9a1bc` |
+| `Acquire`, `Poll` | `net_rx_acquire`, `virtio_net_rx_acquire_locked`, `virtio_net_rx_refill`, `virtio_net_rx_refill_locked`, `virtio_net_rx_post`, `gem_rearm_rx` | successful acquire holds the queue guard through refill; Busy acquire stutters, while a no-frame poll may defer refill | the used-ring snapshot and descriptor ids -- irrelevant to `RingNeverDrains`: only how many buffers are posted matters; `gem_rearm_rx` recording the posted index only after the arm (#959) -- irrelevant to `RingNeverDrains`: the count posted per call is unchanged | `1c8353e11366` |
+| `Release` | `net_rx_release` | the buffer returns Free and refill may be deferred | nothing | `c7baf0589e83` |
+| `Reply`, `TxComplete` | `net_rx_send_reply`, `net_tx_complete`, `virtio_net_tx_finish`, `gem_tx_finish` | the turn's packet goes out as TX; completion returns it Free, or Kept for a kept send, and may defer refill | the transmit itself and its bounded wait -- modelled elsewhere: `FixedDmaOwnership.Timeout` | `f289ae5be665` |
+| `SendBuilt` | `net_transmit_ready` | a kernel-built frame takes a Free buffer; completion may defer refill | the payload copy -- irrelevant to `RingNeverDrains`: it does not move a buffer | `1eaea3a9a1bc` |
 | `SendKept` | `net_transmit_keep`, `net_tx_keep_slot`, `virtio_pkt_out_count`, `gem_pkt_out_count` | keeping is refused when fewer than RESERVE buffers would stay outside the kept set; a refused keep is a `SendBuilt` | the slot choice and the length record -- irrelevant to `TxNeverStarves`: only how many buffers are kept matters | `7bf23ee7f243` |
 | `Resend` | `net_packet_kept_resend`, `net_packet_kept_claim` | a kept buffer goes out again and its completion parks it kept | the claim's slot lookup -- irrelevant to `TxNeverStarves`: it does not move a buffer between sets | `e6153338ab3d` |
 | `FreeKept` | `net_packet_free`, `net_packet_kept_claim` | a kept buffer returns Free off-turn, the ring untouched | the claim's slot lookup -- irrelevant to `RingNeverDrains`: it does not move a buffer between sets | `2519f80afe72` |
+
+The pending IRQ flag and retry opportunity are outside these buffer-count
+properties. The closed source policy and existing native/DMA QEMU contention
+oracles check that Busy preserves the indication; the flag-clear deferred
+refill oracle checks the existing timer/caller retry contract. Those checks
+do not assert a lock fairness or unconditional progress bound.
 
 An unconfirmed transmit is not modelled: it disables both queues
 (`FixedDmaOwnership.Timeout`), after which no RX is expected and no frame is
@@ -1329,7 +1339,7 @@ the scan has read the slot.
 | `KeepDecide` | `net_tx_keep_slot`, `net_transmit_keep` | a Free buffer sent and kept when the count leaves the reserve, else sent plainly | the kept length record -- irrelevant to `RingNeverDrains`: it does not move a buffer | `f6a017309a7b` |
 | `Resend` | `net_packet_kept_resend` | a Kept buffer sent again by the holder, Kept at completion | nothing | `75a9d5b7f3cf` |
 | `Claim`, `FreeKept` | `net_packet_kept_claim`, `net_packet_free` | off-turn, under the slot's lock only, interleaving with every holder step | nothing | `48ff6b6bd7e3` |
-| `Acquire`, `Poll`, `Release`, `Reply`, `SendBuilt`, `TxComplete` | `net_rx_acquire`, `net_rx_release`, `net_rx_send_reply`, `net_transmit_ready`, `net_tx_complete` | as in PacketReserve.tla, by slot | the transmit's wait -- modelled elsewhere: `FixedDmaOwnership.Timeout` | `0ab0cd5525e3` |
+| `Acquire`, `Poll`, `Release`, `Reply`, `SendBuilt`, `TxComplete` | `net_rx_acquire`, `virtio_net_rx_acquire_locked`, `virtio_net_rx_refill`, `virtio_net_rx_refill_locked`, `net_rx_release`, `net_rx_send_reply`, `net_transmit_ready`, `net_tx_complete` | as in PacketReserve.tla, by slot, including optional deferred refill | the transmit's wait -- modelled elsewhere: `FixedDmaOwnership.Timeout` | `264e2d341c7b` |
 
 Variants: `fixed` (5 buffers, 3 descriptors, RESERVE 4) and `gem` (4, 1,
 RESERVE 2) pass. The state space is per slot, so these pools are smaller

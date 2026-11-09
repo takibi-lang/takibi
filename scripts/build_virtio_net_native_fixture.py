@@ -31,6 +31,9 @@ fn virtio_net_shadows(r: borrow NetRxCanAcquire[net]) -> VirtioNetShadows {
     };
     return v;
 }
+fn virtio_net_rx_slot(r: borrow NetRxCanAcquire[net], index: {0..<8 as usize}) -> usize {
+    return r.rx_desc_pkt.slot[index] as usize;
+}
 fn virtio_net_packet_shadows(p: borrow NetPacket[pb, po, net]) -> VirtioNetShadows {
     return virtio_net_shadows(p.ready);
 }

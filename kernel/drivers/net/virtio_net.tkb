@@ -44,6 +44,7 @@ use "kernel/drivers/virtio_ring.tkb";
 use "kernel/drivers/net/virtio_net_tx_wait.tkb";
 use "kernel/drivers/net/virtio_net_tx_dma.tkb";
 use "kernel/lib/occupancy.tkb";
+use "kernel/drivers/block/device_lock.tkb";
 
 
 
@@ -215,7 +216,10 @@ const RX_BUF_SIZE_USIZE: usize = 1536;
 const VIRTIO_NET_HDR_LEN: usize = 12;
 
 // The RX (0) and TX (1) queues.
-let mut virtio_net_queues: [VirtqNetQueue; 2] align(64);
+struct VirtioNetQueueStorage {
+    private queues: [VirtqNetQueue; 2] guarded_by(block_device_lock);
+}
+private let mut virtio_net_queues: VirtioNetQueueStorage align(64);
 // The used rings' addresses as programmed (RX, TX), for DDB and the native
 // fixture's stand-in device.
 let mut virtio_net_used_addr: [usize; 2];
@@ -291,14 +295,24 @@ fn virtio_negotiate(features_low: u32) -> bool {
 
 // Queue `queue_idx` at its descriptor/avail array and its used ring; false
 // when the device offers fewer than QNUM entries or the ring is not Ready.
-fn virtio_queue_setup(queue: {0..<2 as usize}, used_queue: usize) -> bool !{unsafe} {
+private fn virtio_queue_setup(guard: borrow BlockDeviceGuard[&block_device_lock], queue: {0..<2 as usize}, used_queue: usize) -> bool !{unsafe} {
     virtio_net_regs.queue_sel = queue as i32;
     if (virtio_net_regs.queue_num_max < QNUM as u32) { return false; }
     virtio_net_regs.queue_num = QNUM as i32;
     let used: usize = virtio_used_go(used_queue);
     if (used == 0) { return false; }
-    let desc: usize = &virtio_net_queues[queue].desc as usize;
-    let avail: usize = &virtio_net_queues[queue].avail as usize;
+    static_assert(offsetof(VirtioNetQueueStorage, queues) == 0,
+                  "queue array must retain its device address");
+    static_assert(sizeof(VirtioNetQueueStorage) == 512,
+                  "two queues must retain their fixed device extent");
+    static_assert(sizeof(VirtqNetQueue) == 256,
+                  "queue stride must retain its fixed device extent");
+    static_assert(offsetof(VirtqNetQueue, desc) == 0,
+                  "descriptor table must start at the queue base");
+    static_assert(offsetof(VirtqNetQueue, avail) == 128,
+                  "avail ring must follow eight descriptors");
+    let desc: usize = (&virtio_net_queues as usize) + queue * sizeof(VirtqNetQueue) + offsetof(VirtqNetQueue, desc);
+    let avail: usize = (&virtio_net_queues as usize) + queue * sizeof(VirtqNetQueue) + offsetof(VirtqNetQueue, avail);
     virtio_net_regs.queue_desc_low = (desc & 0xFFFFFFFF) as u32;
     virtio_net_regs.queue_desc_high = (desc >> 32) as u32;
     virtio_net_regs.queue_driver_low = (avail & 0xFFFFFFFF) as u32;
@@ -319,18 +333,18 @@ fn virtio_notify(queue_idx: i32) {
     virtio_net_regs.queue_notify = queue_idx;
 }
 
-fn desc_set(queue: {0..<2 as usize}, i: {0..<8 as usize}, addr: usize, len: isize, flags: i32) {
-    virtio_net_queues[queue].desc[i].addr = addr;
-    virtio_net_queues[queue].desc[i].len = len as u32;
-    virtio_net_queues[queue].desc[i].flags = flags as u16;
+fn desc_set(guard: borrow BlockDeviceGuard[&block_device_lock], queue: {0..<2 as usize}, i: {0..<8 as usize}, addr: usize, len: isize, flags: i32) {
+    guarded_ref(guard, virtio_net_queues.queues)[queue].desc[i].addr = addr;
+    guarded_ref(guard, virtio_net_queues.queues)[queue].desc[i].len = len as u32;
+    guarded_ref(guard, virtio_net_queues.queues)[queue].desc[i].flags = flags as u16;
 }
 
-fn avail_ring_set(queue: {0..<2 as usize}, slot: {0..<8 as usize}, desc_idx: {0..<8 as usize}) {
-    virtio_net_queues[queue].avail.ring[slot] = desc_idx as u16;
+fn avail_ring_set(guard: borrow BlockDeviceGuard[&block_device_lock], queue: {0..<2 as usize}, slot: {0..<8 as usize}, desc_idx: {0..<8 as usize}) {
+    guarded_ref(guard, virtio_net_queues.queues)[queue].avail.ring[slot] = desc_idx as u16;
 }
 
-fn avail_publish(queue: {0..<2 as usize}, new_idx: VirtioRingIndex) {
-    virtio_net_queues[queue].avail.idx = new_idx;
+fn avail_publish(guard: borrow BlockDeviceGuard[&block_device_lock], queue: {0..<2 as usize}, new_idx: VirtioRingIndex) {
+    guarded_ref(guard, virtio_net_queues.queues)[queue].avail.idx = new_idx;
     dma_publish();
 }
 
@@ -357,15 +371,17 @@ fn net_init() -> NetInitResult {
         return NetInitResult::Failed;
     }
 
+    let guard = block_device_take_unaccounted();
     atomic_word_store(&virtio_rx_irq_flag, 0);
     virtio_net_gic_enable();
 
     if (virtio_net_regs.version != VIRTIO_MMIO_VERSION_MODERN ||
         virtio_pkts_claim() == false ||
         virtio_negotiate(VIRTIO_NET_F_MAC) == false ||
-        virtio_queue_setup(0, VIRTIO_USED_NET_RX) == false ||
-        virtio_queue_setup(1, VIRTIO_USED_NET_TX) == false) {
+        virtio_queue_setup(guard, 0, VIRTIO_USED_NET_RX) == false ||
+        virtio_queue_setup(guard, 1, VIRTIO_USED_NET_TX) == false) {
         virtio_net_regs.status = VIRTIO_STATUS_FAILED;
+        block_device_give(guard);
         init_once_cancel(&net_init_once, init_guard);
         return NetInitResult::Failed;
     }
@@ -379,18 +395,20 @@ fn net_init() -> NetInitResult {
     atomic_word_store(&virtio_net_rx_used_published, 0);
     for i: usize in 0..<8 {
         let index: {0..<8 as usize} = i % 8;
-        if (virtio_net_rx_post(r, index) == false) {
+        if (virtio_net_rx_post(guard, r, index) == false) {
+            block_device_give(guard);
             init_once_cancel(&net_init_once, init_guard);
             net_rx_capability_drop(r);
             return NetInitResult::Failed;
         }
-        avail_ring_set(0, i, i);
+        avail_ring_set(guard, 0, i, i);
     }
     r.rx_avail_idx = (QNUM as u16) as VirtioRingIndex;
-    avail_publish(0, r.rx_avail_idx);
+    avail_publish(guard, 0, r.rx_avail_idx);
     virtio_notify(0);
 
     atomic_word_store(&virtio_net_ready, 1);
+    block_device_give(guard);
     init_once_commit(&net_init_once, init_guard);
     return NetInitResult::Ready(r);
 }
@@ -415,7 +433,7 @@ fn kernel_net_rx_frame_pending(stopped: borrow MachineStopped[&kernel_world_stop
     return NetPendingState::Yes;
 }
 
-// GitHub issue #237 M4: exactly ONE interrupt_wait() call, not a retry
+// GitHub issue #237 M4: at most ONE interrupt_wait() call, not a retry
 // loop -- unlike examples/common_qemu/virtio_mmio.tkb's own net_rx_wait()
 // (which this was first copied from), this driver's callers
 // (kernel/net/{arp,icmp,tcp}.tkb) run their own CNTPCT-based deadline
@@ -433,11 +451,23 @@ fn net_rx_wait() !{may_block} {
     workload_profile_interrupt_wait();
 }
 
+// Busy preserves the pending flag, shadows and pool before any refill.
+// The caller retains its capability and retries under its existing deadline.
 fn net_rx_acquire(ready: sink NetRxCanAcquire[net]) -> NetRxAcquire[net] {
+    let guard = match block_device_try_take() {
+        BlockDeviceTry::Busy => { return NetRxAcquire::None(ready); }
+        BlockDeviceTry::Taken(taken) => { taken }
+    };
+    let result = virtio_net_rx_acquire_locked(guard, ready);
+    block_device_give(guard);
+    return result;
+}
+
+private fn virtio_net_rx_acquire_locked(guard: borrow BlockDeviceGuard[&block_device_lock], ready: sink NetRxCanAcquire[net]) -> NetRxAcquire[net] {
     let mut r = ready;
     if (atomic_word_load(&virtio_net_ready) == 0 || atomic_word_load(&virtio_rx_irq_flag) == 0) {
         // No frame, but buffers freed off-turn go back to the ring here.
-        virtio_net_rx_refill(r);
+        virtio_net_rx_refill_locked(guard, r);
         return NetRxAcquire::None(r);
     }
     atomic_word_store(&virtio_rx_irq_flag, 0);
@@ -445,7 +475,7 @@ fn net_rx_acquire(ready: sink NetRxCanAcquire[net]) -> NetRxAcquire[net] {
         VirtioNetUsed::None => { return NetRxAcquire::None(r); }
     };
     if (r.rx_used_seen == ring.idx) {
-        virtio_net_rx_refill(r);
+        virtio_net_rx_refill_locked(guard, r);
         return NetRxAcquire::None(r);
     }
     atomic_word_store(&virtio_rx_irq_flag, 1); // drain coalesced used-ring entries
@@ -484,7 +514,7 @@ fn net_rx_acquire(ready: sink NetRxCanAcquire[net]) -> NetRxAcquire[net] {
             // lets go of this one.
             r.rx_used_seen = virtio_ring_index_next(r.rx_used_seen);
             atomic_word_store(&virtio_net_rx_used_published, (r.rx_used_seen as u16) as usize);
-            virtio_net_rx_refill(r);
+            virtio_net_rx_refill_locked(guard, r);
             return NetRxAcquire::Acquired(net_rx_packet(safe_len, pool_slot, filled, r));
         }
     }
@@ -494,20 +524,31 @@ fn net_rx_acquire(ready: sink NetRxCanAcquire[net]) -> NetRxAcquire[net] {
 // the avail ring. A descriptor stays empty while the pool has no Free
 // buffer (every one is with the device or held by the stack); the next
 // release or transmit completion refills it.
+// A busy lock defers queue publication, not pool ownership. Callers retry
+// from the existing RX poll/timer path; no extra device IRQ is required.
 private fn virtio_net_rx_refill(r: borrow mut NetRxCanAcquire[net]) {
+    let guard = match block_device_try_take() {
+        BlockDeviceTry::Busy => { return; }
+        BlockDeviceTry::Taken(taken) => { taken }
+    };
+    virtio_net_rx_refill_locked(guard, r);
+    block_device_give(guard);
+}
+
+private fn virtio_net_rx_refill_locked(guard: borrow BlockDeviceGuard[&block_device_lock], r: borrow mut NetRxCanAcquire[net]) {
     if (atomic_word_load(&virtio_net_ready) == 0) { return; }
     let mut posted: bool = false;
     for i: usize in 0..<8 {
         let index: {0..<8 as usize} = i % 8;
-        if (r.rx_desc_pkt.slot[index] as usize == VIRTIO_PKT_NONE && virtio_net_rx_post(r, index)) {
+        if (r.rx_desc_pkt.slot[index] as usize == VIRTIO_PKT_NONE && virtio_net_rx_post(guard, r, index)) {
             let rx_slot: {0..<8 as usize} = ((r.rx_avail_idx as u16) as usize) % 8;
-            avail_ring_set(0, rx_slot, index);
+            avail_ring_set(guard, 0, rx_slot, index);
             r.rx_avail_idx = virtio_ring_index_next(r.rx_avail_idx);
             posted = true;
         }
     }
     if (posted) {
-        avail_publish(0, r.rx_avail_idx);
+        avail_publish(guard, 0, r.rx_avail_idx);
         virtio_notify(0);
     }
 }
@@ -515,7 +556,7 @@ private fn virtio_net_rx_refill(r: borrow mut NetRxCanAcquire[net]) {
 // Post a Free pool buffer to RX descriptor `index` (its rx edge): the
 // descriptor takes the address from the RxPosted owner's span. False when
 // no buffer is free.
-private fn virtio_net_rx_post(r: borrow mut NetRxCanAcquire[net],
+private fn virtio_net_rx_post(guard: borrow BlockDeviceGuard[&block_device_lock], r: borrow mut NetRxCanAcquire[net],
                              index: {0..<8 as usize}) -> bool {
     let pool_slot: usize = virtio_pkt_free_index();
     let Place::Full(held) = virtio_pkt_take(pool_slot) else {
@@ -534,7 +575,7 @@ private fn virtio_net_rx_post(r: borrow mut NetRxCanAcquire[net],
             virtio_pkt_park(pool_slot, VirtioPktHeld::RxPosted(posted));
         }
     }
-    desc_set(0, index, address, RX_BUF_SIZE, VIRTQ_DESC_F_WRITE);
+    desc_set(guard, 0, index, address, RX_BUF_SIZE, VIRTQ_DESC_F_WRITE);
     r.rx_desc_pkt.slot[index] = min(pool_slot, VIRTIO_PKT_NONE) as u8;
     return true;
 }
@@ -811,12 +852,14 @@ private fn virtio_net_send_built(r: borrow mut NetRxCanAcquire[net], slot: usize
 // The doorbell for one transmit: descriptor 0 at the address its TxPosted
 // owner's span gave (virtio_pkt_tx_address).
 fn virtio_net_tx_ring(r: borrow mut NetRxCanAcquire[net], address: usize, length: usize) {
-    desc_set(1, 0, address, length as isize, 0);
-    avail_ring_set(1, 0, 0);
+    let guard = block_device_take_unaccounted();
+    desc_set(guard, 1, 0, address, length as isize, 0);
+    avail_ring_set(guard, 1, 0, 0);
     r.tx_avail_idx = virtio_ring_index_next(r.tx_avail_idx);
-    avail_publish(1, r.tx_avail_idx);
+    avail_publish(guard, 1, r.tx_avail_idx);
     atomic_word_fetch_add(&virtio_net_tx_submissions, 1);
     virtio_notify(1);
+    block_device_give(guard);
 }
 
 // The MAC is the first six configuration bytes, read as two little-endian

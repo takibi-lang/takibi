@@ -65,6 +65,7 @@ fn packet_tx_used(p: borrow NetPacket[pb, po, net]) -> VirtioRingIndex {
 }
 
 fn workload_profile_interrupt_wait() !{may_block} {
+    check(task_mutex_is_held(&block_device_lock) == false, "completion wait retained queue guard");
     waits = waits + 1;
     // An old unbounded wait fails quickly rather than hanging the host suite.
     check(waits < 40000, "wait did not return after the elapsed deadline");
@@ -110,6 +111,49 @@ fn receive_id(ready: sink NetRxCanAcquire[net], id: u32) -> NetRxAcquire[net] !{
     return net_rx_acquire(ready);
 }
 
+// A real held device guard must cause one-shot RX refusal without
+// changing the capability, pending indication or pool ownership. The same
+// used entry must drain after release, without another device event.
+fn queue_contention_case(ready: sink NetRxCanAcquire[net]) -> NetRxCanAcquire[net] !{unsafe, may_block} {
+    let mut before: VirtioNetShadows = virtio_net_shadows(ready);
+    let free_before: usize = virtio_pkt_free_index();
+    let out_before: usize = virtio_pkt_out_count();
+    let mut slots: [usize; 8];
+    for i: usize in 0..<8 { slots[i] = virtio_net_rx_slot(ready, i); }
+    let guard = block_device_take_unaccounted();
+    let ready = match receive(ready) {
+        NetRxAcquire::None(cap) => { cap }
+        NetRxAcquire::Acquired(frame) => {
+            let cap = net_rx_release(frame);
+            check(false, "RX progressed while the real guard was held");
+            cap
+        }
+    };
+    let mut after: VirtioNetShadows = virtio_net_shadows(ready);
+    check(before.rx_used_seen == after.rx_used_seen && before.tx_used_seen == after.tx_used_seen &&
+          before.rx_avail_idx == after.rx_avail_idx && before.tx_avail_idx == after.tx_avail_idx,
+          "Busy changed queue shadows");
+    for i: usize in 0..<8 {
+        check(slots[i] == virtio_net_rx_slot(ready, i), "Busy changed descriptor ownership");
+    }
+    check(free_before == virtio_pkt_free_index() && out_before == virtio_pkt_out_count(),
+          "Busy changed packet pool ownership");
+    check(atomic_word_load(&virtio_rx_irq_flag) == 1, "Busy lost pending RX indication");
+    let waits_before: usize = waits;
+    net_rx_wait();
+    check(waits == waits_before, "pending RX slept after Busy");
+    block_device_give(guard);
+    let result = match net_rx_acquire(ready) {
+        NetRxAcquire::None(cap) => { check(false, "release did not drain the same entry"); cap }
+        NetRxAcquire::Acquired(frame) => {
+            let cap = net_rx_release(frame);
+            check(rx_used(cap) == virtio_ring_index_next(before.rx_used_seen), "wrong entry drained");
+            cap
+        }
+    };
+    return result;
+}
+
 // #740: the boundary where the pool is empty at acquire. The fixture takes
 // every Free buffer out of the pool, so the acquire's refill finds none and
 // descriptor 0 stays empty; the release of the packet refills it.
@@ -136,6 +180,62 @@ fn drain_pool_case(ready: sink NetRxCanAcquire[net]) -> NetRxCanAcquire[net] !{u
     let again = net_rx_release(packet);
     check(rx_avail(again) == virtio_ring_index_next(before),
           "the next release refills the empty RX descriptor");
+    virtio_pkt_park(a, held_a);
+    virtio_pkt_park(b, held_b);
+    return again;
+}
+
+
+// Deferred refill can retry after the existing timer-style wake without
+// another device completion. Progress still requires a retry and a free lock.
+fn drain_pool_busy_release_case(ready: sink NetRxCanAcquire[net]) -> NetRxCanAcquire[net] !{unsafe, may_block} {
+    let a: usize = virtio_pkt_free_index();
+    let Place::Full(held_a) = virtio_pkt_take(a) else {
+        Place::Empty => { check(false, "no first Free buffer"); return ready; }
+    };
+    let b: usize = virtio_pkt_free_index();
+    let Place::Full(held_b) = virtio_pkt_take(b) else {
+        Place::Empty => { check(false, "no second Free buffer"); virtio_pkt_park(a, held_a); return ready; }
+    };
+    check(virtio_pkt_free_index() == VIRTIO_PKT_NONE, "the fixture emptied the pool");
+    let before: VirtioRingIndex = rx_avail(ready);
+    let NetRxAcquire::Acquired(packet) = receive(ready) else {
+        NetRxAcquire::None(cap) => {
+            check(false, "oracle RX frame was refused");
+            virtio_pkt_park(a, held_a);
+            virtio_pkt_park(b, held_b);
+            return cap;
+        }
+    };
+    check(packet_rx_avail(packet) == before, "an empty pool leaves the RX descriptor empty");
+    // Successful acquire currently leaves the flag set. Clear it here
+    // deliberately to exercise the conservative no-more-device-IRQ case.
+    atomic_word_store(&virtio_rx_irq_flag, 0);
+    let guard = block_device_take_unaccounted();
+    let again = net_rx_release(packet);
+    check(rx_avail(again) == before && virtio_net_rx_slot(again, 0) == VIRTIO_PKT_NONE,
+          "Busy release changed the empty RX descriptor");
+    check(virtio_pkt_free_index() != VIRTIO_PKT_NONE, "release did not return the Free buffer");
+    check(atomic_word_load(&virtio_rx_irq_flag) == 0, "release invented an IRQ indication");
+    let used_before: VirtioRingIndex = rx_used(again);
+    block_device_give(guard);
+    done_at = -1;
+    wake_ticks = read_cntfrq() / 64;
+    let waited_before: usize = waits;
+    net_rx_wait();
+    check(waits == waited_before + 1 && atomic_word_load(&virtio_rx_irq_flag) == 0,
+          "no-IRQ refill retry must return on one timer-style wake");
+    let again = match net_rx_acquire(again) {
+        NetRxAcquire::None(cap) => { cap }
+        NetRxAcquire::Acquired(frame) => {
+            let cap = net_rx_release(frame);
+            check(false, "refill retry invented another used entry");
+            cap
+        }
+    };
+    check(rx_avail(again) == virtio_ring_index_next(before) &&
+          virtio_net_rx_slot(again, 0) != VIRTIO_PKT_NONE && rx_used(again) == used_before,
+          "timer-style retry did not repost the empty descriptor");
     virtio_pkt_park(a, held_a);
     virtio_pkt_park(b, held_b);
     return again;
@@ -276,6 +376,7 @@ fn run_driver_case(reply_timeout: bool) !{may_block} {
 }
 
 fn run_initialized_case(ready: sink NetRxCanAcquire[net], reply_timeout: bool) !{may_block, unsafe} {
+    let ready = queue_contention_case(ready);
 
     let seen0: VirtioRingIndex = tx_used_shadow(ready);
     reset_clock(-1, 100000, seen0);
@@ -313,6 +414,7 @@ fn run_initialized_case(ready: sink NetRxCanAcquire[net], reply_timeout: bool) !
     check(rx_avail(ready) == virtio_ring_index_next(rx_avail_held),
           "release of a held packet reposts no descriptor twice");
     let ready = drain_pool_case(ready);
+    let ready = drain_pool_busy_release_case(ready);
     let ready = drain_pool_tx_case(ready);
     let ready = tx_keep_case(ready);
     reset_clock(500, 100, tx_used_shadow(ready));

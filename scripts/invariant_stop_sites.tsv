@@ -43,8 +43,8 @@ kernel/drivers/net/rp1_gem.tkb	gem_tx_unconfirmed	unmodelled	1	-	#1031	a halted 
 kernel/drivers/net/rp1_gem_desc.tkb	gem_rx_ring_lost	ladder	1	-	#131	a displaced RX ring owner: a slot never holds two owners
 kernel/drivers/net/rp1_gem_desc.tkb	gem_tx_ring_lost	ladder	1	-	#131	a displaced TX ring owner: a slot never holds two owners
 kernel/drivers/net/rp1_gem_desc.tkb	gem_pkt_lost	ladder	1	-	#131	a displaced or misplaced packet owner: a slot never holds two owners
-kernel/drivers/net/virtio_net.tkb	net_rx_acquire	ladder	1	handler	#131	packet pool slot empty on take; NetRxAcquire::None follows the stop
-kernel/drivers/net/virtio_net.tkb	net_rx_acquire	unmodelled	1	handler	#1031	a used entry naming a descriptor whose buffer the protocol calls empty: the device's answer; NetRxAcquire::None follows
+kernel/drivers/net/virtio_net.tkb	virtio_net_rx_acquire_locked	ladder	1	handler	#131	packet pool slot empty on take; NetRxAcquire::None follows the stop
+kernel/drivers/net/virtio_net.tkb	virtio_net_rx_acquire_locked	unmodelled	1	handler	#1031	a used entry naming a descriptor whose buffer the protocol calls empty: the device's answer; NetRxAcquire::None follows
 kernel/drivers/net/virtio_net.tkb	virtio_net_tx_finish	ladder	1	handler	#740	TX packet slot empty after the completion wait; returns false after the stop
 kernel/drivers/net/virtio_net_tx_dma.tkb	virtio_pkt_lost	ladder	1	-	#131	a displaced or misplaced packet owner: a slot never holds two owners
 kernel/drivers/virtio_used.tkb	virtio_used_lost	ladder	1	-	#131	a displaced used-ring owner: a slot never holds two owners

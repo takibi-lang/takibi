@@ -921,8 +921,8 @@ addresses. The closed source policy and resolved caller map confine those
 addresses to descriptor/driver low/high MMIO programming, including runtime
 reinitialization after confirmed reset. Container copies and other pointer
 or integer escapes are rejected by the source policy; the language's
-general guarded_ref address rejection remains unchanged. The network
-queue retains its current capability-based boundary.
+general guarded_ref address rejection remains unchanged. The network queue has its own guarded CPU-access boundary while retaining
+its indexed linear capability and device ownership protocol.
 
 ### Virtio block queue milestone space review (2026-11-09)
 
@@ -963,3 +963,50 @@ text 815420 -> 815540 bytes (+120), RPi5 text 4200424 -> 4200512 bytes
 the one lock remains 8 bytes and the linear guard remains one word. This
 component changes no allocation capacity or retention workload. The full
 net queue consumer milestone requires its own final measurement.
+
+### Virtio net queue guarded CPU access
+
+The RX/TX descriptor and avail arrays are one private guarded field in an
+offset-zero, 512-byte container. Leaf accesses borrow the real shared
+BlockDeviceGuard. Setup alone exports the two typed layout-derived address
+forms for either queue, confined by the closed source policy to low/high
+MMIO sinks. The resolved caller map restricts setup to net initialization.
+The indexed linear network capability, packet owners and separate used-ring
+protocol remain necessary; CPU exclusion is not device quiescence.
+
+RX makes one real try before flag clearing, shadow/pool updates or refill.
+Busy returns the original capability. A release may return its packet to
+the pool while deferring refill when the lock is busy. Successful acquire
+currently leaves the pending flag set, preserving immediate retry on that
+path. With the flag clear, net_rx_wait makes one interrupt wait; the existing
+per-core timer rearms at 64 Hz and supplies a retry opportunity without a
+new device IRQ. Progress requires the caller to retry and the lock to become
+available; it is not a fairness or latency bound. Native coverage includes
+that conservative flag-clear/empty-descriptor case. No pending state is added.
+TX holds the guard only across descriptor/avail publication and notification,
+and releases it before completion waits. Native waits assert the real mutex
+is free. The isolated DMA QEMU case and its Busy-clear control check pending
+ownership and drain of the same used entry after release. IRQ delivery and
+cache coherence remain separate from these deterministic state oracles.
+
+### Virtio net guarded-queue milestone space review (2026-11-09)
+
+The full net unit, including the shared real guard provider, is measured
+against the archived published e15c4f54 kernels. QEMU text grows
+815420 -> 815980 bytes (+560); data/BSS remain 4616/1302528 bytes.
+RPi5 text grows 4200424 -> 4200512 bytes (+88), from the shared provider;
+data/BSS remain 5592/1925120 bytes. virtio_net_queues is not linked on
+RPi5 in either image. QEMU's container remains 512 bytes aligned to 64,
+with queues at offset 0, stride 256, descriptors at 0 and avail at 128.
+The shared lock remains 8 bytes. usable_ram_start stays 0x40208000 and
+0x7e0000. Both baseline ELF hashes match the archived source-head manifest.
+
+The workload is the existing bounded net boot/packet/timeout/retransmit
+flow plus real-lock contention, pending-entry retention and deferred refill
+oracles in the existing native/DMA lanes. The fixture's simulated device
+inputs are outside the production storage comparison. No pool capacity,
+allocation, retention or production image reservation grows. This milestone
+measures fixed storage and linked code, without a new physical timing/cache
+or allocator-occupancy claim. The small code cost is adopted for the explicit
+authority and retry boundary. Measure again when queue capacity, DMA ownership,
+retention or the lock/wait backend changes.

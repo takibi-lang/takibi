@@ -3,7 +3,7 @@
 // memory.tkb; networking never fabricates an accounting BlockSlot.
 //
 // Current limitations (2026-11-09): this is the existing unmasked,
-// preemptible TaskMutex backend, not the pending sleeping Mutex design.
+// preemptible TaskMutex backend; sleeping Mutex work is a separate unit.
 // Blocking take is may_block; try takes one attempt and returns Busy with
 // no authority. Callers release before completion waits. The lock is
 // non-recursive; the existing rank-30/IRQ rules remain in force. The mint

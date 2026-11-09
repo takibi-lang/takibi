@@ -869,3 +869,13 @@ bounded repository enforcement, not general integer noninterference.
 Trusted: fixed physical mapping and offset-zero layout, hardware retaining
 the programmed addresses, and the existing DMA ownership/barrier protocol.
 A CPU lock does not prove device quiescence or whole-ring ownership.
+
+The isolated DMA fixture also simulates the net device's RX used-entry
+publication: three explicit volatile stores of id, length and used index.
+These test inputs exercise the actual driver with the actual shared lock
+held, then verify preserved pending ownership and drain after release.
+The fixture runs only through the isolated DMA overlay entry, with IRQs
+masked and no peer CPU; it is absent from both production entry graphs.
+Its per-file IO budget records those exact stores, without changing a
+production raw budget or treating the file as exempt. This is CPU state
+contract evidence, not physical IRQ delivery or cache-coherence evidence.
