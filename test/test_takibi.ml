@@ -30495,6 +30495,66 @@ let private_default_construction_tests =
          "consumer735.tkb", "fn bad735() { let mut frame: Frame735[3] = { 1 }; }"]);
   ]
 
+(* Struct storage is not an integer address, even inside unsafe. *)
+let struct_pointer_cast_tests =
+  let globals = atomic_word_fixture ^
+    "struct CastPlain1488 { value: usize; }
+" ^
+    "let mut words1488: [AtomicWord; 2];
+" ^
+    "let mut rows1488: [CastPlain1488; 2];
+" in
+  let bad title body = Alcotest.test_case title `Quick
+      (expect_type_error "cannot cast struct value" (globals ^ body)) in
+  [
+    bad "AtomicWord element is not a raw pointer"
+      "fn bad1488() -> *u8 { return words1488[0] as *u8; }";
+    bad "unsafe does not turn AtomicWord into an address"
+      "fn bad1488() -> *u8 !{unsafe} { return unsafe { words1488[0] as *u8 }; }";
+    bad "plain struct element is not a raw pointer"
+      "fn bad1488() -> *u8 { return rows1488[0] as *u8; }";
+    bad "unsafe does not turn plain struct into an address"
+      "fn bad1488() -> *u8 !{unsafe} { return unsafe { rows1488[0] as *u8 }; }";
+    bad "AtomicWord cannot supply an aligned raw pointer"
+      "fn bad1488() -> *align(8) u8 !{unsafe} { return unsafe { words1488[0] as *align(8) u8 }; }";
+    bad "plain struct cannot supply an aligned raw pointer"
+      "fn bad1488() -> *align(8) u8 !{unsafe} { return unsafe { rows1488[0] as *align(8) u8 }; }";
+    bad "plain struct parameter is not an address"
+      "fn bad1488(row: CastPlain1488) -> *u8 { return row as *u8; }";
+    Alcotest.test_case "struct cast diagnostic locates the source expression" `Quick
+      (expect_type_error_at 5 12 "cannot cast struct value" {ess|
+struct CastLocated1488 { value: usize; }
+let mut rows1488: [CastLocated1488; 1];
+fn bad1488() -> *u8 {
+    return rows1488[0] as *u8;
+}
+|ess});
+    Alcotest.test_case "explicit atomic load and cell address codegen" `Quick
+      (expect_codegen_ok (globals ^ {|
+        fn loaded1488() -> *u8 !{unsafe} { let address: usize = atomic_word_load(&words1488[0]); return unsafe { address as *u8 }; }
+        fn cell1488() -> *AtomicWord { return &words1488[0]; }
+        fn cell_bytes1488() -> *u8 { return (&words1488[0]) as *u8; }
+        fn plain1488() -> *CastPlain1488 { return &rows1488[0]; }
+      |}));
+    Alcotest.test_case "struct pointers references arrays slices and enums still codegen" `Quick
+      (expect_codegen_ok (globals ^ {|
+        struct packed CastPacked1488 { value: u32; }
+        enum CastCode1488: u8 { One = 1; }
+        fn pointer1488(p: *CastPlain1488) -> *u8 { return p as *u8; }
+        fn aligned1488(p: *align(8) CastPlain1488) -> *u8 { return p as *u8; }
+        fn shared1488(r: &CastPlain1488) -> *CastPlain1488 { return r as *CastPlain1488; }
+        fn exclusive1488(r: &mut CastPlain1488) -> *CastPlain1488 { return r as *CastPlain1488; }
+        fn array1488() -> *CastPlain1488 { return rows1488 as *CastPlain1488; }
+        fn overlay1488(s: [u8; 4..]) -> *CastPacked1488 { return s as *CastPacked1488; }
+        fn enum1488(code: CastCode1488) -> *u8 !{unsafe} { return unsafe { (code as usize) as *u8 }; }
+      |}));
+    Alcotest.test_case "enum keeps its own direct-pointer diagnostic" `Quick
+      (expect_type_error "cannot cast enum" {|
+        enum CastCode1488: u8 { One = 1; }
+        fn bad1488(code: CastCode1488) -> *u8 { return code as *u8; }
+      |});
+  ]
+
 (* Literal storage must retain readonly access through ordinary slice paths. *)
 let readonly_literal_tests =
   let bad title body = Alcotest.test_case title `Quick
@@ -32208,6 +32268,7 @@ fn pick(s: Slot) -> usize { if (s == 0) { return 1; } return s.word; }");
 
 let named_groups_unisolated = [
   "operator-kinds", operator_kind_tests;
+  "struct-pointer-casts", struct_pointer_cast_tests;
   "readonly-literals", readonly_literal_tests;
   "private-default-construction", private_default_construction_tests;
   "cpu-authority-initialization", cpu_authority_initialization_tests;

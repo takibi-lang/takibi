@@ -443,7 +443,12 @@ parameter value, or top-level declaration name.
   is wanted there.
   Pointer-to-fixed-width-integer casts (`*T as i32`) are a compile error;
   only `*T as usize` and `*T as *U` are allowed (`(ptr as usize) as i32`
-  makes the truncation explicit).
+  makes the truncation explicit). An ordinary struct value, including an
+  `AtomicWord` cell value, cannot be cast to a raw or aligned raw pointer,
+  even inside `unsafe`. Take the storage address when that is intended, or
+  explicitly load an integer value and use the existing integer-address
+  conversion rules. Pointer/reference-to-struct and array/slice conversions
+  remain separate operations; a cast does not implicitly unwrap a cell.
 - `sizeof(T)` -- compile-time size of `T` in bytes, type `usize` (a
   fixed type, not a polymorphic literal -- compare/assign against another
   integer type needs an explicit `as` cast). Reflects `packed`/`align(N)`

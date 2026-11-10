@@ -1,0 +1,142 @@
+{
+  "review": "rejection-only compiler correction; unchanged kernel storage/allocation workload",
+  "published_base": "3e019a8ee35788169cab3f873927ab6a66b85989",
+  "baseline_manifest_sha256": "4369b87e161e531e743ea5a5f1ebf8c5a816db5709c5979675279471552b26c3",
+  "source_sha256": {
+    "lib/type_inf.ml": "4ac63c1ee82dce8ea82d6498a434a3c6beb6a298741a419c619f1327aa08d629",
+    "lib/llvm_gen.ml": "73ceb7f319069f51313cbf3a53d605940db1fdf7f3647d2698418418997264a9",
+    "test/test_takibi.ml": "4cee536a45ee7c6ea5b8ed5c50cdb3b381020a35e13f78fac3e2a11234349b22",
+    "SPEC.md": "979b1176901e19a8a5477b86f91a3f6b73916b7d78664bbec95b6badd07ef8d4"
+  },
+  "artifacts": [
+    {
+      "path": "kernel/build/qemu/kernel.elf",
+      "baseline_sha256": "9ec17808f31ada4b5f5a270d2ee9fbf656839b6ea6b94132c68086a7e97d6060",
+      "candidate_sha256": "9ec17808f31ada4b5f5a270d2ee9fbf656839b6ea6b94132c68086a7e97d6060",
+      "baseline_bytes": 1314888,
+      "candidate_bytes": 1314888,
+      "whole_file_equal": true,
+      "allocated_section_changes": {},
+      "all_section_changes": {}
+    },
+    {
+      "path": "kernel/build/qemu/main.o",
+      "baseline_sha256": "7d558c9c74ed903b8feac657a983d0072fec02e69bdb3c752b34f36f1695acd7",
+      "candidate_sha256": "7d558c9c74ed903b8feac657a983d0072fec02e69bdb3c752b34f36f1695acd7",
+      "baseline_bytes": 3000424,
+      "candidate_bytes": 3000424,
+      "whole_file_equal": true,
+      "allocated_section_changes": {},
+      "all_section_changes": {}
+    },
+    {
+      "path": "kernel/build/rpi5/kernel.elf",
+      "baseline_sha256": "6697a03180178cfa8457a448668fb68b64135fdc0c7414fb79fcbf696dfd50b8",
+      "candidate_sha256": "6697a03180178cfa8457a448668fb68b64135fdc0c7414fb79fcbf696dfd50b8",
+      "baseline_bytes": 4736400,
+      "candidate_bytes": 4736400,
+      "whole_file_equal": true,
+      "allocated_section_changes": {},
+      "all_section_changes": {}
+    },
+    {
+      "path": "kernel/build/rpi5/main.o",
+      "baseline_sha256": "cd2c653434fc8638686fdcae1114551f488977b176eb853139f5a22e87ffa099",
+      "candidate_sha256": "cd2c653434fc8638686fdcae1114551f488977b176eb853139f5a22e87ffa099",
+      "baseline_bytes": 6542008,
+      "candidate_bytes": 6542008,
+      "whole_file_equal": true,
+      "allocated_section_changes": {},
+      "all_section_changes": {}
+    },
+    {
+      "path": "kernel/build/rpi5/main.debug.o",
+      "baseline_sha256": "529220f78f4c7da75ebbb5fe43e8ec265efe58aa468c342749444e16447bdddf",
+      "candidate_sha256": "0a0df7317076aa314cf5f2bc7c10ded94e83e14ce85f973b9fe658ec849af22f",
+      "baseline_bytes": 12105728,
+      "candidate_bytes": 12106656,
+      "whole_file_equal": false,
+      "allocated_section_changes": {},
+      "all_section_changes": {
+        ".rela.debug_info": {
+          "baseline": {
+            "type": 4,
+            "flags": 64,
+            "address": 0,
+            "bytes": 1358328,
+            "alignment": 8,
+            "sha256": "5bc5d82ce9fafc8e4785955a35723339afcb2863b2c0ecf24cf080ff06174c94"
+          },
+          "candidate": {
+            "type": 4,
+            "flags": 64,
+            "address": 0,
+            "bytes": 1358328,
+            "alignment": 8,
+            "sha256": "efc33168855e68d37fef650e1447d214a4c0b2efb48cf01857fbc2fbea322674"
+          }
+        },
+        ".rela.debug_line": {
+          "baseline": {
+            "type": 4,
+            "flags": 64,
+            "address": 0,
+            "bytes": 163008,
+            "alignment": 8,
+            "sha256": "2bc7756c25b66a8a100c00b0e67af3181af77f310102362fa770c7fcb0ef9271"
+          },
+          "candidate": {
+            "type": 4,
+            "flags": 64,
+            "address": 0,
+            "bytes": 163008,
+            "alignment": 8,
+            "sha256": "0dd56cd76208780f72ec3fa457e00c2242d1b0715dea3b5865de902236c3aca7"
+          }
+        },
+        ".debug_line": {
+          "baseline": {
+            "type": 1,
+            "flags": 0,
+            "address": 0,
+            "bytes": 382394,
+            "alignment": 1,
+            "sha256": "5a8d4c4532de43e3d35cb8e5ffc6d588f9f6699e8373878f3ecda66113063a8e"
+          },
+          "candidate": {
+            "type": 1,
+            "flags": 0,
+            "address": 0,
+            "bytes": 383276,
+            "alignment": 1,
+            "sha256": "178bcc75aa4abb11ace4c45887aa27279698b38cf3dc518cfb8d569be8d17bee"
+          }
+        },
+        ".debug_str": {
+          "baseline": {
+            "type": 1,
+            "flags": 48,
+            "address": 0,
+            "bytes": 437803,
+            "alignment": 1,
+            "sha256": "e702c3eb41ee9744fdd04cb5e7b104326420c13d4ac520211a649258191c3bee"
+          },
+          "candidate": {
+            "type": 1,
+            "flags": 48,
+            "address": 0,
+            "bytes": 437852,
+            "alignment": 1,
+            "sha256": "ad8f5f46083a6b72bead60304fce9e8737057e2cbf157f3d85355c9bad99e6d8"
+          }
+        }
+      }
+    }
+  ],
+  "not_built_by_this_allbuild": [
+    "kernel/build/qemu/kernel-debug.elf",
+    "kernel/build/qemu/main.debug.o",
+    "kernel/build/rpi5/kernel-debug.elf"
+  ],
+  "limits": "Normal ELFs and objects are actual whole-file byte-identical. RPi5 debug object has only non-SHF_ALLOC debug differences. No unbuilt debug ELF or QEMU debug object, physical cycles/coherence, compiler performance or wholecallgraph stack claim."
+}

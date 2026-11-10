@@ -4358,6 +4358,17 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
              "cannot cast to SrcLoc; only src_loc() makes one"))
        | _ -> ());
       let tgt_ty = of_ast target_ty in
+      (* A struct value is neither its address nor an integer stored in it.
+         Reject before pointer lowering, including inside unsafe. Enums have
+         their own underlying-type conversions below. *)
+      (match strip_singleton src_ty, repr tgt_ty with
+       | (TStruct name | TIndexedStruct (name, _)), (TPtr _ | TAlignedPtr _)
+         when StringMap.mem name senv && not (StringMap.mem name eenv) ->
+           raise (TypeError (e.loc, Printf.sprintf
+             "cannot cast struct value '%s' to raw pointer '%s'; take its \
+              address or explicitly load an integer value first"
+             (to_string src_ty) (to_string tgt_ty)))
+       | _ -> ());
       (* Reinterpreting a branded container pointer is a raw mint boundary,
          rather than evidence that two erased pool identities are equal. *)
       let rec indexed_inner t = match strip_singleton t with
