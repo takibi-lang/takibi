@@ -1,13 +1,14 @@
 {
   "date": "2026-11-10",
-  "event": "milestone",
-  "decision": "measured",
-  "source_sha256": "a85971c6ee19622edc94db9047a1f90aa8b0570fb5ac0aa228b846059020275f",
-  "workload": "Compiler-only stopped scalar store; unchanged maintained normal QEMU/RPi5 kernels, actual ELF/object comparisons against verified GREEN3e and compile-only scalar/bounds controls. No kernel consumer migration.",
+  "event": "incremental",
+  "decision": "reuse",
+  "source_sha256": "0bbaa77f5ee189e97b9219006e698de87e5e679ff72d293a6f9d7eec043f025d",
+  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 3a7e657f: this branch's review, rebound to the merged sources (upstream's record was 2026-11-10 milestone/measured). Host model queue and allcheck-only job-default correction. Compile/link recipes, compiler/kernel sources, linked inputs, storage/allocation and lifetimes unchanged.",
   "evidence": [
-    "docs/STOPPED_STORE_SPACE.md",
-    "docs/STOPPED_STORE_SPACE.json"
+    "docs/MODEL_JOB_BUDGET_REVIEW.md",
+    "docs/STRUCT_POINTER_CAST_REVIEW.md",
+    "docs/STRUCT_POINTER_CAST_REVIEW.json"
   ],
-  "assessment": "Adopt bounded scalar/enum store under existing borrowed complete-stop authority. Both production ELF/object pairs are byte-identical; allocated debug sections match, with path-related debug metadata size differences. No allocation, storage or kernel workload change; no physical timing/coherence claim.",
-  "next_trigger": "First real stopped_store consumer, changed complete-stop lifetime or scalar iteration/closure, changed storage/allocation workload, or altered place/bounds lowering."
+  "assessment": "Reuse current kernel image/occupancy evidence: only host scheduling and peer phase diagnostics change. No new kernel memory measurement or deadline proof is claimed; host wall/CPU costs and their one-arm limits are recorded separately.",
+  "next_trigger": "Changed compiler lowering, kernel storage/allocation/lifetimes, or the next completed kernel feature/layout stage."
 }
