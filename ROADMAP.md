@@ -121,6 +121,9 @@ and the narrowly admitted publication mirror; parent #1159 remains open for
 other globals. The exception/net boundaries and reverted-churn timing-policy
 correction are complete. Protect production-reachable boot/selftest state
 with typed guards, owners or phases, without a live-fixture exemption.
+The UART registration boundary waits for the approved actual function-value
+effect conformance repair (#1493); preserve the IRQ logging ban and review
+any required logging architecture before implementation.
 Investigate explicit linear ownership for CPU-independent exec reservations
 using existing types first; add no reservation workaround. Continue
 independent raw-CPU reader review while a concrete new decision is parked.
