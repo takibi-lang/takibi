@@ -17,9 +17,9 @@ the pool deadlocks.
 So, per pool, the entry points -- the functions that call the acquire --
 must be leaves of the file's call graph from the inside: no function in the
 pool's file names one, and none of them is itself handed a slot. Internal
-work takes the caller's slot as a `borrow` parameter instead. Other files
-never hold a slot of the pool (the acquire is private), so calls from them
-are fine.
+work takes the caller's slot as a `borrow` parameter instead. The whole-kernel
+nesting check also covers holders in other files: BlockSlot is intentionally
+borrowed by block_cache.tkb, so file isolation is not a general premise.
 
 SyscallSlot (kernel/kernel/syscall.tkb) is a pool whose entry points the
 same file's dispatcher calls, so "never called from inside the file" cannot
@@ -85,7 +85,11 @@ POOLS = [
 MUTATION_TAKE = "ext2_mutation_take"
 RANK = {MUTATION_TAKE: 0, "syscall_slot_acquire": 1,
         "exec_window_slot_acquire": 1, "process_image_slot_acquire": 2,
-        "ext2_slot_acquire": 3, "block_slot_acquire": 4}
+        "ext2_slot_acquire": 3, "block_slot_acquire": 4,
+        "block_slot_acquire_from": 4}
+# memory.tkb's locality wrapper and block_slot.tkb's existing backing mint
+# acquire the same pool. This names an existing issuer, not another pool.
+ACQUIRE_ALIASES = {"block_slot_acquire": ("block_slot_acquire_from",)}
 # Guards of TaskMutexes that sit below every pool.
 INNER_GUARDS = ["BlockDeviceGuard", "TcpConnectionOwner", "XhciRingGuard",
                 "MscDmaGuard"]
@@ -125,6 +129,10 @@ def callees(body, known):
     return references(body) & known
 
 
+def acquire_names(acquire):
+    return frozenset((acquire,) + ACQUIRE_ALIASES.get(acquire, ()))
+
+
 def reach(start, graph):
     """Functions reachable from start (start itself only through a cycle)."""
     seen, todo = set(), list(graph.get(start, ()))
@@ -138,16 +146,18 @@ def reach(start, graph):
 
 
 def holders_of(fns, acquire, token):
+    issuers = acquire_names(acquire)
     return {name for name, (signature, body) in fns.items()
-            if name != acquire and
+            if name not in issuers and
             (re.search(r"\b" + token + r"\b", signature) or
-             acquire in references(body))}
+             references(body) & issuers)}
 
 
 def problems_in(text, acquire, token, rule="leaf", sleepers=frozenset()):
     fns = functions(text)
+    issuers = acquire_names(acquire)
     entries = {name for name, (_, body) in fns.items()
-               if acquire in references(body)}
+               if name not in issuers and references(body) & issuers}
     problems = []
     for entry in sorted(entries):
         if re.search(r"\b" + token + r"\b", fns[entry][0]):
@@ -179,7 +189,7 @@ def problems_in(text, acquire, token, rule="leaf", sleepers=frozenset()):
                     "reaches a scheduler sleep; release the slot before "
                     "the wait")
     for name, (signature, _) in fns.items():
-        if name == acquire:
+        if name in issuers:
             continue
         arrow = signature.find("->")
         if arrow >= 0 and re.search(r"\b" + token + r"\b", signature[arrow:]):
@@ -237,14 +247,17 @@ def nesting_problems(files):
         return closure[name]
 
     for _, acquire, token, _ in POOLS:
+        issuers = acquire_names(acquire)
+        take_pattern = re.compile(r"\b(?:" + "|".join(
+            re.escape(name) for name in sorted(issuers)) + r")\b")
         for holder in sorted(fns):
-            if holder == acquire:
+            if holder in issuers:
                 continue
             held_calls = set()
             for signature, body in fns[holder]:
                 # Substring first: this runs per function, per pool.
-                taken = (re.search(r"\b" + acquire + r"\b", body)
-                         if acquire in body else None)
+                taken = (take_pattern.search(body)
+                         if any(name in body for name in issuers) else None)
                 if token in signature and re.search(r"\b" + token + r"\b",
                                                     signature):
                     held_calls |= references(body)
@@ -256,11 +269,13 @@ def nesting_problems(files):
             for callee in held_calls:
                 reached |= reached_from(callee)
             for target in sorted(reached & set(RANK)):
-                if target == acquire or RANK[target] > RANK[acquire]:
+                if RANK[target] > RANK[acquire]:
                     continue
+                relation = ("the same pool" if RANK[target] == RANK[acquire]
+                            and target in issuers else "outside it")
                 problems.append(
                     f"{holder} holds a {token} and reaches {target}, which "
-                    "is outside it; with more holders than cores that is a "
+                    f"is {relation}; with more holders than cores that is a "
                     "deadlock (kernel/models/SlotPool.tla)")
     for token in INNER_GUARDS:
         for name, rows in sorted(fns.items()):

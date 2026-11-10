@@ -28,6 +28,22 @@ private fn entry() {
 }
 fn kernel_process_block_control() {}
 """
+BLOCK_POOL = ("kernel/drivers/block/memory.tkb", "block_slot_acquire",
+              "BlockSlot", "leaf")
+BLOCK_MINT = """linear struct BlockSlot[unit: usize] { private index: usize; }
+fn block_slot_acquire_from(hint: usize) -> BlockSlot[0] {
+    let mut slot: BlockSlot[0] = { hint }; return slot;
+}
+fn block_slot_release(slot: sink BlockSlot[0]) {}
+"""
+BLOCK_MEMORY = """fn block_slot_acquire() -> BlockSlot[0] {
+    return block_slot_acquire_from(0);
+}
+fn block_read() {
+    let slot = block_slot_acquire(); block_slot_release(slot);
+}
+fn kernel_process_block_control() {}
+"""
 
 
 def load_checker(path):
@@ -37,7 +53,7 @@ def load_checker(path):
     return checker
 
 
-def invoke(checker, root):
+def invoke(checker, root, pool=None):
     """Call the real main and observe its real exit branch without waiting.
 
     The original built-in controls keep their production pool configuration;
@@ -47,7 +63,8 @@ def invoke(checker, root):
     original_root = checker.ROOT
     original_pools = checker.POOLS
     original_controls = checker.controls
-    fixture_pools = [("kernel/pool.tkb", ACQUIRE, "ExecWindowSlot", "holders")]
+    fixture_pools = [pool or (
+        "kernel/pool.tkb", ACQUIRE, "ExecWindowSlot", "holders")]
 
     def controls():
         checker.POOLS = original_pools
@@ -73,6 +90,21 @@ def invoke(checker, root):
         checker.POOLS = original_pools
         checker.controls = original_controls
     return status, stdout.getvalue(), stderr.getvalue()
+
+
+def check_case(checker, root, label, diagnostic, count, pool=None):
+    original = checker.ROOT, checker.POOLS, checker.controls
+    status, stdout, stderr = invoke(checker, root, pool)
+    count.note()
+    assert all(before is after for before, after in zip(
+        original, (checker.ROOT, checker.POOLS, checker.controls))), label
+    output = stdout + stderr
+    if diagnostic is None:
+        assert status == 0, (label, status, output)
+        assert "PASS slot-pool-entries:" in output, (label, output)
+    else:
+        assert status != 0, (label, "accepted", output)
+        assert diagnostic in output, (label, diagnostic, output)
 
 
 def main():
@@ -140,18 +172,43 @@ def main():
         (root / "kernel").mkdir()
         for label, extra, diagnostic in cases:
             (root / "kernel/pool.tkb").write_text(BASE + extra + "\n")
-            original = checker.ROOT, checker.POOLS, checker.controls
-            status, stdout, stderr = invoke(checker, root)
-            count.note()
-            assert all(before is after for before, after in zip(
-                original, (checker.ROOT, checker.POOLS, checker.controls))), label
-            output = stdout + stderr
-            if diagnostic is None:
-                assert status == 0, (label, status, output)
-                assert "PASS slot-pool-entries:" in output, (label, output)
-            else:
-                assert status != 0, (label, "accepted", output)
-                assert diagnostic in output, (label, diagnostic, output)
+            check_case(checker, root, label, diagnostic, count)
+        (root / "kernel/pool.tkb").unlink()
+        block = root / "kernel/drivers/block"
+        block.mkdir(parents=True)
+        (block / "block_slot.tkb").write_text(BLOCK_MINT)
+        same_pool = "which is the same pool; with more holders than cores"
+        block_cases = [
+            ("single wrapper and backing issuer", "", "", None),
+            ("foreign holder calls public entry", "",
+             "fn cache_helper(slot: borrow BlockSlot[0]) { block_read(); }",
+             "cache_helper holds a BlockSlot and reaches block_slot_acquire, " + same_pool),
+            ("direct second acquire",
+             "fn double() { let first = block_slot_acquire();\n"
+             "    let second = block_slot_acquire();\n"
+             "    block_slot_release(second); block_slot_release(first); }", "",
+             "double holds a BlockSlot and reaches block_slot_acquire, " + same_pool),
+            ("foreign holder takes backing issuer", "",
+             "fn cache_helper(slot: borrow BlockSlot[0]) {\n"
+             "    let other = block_slot_acquire_from(0); block_slot_release(other); }",
+             "cache_helper holds a BlockSlot and reaches block_slot_acquire_from, " + same_pool),
+            ("backing issuer value",
+             "fn install() { let callback = block_slot_acquire_from; }", "",
+             "block_slot_acquire_from " + value),
+            ("foreign holder aliases backing issuer", "",
+             "fn cache_helper(slot: borrow BlockSlot[0]) {\n"
+             "    let callback = block_slot_acquire_from;\n"
+             "    let other = callback(0); block_slot_release(other); }",
+             "cache_helper holds a BlockSlot and reaches block_slot_acquire_from, " + same_pool),
+            ("outer lock before first acquire",
+             "fn ext2_mutation_take() {}\nfn ordered() {\n"
+             "    ext2_mutation_take(); let slot = block_slot_acquire_from(0);\n"
+             "    block_slot_release(slot); }", "", None),
+        ]
+        for label, memory, cache, diagnostic in block_cases:
+            (block / "memory.tkb").write_text(BLOCK_MEMORY + memory + "\n")
+            (block / "block_cache.tkb").write_text(cache + "\n")
+            check_case(checker, root, label, diagnostic, count, BLOCK_POOL)
     report_pass("slot-pool-entries-controls",
                 "direct nonholders accept; aliases and escaped acquiring "
                 "callbacks reject without weakening sleep, rank or return checks",
