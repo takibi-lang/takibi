@@ -1,13 +1,13 @@
 {
-  "date": "2026-11-09",
+  "date": "2026-11-10",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "de4e78eb14f46fef1a8b5e93e0f9b66f044dc42db15141c8ca3bfba5a0fb3e25",
-  "workload": "Actual production QEMU/RPi5 ELF/object/facts against verified publishedcd08 baseline; six literal-zero checks in unchanged page-loading paths. Existing pool occupancy reused only for unchanged allocation/lifetime workload.",
+  "source_sha256": "921ee6dea2b75bbafed24e7419307e509e5116625be3ba755b5434279a911d02",
+  "workload": "Protocol trace process/core shadows and existing bounded boot/replay; actual normal/debug QEMU/RPi5 ELF/object/facts against verified published GREEN4ee. Existing pool occupancy reused only for unchanged allocation/lifetime workload.",
   "evidence": [
-    "docs/ZERO_BUFFER_ELIMINATION_SPACE.md",
-    "docs/ZERO_BUFFER_ELIMINATION_SPACE.json"
+    "docs/PROTOCOL_SHADOW_SPACE.md",
+    "docs/PROTOCOL_SHADOW_SPACE.json"
   ],
-  "assessment": "Remove the 4096-byte mutable reference array and one allowance. Actual text -104B QEMU/-72B RPi5, GOT/data -8B and BSS -4096B on both. Loader frames remain224/240B; predicate adds16B at its new call edges. Pool/usable RAM start unchanged by rounding, so no extra usable pages or physical timing/coherence claim. Existing readonly-array compiler gap remains separate.",
-  "next_trigger": "Next completed kernel feature, or changed byte traversal, loader comparison/copy behavior, stack call structure, pool-start rounding or retained allocation/lifetime workload."
+  "assessment": "Adopt existing no_copy plus guarded_ref storage: exactly two composite globals, rows offset0 and retained3072/64B. Production text +16/+64B and unwind +8B each; debug text +80/+96B. Data/GOT/BSS/usable RAM start and production frames unchanged; debug helper frames +16-32B. No physical timing/coherence or whole-callgraph stack claim; frame parser undercount remains separate.",
+  "next_trigger": "Next completed feature or changed shadow dimensions/event representation/guard passing/stack call structure/retained allocation or lifetimes."
 }
