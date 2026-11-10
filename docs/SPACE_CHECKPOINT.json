@@ -1,14 +1,13 @@
 {
   "date": "2026-11-10",
-  "event": "incremental",
+  "event": "milestone",
   "decision": "measured",
-  "source_sha256": "d9227f6a6f39ea9c9507e5c608ce7e7a229e5a817f99d1b02be90d5b21dc099c",
-  "workload": "Existing publication-copy loop in standard normal/debug QEMU/RPi5 kernels; actual same-source object, linked image, per-function code and frame comparison against b95036df. Existing allocator occupancy evidence is reused because this private temporary correction changes no pool, retained allocation or allocation workload.",
+  "source_sha256": "ba6c7da11e3e370d7ac764cffcc14a1ceaf33ca12df6230a464c51f90f7522da",
+  "workload": "Existing destructive boot log bounds/torn/stray snapshot probes under the real BootPhase; existing ordinary snapshot API and storage. No allocator, pool, retained-capacity, snapshot payload, initialization or teardown workload change. Standard normal linked QEMU/RPi5 images and selected actual function frames; existing allocator occupancy evidence reused because its workload is unchanged.",
   "evidence": [
-    "docs/PUBLISH_COPY_STORAGE_REVIEW.md",
-    "docs/PUBLISH_COPY_STORAGE_REVIEW.json",
-    "docs/APPROVED_COMPILER_HOST_BATCH_SPACE.json"
+    "docs/BOOT_SNAPSHOT_AUTHORITY_REVIEW.md",
+    "docs/BOOT_SNAPSHOT_AUTHORITY_REVIEW.json"
   ],
-  "assessment": "Only diagnostic_trace_copy_cpu instructions change in all four objects. Its repeated 16-byte copy allocation becomes fixed entry storage: normal 112 bytes and debug 192 bytes. Linked text shrinks by 32/16 bytes for normal/debug QEMU and 32/32 bytes for RPi5. Data/BSS symbol sizes and usable_ram_start are unchanged. Existing frame ceiling and exceptions are retained; neither total stack fit nor backend metadata completeness is claimed.",
-  "next_trigger": "Changed temporary lowering, kernel storage/allocation workload, or the next completed kernel feature/layout stage; first real stopped_store consumer retains its separate lifetime review trigger."
+  "assessment": "Matched published86 comparison: QEMU text +288 B and RPi5 +272 B, explained by +184 B text-symbol coverage, +24/+8 B section gaps and +80 B unwind each. Data/BSS, every data/BSS symbol size and RAM boundary unchanged. New factory/leaf and shared prepare retain bounded measured code/helper-frame costs; no stack-reduction or whole-call-path claim. Existing payload/pool/allocator workload unchanged. Final combined-HEAD runtime/hardware acceptance remains coordinator publication work.",
+  "next_trigger": "Sleeping Mutex backend/consumer integration, changed authority lifetime or storage/allocator workload, or the next completed kernel feature/layout stage."
 }

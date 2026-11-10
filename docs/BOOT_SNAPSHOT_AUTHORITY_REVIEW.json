@@ -1,0 +1,619 @@
+{
+  "date": "2026-11-10",
+  "boundary": "Standard normal linked QEMU and RPi5 kernel images and selected snapshot/boot function prologues; not whole-call-path stack or physical timing bounds.",
+  "base": "86c0cf5442e52c2834da7e866cec256598537e8f",
+  "candidate_source_commit": "86ccdaa3488b13255163607e55a0afa1f0516da2",
+  "production_source_sha256": "ba6c7da11e3e370d7ac764cffcc14a1ceaf33ca12df6230a464c51f90f7522da",
+  "baseline_association": "Archived coordinator clean allcheck/land75244 terminal0 exact published86; clean root HEAD and source/copy hashes verified before/after archival. Not a fresh B baseline run.",
+  "candidate_build": "make kernelbuild-qemu kernelbuild-rpi5, owned86259 terminal0 on a5c034fb; metadata-only identity amend to86ccdaa3 preserved exact tree ff6d9b833b9d057f6931ba23331f136c543ca31f.",
+  "workload": "Existing destructive boot log bounds/torn/stray snapshot probes under the real BootPhase; existing ordinary snapshot API and storage. No allocator, pool, retained-capacity, snapshot payload, initialization or teardown workload change.",
+  "payload_bytes": {
+    "BootPhase": 8,
+    "TaskMutex": 8,
+    "KernelLogSnapshotGuard": 8,
+    "KernelLogSnapshot": 65544,
+    "KernelLogSnapshotStore": 24
+  },
+  "targets": {
+    "qemu": {
+      "base_sections": {
+        "text": 822728,
+        "data": 4616,
+        "bss": 1314816
+      },
+      "candidate_sections": {
+        "text": 823016,
+        "data": 4616,
+        "bss": 1314816
+      },
+      "section_delta": {
+        "text": 288,
+        "data": 0,
+        "bss": 0
+      },
+      "text_detail_base": {
+        "text_section_bytes": 644896,
+        "covered_text_symbol_bytes": 614288,
+        "text_section_gaps_bytes": 30608,
+        "eh_frame_bytes": 122928
+      },
+      "text_detail_candidate": {
+        "text_section_bytes": 645104,
+        "covered_text_symbol_bytes": 614472,
+        "text_section_gaps_bytes": 30632,
+        "eh_frame_bytes": 123008
+      },
+      "section_detail_delta": {
+        "text_section_bytes": 208,
+        "covered_text_symbol_bytes": 184,
+        "text_section_gaps_bytes": 24,
+        "eh_frame_bytes": 80
+      },
+      "changed_text_symbols": {
+        "kernel_log_snapshot_prepare": [
+          null,
+          108,
+          108
+        ],
+        "kernel_boot_prologue": [
+          116,
+          120,
+          4
+        ],
+        "kernel_log_bounds_probe": [
+          660,
+          700,
+          40
+        ],
+        "kernel_log_torn_read_probe": [
+          192,
+          228,
+          36
+        ],
+        "task_mutex_acquire_boot": [
+          null,
+          20,
+          20
+        ],
+        "kernel_log_snapshot_take_boot": [
+          null,
+          44,
+          44
+        ],
+        "kernel_log_stray_continuation_probe": [
+          428,
+          444,
+          16
+        ],
+        "kernel_log_snapshot_take": [
+          124,
+          40,
+          -84
+        ]
+      },
+      "data_bss_symbol_changes": {},
+      "layout_base": {
+        "__bss_end": 1075494912,
+        "__bss_start": 1074573312,
+        "usable_ram_start": 1075904512
+      },
+      "layout_candidate": {
+        "__bss_end": 1075494912,
+        "__bss_start": 1074573312,
+        "usable_ram_start": 1075904512
+      },
+      "selected_functions": {
+        "task_mutex_acquire": {
+          "base": {
+            "object_bytes": 20,
+            "linked_bytes": 20,
+            "frame_bytes_prefix_parser": 16
+          },
+          "candidate": {
+            "object_bytes": 20,
+            "linked_bytes": 20,
+            "frame_bytes_prefix_parser": 16
+          }
+        },
+        "task_mutex_acquire_short": {
+          "base": {
+            "object_bytes": 20,
+            "linked_bytes": 20,
+            "frame_bytes_prefix_parser": 16
+          },
+          "candidate": {
+            "object_bytes": 20,
+            "linked_bytes": 20,
+            "frame_bytes_prefix_parser": 16
+          }
+        },
+        "task_mutex_acquire_boot": {
+          "base": {
+            "object_bytes": null,
+            "linked_bytes": null,
+            "frame_bytes_prefix_parser": null
+          },
+          "candidate": {
+            "object_bytes": 20,
+            "linked_bytes": 20,
+            "frame_bytes_prefix_parser": 16
+          }
+        },
+        "kernel_log_snapshot_take": {
+          "base": {
+            "object_bytes": 124,
+            "linked_bytes": 124,
+            "frame_bytes_prefix_parser": 32
+          },
+          "candidate": {
+            "object_bytes": 40,
+            "linked_bytes": 40,
+            "frame_bytes_prefix_parser": 16
+          }
+        },
+        "kernel_log_snapshot_take_boot": {
+          "base": {
+            "object_bytes": null,
+            "linked_bytes": null,
+            "frame_bytes_prefix_parser": null
+          },
+          "candidate": {
+            "object_bytes": 44,
+            "linked_bytes": 44,
+            "frame_bytes_prefix_parser": 16
+          }
+        },
+        "kernel_log_snapshot_prepare": {
+          "base": {
+            "object_bytes": null,
+            "linked_bytes": null,
+            "frame_bytes_prefix_parser": null
+          },
+          "candidate": {
+            "object_bytes": 108,
+            "linked_bytes": 108,
+            "frame_bytes_prefix_parser": 32
+          }
+        },
+        "kernel_log_snapshot_give": {
+          "base": {
+            "object_bytes": 28,
+            "linked_bytes": 28,
+            "frame_bytes_prefix_parser": 16
+          },
+          "candidate": {
+            "object_bytes": 28,
+            "linked_bytes": 28,
+            "frame_bytes_prefix_parser": 16
+          }
+        },
+        "kernel_log_probe_snapshot_record": {
+          "base": {
+            "object_bytes": 220,
+            "linked_bytes": 220,
+            "frame_bytes_prefix_parser": 112
+          },
+          "candidate": {
+            "object_bytes": 220,
+            "linked_bytes": 220,
+            "frame_bytes_prefix_parser": 112
+          }
+        },
+        "kernel_log_probe_snapshot_clear": {
+          "base": {
+            "object_bytes": 108,
+            "linked_bytes": 108,
+            "frame_bytes_prefix_parser": 48
+          },
+          "candidate": {
+            "object_bytes": 108,
+            "linked_bytes": 108,
+            "frame_bytes_prefix_parser": 48
+          }
+        },
+        "kernel_log_probe_snapshot_length": {
+          "base": {
+            "object_bytes": 120,
+            "linked_bytes": 120,
+            "frame_bytes_prefix_parser": 48
+          },
+          "candidate": {
+            "object_bytes": 120,
+            "linked_bytes": 120,
+            "frame_bytes_prefix_parser": 48
+          }
+        },
+        "kernel_log_probe_snapshot_byte": {
+          "base": {
+            "object_bytes": 132,
+            "linked_bytes": 132,
+            "frame_bytes_prefix_parser": 64
+          },
+          "candidate": {
+            "object_bytes": 132,
+            "linked_bytes": 132,
+            "frame_bytes_prefix_parser": 64
+          }
+        },
+        "kernel_log_stray_continuation_probe": {
+          "base": {
+            "object_bytes": 428,
+            "linked_bytes": 428,
+            "frame_bytes_prefix_parser": 112
+          },
+          "candidate": {
+            "object_bytes": 444,
+            "linked_bytes": 444,
+            "frame_bytes_prefix_parser": 112
+          }
+        },
+        "kernel_log_torn_read_probe": {
+          "base": {
+            "object_bytes": 192,
+            "linked_bytes": 192,
+            "frame_bytes_prefix_parser": 16
+          },
+          "candidate": {
+            "object_bytes": 228,
+            "linked_bytes": 228,
+            "frame_bytes_prefix_parser": 32
+          }
+        },
+        "kernel_log_bounds_probe": {
+          "base": {
+            "object_bytes": 660,
+            "linked_bytes": 660,
+            "frame_bytes_prefix_parser": 48
+          },
+          "candidate": {
+            "object_bytes": 700,
+            "linked_bytes": 700,
+            "frame_bytes_prefix_parser": 64
+          }
+        },
+        "kernel_boot_prologue": {
+          "base": {
+            "object_bytes": 116,
+            "linked_bytes": 116,
+            "frame_bytes_prefix_parser": 32
+          },
+          "candidate": {
+            "object_bytes": 120,
+            "linked_bytes": 120,
+            "frame_bytes_prefix_parser": 32
+          }
+        }
+      },
+      "base_artifacts": {
+        "kernel.elf": {
+          "sha256": "443e0b57012f7eb57d4c714d5db889945ca5ce3bd82a71ddf78bf8a4ac96cbec",
+          "file_bytes": 1314888
+        },
+        "main.o": {
+          "sha256": "74c56084512352727e58914e8ea3cf2b53ccf571a68c2b837b2eba1facf8ce08",
+          "file_bytes": 3000424
+        }
+      },
+      "candidate_artifacts": {
+        "kernel.elf": {
+          "sha256": "1af32c744b131ae8fea86c2cb1095b2dc8b259f5fbfb910ce4681cdf5c2af3d0",
+          "file_bytes": 1315200
+        },
+        "main.o": {
+          "sha256": "cc618699d86dc46ad6cdd5383a1bf5be7dd6384a5cd7bb03f3616b1fb0a36452",
+          "file_bytes": 3001648
+        }
+      }
+    },
+    "rpi5": {
+      "base_sections": {
+        "text": 4207460,
+        "data": 5592,
+        "bss": 1929216
+      },
+      "candidate_sections": {
+        "text": 4207732,
+        "data": 5592,
+        "bss": 1929216
+      },
+      "section_delta": {
+        "text": 272,
+        "data": 0,
+        "bss": 0
+      },
+      "text_detail_base": {
+        "text_section_bytes": 688676,
+        "covered_text_symbol_bytes": 649236,
+        "text_section_gaps_bytes": 39440,
+        "eh_frame_bytes": 133640
+      },
+      "text_detail_candidate": {
+        "text_section_bytes": 688868,
+        "covered_text_symbol_bytes": 649420,
+        "text_section_gaps_bytes": 39448,
+        "eh_frame_bytes": 133720
+      },
+      "section_detail_delta": {
+        "text_section_bytes": 192,
+        "covered_text_symbol_bytes": 184,
+        "text_section_gaps_bytes": 8,
+        "eh_frame_bytes": 80
+      },
+      "changed_text_symbols": {
+        "kernel_log_snapshot_prepare": [
+          null,
+          108,
+          108
+        ],
+        "kernel_boot_prologue": [
+          116,
+          120,
+          4
+        ],
+        "kernel_log_torn_read_probe": [
+          192,
+          228,
+          36
+        ],
+        "task_mutex_acquire_boot": [
+          null,
+          20,
+          20
+        ],
+        "kernel_log_bounds_probe": [
+          672,
+          700,
+          28
+        ],
+        "kernel_log_snapshot_take_boot": [
+          null,
+          44,
+          44
+        ],
+        "kernel_log_stray_continuation_probe": [
+          428,
+          456,
+          28
+        ],
+        "kernel_log_snapshot_take": [
+          124,
+          40,
+          -84
+        ]
+      },
+      "data_bss_symbol_changes": {},
+      "layout_base": {
+        "__bss_end": 7852032,
+        "__bss_start": 6316032,
+        "usable_ram_start": 8257536
+      },
+      "layout_candidate": {
+        "__bss_end": 7852032,
+        "__bss_start": 6316032,
+        "usable_ram_start": 8257536
+      },
+      "selected_functions": {
+        "task_mutex_acquire": {
+          "base": {
+            "object_bytes": 20,
+            "linked_bytes": 20,
+            "frame_bytes_prefix_parser": 16
+          },
+          "candidate": {
+            "object_bytes": 20,
+            "linked_bytes": 20,
+            "frame_bytes_prefix_parser": 16
+          }
+        },
+        "task_mutex_acquire_short": {
+          "base": {
+            "object_bytes": 20,
+            "linked_bytes": 20,
+            "frame_bytes_prefix_parser": 16
+          },
+          "candidate": {
+            "object_bytes": 20,
+            "linked_bytes": 20,
+            "frame_bytes_prefix_parser": 16
+          }
+        },
+        "task_mutex_acquire_boot": {
+          "base": {
+            "object_bytes": null,
+            "linked_bytes": null,
+            "frame_bytes_prefix_parser": null
+          },
+          "candidate": {
+            "object_bytes": 20,
+            "linked_bytes": 20,
+            "frame_bytes_prefix_parser": 16
+          }
+        },
+        "kernel_log_snapshot_take": {
+          "base": {
+            "object_bytes": 124,
+            "linked_bytes": 124,
+            "frame_bytes_prefix_parser": 32
+          },
+          "candidate": {
+            "object_bytes": 40,
+            "linked_bytes": 40,
+            "frame_bytes_prefix_parser": 16
+          }
+        },
+        "kernel_log_snapshot_take_boot": {
+          "base": {
+            "object_bytes": null,
+            "linked_bytes": null,
+            "frame_bytes_prefix_parser": null
+          },
+          "candidate": {
+            "object_bytes": 44,
+            "linked_bytes": 44,
+            "frame_bytes_prefix_parser": 16
+          }
+        },
+        "kernel_log_snapshot_prepare": {
+          "base": {
+            "object_bytes": null,
+            "linked_bytes": null,
+            "frame_bytes_prefix_parser": null
+          },
+          "candidate": {
+            "object_bytes": 108,
+            "linked_bytes": 108,
+            "frame_bytes_prefix_parser": 32
+          }
+        },
+        "kernel_log_snapshot_give": {
+          "base": {
+            "object_bytes": 28,
+            "linked_bytes": 28,
+            "frame_bytes_prefix_parser": 16
+          },
+          "candidate": {
+            "object_bytes": 28,
+            "linked_bytes": 28,
+            "frame_bytes_prefix_parser": 16
+          }
+        },
+        "kernel_log_probe_snapshot_record": {
+          "base": {
+            "object_bytes": 220,
+            "linked_bytes": 220,
+            "frame_bytes_prefix_parser": 112
+          },
+          "candidate": {
+            "object_bytes": 220,
+            "linked_bytes": 220,
+            "frame_bytes_prefix_parser": 112
+          }
+        },
+        "kernel_log_probe_snapshot_clear": {
+          "base": {
+            "object_bytes": 108,
+            "linked_bytes": 108,
+            "frame_bytes_prefix_parser": 48
+          },
+          "candidate": {
+            "object_bytes": 108,
+            "linked_bytes": 108,
+            "frame_bytes_prefix_parser": 48
+          }
+        },
+        "kernel_log_probe_snapshot_length": {
+          "base": {
+            "object_bytes": 120,
+            "linked_bytes": 120,
+            "frame_bytes_prefix_parser": 48
+          },
+          "candidate": {
+            "object_bytes": 120,
+            "linked_bytes": 120,
+            "frame_bytes_prefix_parser": 48
+          }
+        },
+        "kernel_log_probe_snapshot_byte": {
+          "base": {
+            "object_bytes": 132,
+            "linked_bytes": 132,
+            "frame_bytes_prefix_parser": 64
+          },
+          "candidate": {
+            "object_bytes": 132,
+            "linked_bytes": 132,
+            "frame_bytes_prefix_parser": 64
+          }
+        },
+        "kernel_log_stray_continuation_probe": {
+          "base": {
+            "object_bytes": 428,
+            "linked_bytes": 428,
+            "frame_bytes_prefix_parser": 112
+          },
+          "candidate": {
+            "object_bytes": 456,
+            "linked_bytes": 456,
+            "frame_bytes_prefix_parser": 112
+          }
+        },
+        "kernel_log_torn_read_probe": {
+          "base": {
+            "object_bytes": 192,
+            "linked_bytes": 192,
+            "frame_bytes_prefix_parser": 16
+          },
+          "candidate": {
+            "object_bytes": 228,
+            "linked_bytes": 228,
+            "frame_bytes_prefix_parser": 32
+          }
+        },
+        "kernel_log_bounds_probe": {
+          "base": {
+            "object_bytes": 672,
+            "linked_bytes": 672,
+            "frame_bytes_prefix_parser": 48
+          },
+          "candidate": {
+            "object_bytes": 700,
+            "linked_bytes": 700,
+            "frame_bytes_prefix_parser": 64
+          }
+        },
+        "kernel_boot_prologue": {
+          "base": {
+            "object_bytes": 116,
+            "linked_bytes": 116,
+            "frame_bytes_prefix_parser": 32
+          },
+          "candidate": {
+            "object_bytes": 120,
+            "linked_bytes": 120,
+            "frame_bytes_prefix_parser": 32
+          }
+        }
+      },
+      "base_artifacts": {
+        "kernel.elf": {
+          "sha256": "31bd73f9ad65ee976aed0f861b5c70f4bb3f0ecd89570bddd0142f3e22b88edc",
+          "file_bytes": 4736400
+        },
+        "main.o": {
+          "sha256": "07bb2f7b6deb4420f535f54a582f16d47cf2f6782b2c45dddef510bd74b65b20",
+          "file_bytes": 6542008
+        }
+      },
+      "candidate_artifacts": {
+        "kernel.elf": {
+          "sha256": "a8e92f0315515954b603c412de3ee73f450df8ba39a806793259081bfd1e9312",
+          "file_bytes": 4736712
+        },
+        "main.o": {
+          "sha256": "b99a493db92df056b39d3925857c402bd2c53ed157f7eecb6397e7a6c7ea3f16",
+          "file_bytes": 6543040
+        }
+      }
+    }
+  },
+  "controls": {
+    "real_ast_cases": 4,
+    "real_ast_seconds": 0.028,
+    "real_ast_wall_seconds": 0.05,
+    "full_api_positive_compile_and_caller": 0,
+    "full_api_phase_ended_compile": 1,
+    "full_api_wrong_authority_compile": 1,
+    "full_api_function_value_compile": 1,
+    "raw_bypass_compile": 0,
+    "raw_bypass_compiled_caller": 1,
+    "external_annotation_mutation_positive": 0,
+    "external_annotation_mutation_expected_lifetime_test_failure": 1
+  },
+  "guarantee": "Existing compiler authority loan excludes ending phase with a live derived guard; exact raw leaf factory confinement is build checked. Real acquisition/release and phase mint remain reviewed trust.",
+  "limits": [
+    "Selected frame observations use existing prefix parser; full selected bodies were scanned for negative SP adjustments, all within first12 instructions (54 bodies/54 adjustments). This does not repair the separate general late-prologue limitation.",
+    "Ordinary take frame32->16 plus nested prepare32 is an additional helper cost, not an apparent stack reduction or whole-call-path proof.",
+    "No new standalone physical timing claim. Coordinator final combined-HEAD allcheck supplies existing QEMU/RPi5 runtime acceptance; full sleeping Mutex contended scheduling/cost remains unfinished."
+  ],
+  "next_trigger": "Sleeping Mutex backend/consumer integration, changed authority lifetime or storage/allocator workload, or the next completed kernel feature/layout stage."
+}
