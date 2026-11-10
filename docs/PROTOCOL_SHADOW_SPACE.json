@@ -1,0 +1,566 @@
+{
+  "baseline_head": "4eea42a7615cf0d2fe0fdf685bd992bab2922eec",
+  "baseline_manifest_sha256": "2bcb1249ce1137b7bbf71f5e9a9678ab1b65e96036508589c458c4aa0c3adb53",
+  "source_sha256": {
+    "kernel/kernel/protocol_trace.tkb": "d7c996a4bbcbfb776c81a78084194349efe8ed36b6688bc72705e4615d0f9892",
+    "kernel/kernel/process.tkb": "6af7d57bad65ebbe2527c9a7a2ad41a91d04eed9eb5719f0826bae838a7edd8e"
+  },
+  "linked": {
+    "qemu": {
+      "section_changes": {
+        ".eh_frame": {
+          "before": 122920,
+          "after": 122928,
+          "delta": 8
+        },
+        ".text": {
+          "before": 644912,
+          "after": 644928,
+          "delta": 16
+        }
+      },
+      "text_data_bss": {
+        ".text": {
+          "before": 644912,
+          "after": 644928,
+          "delta": 16
+        },
+        ".data": {
+          "before": 136,
+          "after": 136,
+          "delta": 0
+        },
+        ".bss": {
+          "before": 921600,
+          "after": 921600,
+          "delta": 0
+        }
+      },
+      "storage_size_changes": [],
+      "function_size_changes": [
+        {
+          "symbol": "kernel_process_protocol_observe",
+          "before": 596,
+          "after": 592,
+          "delta": -4
+        },
+        {
+          "symbol": "kernel_process_protocol_trace_open",
+          "before": 92,
+          "after": 100,
+          "delta": 8
+        },
+        {
+          "symbol": "protocol_trace_observe_core",
+          "before": 108,
+          "after": 92,
+          "delta": -16
+        },
+        {
+          "symbol": "protocol_trace_observe_process",
+          "before": 268,
+          "after": 252,
+          "delta": -16
+        },
+        {
+          "symbol": "protocol_trace_open_probe",
+          "before": 204,
+          "after": 244,
+          "delta": 40
+        }
+      ],
+      "storage": {
+        "protocol_trace_processes": {
+          "before": {
+            "address": 1074849752,
+            "size": 3072,
+            "kind": "B"
+          },
+          "after": {
+            "address": 1074849752,
+            "size": 3072,
+            "kind": "B"
+          }
+        },
+        "protocol_trace_cores": {
+          "before": {
+            "address": 1074852832,
+            "size": 64,
+            "kind": "B"
+          },
+          "after": {
+            "address": 1074852832,
+            "size": 64,
+            "kind": "B"
+          }
+        },
+        "usable_ram_start": {
+          "before": {
+            "address": 1075904512,
+            "size": 0,
+            "kind": "B"
+          },
+          "after": {
+            "address": 1075904512,
+            "size": 0,
+            "kind": "B"
+          }
+        },
+        "kernel_pool_start": {
+          "before": null,
+          "after": null
+        },
+        "kernel_heap_start": {
+          "before": null,
+          "after": null
+        }
+      },
+      "function_size_delta_sum": 12
+    },
+    "rpi5": {
+      "section_changes": {
+        ".eh_frame": {
+          "before": 133632,
+          "after": 133640,
+          "delta": 8
+        },
+        ".text": {
+          "before": 688644,
+          "after": 688708,
+          "delta": 64
+        }
+      },
+      "text_data_bss": {
+        ".text": {
+          "before": 688644,
+          "after": 688708,
+          "delta": 64
+        },
+        ".data": {
+          "before": 336,
+          "after": 336,
+          "delta": 0
+        },
+        ".bss": {
+          "before": 1536000,
+          "after": 1536000,
+          "delta": 0
+        }
+      },
+      "storage_size_changes": [],
+      "function_size_changes": [
+        {
+          "symbol": "kernel_process_protocol_observe",
+          "before": 588,
+          "after": 628,
+          "delta": 40
+        },
+        {
+          "symbol": "kernel_process_protocol_trace_open",
+          "before": 92,
+          "after": 100,
+          "delta": 8
+        },
+        {
+          "symbol": "protocol_trace_observe_core",
+          "before": 104,
+          "after": 92,
+          "delta": -12
+        },
+        {
+          "symbol": "protocol_trace_observe_process",
+          "before": 252,
+          "after": 228,
+          "delta": -24
+        },
+        {
+          "symbol": "protocol_trace_open_probe",
+          "before": 204,
+          "after": 244,
+          "delta": 40
+        }
+      ],
+      "storage": {
+        "protocol_trace_processes": {
+          "before": {
+            "address": 7075736,
+            "size": 3072,
+            "kind": "B"
+          },
+          "after": {
+            "address": 7075736,
+            "size": 3072,
+            "kind": "B"
+          }
+        },
+        "protocol_trace_cores": {
+          "before": {
+            "address": 7078816,
+            "size": 64,
+            "kind": "B"
+          },
+          "after": {
+            "address": 7078816,
+            "size": 64,
+            "kind": "B"
+          }
+        },
+        "usable_ram_start": {
+          "before": {
+            "address": 8257536,
+            "size": 0,
+            "kind": "B"
+          },
+          "after": {
+            "address": 8257536,
+            "size": 0,
+            "kind": "B"
+          }
+        },
+        "kernel_pool_start": {
+          "before": null,
+          "after": null
+        },
+        "kernel_heap_start": {
+          "before": null,
+          "after": null
+        }
+      },
+      "function_size_delta_sum": 52
+    }
+  },
+  "object_section_changes": {
+    "qemu": {
+      ".eh_frame": {
+        "before": 127240,
+        "after": 127248,
+        "delta": 8
+      },
+      ".text.takibi.kernel_process_protocol_observe": {
+        "before": 596,
+        "after": 592,
+        "delta": -4
+      },
+      ".text.takibi.kernel_process_protocol_trace_open": {
+        "before": 92,
+        "after": 100,
+        "delta": 8
+      },
+      ".text.takibi.protocol_trace_observe_core": {
+        "before": 108,
+        "after": 92,
+        "delta": -16
+      },
+      ".text.takibi.protocol_trace_observe_process": {
+        "before": 268,
+        "after": 252,
+        "delta": -16
+      },
+      ".text.takibi.protocol_trace_open_probe": {
+        "before": 204,
+        "after": 244,
+        "delta": 40
+      }
+    },
+    "rpi5": {
+      ".eh_frame": {
+        "before": 137600,
+        "after": 137608,
+        "delta": 8
+      },
+      ".text.takibi.kernel_process_protocol_observe": {
+        "before": 588,
+        "after": 628,
+        "delta": 40
+      },
+      ".text.takibi.kernel_process_protocol_trace_open": {
+        "before": 92,
+        "after": 100,
+        "delta": 8
+      },
+      ".text.takibi.protocol_trace_observe_core": {
+        "before": 104,
+        "after": 92,
+        "delta": -12
+      },
+      ".text.takibi.protocol_trace_observe_process": {
+        "before": 252,
+        "after": 228,
+        "delta": -24
+      },
+      ".text.takibi.protocol_trace_open_probe": {
+        "before": 204,
+        "after": 244,
+        "delta": 40
+      }
+    }
+  },
+  "frames": {
+    "qemu": {
+      "main.o": {
+        "baseline": {
+          "protocol_trace_prepare_open": 16,
+          "protocol_trace_commit_open": 16,
+          "protocol_trace_open_probe": 32,
+          "protocol_trace_pass_begin": 16,
+          "protocol_trace_observe_process": 16,
+          "protocol_trace_observe_core": 0,
+          "protocol_trace_pass_end": 80,
+          "kernel_process_protocol_observe": 160,
+          "kernel_process_protocol_trace_open": 32
+        },
+        "candidate": {
+          "protocol_trace_prepare_open": 16,
+          "protocol_trace_commit_open": 16,
+          "protocol_trace_open_probe": 32,
+          "protocol_trace_pass_begin": 16,
+          "protocol_trace_observe_process": 16,
+          "protocol_trace_observe_core": 0,
+          "protocol_trace_pass_end": 80,
+          "kernel_process_protocol_observe": 160,
+          "kernel_process_protocol_trace_open": 32
+        }
+      },
+      "main.debug.o": {
+        "baseline": {
+          "protocol_trace_prepare_open": 16,
+          "protocol_trace_commit_open": 32,
+          "protocol_trace_open_probe": 32,
+          "protocol_trace_pass_begin": 16,
+          "protocol_trace_observe_process": 32,
+          "protocol_trace_observe_core": 0,
+          "protocol_trace_pass_end": 96,
+          "kernel_process_protocol_observe": 224,
+          "kernel_process_protocol_trace_open": 48
+        },
+        "candidate": {
+          "protocol_trace_prepare_open": 32,
+          "protocol_trace_commit_open": 48,
+          "protocol_trace_open_probe": 32,
+          "protocol_trace_pass_begin": 32,
+          "protocol_trace_observe_process": 48,
+          "protocol_trace_observe_core": 32,
+          "protocol_trace_pass_end": 112,
+          "kernel_process_protocol_observe": 224,
+          "kernel_process_protocol_trace_open": 48
+        }
+      }
+    },
+    "rpi5": {
+      "main.o": {
+        "baseline": {
+          "protocol_trace_prepare_open": 16,
+          "protocol_trace_commit_open": 16,
+          "protocol_trace_open_probe": 32,
+          "protocol_trace_pass_begin": 16,
+          "protocol_trace_observe_process": 16,
+          "protocol_trace_observe_core": 0,
+          "protocol_trace_pass_end": 80,
+          "kernel_process_protocol_observe": 160,
+          "kernel_process_protocol_trace_open": 32
+        },
+        "candidate": {
+          "protocol_trace_prepare_open": 16,
+          "protocol_trace_commit_open": 16,
+          "protocol_trace_open_probe": 32,
+          "protocol_trace_pass_begin": 16,
+          "protocol_trace_observe_process": 16,
+          "protocol_trace_observe_core": 0,
+          "protocol_trace_pass_end": 80,
+          "kernel_process_protocol_observe": 160,
+          "kernel_process_protocol_trace_open": 32
+        }
+      },
+      "main.debug.o": {
+        "baseline": {
+          "protocol_trace_prepare_open": 16,
+          "protocol_trace_commit_open": 32,
+          "protocol_trace_open_probe": 32,
+          "protocol_trace_pass_begin": 16,
+          "protocol_trace_observe_process": 32,
+          "protocol_trace_observe_core": 0,
+          "protocol_trace_pass_end": 96,
+          "kernel_process_protocol_observe": 224,
+          "kernel_process_protocol_trace_open": 48
+        },
+        "candidate": {
+          "protocol_trace_prepare_open": 32,
+          "protocol_trace_commit_open": 48,
+          "protocol_trace_open_probe": 32,
+          "protocol_trace_pass_begin": 32,
+          "protocol_trace_observe_process": 48,
+          "protocol_trace_observe_core": 32,
+          "protocol_trace_pass_end": 112,
+          "kernel_process_protocol_observe": 224,
+          "kernel_process_protocol_trace_open": 48
+        }
+      }
+    }
+  },
+  "artifact_bindings": [
+    {
+      "path": "kernel/build/qemu/kernel.elf",
+      "baseline_sha256": "44606d92a4083929d8fcbcc3fff8e4b41de58150482654ca2a43986568e5609c",
+      "candidate_sha256": "9ec17808f31ada4b5f5a270d2ee9fbf656839b6ea6b94132c68086a7e97d6060",
+      "baseline_bytes": 1314880,
+      "candidate_bytes": 1314888
+    },
+    {
+      "path": "kernel/build/qemu/main.o",
+      "baseline_sha256": "4a03410dbf184b78508727e18da6cc3bd9bdea54f3088436e41a93aab93eefe6",
+      "candidate_sha256": "7d558c9c74ed903b8feac657a983d0072fec02e69bdb3c752b34f36f1695acd7",
+      "baseline_bytes": 3000416,
+      "candidate_bytes": 3000424
+    },
+    {
+      "path": "kernel/build/qemu/main.debug.o",
+      "baseline_sha256": "02b75e1881d1530f33f181908c871145ef095bd02076ab0834f60c431e359870",
+      "candidate_sha256": "c112e4f7ab74ced102bf215a3e5158084b8d718aba6a623227951ebb4c68a828",
+      "baseline_bytes": 7833456,
+      "candidate_bytes": 7834936
+    },
+    {
+      "path": "kernel/build/qemu/main.o.facts/structs.tsv",
+      "baseline_sha256": "1c370095977b8eee0db34aa0a86cd8a7a8c2dd5ed502932e36952e889815cca5",
+      "candidate_sha256": "cd9357c37d1a3988e2beab90c4018763e21832461973b73fd48a0df00ad9ff34",
+      "baseline_bytes": 105268,
+      "candidate_bytes": 105477
+    },
+    {
+      "path": "kernel/build/qemu/main.o.facts/globals.tsv",
+      "baseline_sha256": "ccc7917c1888899bec10d83ffb448f3bc94625e3cb7b57b42867fb5e48e54c89",
+      "candidate_sha256": "f29f14e34e57a1ffd352ceda7021e5f7bef44149341bd8d4615546346e87655c",
+      "baseline_bytes": 437984,
+      "candidate_bytes": 438001
+    },
+    {
+      "path": "kernel/build/qemu/main.o.facts/callgraph.tsv",
+      "baseline_sha256": "d783bb44254f0becb7025568e92ec4811d2701c1037fcc8b50bdc0e067ed9701",
+      "candidate_sha256": "f0a8cdd5b105f66a01566cbe8961f801ba57f448757587a8400e572f28bc8e3f",
+      "baseline_bytes": 2226752,
+      "candidate_bytes": 2227253
+    },
+    {
+      "path": "kernel/build/rpi5/kernel.elf",
+      "baseline_sha256": "951fc8c5a00dacea1a826a3fbf6f4b3c063b7719e9e2910d4a1d2fa55d4c4832",
+      "candidate_sha256": "6697a03180178cfa8457a448668fb68b64135fdc0c7414fb79fcbf696dfd50b8",
+      "baseline_bytes": 4736392,
+      "candidate_bytes": 4736400
+    },
+    {
+      "path": "kernel/build/rpi5/main.o",
+      "baseline_sha256": "aaa7763a28c6424235ac8e6c04d935c140328e514fb6d10a4291639fea9a864e",
+      "candidate_sha256": "cd2c653434fc8638686fdcae1114551f488977b176eb853139f5a22e87ffa099",
+      "baseline_bytes": 6542000,
+      "candidate_bytes": 6542008
+    },
+    {
+      "path": "kernel/build/rpi5/main.debug.o",
+      "baseline_sha256": "322048ebe37fff40e43cda3b10e3ddc5ce8b02a42908da7e000eabe10bf6075c",
+      "candidate_sha256": "35f6b9789634e3c88063791a708d4ab6f1b77007b1f9b2e89090411554c60cc7",
+      "baseline_bytes": 12105184,
+      "candidate_bytes": 12106600
+    },
+    {
+      "path": "kernel/build/rpi5/main.o.facts/structs.tsv",
+      "baseline_sha256": "a5e5dd5926ec5ef8f8ec1fd510ccd6ea00e380101575b4645e3deffa48f64c7e",
+      "candidate_sha256": "df2f3233052908aafdc4f24a8f50297a1b51840feb4ec525e9e50d926e94fef1",
+      "baseline_bytes": 123099,
+      "candidate_bytes": 123308
+    },
+    {
+      "path": "kernel/build/rpi5/main.o.facts/globals.tsv",
+      "baseline_sha256": "3d9865f029e1ad94a5f4e7d047d552222fd66a182be6cec446a797b0db7fa2ea",
+      "candidate_sha256": "60b015099411459ce88c1e4e2dace9c68c1d8a4cd9354ce657e2e8ba6f4f8da3",
+      "baseline_bytes": 478206,
+      "candidate_bytes": 478223
+    },
+    {
+      "path": "kernel/build/rpi5/main.o.facts/callgraph.tsv",
+      "baseline_sha256": "00f377b9622146c32638ed8330a6b74868eddc627197ad048cad9b3a6b9dbba0",
+      "candidate_sha256": "6f489ff278fc32390922c76840903e93524fecef84c1b33baccb9bfe241a0df1",
+      "baseline_bytes": 2377296,
+      "candidate_bytes": 2377797
+    }
+  ],
+  "debug_artifact_bindings": [
+    {
+      "path": "kernel/build/qemu/kernel-debug.elf",
+      "baseline_sha256": "7a2e3ad202d6d43aed71d3d4f199634a6bf9fd9eed2149649e78fe3718151a4d",
+      "candidate_sha256": "2ccdd96f443664ca225af41d93c7e8714ee9b26fb8b0007215f8aebfa3a5b251"
+    },
+    {
+      "path": "kernel/build/rpi5/kernel-debug.elf",
+      "baseline_sha256": "700db43f5fe7eb82bea93edba7af1c37277edc44aef4f2e54a270676185feab3",
+      "candidate_sha256": "4f0b0fffd7b2eb4d12a2a2c56b3af88f5cb90a52c3e69d0ef934ed147dab5e69"
+    }
+  ],
+  "classification": "two existing composite declarations; offsets0, sizes3072/64 in both normal/debug target facts",
+  "limits": "Single-frame/static image evidence; no physical time/coherence or whole-callgraph stack claim; existing allocation workload unchanged.",
+  "debug_section_changes": {
+    "qemu": {
+      ".debug_str": {
+        "before": 383652,
+        "after": 383749,
+        "delta": 97
+      },
+      ".debug_loc": {
+        "before": 499748,
+        "after": 499647,
+        "delta": -101
+      },
+      ".text": {
+        "before": 723648,
+        "after": 723728,
+        "delta": 80
+      },
+      ".debug_line": {
+        "before": 361354,
+        "after": 362190,
+        "delta": 836
+      },
+      ".debug_pubtypes": {
+        "before": 17368,
+        "after": 17427,
+        "delta": 59
+      },
+      ".debug_info": {
+        "before": 557210,
+        "after": 557359,
+        "delta": 149
+      }
+    },
+    "rpi5": {
+      ".debug_str": {
+        "before": 437752,
+        "after": 437849,
+        "delta": 97
+      },
+      ".debug_loc": {
+        "before": 554039,
+        "after": 553976,
+        "delta": -63
+      },
+      ".text": {
+        "before": 775404,
+        "after": 775500,
+        "delta": 96
+      },
+      ".debug_line": {
+        "before": 382359,
+        "after": 383222,
+        "delta": 863
+      },
+      ".debug_pubtypes": {
+        "before": 20681,
+        "after": 20740,
+        "delta": 59
+      },
+      ".debug_info": {
+        "before": 634786,
+        "after": 634935,
+        "delta": 149
+      }
+    }
+  }
+}

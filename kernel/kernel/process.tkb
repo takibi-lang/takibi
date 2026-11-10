@@ -1945,7 +1945,7 @@ private fn kernel_process_protocol_owner(owner: usize) -> usize {
 // A record with no parent (PID 1, the boot thread, or an orphan the
 // teardown sweep detached) names nothing.
 private fn kernel_process_protocol_observe(guard: borrow ProcessRunGuard[&scheduled_process_run_lock], unlocked: bool) !{unsafe} {
-    protocol_trace_pass_begin(unlocked);
+    protocol_trace_pass_begin(guard, unlocked);
     let mut slot: usize = 0;
     if (atomic_word_load(&scheduled_process_pool_ready) != 0) {
         slot = process_pool_first_slot();
@@ -1985,7 +1985,7 @@ private fn kernel_process_protocol_observe(guard: borrow ProcessRunGuard[&schedu
         if (seen) {
             let mut parent_pid: usize = PROTOCOL_TRACE_NONE;
             if (has_parent) { parent_pid = scheduled_process_pid_of_handle(parent); }
-            protocol_trace_observe_process(pid, state, owner, reason, parent_pid);
+            protocol_trace_observe_process(guard, pid, state, owner, reason, parent_pid);
         }
         probes = probes + 1;
         slot = next;
@@ -1994,9 +1994,9 @@ private fn kernel_process_protocol_observe(guard: borrow ProcessRunGuard[&schedu
     for core: usize in 0..<KERNEL_MAX_CORES {
         let current: usize = execution_observed_current_pid(guard, core);
         let stands: usize = execution_observed_stack_pid(guard, core);
-        protocol_trace_observe_core(core, current, stands);
+        protocol_trace_observe_core(guard, core, current, stands);
     }
-    protocol_trace_pass_end(unlocked);
+    protocol_trace_pass_end(guard, unlocked);
 }
 
 // /bin/protocol-trace opens and closes the window (GitHub issue #606). The
@@ -2005,13 +2005,13 @@ private fn kernel_process_protocol_observe(guard: borrow ProcessRunGuard[&schedu
 // outside the lock.
 fn kernel_process_protocol_trace_open() -> ProtocolTraceOpenResult {
     let guard = process_run_lock();
-    if (protocol_trace_open_probe() == false) {
+    if (protocol_trace_open_probe(guard) == false) {
         process_run_unlock(guard);
         return ProtocolTraceOpenResult::Invalid;
     }
-    protocol_trace_prepare_open();
+    protocol_trace_prepare_open(guard);
     kernel_process_protocol_observe(guard, false);
-    let result = protocol_trace_commit_open();
+    let result = protocol_trace_commit_open(guard);
     // The opening hold already observed exactly once. Ordinary unlock would
     // diff a second time and count two observations for one critical section.
     process_run_unlock_observed(guard);

@@ -71,16 +71,28 @@ struct ProtocolTraceCore {
     stands: usize;
 }
 
+// Inline guarded fields keep the shadow arrays in place under the existing
+// process-run hold. no_copy prevents whole-wrapper copies or replacement;
+// guarded_ref permits only in-place scalar access under the matching guard.
+struct no_copy ProtocolTraceProcessShadow {
+    private rows: [ProtocolTraceProcess; PROTOCOL_TRACE_PROCESSES]
+        guarded_by(scheduled_process_run_lock);
+}
+
+struct no_copy ProtocolTraceCoreShadow {
+    private rows: [ProtocolTraceCore; KERNEL_MAX_CORES]
+        guarded_by(scheduled_process_run_lock);
+}
+
 private let mut protocol_trace_active: AtomicWord;
 private let mut protocol_trace_sequence: AtomicWord;
 private let mut protocol_trace_stored: AtomicWord;
 private let mut protocol_trace_lost: AtomicWord;
 private let mut protocol_trace_events:
     [ProtocolTraceEvent; PROTOCOL_TRACE_EVENTS];
-private let mut protocol_trace_processes:
-    [ProtocolTraceProcess; PROTOCOL_TRACE_PROCESSES];
+private let mut protocol_trace_processes: ProtocolTraceProcessShadow;
 private let mut protocol_trace_process_count: AtomicWord;
-private let mut protocol_trace_cores: [ProtocolTraceCore; KERNEL_MAX_CORES];
+private let mut protocol_trace_cores: ProtocolTraceCoreShadow;
 private let mut protocol_trace_unlocked_pass: AtomicWord;
 
 fn protocol_trace_is_active() -> bool {
@@ -110,14 +122,15 @@ private fn protocol_trace_record(kind: ProtocolTraceKind, first: usize,
 
 // Opening: forget every earlier window. The caller then observes every
 // process and core, which records them all, as sequence 0.
-fn protocol_trace_prepare_open() {
+fn protocol_trace_prepare_open(
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock]) {
     atomic_word_store(&protocol_trace_sequence, 0);
     atomic_word_store(&protocol_trace_stored, 0);
     atomic_word_store(&protocol_trace_lost, 0);
     atomic_word_store(&protocol_trace_process_count, 0);
     for core: usize in 0..<KERNEL_MAX_CORES {
-        protocol_trace_cores[core].current = 0;
-        protocol_trace_cores[core].stands = 0;
+        guarded_ref(guard, protocol_trace_cores.rows)[core].current = 0;
+        guarded_ref(guard, protocol_trace_cores.rows)[core].stands = 0;
     }
     atomic_word_store(&protocol_trace_unlocked_pass, 0);
     atomic_word_store(&protocol_trace_active, 0);
@@ -128,15 +141,16 @@ must_use variant ProtocolTraceOpenResult { Opened; ReservationPending; Invalid; 
 // The wire format has no explicit per-CPU reservation. A snapshot may start
 // only when every Running process is visible as current or stood-on. Later
 // Ready -> Running holds let the replay infer reservations normally.
-fn protocol_trace_commit_open() -> ProtocolTraceOpenResult {
+fn protocol_trace_commit_open(
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock]) -> ProtocolTraceOpenResult {
     let count: usize = atomic_word_load(&protocol_trace_process_count);
     for index: usize in 0..<PROTOCOL_TRACE_PROCESSES {
-        if (index < count && protocol_trace_processes[index].state == 2) {
-            let pid: usize = protocol_trace_processes[index].pid;
+        if (index < count && guarded_ref(guard, protocol_trace_processes.rows)[index].state == 2) {
+            let pid: usize = guarded_ref(guard, protocol_trace_processes.rows)[index].pid;
             let mut held: bool = false;
             for core: usize in 0..<KERNEL_MAX_CORES {
-                if (protocol_trace_cores[core].current == pid ||
-                    protocol_trace_cores[core].stands == pid) { held = true; }
+                if (guarded_ref(guard, protocol_trace_cores.rows)[core].current == pid ||
+                    guarded_ref(guard, protocol_trace_cores.rows)[core].stands == pid) { held = true; }
             }
             if (held == false) { return ProtocolTraceOpenResult::ReservationPending; }
         }
@@ -148,22 +162,23 @@ fn protocol_trace_commit_open() -> ProtocolTraceOpenResult {
 // Deterministic regression for the real failed snapshot: Running pid 2 is
 // reserved off-core while CPU 1 holds pid 85. Publishing that candidate must
 // be refused, and a later candidate with CPU 0 holding pid 2 must open.
-fn protocol_trace_open_probe() -> bool {
-    protocol_trace_prepare_open();
-    protocol_trace_pass_begin(false);
-    protocol_trace_observe_process(2, 2, PROTOCOL_TRACE_NONE, 0, 1);
-    protocol_trace_observe_process(85, 2, 1, 0, 2);
-    protocol_trace_observe_core(0, PROTOCOL_TRACE_NONE, PROTOCOL_TRACE_NONE);
-    protocol_trace_observe_core(1, 85, 85);
-    protocol_trace_pass_end(false);
-    match protocol_trace_commit_open() {
+fn protocol_trace_open_probe(
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock]) -> bool {
+    protocol_trace_prepare_open(guard);
+    protocol_trace_pass_begin(guard, false);
+    protocol_trace_observe_process(guard, 2, 2, PROTOCOL_TRACE_NONE, 0, 1);
+    protocol_trace_observe_process(guard, 85, 2, 1, 0, 2);
+    protocol_trace_observe_core(guard, 0, PROTOCOL_TRACE_NONE, PROTOCOL_TRACE_NONE);
+    protocol_trace_observe_core(guard, 1, 85, 85);
+    protocol_trace_pass_end(guard, false);
+    match protocol_trace_commit_open(guard) {
         ProtocolTraceOpenResult::Opened => { protocol_trace_close(); return false; }
         ProtocolTraceOpenResult::Invalid => { return false; }
         ProtocolTraceOpenResult::ReservationPending => {}
     }
     if (protocol_trace_is_active()) { protocol_trace_close(); return false; }
-    protocol_trace_observe_core(0, 2, PROTOCOL_TRACE_NONE);
-    match protocol_trace_commit_open() {
+    protocol_trace_observe_core(guard, 0, 2, PROTOCOL_TRACE_NONE);
+    match protocol_trace_commit_open(guard) {
         ProtocolTraceOpenResult::Opened => { protocol_trace_close(); return true; }
         ProtocolTraceOpenResult::ReservationPending => { return false; }
         ProtocolTraceOpenResult::Invalid => { return false; }
@@ -180,27 +195,29 @@ fn protocol_trace_note_lost() {
 // One diff pass. `unlocked` says the pass is taken at acquire, so whatever
 // it finds changed while no CPU held the lock; at release it is this hold's
 // own step, and the next hold gets the next sequence number.
-fn protocol_trace_pass_begin(unlocked: bool) {
+fn protocol_trace_pass_begin(
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock], unlocked: bool) {
     if (unlocked) { atomic_word_store(&protocol_trace_unlocked_pass, 1); } else { atomic_word_store(&protocol_trace_unlocked_pass, 0); }
     for index: usize in 0..<PROTOCOL_TRACE_PROCESSES {
-        protocol_trace_processes[index].seen = false;
+        guarded_ref(guard, protocol_trace_processes.rows)[index].seen = false;
     }
 }
 
-fn protocol_trace_observe_process(pid: usize, state: usize, owner: usize,
+fn protocol_trace_observe_process(
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock], pid: usize, state: usize, owner: usize,
                                   reason: usize, parent: usize) {
     let count: usize = atomic_word_load(&protocol_trace_process_count);
     for index: usize in 0..<PROTOCOL_TRACE_PROCESSES {
-        if (index < count && protocol_trace_processes[index].pid == pid) {
-            protocol_trace_processes[index].seen = true;
-            if (protocol_trace_processes[index].state != state ||
-                protocol_trace_processes[index].owner != owner ||
-                protocol_trace_processes[index].reason != reason ||
-                protocol_trace_processes[index].parent != parent) {
-                protocol_trace_processes[index].state = state;
-                protocol_trace_processes[index].owner = owner;
-                protocol_trace_processes[index].reason = reason;
-                protocol_trace_processes[index].parent = parent;
+        if (index < count && guarded_ref(guard, protocol_trace_processes.rows)[index].pid == pid) {
+            guarded_ref(guard, protocol_trace_processes.rows)[index].seen = true;
+            if (guarded_ref(guard, protocol_trace_processes.rows)[index].state != state ||
+                guarded_ref(guard, protocol_trace_processes.rows)[index].owner != owner ||
+                guarded_ref(guard, protocol_trace_processes.rows)[index].reason != reason ||
+                guarded_ref(guard, protocol_trace_processes.rows)[index].parent != parent) {
+                guarded_ref(guard, protocol_trace_processes.rows)[index].state = state;
+                guarded_ref(guard, protocol_trace_processes.rows)[index].owner = owner;
+                guarded_ref(guard, protocol_trace_processes.rows)[index].reason = reason;
+                guarded_ref(guard, protocol_trace_processes.rows)[index].parent = parent;
                 protocol_trace_record(ProtocolTraceKind::Process, pid, state,
                                       owner, reason, parent);
             }
@@ -212,55 +229,57 @@ fn protocol_trace_observe_process(pid: usize, state: usize, owner: usize,
         return;
     }
     let slot: {0..<PROTOCOL_TRACE_PROCESSES as usize} = count;
-    protocol_trace_processes[slot].pid = pid;
-    protocol_trace_processes[slot].state = state;
-    protocol_trace_processes[slot].owner = owner;
-    protocol_trace_processes[slot].reason = reason;
-    protocol_trace_processes[slot].parent = parent;
-    protocol_trace_processes[slot].seen = true;
+    guarded_ref(guard, protocol_trace_processes.rows)[slot].pid = pid;
+    guarded_ref(guard, protocol_trace_processes.rows)[slot].state = state;
+    guarded_ref(guard, protocol_trace_processes.rows)[slot].owner = owner;
+    guarded_ref(guard, protocol_trace_processes.rows)[slot].reason = reason;
+    guarded_ref(guard, protocol_trace_processes.rows)[slot].parent = parent;
+    guarded_ref(guard, protocol_trace_processes.rows)[slot].seen = true;
     atomic_word_store(&protocol_trace_process_count, count + 1);
     protocol_trace_record(ProtocolTraceKind::Process, pid, state, owner,
                           reason, parent);
 }
 
-fn protocol_trace_observe_core(core: {0..<KERNEL_MAX_CORES as usize},
+fn protocol_trace_observe_core(
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock], core: {0..<KERNEL_MAX_CORES as usize},
                                current: usize, stands: usize) {
-    if (protocol_trace_cores[core].current == current &&
-        protocol_trace_cores[core].stands == stands &&
+    if (guarded_ref(guard, protocol_trace_cores.rows)[core].current == current &&
+        guarded_ref(guard, protocol_trace_cores.rows)[core].stands == stands &&
         atomic_word_load(&protocol_trace_sequence) != 0) {
         return;
     }
-    protocol_trace_cores[core].current = current;
-    protocol_trace_cores[core].stands = stands;
+    guarded_ref(guard, protocol_trace_cores.rows)[core].current = current;
+    guarded_ref(guard, protocol_trace_cores.rows)[core].stands = stands;
     protocol_trace_record(ProtocolTraceKind::Core, core, current, stands, 0,
                           0);
 }
 
 // A process no longer in the pool is recorded gone, and the entries still
 // tracked are packed to the front.
-fn protocol_trace_pass_end(unlocked: bool) {
+fn protocol_trace_pass_end(
+        guard: borrow ProcessRunGuard[&scheduled_process_run_lock], unlocked: bool) {
     let count: usize = atomic_word_load(&protocol_trace_process_count);
     let mut kept: usize = 0;
     for position: usize in 0..<PROTOCOL_TRACE_PROCESSES {
         if (position < count) {
-            if (protocol_trace_processes[position].seen) {
+            if (guarded_ref(guard, protocol_trace_processes.rows)[position].seen) {
                 let dest: usize = kept;
                 if (dest < PROTOCOL_TRACE_PROCESSES) {
-                    protocol_trace_processes[dest].pid =
-                        protocol_trace_processes[position].pid;
-                    protocol_trace_processes[dest].state =
-                        protocol_trace_processes[position].state;
-                    protocol_trace_processes[dest].owner =
-                        protocol_trace_processes[position].owner;
-                    protocol_trace_processes[dest].reason =
-                        protocol_trace_processes[position].reason;
-                    protocol_trace_processes[dest].parent =
-                        protocol_trace_processes[position].parent;
+                    guarded_ref(guard, protocol_trace_processes.rows)[dest].pid =
+                        guarded_ref(guard, protocol_trace_processes.rows)[position].pid;
+                    guarded_ref(guard, protocol_trace_processes.rows)[dest].state =
+                        guarded_ref(guard, protocol_trace_processes.rows)[position].state;
+                    guarded_ref(guard, protocol_trace_processes.rows)[dest].owner =
+                        guarded_ref(guard, protocol_trace_processes.rows)[position].owner;
+                    guarded_ref(guard, protocol_trace_processes.rows)[dest].reason =
+                        guarded_ref(guard, protocol_trace_processes.rows)[position].reason;
+                    guarded_ref(guard, protocol_trace_processes.rows)[dest].parent =
+                        guarded_ref(guard, protocol_trace_processes.rows)[position].parent;
                 }
                 kept = kept + 1;
             } else {
                 protocol_trace_record(ProtocolTraceKind::Gone,
-                                      protocol_trace_processes[position].pid,
+                                      guarded_ref(guard, protocol_trace_processes.rows)[position].pid,
                                       0, 0, 0, 0);
             }
         }
