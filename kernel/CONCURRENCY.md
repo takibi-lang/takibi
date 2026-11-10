@@ -341,6 +341,13 @@ Symmetric now:
   DDB's continue gives back what it displaced only while its own owner field
   is still there. `kernel/models/ConsoleOwner.tla` checks it. Before, core 0
   alone could stand the queue down and a peer got `NotConsoleOwner`.
+  Every ordinary checked FIFO store holds the console guard across its
+  room observation and DR write. A complete stop may interrupt that interval.
+  After its final UART byte and before releasing peers, the returning DDB
+  waits for one free slot under the existing stop borrow, without taking
+  the stopped console lock. The hardware can only free more slots before
+  the one held checked writer resumes. This retains the debugger's existing
+  polled-device progress assumption and adds no wait to input requests.
 - UART input-flow requests: the RX handler, a terminal read that drained
   the receive ring, and a termios change publish/coalesce the latest STOP
   or START under the console lock (`kernel_log_terminal_flow_request`).

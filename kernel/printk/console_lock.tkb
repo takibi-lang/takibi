@@ -25,19 +25,16 @@
 // guard as a parameter, so a caller cannot reach them without holding it, and
 // they are written without `logs`.
 //
-// Current limitations (2026-09-30):
-// - THE KERNEL LOG AND THE TERMINAL ARE STILL TWO STREAMS. A peer's kernel
-//   log lines go through the per-CPU publication ring and core 0 moves them
-//   here at its own moments, as before; only TERMINAL output is ordered by
-//   this lock. That split is deliberate (kernel/CONCURRENCY.md, "Reporters
-//   must not take locks": an oops or a BREAK must not wait for a lock), and
-//   it is Linux's own split between printk and tty output.
+// Reporter boundary:
+// - Ordinary retained log lines and terminal output share this lock for
+//   physical admission. Retained records are a separate lock-free stream;
+//   every CPU writes its own line directly rather than through a peer ring.
 // - DDB AND THE CRASH CONSOLE DO NOT TAKE IT. They stand the queue down and
-//   write through uart_debug_putc. The world stop that precedes them waits for
-//   every other CPU to take an interrupt, which a CPU inside this lock does
-//   not until it leaves; the critical sections are short and bounded by the
-//   wire, so that is a delay, not a hang, but a holder stuck for good would
-//   stop the debugger entering.
+//   write through uart_debug_putc. The priority-mask stop SGI can interrupt
+//   a holder, including between its FIFO check and store. A complete-stop DDB
+//   leaves one free slot after its final byte and before releasing peers;
+//   every ordinary checked store is serialized by this guard. A complete
+//   stop does not make partially updated guarded state coherent.
 use "kernel/lib/mutex.tkb";
 
 let mut console_tx_lock: Mutex;

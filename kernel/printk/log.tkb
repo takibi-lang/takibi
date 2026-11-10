@@ -972,6 +972,16 @@ fn kernel_log_tx_resume(stopped: borrow MachineStopped[&kernel_world_stop],
     }
 }
 
+// The debugger's last byte can fill a FIFO slot a stopped guard holder
+// observed as free. All normal checked stores hold the console guard, so
+// at most one can be in flight. After the last debug write, leave one slot
+// before releasing the machine; hardware can only make more room. This is
+// the debug path's existing polled-device progress assumption, not a timed
+// wait or an ordinary IRQ/request path. Never acquire the stopped lock.
+fn kernel_log_tx_resume_room(stopped: borrow MachineStopped[&kernel_world_stop]) {
+    while (uart_tx_fifo_full()) { }
+}
+
 private fn kernel_log_tx_flow_is_pending() -> bool {
     return atomic_word_load(&kernel_log_tx_flow_pending) != 0;
 }
@@ -1114,11 +1124,11 @@ private fn kernel_log_tx_pop(guard: borrow ConsoleGuard[&console_tx_lock])
 // existed, and it is still the whole story for early boot, for DDB, and for a
 // queue that has filled.
 private fn uart_tx_spin_store(c: u8) !{unsafe} {
+    let guard = console_lock();
     let spin_from: i64 = read_cntpct();
     while (uart_tx_fifo_full()) { }
     kernel_log_note_tx_spin(read_cntpct() - spin_from);
     uart_tx_store(c);
-    let guard = console_lock();
     kernel_log_wire_note(guard, c);
     console_unlock(guard);
 }

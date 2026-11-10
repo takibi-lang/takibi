@@ -3093,6 +3093,11 @@ private fn kernel_ddb_enter_stopped(
     } else {
         ddb_puts("ddb: console tx=spinning\n");
     }
+    // This must follow every debugger UART write. A stopped console guard
+    // may retain one checked store, whose pre-stop FIFO observation is stale.
+    // The caller retires execution-stop state and releases the machine next;
+    // neither operation writes the UART on this nonterminal return.
+    kernel_log_tx_resume_room(stopped_world);
     // Do this last: every command above may exercise the nested-fault path.
     kernel_ddb_restore_fault_state(outer_esr_el1, outer_far_el1);
 }

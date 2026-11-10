@@ -212,6 +212,12 @@ check_model ConsoleTx Safety 10 \
     flowpauseoff:CInitFlowPauseOff:FlowNoStranded:violated:6 \
     flowhintonly:CInitFlowHintOnly:temporal:ok:4
 
+check_model ConsoleRoom Safety 8 \
+    fixed:CInitFixed:pass:ok \
+    nofence:CInitNoFence:NoFullStore:violated \
+    noserial:CInitNoSerial:NoFullStore:violated \
+    old:CInitOld:NoFullStore:violated
+
 check_model ConsoleOwner Safety 8 \
     fixed:CInitFixed:pass:ok \
     blind:CInitBlind:TerminalStays:violated \
