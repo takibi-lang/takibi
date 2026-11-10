@@ -130,8 +130,11 @@ Investigate explicit linear ownership for CPU-independent exec reservations
 using existing types first; add no reservation workaround. Continue
 independent raw-CPU reader review while a concrete new decision is parked.
 
-**Ownership review update, 2026-11-10.** Scoped ASID initialization is
-published. Boot exec scratch migration waits for an explicit choice between
+**Ownership review update, 2026-11-10.** The pending TCP chain probe owns
+its fully zeroed frame locally through the existing nonretaining copy API;
+all four measured frames fit the existing ceiling. Continue the remaining
+production-reachable global migrations without a fixture exemption.
+Scoped ASID initialization is published. Boot exec scratch migration waits for an explicit choice between
 aggregate loan provenance and a scalar-plan/borrowed-image API; actual
 production lifetime controls demonstrate the current retaining-plan gap.
 The separate nested-index consumed-owner defect (#1500) needs compiler
