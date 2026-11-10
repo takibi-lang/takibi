@@ -205,6 +205,67 @@ def main():
              "    ext2_mutation_take(); let slot = block_slot_acquire_from(0);\n"
              "    block_slot_release(slot); }", "", None),
         ]
+        held_block = ("operation holds a BlockSlot and reaches block_slot_acquire, "
+                      + same_pool)
+        interval_cases = [
+            ("USB retirement around guarded work",
+             "block_read(); let slot: BlockSlot[0] = block_slot_acquire(); "
+             "let guard = block_device_take(slot); work(guard); "
+             "block_device_give(guard); block_slot_release(slot); block_read();", None),
+            ("entry before release", "let slot = block_slot_acquire(); "
+             "block_read(); block_slot_release(slot);", held_block),
+            ("entry after release", "let slot = block_slot_acquire(); "
+             "block_slot_release(slot); block_read();", None),
+            ("between two held intervals", "let a = block_slot_acquire(); "
+             "block_slot_release(a); block_read(); let b = block_slot_acquire(); "
+             "block_slot_release(b); block_read();", None),
+            ("second held interval", "let a = block_slot_acquire(); "
+             "block_slot_release(a); let b = block_slot_acquire(); "
+             "block_read(); block_slot_release(b);", held_block),
+            ("wrong release name", "let slot = block_slot_acquire(); "
+             "block_slot_release(other); block_read();", held_block),
+            ("conditional release", "let slot = block_slot_acquire(); "
+             "if (flag) { block_slot_release(slot); } block_read();", held_block),
+            ("same-depth sibling release", "if (flag) { "
+             "let slot = block_slot_acquire(); } else { "
+             "block_slot_release(slot); } block_read();", held_block),
+            ("shadowed release name", "let slot = block_slot_acquire(); "
+             "{ let slot = other; } block_slot_release(slot); block_read();", held_block),
+            ("reassigned release name", "let mut slot = block_slot_acquire(); "
+             "slot = other; block_slot_release(slot); block_read();", held_block),
+            ("operator reassign", "let mut slot = block_slot_acquire(); "
+             "slot += other; block_slot_release(slot); block_read();", held_block),
+            ("unknown release helper", "let slot = block_slot_acquire(); "
+             "finish(slot); block_read();", held_block),
+            ("short circuit release expression", "let slot = block_slot_acquire(); "
+             "flag && block_slot_release(slot); block_read();", held_block),
+            ("nested second acquisition argument",
+             "let slot = block_slot_acquire_from(block_slot_acquire()); "
+             "block_slot_release(slot);", held_block),
+            ("non-let acquisition", "save(block_slot_acquire()); block_read();", held_block),
+            ("comment and literal release", "let slot = block_slot_acquire(); "
+             'print("block_slot_release(slot);"); /* block_slot_release(slot); */ '
+             "block_read();", held_block),
+            ("relayout and comments", "let /* binding */ slot: BlockSlot[0]\n"
+             " = block_slot_acquire\n(\n);\nblock_slot_release\n( /* arg */ slot\n);\n"
+             "block_read();", None),
+            ("released backing issuer", "let slot = block_slot_acquire_from(0); "
+             "block_slot_release(slot); block_read();", None),
+            ("outer lock after release", "let slot = block_slot_acquire(); "
+             "block_slot_release(slot); ext2_mutation_take();", None),
+            ("outer lock while held", "let slot = block_slot_acquire(); "
+             "ext2_mutation_take(); block_slot_release(slot);",
+             "operation holds a BlockSlot and reaches ext2_mutation_take, which is outside it"),
+            ("unknown acquisition expression", "let slot = wrap(block_slot_acquire()); "
+             "block_slot_release(slot); block_read();", held_block),
+            ("nested conditional acquisition", "if (flag) { let slot = block_slot_acquire(); "
+             "block_slot_release(slot); } block_read();", None),
+        ]
+        for label, body, diagnostic in interval_cases:
+            block_cases.append((label, "", "fn operation() { " + body + " }", diagnostic))
+        block_cases.append(("borrowed holder remains held", "",
+                            "fn operation(slot: borrow BlockSlot[0]) { "
+                            "block_slot_release(slot); block_read(); }", held_block))
         for label, memory, cache, diagnostic in block_cases:
             (block / "memory.tkb").write_text(BLOCK_MEMORY + memory + "\n")
             (block / "block_cache.tkb").write_text(cache + "\n")

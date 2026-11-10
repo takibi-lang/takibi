@@ -227,6 +227,92 @@ def sleepers_in(files):
     return sleeping
 
 
+@per_file
+def statements(body):
+    """Semicolon statements and their exact containing brace stack.
+
+    The input is already code_skeleton output. Parentheses and brackets
+    keep an argument or array-type semicolon from ending a statement.
+    This is only a recognizer for standalone acquire/release statements;
+    unrecognized syntax never shortens a held interval.
+    """
+    blocks, begin, nested, out = [], 0, 0, []
+    for match in re.finditer(r"[{}()\[\];]", body):
+        char, at = match[0], match.start()
+        if char in "([":
+            nested += 1
+        elif char in ")]":
+            nested -= 1
+        elif char == "{":
+            blocks.append((at, nested))
+            nested, begin = 0, at + 1
+        elif char == "}":
+            if blocks:
+                _, nested = blocks.pop()
+            begin = at + 1
+        elif nested == 0:
+            out.append((begin, at + 1, tuple(x[0] for x in blocks)))
+            begin = at + 1
+    return tuple(out)
+
+
+@per_file
+def acquired_references(body, acquire):
+    """References while any locally acquired slot may still be live.
+
+    Default to the old conservative tail for EVERY issuer reference. Only
+    a direct, standalone let binding and its same-block explicit release
+    shorten a tail. Shadowing/reassignment, conditional releases and helper
+    consumption are deliberately not inferred. Borrowed holders bypass
+    this helper and retain their whole-body rule.
+    """
+    issuers = acquire_names(acquire)
+    names = "|".join(re.escape(name) for name in sorted(issuers))
+    take = re.compile(r"\b(?:" + names + r")\b")
+    binding = re.compile(
+        r"\s*let\s+(?:mut\s+)?(\w+)\s*"
+        r"(?::\s*\w+\s*\[[^{};=]*\]\s*)?=\s*(?:" + names + r")\s*\(")
+    release = acquire.removesuffix("_acquire") + "_release"
+    rows = statements(body)
+    held = set()
+    for taken in take.finditer(body):
+        end = len(body)
+        for index, (start, stop, block) in enumerate(rows):
+            if not start <= taken.start() < stop:
+                continue
+            statement = body[start:stop]
+            bound = binding.match(statement)
+            # Require the issuer at this occurrence, and a complete direct
+            # call as the RHS, not a call buried in an argument/expression.
+            if not bound or start + bound.end() <= taken.end():
+                break
+            prefix = statement[:bound.end()]
+            if not re.search(r"\b" + re.escape(taken[0]) + r"\s*\($", prefix):
+                break
+            depth, close = 1, bound.end()
+            while close < len(statement) and depth:
+                depth += {"(": 1, ")": -1}.get(statement[close], 0)
+                close += 1
+            if depth or statement[close:].strip() != ";":
+                break
+            name = re.escape(bound[1])
+            changed = re.compile(r"\blet\s+(?:mut\s+)?" + name + r"\b|"
+                                 r"\b" + name + r"\s*(?:[+*/%&|^\-]|<<|>>)?=(?!=)")
+            give = re.compile(r"\s*" + re.escape(release) +
+                              r"\s*\(\s*" + name + r"\s*\)\s*;\s*")
+            change = changed.search(body, stop)
+            for after_start, after_stop, after_block in rows[index + 1:]:
+                if change and change.start() < after_stop:
+                    break
+                if after_block == block and give.fullmatch(
+                        body[after_start:after_stop]):
+                    end = after_stop
+                    break
+            break
+        held |= references(body[taken.end():end])
+    return frozenset(held)
+
+
 def nesting_problems(files):
     """Holders of a pool reaching something outer, over the kernel's graph."""
     fns = {}
@@ -248,23 +334,17 @@ def nesting_problems(files):
 
     for _, acquire, token, _ in POOLS:
         issuers = acquire_names(acquire)
-        take_pattern = re.compile(r"\b(?:" + "|".join(
-            re.escape(name) for name in sorted(issuers)) + r")\b")
         for holder in sorted(fns):
             if holder in issuers:
                 continue
             held_calls = set()
             for signature, body in fns[holder]:
                 # Substring first: this runs per function, per pool.
-                taken = (take_pattern.search(body)
-                         if any(name in body for name in issuers) else None)
                 if token in signature and re.search(r"\b" + token + r"\b",
                                                     signature):
                     held_calls |= references(body)
-                elif taken:
-                    # Conservatively start at a reference to the acquire,
-                    # including one captured for an indirect invocation.
-                    held_calls |= references(body[taken.end():])
+                elif any(name in body for name in issuers):
+                    held_calls |= acquired_references(body, acquire)
             reached = set(held_calls)
             for callee in held_calls:
                 reached |= reached_from(callee)

@@ -629,7 +629,14 @@ rules globally.
   sleep are refused, including local nonholder aliases: the check does not
   prove nonescape. This is a source/build policy, not arbitrary indirect
   call soundness; integer-to-function casts and unknown external callback
-  targets are not resolved by it.
+  targets are not resolved by it. The rank check covers foreign borrowers
+  and groups the BlockSlot wrapper with its existing backing issuer. For
+  local acquisitions it recognizes only direct let bindings through a
+  same-block standalone canonical release of that token, with no intervening
+  shadow or reassignment. Other consumption remains a conservative held
+  tail; borrowed holders keep the whole-body rule. The source recognizer
+  and the named acquire/release boundary correspondence are build-check
+  trust, not a compiler ownership or arbitrary control-flow proof.
 - Definite initialization (SPEC.md, "Definite Initialization") trusts three
   premises. A `scratch` global's element is reached only by its own CPU, so
   any index names the same place (`kernel/kernel/syscall.tkb`'s
