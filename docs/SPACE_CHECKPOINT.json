@@ -2,15 +2,12 @@
   "date": "2026-11-10",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "4c30b90193dc2cdb03cb2056a7d20da04751da18a1d3361c5e99823d50c5f7c1",
-  "workload": "Combined real BootPhase-bound boot snapshot probes and scoped two-word ASID initialization/assignment/rollover/debugger access in standard normal/debug QEMU and RPi5 images. Existing snapshot payload/store, ASID words, allocator capacities, retained allocation and lifetime workload are unchanged. Actual combined images are compared with independently hash-bound published86 baseline; prior allocator occupancy evidence remains at its original unchanged-workload boundary.",
+  "source_sha256": "c0dd523d2afe35ce619a5ec0b8509d5fb1186f15677ba4db87c1729e1591a294",
+  "workload": "Existing bounded pending TCP chain probe: five outstanding segments, one interleaved other connection, ordered records, per-connection reset, retained empty chunk reuse and teardown. Replace permanent zero BSS frame with a fully zero-initialized 1514-byte invocation-local array through the existing nonretaining borrowed copy API. Actual standard normal/debug objects and linked images for QEMU and RPi5; no allocator workload change.",
   "evidence": [
-    "docs/BOOT_SNAPSHOT_AUTHORITY_REVIEW.md",
-    "docs/BOOT_SNAPSHOT_AUTHORITY_REVIEW.json",
-    "docs/ASID_BOOT_CONFIG_SPACE_REVIEW.md",
-    "docs/ASID_BOOT_CONFIG_SPACE_REVIEW.json",
-    "docs/BOOT_ASID_INTEGRATION_SPACE_REVIEW.json"
+    "docs/TCP_PROBE_LOCAL_FRAME_SPACE.md",
+    "docs/TCP_PROBE_LOCAL_FRAME_SPACE.json"
   ],
-  "assessment": "Actual combined linked text aggregates grow QEMU normal/debug 384/448 B and RPi5 368/432 B. Normal .text grows 240/224 B, debug .text 304/288 B; unwind grows 144 B in each image. Data/BSS sizes and every data/BSS symbol size are unchanged. QEMU debug BSS start/end shift by 4096 B within the existing reserved image span; all usable_ram_start boundaries and allocator capacities remain unchanged, and the actual memory-map check passes. Accept the measured fixed code/helper and getter-call costs of the two approved existing-type boundaries. Individual reports retain selected-frame and nested-helper limitations; this is no physical-cycle or whole-call-stack proof. No new allocation or speculative optimization is introduced.",
-  "next_trigger": "Sleeping Mutex backend/consumer integration, changed snapshot authority/storage lifetime, another ASID writer or initializer/reader representation, changed allocation workload, or the next completed kernel feature/layout stage."
+  "assessment": "Selected full-body frames grow QEMU normal/debug 256/416 to 1808/1936 B and RPi5 160/288 to 1680/1808 B, within the unchanged 2048 B ceiling. Exact 1514 B BSS symbol disappears, object BSS falls 1514 B, linked GOT falls 8 B per image, linked text changes +32/+16/0/+32 B respectively. Linked BSS reservation and all usable_ram_start boundaries remain unchanged; no additional usable pages claimed. Accept active-frame and code cost for local ownership. Fixed stack reservations, pool metadata/capacity and retained allocator occupancy scope remain unchanged. Selected SP inspection is not a whole-call-path bound or physical timing/cache proof.",
+  "next_trigger": "Changed probe frame size, caller depth, borrowed copy API, allocation workload, or the next completed kernel storage/layout milestone."
 }
