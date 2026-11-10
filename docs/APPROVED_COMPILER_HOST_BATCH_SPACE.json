@@ -1,0 +1,53 @@
+{
+  "allbuild": {
+    "exit": 0,
+    "log_sha256": "cbee6a9c21b9f01fcbb5a95530fb958821febf0461bab9d9db188f9ea72d67d6",
+    "source_head_unchanged": true
+  },
+  "assessment": "The integrated normal QEMU and RPi5 ELF/object files are byte-identical to the verified published baseline. Native FDT objects match the measured readonly candidate exactly. No kernel storage, allocator workload or kernel consumer of stopped_store is added. Existing boot occupancy evidence is reused at its original strength. No physical timing, cache, stop-protocol or whole-call-chain stack proof is claimed.",
+  "baseline_head": "08d88c747e1a2d886e7a7e89b2f69688862375cf",
+  "baseline_manifest_sha256": "37d9de3febcff02329f5192eca167148ab5cecf67c76dcfcc22267eb067028de",
+  "candidate_source_head_before_review": "ecb461dbbc17c9f2e64b62ee1522eb0608d76338",
+  "compiler_sha256": "3998caee3e466fd12e3d6d932610af1bb1ae6264bf69553629ac22f9ac8882a4",
+  "date": "2026-11-10",
+  "native_fdt": {
+    "elf_delta_bytes": 824,
+    "elf_sha256": "b1efe91ddf63ec541e23f67fbe96b39961ccf4b531becc746dd1d141b6057bd0",
+    "fixed_frame_bytes_excluding_return_address_and_callees": 75784,
+    "fixed_frame_delta_bytes": 70848,
+    "matches_measured_readonly_candidate": true,
+    "measurement_source": "docs/IMMUTABLE_GLOBAL_ARRAY_REVIEW.json",
+    "object_sha256": "0bfd289494845b16c9990aa4836a15d77eb2d22afe80d6cbc8993b1fdda9b6c2"
+  },
+  "normal_kernel_artifacts": [
+    {
+      "baseline_sha256": "9ec17808f31ada4b5f5a270d2ee9fbf656839b6ea6b94132c68086a7e97d6060",
+      "byte_identical": true,
+      "bytes": 1314888,
+      "path": "kernel/build/qemu/kernel.elf",
+      "sha256": "9ec17808f31ada4b5f5a270d2ee9fbf656839b6ea6b94132c68086a7e97d6060"
+    },
+    {
+      "baseline_sha256": "7d558c9c74ed903b8feac657a983d0072fec02e69bdb3c752b34f36f1695acd7",
+      "byte_identical": true,
+      "bytes": 3000424,
+      "path": "kernel/build/qemu/main.o",
+      "sha256": "7d558c9c74ed903b8feac657a983d0072fec02e69bdb3c752b34f36f1695acd7"
+    },
+    {
+      "baseline_sha256": "6697a03180178cfa8457a448668fb68b64135fdc0c7414fb79fcbf696dfd50b8",
+      "byte_identical": true,
+      "bytes": 4736400,
+      "path": "kernel/build/rpi5/kernel.elf",
+      "sha256": "6697a03180178cfa8457a448668fb68b64135fdc0c7414fb79fcbf696dfd50b8"
+    },
+    {
+      "baseline_sha256": "cd2c653434fc8638686fdcae1114551f488977b176eb853139f5a22e87ffa099",
+      "byte_identical": true,
+      "bytes": 6542008,
+      "path": "kernel/build/rpi5/main.o",
+      "sha256": "cd2c653434fc8638686fdcae1114551f488977b176eb853139f5a22e87ffa099"
+    }
+  ],
+  "production_source_sha256": "0bbaa77f5ee189e97b9219006e698de87e5e679ff72d293a6f9d7eec043f025d"
+}

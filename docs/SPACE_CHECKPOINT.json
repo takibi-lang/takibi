@@ -1,14 +1,17 @@
 {
   "date": "2026-11-10",
-  "event": "incremental",
-  "decision": "reuse",
+  "event": "milestone",
+  "decision": "measured",
   "source_sha256": "0bbaa77f5ee189e97b9219006e698de87e5e679ff72d293a6f9d7eec043f025d",
-  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 3a7e657f: this branch's review, rebound to the merged sources (upstream's record was 2026-11-10 milestone/measured). Host model queue and allcheck-only job-default correction. Compile/link recipes, compiler/kernel sources, linked inputs, storage/allocation and lifetimes unchanged.",
+  "workload": "Integrated approved stopped_store compiler API (no kernel consumer yet), immutable global array readonly correction with native-only FDT copies, and allcheck-only model scheduling. Standard linked QEMU/RPi5 kernel image boundary; native FDT frame and image are separate. Fresh combined allbuild and four linked artifact comparisons, with existing unchanged kernel allocator occupancy evidence reused.",
   "evidence": [
-    "docs/MODEL_JOB_BUDGET_REVIEW.md",
-    "docs/STRUCT_POINTER_CAST_REVIEW.md",
-    "docs/STRUCT_POINTER_CAST_REVIEW.json"
+    "docs/APPROVED_COMPILER_HOST_BATCH_SPACE.json",
+    "docs/STOPPED_STORE_SPACE.md",
+    "docs/STOPPED_STORE_SPACE.json",
+    "docs/IMMUTABLE_GLOBAL_ARRAY_REVIEW.md",
+    "docs/IMMUTABLE_GLOBAL_ARRAY_REVIEW.json",
+    "docs/MODEL_JOB_BUDGET_REVIEW.md"
   ],
-  "assessment": "Reuse current kernel image/occupancy evidence: only host scheduling and peer phase diagnostics change. No new kernel memory measurement or deadline proof is claimed; host wall/CPU costs and their one-arm limits are recorded separately.",
-  "next_trigger": "Changed compiler lowering, kernel storage/allocation/lifetimes, or the next completed kernel feature/layout stage."
+  "assessment": "All four normal kernel ELF/object files match GREEN08d byte for byte, so their linked image and reservations are unchanged. Native FDT artifacts match the measured candidate: fixed function frame +70848 bytes and ELF +824 bytes, with immutable fixture data retained. The compiler API has no kernel consumer, and host scheduling adds no kernel allocation workload; existing occupancy evidence is retained without a new physical measurement or deadline guarantee.",
+  "next_trigger": "First real stopped_store kernel consumer or changed complete-stop lifetime; changed lowering, kernel storage/allocation workload, or the next completed kernel feature/layout stage."
 }
