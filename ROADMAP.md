@@ -220,9 +220,7 @@ and review the ext2 reader-drain premise separately from lock acquisition.
 Preserve non-sleeping paths and add no dedicated bootstrap stack. For boot
 mount, implement per-command acquisition with explicit driver-phase and Busy
 outcomes, preserving cache/read-ahead and publication order. Measure the RPi5
-path before proposing optimization; retain no change as an option. Immutable
-global arrays must preserve readonly provenance; park the FDT fixture/API
-migration choice while continuing independent approved work.
+path before proposing optimization; retain no change as an option.
 
 **Assigned queue (maintainer, 2026-10-23, re-cut 2026-10-25).**
 Low-dependency issues A does not hold, in this order; compiler work in
