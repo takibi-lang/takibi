@@ -3,8 +3,8 @@ fn invariant_stop_fixture_run() !{unsafe} {
     disable_irq();
     let mut phase = boot_phase_mint();
     qemu_uart_attach_bootstrap(phase);
-    boot_phase_end(phase);
     uart_init();
-    kernel_log_init();
+    kernel_log_init(phase);
+    boot_phase_end(phase);
     kernel_invariant_stop();
 }

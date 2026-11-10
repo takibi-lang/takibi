@@ -506,8 +506,13 @@ private fn kernel_log_retain_line(core: {0..<KERNEL_MAX_CORES as usize}, wire: b
     kernel_log_core_state[core].length = 0;
 }
 
-fn kernel_log_init() {
+fn kernel_log_init(phase: borrow BootPhase[boot]) {
     kernel_log_tx_ownership_reset();
+    // Establish the persistent TX owner before destructive boot probes.
+    // region_of is once-only; a probe cannot release it and later reclaim.
+    let tx = console_lock();
+    kernel_log_tx_claim(tx);
+    console_unlock(tx);
     for core: usize in 0..<KERNEL_MAX_CORES {
         kernel_log_core_state[core].emergency = false;
         kernel_log_core_state[core].capturing = false;
@@ -701,7 +706,11 @@ const KERNEL_LOG_TX_QUEUE_BYTES: usize = 512;
 // wire line: its writer sends one newline of its own first when the wire is
 // mid-line (kernel_log_emit_line). The retained log never sees it.
 //
-// input_stopped is the XOFF this side last sent (kernel_log_terminal_flow_poll).
+// input_stopped is the last flow state taken by the FIFO drain, or
+// acknowledged without emission when its configured byte is disabled. A request
+// records the latest desired state separately and coalesces until that drain
+// takes it. flow_before counts older queued bytes, so a control cannot pass
+// accepted output except while the peer has paused terminal output.
 //
 // All of it is reached only through a place guarded by the console lock. The
 // count stays one atomic word beside it for DDB, which takes no lock; only a
@@ -712,6 +721,10 @@ struct KernelLogTxState {
     column: usize;
     wire_last: u8;
     input_stopped: bool;
+    input_requested: bool;
+    flow_pending: bool;
+    flow_byte: u8;
+    flow_before: usize;
     queue: [u8; KERNEL_LOG_TX_QUEUE_BYTES];
     terminal: [bool; KERNEL_LOG_TX_QUEUE_BYTES];
 }
@@ -723,6 +736,11 @@ struct KernelLogTxStore {
 }
 private let mut kernel_log_tx_store: KernelLogTxStore;
 private let mut kernel_log_tx_count: AtomicWord;
+// Published before guarded pending state, cleared only after it is retired.
+// DDB may stop a producer or consumer inside the console critical section:
+// this hint, not an assumed coherent guarded snapshot, decides its rearm.
+// A stale true permits a harmless service; a false must not hide a request.
+private let mut kernel_log_tx_flow_pending: AtomicWord;
 
 // The first writer claims the storage, whichever comes first: bytes spin to the
 // wire through here before any boot step has run. Until then a reader sees the
@@ -813,7 +831,10 @@ fn kernel_log_tx_is_live() -> bool !{unsafe} {
 }
 
 fn kernel_log_tx_activate() !{unsafe} {
+    let guard = console_lock();
     atomic_word_store(&kernel_log_tx_armed, 1);
+    if (kernel_log_tx_flow_is_pending()) { uart_tx_irq_enable(); }
+    console_unlock(guard);
 }
 
 // kernel_log_init's half: the boot probe that enters the emergency on
@@ -915,11 +936,15 @@ private fn kernel_log_tx_take_owner(priority: usize)
     return KernelLogTxStandDown::Outranked;
 }
 
-// Put back the owner that was found, only while this core's own owner field
-// is still there, and keep TERMINAL. Re-arming the TX interrupt is not this
-// function's business: uart_tx_flush() disabled it, and the next queued byte
-// enables it again.
-fn kernel_log_tx_resume(previous: KernelLogTxStandDown, priority: usize) !{unsafe} {
+// Put back the found owner only while this core still owns it, keeping
+// TERMINAL. A completed stop can have interrupted an unrelated holder or a
+// FIFO consumer after retiring its flow byte. Re-arm retained flow, unpaused
+// queued/echo data or owed writer wake from atomic hints before peers resume.
+// Those hints may be stale true during a stopped critical section; they do
+// not claim the guarded queue is a coherent snapshot. A pre-publication
+// producer finishes its ordinary kick when resumed. Never take its lock.
+fn kernel_log_tx_resume(stopped: borrow MachineStopped[&kernel_world_stop],
+                         previous: KernelLogTxStandDown, priority: usize) !{unsafe} {
     match previous {
         KernelLogTxStandDown::Took(found) => {
             let mine: usize = kernel_console_owner_word(priority);
@@ -928,13 +953,27 @@ fn kernel_log_tx_resume(previous: KernelLogTxStandDown, priority: usize) !{unsaf
                 if ((current & KERNEL_CONSOLE_OWNER_MASK) != mine) { return; }
                 let restored: usize = (current & KERNEL_CONSOLE_TERMINAL) | found;
                 match kernel_log_cas(&kernel_console_owner, current, restored) {
-                    CasResult::Swapped => { return; }
+                    CasResult::Swapped => {
+                        if (restored == 0 && kernel_log_tx_is_live()) {
+                            let data_pending: bool = terminal_output_paused() == false &&
+                                (atomic_word_load(&kernel_log_tx_count) != 0 || terminal_echo_pending());
+                            if (kernel_log_tx_flow_is_pending() || data_pending ||
+                                atomic_word_load(&kernel_log_tx_writer_wake_owed) != 0) {
+                                uart_tx_irq_enable();
+                            }
+                        }
+                        return;
+                    }
                     CasResult::Observed(seen) => { }
                 }
             }
         }
         KernelLogTxStandDown::Outranked => { }
     }
+}
+
+private fn kernel_log_tx_flow_is_pending() -> bool {
+    return atomic_word_load(&kernel_log_tx_flow_pending) != 0;
 }
 
 private fn kernel_log_tx_pending(guard: borrow ConsoleGuard[&console_tx_lock]) -> bool {
@@ -1003,6 +1042,7 @@ private fn kernel_log_tx_keep_kernel_bytes(state: borrow &mut KernelLogTxState,
                                            count: usize) -> usize {
     let head: usize = state.head;
     let mut retained: usize = 0;
+    let mut flow_before: usize = 0;
     for offset: usize in 0..<KERNEL_LOG_TX_QUEUE_BYTES {
         if (offset < count) {
             let source: usize = (head + offset) % KERNEL_LOG_TX_QUEUE_BYTES;
@@ -1012,12 +1052,14 @@ private fn kernel_log_tx_keep_kernel_bytes(state: borrow &mut KernelLogTxState,
                 if (target < KERNEL_LOG_TX_QUEUE_BYTES) {
                     state.queue[target] = state.queue[source];
                     state.terminal[target] = false;
+                    if (offset < state.flow_before) { flow_before = flow_before + 1; }
                     retained = retained + 1;
                 }
             }
         }
     }
     state.tail = (head + retained) % KERNEL_LOG_TX_QUEUE_BYTES;
+    state.flow_before = flow_before;
     return retained;
 }
 
@@ -1048,6 +1090,7 @@ private fn kernel_log_tx_pop(guard: borrow ConsoleGuard[&console_tx_lock])
             let mut taken: (u8, bool) = (0, false);
             if (slot < KERNEL_LOG_TX_QUEUE_BYTES) {
                 state.head = (slot + 1) % KERNEL_LOG_TX_QUEUE_BYTES;
+                if (state.flow_before != 0) { state.flow_before = state.flow_before - 1; }
                 taken = (state.queue[slot], true);
             }
             taken
@@ -1092,37 +1135,82 @@ private fn uart_tx_spin_store_locked(guard: borrow ConsoleGuard[&console_tx_lock
     kernel_log_wire_note(guard, c);
 }
 
-// The RX handler, a terminal read and a termios change send UART input-flow
-// requests from whichever CPU runs them, each deciding under the console lock
-// (GitHub issue #830: no core polls for them). Readers on every CPU
-// publish their desired state atomically; coalescing to the latest state cannot leave
-// the sender stopped after the receive ring became empty.
-
-fn kernel_log_terminal_flow_poll() !{logs, unsafe} {
-    // The decision and the byte it sends are one section, so two callers
-    // cannot each send a STOP. uart_wire_byte takes the console lock itself,
-    // so the decision is made under a hold of its own and the byte follows;
-    // a second caller in between finds the flag already updated and sends
-    // nothing.
+// RX, readers and termios changes publish the latest request under the
+// console guard. This does not wait for FIFO or queue room. A masking lock
+// may contend; the request is bounded after acquiring it, not wait-free.
+//
+// Column and wire-last are accepted-output predictions: ordinary enqueue
+// and echo admission update them, and a signal flush does not roll them
+// back. Keep that same accounting for each changed request, including a
+// configured printable/CR START or STOP even when pending requests coalesce.
+fn kernel_log_terminal_flow_request() !{unsafe} {
     let guard = console_lock();
     let wanted: bool = terminal_input_flow_requested();
-    let mut control: u8 = 0;
+    let mut control: u8 = terminal_flow_control_byte(false);
+    if (wanted) { control = terminal_flow_control_byte(true); }
     kernel_log_tx_claim(guard);
     let changed: bool = match place_borrow(guard, kernel_log_tx_store.state) {
         Place::Empty => { false }
         Place::Full(states) => {
             let state = region_at(states, 0);
-            let differs: bool = wanted != state.input_stopped;
-            state.input_stopped = wanted;
+            let differs: bool = wanted != state.input_requested;
+            if (differs) {
+                state.input_requested = wanted;
+                if (wanted == state.input_stopped || control == 0) {
+                    // A disabled control character acknowledges the desired
+                    // state without a byte, as the prior direct path did.
+                    if (control == 0) { state.input_stopped = wanted; }
+                    state.flow_pending = false;
+                    atomic_word_store(&kernel_log_tx_flow_pending, 0);
+                } else {
+                    // A debug stop can interrupt any of these stores.
+                    // Publish the hint first; the producer finishes the
+                    // fields and kick after peers resume if stopped here.
+                    atomic_word_store(&kernel_log_tx_flow_pending, 1);
+                    state.flow_byte = control;
+                    state.flow_before = atomic_word_load(&kernel_log_tx_count);
+                    state.flow_pending = true;
+                }
+            }
             differs
         }
     };
-    if (changed) {
-        control = terminal_flow_control_byte(false);
-        if (wanted) { control = terminal_flow_control_byte(true); }
+    if (changed && control != 0) {
+        kernel_log_note_tx_byte();
+        kernel_log_terminal_column_byte(guard, control);
+        kernel_log_wire_note(guard, control);
+    }
+    if (kernel_log_tx_flow_is_pending() && kernel_log_tx_is_live()) {
+        uart_tx_irq_enable();
     }
     console_unlock(guard);
-    if (control != 0) { uart_wire_byte(control); }
+}
+
+// Transfer a ready control to the caller's FIFO store while it still holds
+// the real console guard. A peer's XOFF pauses ordinary queued output, not
+// our independent input-throttle response, matching the direct wire path.
+private fn kernel_log_tx_flow_take(guard: borrow ConsoleGuard[&console_tx_lock],
+                                   paused: bool) -> KernelLogTxByte {
+    let outcome: (u8, bool) = match place_borrow(guard, kernel_log_tx_store.state) {
+        Place::Empty => { (0, false) }
+        Place::Full(states) => {
+            let state = region_at(states, 0);
+            let mut taken: (u8, bool) = (0, false);
+            if (state.flow_pending && (state.flow_before == 0 || paused)) {
+                taken = (state.flow_byte, true);
+                state.input_stopped = state.input_requested;
+                state.flow_pending = false;
+                // Clear only after retirement. If stopped before the FIFO
+                // store the guard's holder resumes and completes that one
+                // store; a stale true cannot duplicate the retired control.
+                atomic_word_store(&kernel_log_tx_flow_pending, 0);
+            }
+            taken
+        }
+    };
+    let (byte, found) = outcome;
+    if (found) { return KernelLogTxByte::Byte(byte); }
+    return KernelLogTxByte::Empty;
 }
 
 // XOFF from the terminal: stop the transmit interrupt. Under the console lock,
@@ -1131,7 +1219,8 @@ fn kernel_log_terminal_flow_poll() !{logs, unsafe} {
 // core that queued).
 fn uart_terminal_stop_output() {
     let guard = console_lock();
-    uart_tx_irq_disable();
+    if (kernel_log_tx_flow_is_pending() && kernel_log_tx_is_live()) { uart_tx_irq_enable(); }
+    else { uart_tx_irq_disable(); }
     console_unlock(guard);
 }
 
@@ -1172,7 +1261,8 @@ fn uart_terminal_output_pending() -> bool {
 
 private fn uart_terminal_output_pending_locked(
         guard: borrow ConsoleGuard[&console_tx_lock]) -> bool {
-    return kernel_log_tx_pending(guard) || terminal_echo_pending();
+    return kernel_log_tx_pending(guard) || terminal_echo_pending() ||
+           kernel_log_tx_flow_is_pending();
 }
 
 fn uart_terminal_resume_output() !{unsafe} {
@@ -1181,18 +1271,17 @@ fn uart_terminal_resume_output() !{unsafe} {
         uart_tx_drain_into_fifo(guard);
         if (uart_terminal_output_pending_locked(guard)) { uart_tx_irq_enable(); }
     }
+    if (kernel_log_tx_flow_is_pending() && kernel_log_tx_is_live()) { uart_tx_irq_enable(); }
     console_unlock(guard);
 }
 
 // Move queued bytes into the FIFO while both have room. Runs from the TX
-// interrupt as well as from the poll-drain paths, so it carries neither
-// `logs` nor `locks`: the effect system rejects `locks` on an `!{interrupt}`
-// function, and a console that could block on one could not report the
-// deadlock it is in.
+// interrupt as well as from ordinary drain paths. It never waits for FIFO
+// space or invokes the logging policy. Masking console-guard acquisition is
+// permitted in an IRQ; no_handler_lock and may_block remain forbidden.
 private fn uart_tx_drain_into_fifo(
         guard: borrow ConsoleGuard[&console_tx_lock]) !{unsafe} {
-    if (terminal_output_paused()) { return; }
-    uart_tx_drain_into_fifo_force(guard);
+    uart_tx_drain_into_fifo_mode(guard, false);
 }
 
 // The transmit interrupt's whole service: drain under the console lock, and
@@ -1201,11 +1290,17 @@ private fn uart_tx_drain_into_fifo(
 // writer -- never across it (kernel/models/ConsoleTx.tla, NESTED).
 fn uart_tx_service() !{unsafe} {
     let guard = console_lock();
+    if (kernel_log_tx_is_live() == false) {
+        uart_tx_irq_disable();
+        console_unlock(guard);
+        return;
+    }
     uart_tx_drain_into_fifo(guard);
     // This service's caller runs the writer wake, so a wake another drain
     // owed (see uart_tx_drain_into_fifo_force) is paid here.
     atomic_word_store(&kernel_log_tx_writer_wake_owed, 0);
-    if (terminal_output_paused() || uart_terminal_output_pending_locked(guard) == false) {
+    if ((terminal_output_paused() && kernel_log_tx_flow_is_pending() == false) ||
+        uart_terminal_output_pending_locked(guard) == false) {
         uart_tx_irq_disable();
     }
     console_unlock(guard);
@@ -1233,17 +1328,35 @@ private fn kernel_log_tx_writer_room_locked(
 // Fatal/DDB flushes must remain available even after a user sent XOFF.
 private fn uart_tx_drain_into_fifo_force(
         guard: borrow ConsoleGuard[&console_tx_lock]) !{unsafe} {
+    uart_tx_drain_into_fifo_mode(guard, true);
+}
+
+// Existing ordinary drains may service ready controls too: a logger that
+// holds the guard while making room cannot wait for a TX handler to take
+// that same guard. Every store still first checks physical FIFO room.
+private fn uart_tx_drain_into_fifo_mode(
+        guard: borrow ConsoleGuard[&console_tx_lock], force: bool) !{unsafe} {
+    if (force == false && kernel_log_tx_is_live() == false) { return; }
     let room_before: bool = kernel_log_tx_writer_room_locked(guard);
     let mut draining: bool = true;
     while (draining && uart_terminal_output_pending_locked(guard) && uart_tx_fifo_full() == false) {
-        match kernel_log_tx_pop(guard) {
+        let paused: bool = terminal_output_paused();
+        match kernel_log_tx_flow_take(guard, paused) {
+            KernelLogTxByte::Byte(control) => { uart_tx_store(control); }
             KernelLogTxByte::Empty => {
-                match terminal_echo_read(guard) {
-                    TerminalEchoReadResult::Empty => { draining = false; }
-                    TerminalEchoReadResult::Byte(value) => { uart_tx_store(value); }
+                if (paused && force == false) { draining = false; }
+                else {
+                    match kernel_log_tx_pop(guard) {
+                        KernelLogTxByte::Empty => {
+                            match terminal_echo_read(guard) {
+                                TerminalEchoReadResult::Empty => { draining = false; }
+                                TerminalEchoReadResult::Byte(value) => { uart_tx_store(value); }
+                            }
+                        }
+                        KernelLogTxByte::Byte(value) => { uart_tx_store(value); }
+                    }
                 }
             }
-            KernelLogTxByte::Byte(value) => { uart_tx_store(value); }
         }
     }
     if (room_before == false && kernel_log_tx_writer_room_locked(guard)) {
@@ -2410,7 +2523,278 @@ private fn kernel_log_second_writer_probe() -> bool !{unsafe} {
         kernel_log_raw_text_byte(start + 1, 1) == 10;
 }
 
-// Destructive boot-time probe, followed immediately by kernel_log_init(). It
+// Destructive API coverage at the existing pre-IRQ, pre-secondary boot point.
+// Init has already claimed the persistent TX owner. This probe only borrows
+// its content and never takes/releases that once-only owner. It uses actual
+// settings/request/queue/retirement APIs, but never stores a
+// fixture byte into the FIFO. Real UART delivery remains the termios lane's
+// verdict. BootPhase and the masked-IRQ check prevent a live fixture entry.
+private fn kernel_log_terminal_flow_probe(phase: borrow BootPhase[boot]) -> bool !{unsafe} {
+    if ((mrs_daif() & 0x80) == 0 || kernel_log_tx_is_live() ||
+        terminal_output_paused() || terminal_input_flow_requested() ||
+        terminal_flow_control_byte(false) != 0 || terminal_flow_control_byte(true) != 0 ||
+        terminal_echo_pending() || atomic_word_load(&kernel_console_owner) != 0 ||
+        atomic_word_load(&kernel_log_tx_count) != 0 || kernel_log_tx_flow_is_pending()) {
+        return false;
+    }
+    let before_guard = console_lock();
+    if (place_is_full(before_guard, kernel_log_tx_store.state) == false) {
+        console_unlock(before_guard);
+        return false;
+    }
+    let initial: (usize, usize, usize, u8, bool) = match place_borrow(before_guard, kernel_log_tx_store.state) {
+        Place::Empty => { (0, 0, 0, 10, false) }
+        Place::Full(states) => {
+            let state = region_at(states, 0);
+            let clean: bool = state.input_stopped == false && state.input_requested == false &&
+                state.flow_pending == false && state.flow_byte == 0 && state.flow_before == 0;
+            (state.head, state.tail, state.column, state.wire_last, clean)
+        }
+    };
+    let mut storage_clean: bool = true;
+    for index: usize in 0..<KERNEL_LOG_TX_QUEUE_BYTES {
+        let clean_byte: bool = match place_borrow(before_guard, kernel_log_tx_store.state) {
+            Place::Empty => { false }
+            Place::Full(states) => {
+                region_at(states, 0).queue[index] == 0 &&
+                region_at(states, 0).terminal[index] == false
+            }
+        };
+        if (clean_byte == false) { storage_clean = false; }
+    }
+    let irq_before: bool = uart_tx_irq_enabled();
+    let armed_before: usize = atomic_word_load(&kernel_log_tx_armed);
+    let bytes_before: usize = atomic_word_load(&kernel_log_tx_bytes);
+    let wake_before: usize = atomic_word_load(&kernel_log_tx_writer_wake_owed);
+    console_unlock(before_guard);
+    let (head_before, tail_before, column_before, wire_before, clean) = initial;
+    let mut ok: bool = clean && storage_clean && armed_before == 0;
+
+    if (clean == false || storage_clean == false || armed_before != 0) { return false; }
+    let mut settings: TerminalSettings = { 0, 0, 0, 0, 0, false };
+    let mut bytes: [u8; TERMINAL_TERMIOS_BYTES];
+    for index: usize in 0..<TERMINAL_TERMIOS_BYTES {
+        bytes[index] = terminal_settings_byte(&settings, index);
+    }
+    bytes[1] = 0x10; // IXOFF, with the original raw policy otherwise.
+    bytes[25] = 65; // Printable START is valid.
+    bytes[26] = 13; // CR STOP is valid.
+    match terminal_settings_apply(&settings, bytes as [u8; TERMINAL_TERMIOS_BYTES..]) {
+        TerminalSettingsResult::Applied => {}
+        TerminalSettingsResult::Unsupported => { ok = false; }
+    }
+    let fill = console_lock();
+    for index: usize in 0..<KERNEL_LOG_TX_QUEUE_BYTES {
+        if (kernel_log_tx_push(fill, 66, index == 0) == false) { ok = false; }
+    }
+    console_unlock(fill);
+    terminal_input_flow_update(&settings, 3072);
+    kernel_log_terminal_flow_request();
+    terminal_input_flow_update(&settings, 0);
+    kernel_log_terminal_flow_request();
+    let coalesced = console_lock();
+    if (kernel_log_terminal_column(coalesced) != 1 || kernel_log_wire_last(coalesced) != 65 ||
+        atomic_word_load(&kernel_log_tx_count) != KERNEL_LOG_TX_QUEUE_BYTES ||
+        kernel_log_tx_flow_is_pending()) { ok = false; }
+    match kernel_log_tx_flow_take(coalesced, false) {
+        KernelLogTxByte::Empty => {}
+        KernelLogTxByte::Byte(value) => { ok = false; }
+    }
+    console_unlock(coalesced);
+
+    // Flush one older terminal byte, then append a later kernel byte. The
+    // control must stay behind the 511 older kernel bytes and ahead of it.
+    terminal_input_flow_update(&settings, 3072);
+    kernel_log_terminal_flow_request();
+    uart_terminal_flush_output();
+    let drain = console_lock();
+    if (kernel_log_tx_push(drain, 67, false) == false) { ok = false; }
+    match kernel_log_tx_flow_take(drain, false) {
+        KernelLogTxByte::Empty => {}
+        KernelLogTxByte::Byte(value) => { ok = false; }
+    }
+    for index: usize in 0..<KERNEL_LOG_TX_QUEUE_BYTES {
+        if (index < KERNEL_LOG_TX_QUEUE_BYTES - 1) {
+            match kernel_log_tx_pop(drain) {
+                KernelLogTxByte::Empty => { ok = false; }
+                KernelLogTxByte::Byte(value) => { if (value != 66) { ok = false; } }
+            }
+        }
+    }
+    match kernel_log_tx_flow_take(drain, false) {
+        KernelLogTxByte::Empty => { ok = false; }
+        KernelLogTxByte::Byte(value) => { if (value != 13) { ok = false; } }
+    }
+    match kernel_log_tx_pop(drain) {
+        KernelLogTxByte::Empty => { ok = false; }
+        KernelLogTxByte::Byte(value) => { if (value != 67) { ok = false; } }
+    }
+    console_unlock(drain);
+    terminal_input_flow_update(&settings, 0);
+    kernel_log_terminal_flow_request();
+    let start = console_lock();
+    match kernel_log_tx_flow_take(start, false) {
+        KernelLogTxByte::Empty => { ok = false; }
+        KernelLogTxByte::Byte(value) => { if (value != 65) { ok = false; } }
+    }
+    console_unlock(start);
+
+    // A peer pause must not prevent the independent input-throttle byte,
+    // and serving that byte must not drain the paused ordinary queue.
+    bytes[1] = 0x14; // IXON and IXOFF.
+    match terminal_settings_apply(&settings, bytes as [u8; TERMINAL_TERMIOS_BYTES..]) {
+        TerminalSettingsResult::Applied => {}
+        TerminalSettingsResult::Unsupported => { ok = false; }
+    }
+    kernel_log_tx_activate();
+    let queued = console_lock();
+    if (kernel_log_tx_push(queued, 68, true) == false) { ok = false; }
+    console_unlock(queued);
+    match terminal_input_decode(&settings, 13) {
+        TerminalInput::StopOutput => {}
+        TerminalInput::Byte(value) => { ok = false; }
+        TerminalInput::EndLine(value) => { ok = false; }
+        TerminalInput::EndFile => { ok = false; }
+        TerminalInput::Erase => { ok = false; }
+        TerminalInput::Kill => { ok = false; }
+        TerminalInput::WordErase => { ok = false; }
+        TerminalInput::Reprint => { ok = false; }
+        TerminalInput::StartOutput => { ok = false; }
+        TerminalInput::Signal(signum) => { ok = false; }
+        TerminalInput::LiteralNext => { ok = false; }
+    }
+    uart_terminal_stop_output();
+    terminal_input_flow_update(&settings, 3072);
+    kernel_log_terminal_flow_request();
+    let paused = console_lock();
+    if (terminal_output_paused() == false || uart_tx_irq_enabled() == false) { ok = false; }
+    match kernel_log_tx_flow_take(paused, true) {
+        KernelLogTxByte::Empty => { ok = false; }
+        KernelLogTxByte::Byte(value) => { if (value != 13) { ok = false; } }
+    }
+    console_unlock(paused);
+    uart_tx_service();
+    let retained = console_lock();
+    if (atomic_word_load(&kernel_log_tx_count) != 1 || uart_tx_irq_enabled()) { ok = false; }
+    match kernel_log_tx_pop(retained) {
+        KernelLogTxByte::Empty => { ok = false; }
+        KernelLogTxByte::Byte(value) => { if (value != 68) { ok = false; } }
+    }
+    console_unlock(retained);
+    match terminal_input_decode(&settings, 65) {
+        TerminalInput::StartOutput => {}
+        TerminalInput::Byte(value) => { ok = false; }
+        TerminalInput::EndLine(value) => { ok = false; }
+        TerminalInput::EndFile => { ok = false; }
+        TerminalInput::Erase => { ok = false; }
+        TerminalInput::Kill => { ok = false; }
+        TerminalInput::WordErase => { ok = false; }
+        TerminalInput::Reprint => { ok = false; }
+        TerminalInput::StopOutput => { ok = false; }
+        TerminalInput::Signal(signum) => { ok = false; }
+        TerminalInput::LiteralNext => { ok = false; }
+    }
+    terminal_input_flow_update(&settings, 0);
+    kernel_log_terminal_flow_request();
+    let resumed = console_lock();
+    match kernel_log_tx_flow_take(resumed, false) {
+        KernelLogTxByte::Empty => { ok = false; }
+        KernelLogTxByte::Byte(value) => { if (value != 65) { ok = false; } }
+    }
+    console_unlock(resumed);
+    uart_terminal_resume_output();
+    uart_tx_service();
+    bytes[1] = 0x10;
+
+    // Both individual disabled-character cases, and both disabled. The real
+    // TXIM must remain unchanged when a disabled request is acknowledged.
+    kernel_log_tx_activate();
+    for disabled: usize in 0..<3 {
+        bytes[25] = 65;
+        bytes[26] = 13;
+        if (disabled != 1) { bytes[26] = 0; }
+        if (disabled != 0) { bytes[25] = 0; }
+        match terminal_settings_apply(&settings, bytes as [u8; TERMINAL_TERMIOS_BYTES..]) {
+            TerminalSettingsResult::Applied => {}
+            TerminalSettingsResult::Unsupported => { ok = false; }
+        }
+        let quiet = console_lock();
+        uart_tx_irq_disable();
+        console_unlock(quiet);
+        terminal_input_flow_update(&settings, 3072);
+        kernel_log_terminal_flow_request();
+        let stop = console_lock();
+        match kernel_log_tx_flow_take(stop, false) {
+            KernelLogTxByte::Empty => { if (disabled == 1) { ok = false; } }
+            KernelLogTxByte::Byte(value) => {
+                if (disabled != 1 || value != 13) { ok = false; }
+            }
+        }
+        if (disabled != 1 && uart_tx_irq_enabled()) { ok = false; }
+        uart_tx_irq_disable();
+        console_unlock(stop);
+        terminal_input_flow_update(&settings, 0);
+        kernel_log_terminal_flow_request();
+        let resume = console_lock();
+        match kernel_log_tx_flow_take(resume, false) {
+            KernelLogTxByte::Empty => { if (disabled == 0) { ok = false; } }
+            KernelLogTxByte::Byte(value) => {
+                if (disabled != 0 || value != 65) { ok = false; }
+            }
+        }
+        if (disabled != 0 && uart_tx_irq_enabled()) { ok = false; }
+        uart_tx_irq_disable();
+        console_unlock(resume);
+        if (kernel_log_tx_flow_is_pending()) { ok = false; }
+    }
+
+    // Restore the exact pre-apply policy publication: controls/pause/desired
+    // were checked zero above; literal state has no producer before IRQ and
+    // secondary startup. The probe never edits the real TerminalStateRecord.
+    bytes[1] = 0;
+    bytes[25] = 0;
+    bytes[26] = 0;
+    match terminal_settings_apply(&settings, bytes as [u8; TERMINAL_TERMIOS_BYTES..]) {
+        TerminalSettingsResult::Applied => {}
+        TerminalSettingsResult::Unsupported => { ok = false; }
+    }
+    let restore = console_lock();
+    match place_borrow(restore, kernel_log_tx_store.state) {
+        Place::Empty => { ok = false; }
+        Place::Full(states) => {
+            let state = region_at(states, 0);
+            state.head = head_before;
+            state.tail = tail_before;
+            state.column = column_before;
+            state.wire_last = wire_before;
+            state.input_stopped = false;
+            state.input_requested = false;
+            state.flow_pending = false;
+            state.flow_byte = 0;
+            state.flow_before = 0;
+        }
+    }
+    for index: usize in 0..<KERNEL_LOG_TX_QUEUE_BYTES {
+        match place_borrow(restore, kernel_log_tx_store.state) {
+            Place::Empty => { ok = false; }
+            Place::Full(states) => {
+                region_at(states, 0).queue[index] = 0;
+                region_at(states, 0).terminal[index] = false;
+            }
+        }
+    }
+    atomic_word_store(&kernel_log_tx_count, 0);
+    atomic_word_store(&kernel_log_tx_flow_pending, 0);
+    atomic_word_store(&kernel_log_tx_armed, armed_before);
+    atomic_word_store(&kernel_log_tx_bytes, bytes_before);
+    atomic_word_store(&kernel_log_tx_writer_wake_owed, wake_before);
+    if (irq_before) { uart_tx_irq_enable(); }
+    else { uart_tx_irq_disable(); }
+    console_unlock(restore);
+    return ok;
+}
+
+// Destructive boot-time probe, followed immediately by kernel_log_init(phase). It
 // exercises every loss signal without emitting UART lines: a reservation held
 // across a whole turn of the ring makes the claim that comes round to its
 // slot Refused and counted rather than waited for; the overwrite count; #612's
@@ -2418,6 +2802,7 @@ private fn kernel_log_second_writer_probe() -> bool !{unsafe} {
 // longer than the stage split into a continuation record; and a fatal report
 // bypassing a partial line, which stays staged and invisible.
 fn kernel_log_bounds_probe(phase: borrow BootPhase[boot]) -> bool !{unsafe} {
+    let flow_ok: bool = kernel_log_terminal_flow_probe(phase);
     static_assert(KERNEL_LOG_TEXT_WORDS ==
                   KERNEL_LOG_SLOT_COUNT * KERNEL_LOG_SLOT_WORDS,
                   "one run of text words per slot");
@@ -2484,7 +2869,7 @@ fn kernel_log_bounds_probe(phase: borrow BootPhase[boot]) -> bool !{unsafe} {
     kernel_log_enter_emergency();
     kernel_log_begin_fragment();
     let visible: bool = kernel_log_capture_uart_byte(122);
-    return visible && kernel_log_core_state[here].capturing == false &&
+    return flow_ok && visible && kernel_log_core_state[here].capturing == false &&
         kernel_log_tx_is_live() == false && staged == 3 &&
         kernel_log_core_state[here].length == staged &&
         kernel_log_observe(&kernel_log_head) == head;

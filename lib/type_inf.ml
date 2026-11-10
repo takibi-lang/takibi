@@ -2494,7 +2494,7 @@ let rec contains_singleton_ty t = match repr t with
   | TPtr t | TIo t | TArray (t, _) | TSlice (t, _, _)
   | TAlignedPtr (_, t) -> contains_singleton_ty t
   | TTuple ts -> List.exists contains_singleton_ty ts
-  | TFun (args, ret, _) ->
+  | TFun (args, ret, _, _) ->
       List.exists contains_singleton_ty args || contains_singleton_ty ret
   | _ -> false
 
@@ -2503,7 +2503,7 @@ let rec contains_view_ty t = match repr t with
   | TPtr t | TIo t | TArray (t, _) | TSlice (t, _, _)
   | TAlignedPtr (_, t) | TSingleton (t, _) -> contains_view_ty t
   | TTuple ts -> List.exists contains_view_ty ts
-  | TFun (args, ret, _) ->
+  | TFun (args, ret, _, _) ->
       List.exists contains_view_ty args || contains_view_ty ret
   | TExists (_, _, _, body) -> contains_view_ty body
   | _ -> false
@@ -2513,7 +2513,7 @@ let rec contains_variant_ty t = match repr t with
   | TPtr t | TIo t | TArray (t, _) | TSlice (t, _, _)
   | TAlignedPtr (_, t) | TSingleton (t, _) -> contains_variant_ty t
   | TTuple ts -> List.exists contains_variant_ty ts
-  | TFun (args, ret, _) ->
+  | TFun (args, ret, _, _) ->
       List.exists contains_variant_ty args || contains_variant_ty ret
   | TExists (_, _, _, body) -> contains_variant_ty body
   | _ -> false
@@ -2525,7 +2525,7 @@ let rec contains_kinded_variant_ty t = match repr t with
   | TPtr t | TIo t | TArray (t, _) | TSlice (t, _, _)
   | TAlignedPtr (_, t) | TSingleton (t, _) -> contains_kinded_variant_ty t
   | TTuple ts -> List.exists contains_kinded_variant_ty ts
-  | TFun (args, ret, _) ->
+  | TFun (args, ret, _, _) ->
       List.exists contains_kinded_variant_ty args
       || contains_kinded_variant_ty ret
   | TExists (_, _, _, body) -> contains_kinded_variant_ty body
@@ -2568,6 +2568,11 @@ let resolved_call_targets = ref StringMap.empty
 let resolved_function_values = ref StringMap.empty
 let resolved_indirect_call_effects : string list option StringMap.t ref =
   ref StringMap.empty
+
+(* An inferred alias of a named function still calls that concrete body.
+   Keep this separate from codegen's direct-call decisions. Unknown rows
+   remain unknown even when their original named value is visible. *)
+let resolved_indirect_effect_targets = ref StringMap.empty
 
 let inferred_effect_locs : Lexing.position StringMap.t ref = ref StringMap.empty
 
@@ -2716,7 +2721,7 @@ let rec contains_stable_owner_value_ty t = match repr t with
   | TIo t | TArray (t, _) | TSlice (t, _, _) | TSingleton (t, _)
   | TExists (_, _, _, t) -> contains_stable_owner_value_ty t
   | TTuple ts -> List.exists contains_stable_owner_value_ty ts
-  | TFun (args, ret, _) ->
+  | TFun (args, ret, _, _) ->
       List.exists contains_stable_owner_value_ty args
       || contains_stable_owner_value_ty ret
   | TPtr _ | TAlignedPtr _ -> false
@@ -5558,7 +5563,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                let holder = match base_expr.desc, template with
                  | Call (_, call_args), Some template ->
                      (match instantiate_static_params template with
-                      | TFun (params, TView (_, [ holder ]), _)
+                      | TFun (params, TView (_, [ holder ]), _, _)
                         when List.length params = List.length call_args ->
                           List.iter2 (fun param (arg : Ast.expr) ->
                             unify_at arg.loc
@@ -6608,10 +6613,11 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
               | TView (a, _), TView (b, _) -> a = b
               | TVariant (a, _, _), TVariant (b, _, _) -> a = b
               | TPtr a, TPtr b -> same_shape a b
+              | TFun _, TFun _ -> to_ast actual = to_ast expected
               | a, b -> a = b
             in
             let matches ~loose (_, ft) = match repr ft with
-              | TFun (ps, _, _) when List.length ps = List.length arg_tys ->
+              | TFun (ps, _, _, _) when List.length ps = List.length arg_tys ->
                   List.for_all2 (fun at pt ->
                     match repr at with
                     | TVar { contents = Unbound _ } -> loose
@@ -6654,15 +6660,21 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            raise (TypeError (e.loc,
              Printf.sprintf "Undefined function: %s" fname))
        | Some ft ->
-           let (param_tys, ret_ty, call_effects) = match repr ft with
-             | TFun (ps, r, effects) -> (ps, r, effects)
+           let (param_tys, ret_ty, call_effects, effect_origin) = match repr ft with
+             | TFun (ps, r, effects, origin) -> (ps, r, effects, origin)
              | _ ->
                  raise (TypeError (e.loc,
                    Printf.sprintf "'%s' is not a function or function pointer" fname))
            in
-           if not (StringMap.mem (loc_key e.loc) !resolved_call_targets) then
+           if not (StringMap.mem (loc_key e.loc) !resolved_call_targets) then begin
              resolved_indirect_call_effects := StringMap.add
                (loc_key e.loc) call_effects !resolved_indirect_call_effects;
+             match call_effects, effect_origin with
+             | Some _, Some target ->
+                 resolved_indirect_effect_targets := StringMap.add
+                   (loc_key e.loc) target !resolved_indirect_effect_targets
+             | _ -> ()
+           end;
            if List.length args <> List.length param_tys then
              raise (TypeError (e.loc,
                Printf.sprintf "%s expects %d argument(s), got %d"
@@ -6749,7 +6761,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
             | None -> ()
             | Some (cmps, template) ->
                 (match repr (instantiate_static_params template) with
-                 | TFun (wps, wrt, _) ->
+                 | TFun (wps, wrt, _, _) ->
                      let rec split = function
                        | [ last ] -> ([], last)
                        | p :: rest -> let (ps, l) = split rest in (p :: ps, l)
@@ -9622,7 +9634,9 @@ let reset_compilation_state () =
   enclosing_future_writes := StringSet.empty;  (* fresh per compilation / per unit test *)
   resolved_call_targets := StringMap.empty;
   resolved_function_values := StringMap.empty;
+  function_effect_obligations := [];
   resolved_indirect_call_effects := StringMap.empty;
+  resolved_indirect_effect_targets := StringMap.empty;
   global_address_names := StringSet.empty;
   active_stopped_globals := StringMap.empty;
   immutable_global_array_bindings := StringMap.empty;
@@ -11884,7 +11898,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         (match Option.bind fdef.ret_type region_return_annotation with
          | Some (_, holder, _) ->
              Hashtbl.replace function_holder key
-               (TFun (pts, TView ("__holder", [ static_of_ast scope holder ]), None))
+               (TFun (pts, TView ("__holder", [ static_of_ast scope holder ]), None, None))
          | None -> ());
         if fdef.where_clauses <> [] then begin
           let terms = List.concat_map (fun (a, _, b) ->
@@ -11892,7 +11906,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             fdef.where_clauses in
           Hashtbl.replace function_where key
             (List.map (fun (_, c, _) -> c) fdef.where_clauses,
-             TFun (pts @ [ TView ("__where", terms) ], rt, None))
+             TFun (pts @ [ TView ("__where", terms) ], rt, None, None))
         end;
         let old = Option.value (StringMap.find_opt fdef.name m) ~default:[] in
         let old = List.filter (fun (k, _) -> k <> key) old in
@@ -11900,7 +11914,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           List.filter (fun eff -> match Effect_rules.find eff with
             | Some rule -> rule.function_pointer | None -> false) effects)
           fdef.effects in
-        StringMap.add fdef.name ((key, TFun (pts, rt, call_effects)) :: old) m
+        StringMap.add fdef.name ((key, TFun (pts, rt, call_effects, Some key)) :: old) m
     | Ast.ExternFuncDef (name, params, ret_ty, effects_for_extern, eloc) ->
         check_reserved_fn eloc name;
         if Option.value (StringMap.find_opt name fn_occurrences) ~default:0 > 1 then
@@ -11919,7 +11933,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               Some (List.filter (fun eff -> match Effect_rules.find eff with
                 | Some rule -> rule.function_pointer | None -> false) effects)
         in
-        StringMap.add name ((key, TFun (pts, rt, call_effects)) :: old) m
+        StringMap.add name ((key, TFun (pts, rt, call_effects, Some key)) :: old) m
     | Ast.ConstDef _ -> m
     | Ast.LetDef _    -> m
     | Ast.ExternSymbolDef _ -> m
@@ -11959,7 +11973,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | None -> raise (TypeError (loc, Printf.sprintf
         "%s '%s' %s target '%s' is not defined"
         construct entry_name key target))
-    | Some [(_, TFun (pts, rt, _))] ->
+    | Some [(_, TFun (pts, rt, _, _))] ->
         if pts <> want_params || rt <> want_ret then
           raise (TypeError (loc, Printf.sprintf
             "%s '%s' %s target '%s' has the wrong signature (expected %s)"
@@ -15534,12 +15548,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               callees := StringSet.add target !callees
             else if not (Language_words.is_reserved_function_name name) then
               (match StringMap.find_opt (loc_key e.loc)
-               !resolved_indirect_call_effects with
-               | Some (Some effects) ->
-                   List.iter (fun eff ->
-                     indirect_effects := StringSet.add eff !indirect_effects
-                   ) effects
-               | Some None | None -> has_unknown_indirect_call := true)
+                       !resolved_indirect_effect_targets with
+               | Some target -> callees := StringSet.add target !callees
+               | None ->
+                   match StringMap.find_opt (loc_key e.loc)
+                     !resolved_indirect_call_effects with
+                   | Some (Some effects) ->
+                       List.iter (fun eff ->
+                         indirect_effects := StringSet.add eff !indirect_effects
+                       ) effects
+                   | Some None | None -> has_unknown_indirect_call := true)
       | Ast.VariantCtor (_, _, payload) -> visit_expr payload
       | Ast.BinOp (_, left, right) -> visit_expr left; visit_expr right
       | Ast.Bnot x | Ast.Deref x | Ast.AddrOf x | Ast.Cast (_, x)
@@ -15659,7 +15677,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           let rec search = function
             | [] -> None
             | callee :: rest ->
-                if StringSet.mem callee (closed_effect eff) then
+                if StringSet.mem callee
+                     (if eff = "unsafe" then may_unsafe else closed_effect eff) then
                   (match find_effect_path eff visited callee with
                    | Some path -> Some (display_effect_key key :: path)
                    | None -> search rest)
@@ -15688,6 +15707,59 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           search (StringSet.elements callees)
       | None -> None
   in
+  (* Check concrete values at explicit contracts and at the actual initial
+     row of inferred destinations. Nonempty declarations are not closed
+     upper bounds on ordinary direct calls: the
+     existing call-graph closure, including unknown indirect calls, decides
+     whether each saved flow was sound. Checking after inference also covers
+     forward definitions, recursive helpers and global initializers. *)
+  let check_function_value_effects (loc, source, source_row, destination, destination_row, writable) =
+    let reaches key eff = StringSet.mem key
+      (if eff = "unsafe" then may_unsafe else closed_effect eff) in
+    let unknown = function
+      | Some key -> StringSet.mem key may_reach_unknown
+      | None -> false in
+    let expected_unknown = unknown destination in
+    let actual eff = match source with
+      | Some key -> reaches key eff
+      | None -> List.mem eff source_row in
+    let allowed eff = expected_unknown || match destination with
+      | Some key -> reaches key eff
+          || (eff = "no_handler_lock" && reaches key "may_block")
+      | None -> List.mem eff destination_row
+          || (eff = "no_handler_lock" && List.mem "may_block" destination_row) in
+    let unexpected = List.filter (fun eff -> actual eff && not (allowed eff))
+      Effect_rules.propagating in
+    let source_name = Option.fold ~none:"<contracted value>"
+      ~some:display_effect_key source in
+    let invariant = if writable then
+      "function-pointer effect contracts are invariant behind writable pointers: "
+      else "" in
+    if unexpected <> [] then begin
+      let eff = List.hd unexpected in
+      let path = Option.bind source (find_effect_path eff StringSet.empty)
+        |> Option.value ~default:[source_name] in
+      raise (TypeError (loc, Printf.sprintf
+        "%sfunction pointer '%s' may have effect%s %s, which the destination contract does not allow (via %s)"
+        invariant source_name (if List.length unexpected = 1 then "" else "s")
+        (String.concat ", " unexpected) (String.concat " -> " path)))
+    end;
+    if unknown source && not expected_unknown then begin
+      let path = Option.bind source (find_unknown_path StringSet.empty)
+        |> Option.value ~default:[source_name; "<indirect call>"] in
+      raise (TypeError (loc, Printf.sprintf
+        "%sfunction pointer '%s' has unknown effects via %s; cannot verify the explicit destination contract"
+        invariant source_name (String.concat " -> " path)))
+    end
+  in
+  let effect_contract_errors = List.filter_map (fun obligation ->
+    try check_function_value_effects obligation; None
+    with TypeError (loc, message) -> Some (loc, message))
+    (List.sort_uniq compare (List.rev !function_effect_obligations)) in
+  (match effect_contract_errors with
+   | [] -> ()
+   | [(loc, message)] -> raise (TypeError (loc, message))
+   | errors -> raise (MultiTypeError errors));
   let find_exception_reentry_path root =
     let rec search visited key =
       if StringSet.mem key visited then None

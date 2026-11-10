@@ -10,7 +10,7 @@
 // destructive probe, re-initialise after it, and only then say the kernel is
 // at EL1.
 //
-// The probe is why kernel_log_init() appears twice. It deliberately overruns
+// The probe is why kernel_log_init(phase) appears twice. It deliberately overruns
 // the ring to make the overwrite and truncation signals fire, so the log has
 // to be reset afterwards; running it before the first real line means the
 // evidence a boot leaves is never the probe's.
@@ -29,12 +29,12 @@ fn kernel_boot_prologue(phase: borrow BootPhase[boot]) !{logs, unsafe} {
     // poisoned outright (issue #378).
     kernel_irq_stack_arm();
     platform_init(phase);
-    kernel_log_init();
+    kernel_log_init(phase);
     let log_bounds_ok: bool = kernel_log_bounds_probe(phase);
-    kernel_log_init();
+    kernel_log_init(phase);
     kernel_boot_log("takibi kernel: EL1\n");
     if (log_bounds_ok) {
-        kernel_boot_log("kernel log: overwrite+refusal+line split reported\n");
+        kernel_boot_log("kernel log: overwrite+refusal+line split+flow requests reported\n");
     } else {
         kernel_boot_log("kernel log: bounds probe failed\n");
     }

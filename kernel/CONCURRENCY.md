@@ -341,12 +341,15 @@ Symmetric now:
   DDB's continue gives back what it displaced only while its own owner field
   is still there. `kernel/models/ConsoleOwner.tla` checks it. Before, core 0
   alone could stand the queue down and a peer got `NotConsoleOwner`.
-- UART input-flow requests (#830): the RX handler, a terminal read that
-  drained the receive ring, and a termios change each send the STOP or
-  START byte themselves, from whichever core runs them, deciding under the
-  console lock (`kernel_log_terminal_flow_poll`). There is no longer a
-  console poll at syscall entry or in the idle loop, so no core is asked to
-  send it for another.
+- UART input-flow requests: the RX handler, a terminal read that drained
+  the receive ring, and a termios change publish/coalesce the latest STOP
+  or START under the console lock (`kernel_log_terminal_flow_request`).
+  The request does not wait for FIFO or queue room; the existing masking
+  lock can contend, so this is not a wait-free claim. TX IRQ service and
+  existing bounded drains deliver it behind the normal bytes already
+  queued at publication. A signal flush adjusts that queue-position fence.
+  A peer's XOFF pauses ordinary terminal bytes, not our independent flow
+  response. There is no periodic idle/syscall-entry poll or separate worker.
 - The boot contention probes (#756): core 0 arms each from the boot
   sequence and every other online core joins it from the idle loop, each
   per-core word indexed by its own id (`kernel/lib/peer_round.tkb`: a
@@ -926,6 +929,17 @@ cannot interrupt a debug-record peek/retire pair. Terminal producers on every
 CPU append to the same queue under the guard. Single-word atomic
 publication carries output pause and input-throttle requests to TX paths
 that cannot acquire the process-run lock. See `TERMINAL.md`.
+
+Flow-control column/wire-last accounting remains an accepted-output
+prediction. Queue admission and echo admission advance it; a signal flush
+has never rolled it back. Each changed flow request keeps that same
+accounting even if a newer request coalesces its physical byte away. A
+configured CR STOP followed by printable START therefore preserves the
+existing cursor prediction; it does not claim both control bytes reached
+the wire. A zero control byte acknowledges the desired state without a
+pending FIFO byte or a NUL. The shared pre-IRQ boot probe exercises real
+settings, request, queue, flush and retirement APIs; it does not transmit
+fixture bytes. The ordinary termios lane checks actual UART delivery.
 
 `/bin/peer-tty` is the admitted reader on the secondary. The deterministic
 `peer` mode of kernelcheck-uart-wake-qemu uses gdb to hold CPU1 after the

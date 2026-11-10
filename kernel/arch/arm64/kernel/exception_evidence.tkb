@@ -3073,7 +3073,7 @@ private fn kernel_ddb_enter_stopped(
     // profile session started or stopped above; peers do it on leaving
     // the pen.
     profile_session_sync();
-    kernel_log_tx_resume(console, KERNEL_CONSOLE_PRIORITY_DEBUGGER);
+    kernel_log_tx_resume(stopped_world, console, KERNEL_CONSOLE_PRIORITY_DEBUGGER);
     // Said at all because nothing else could see this: both DDB lanes resume
     // into the interactive shell and end there, so neither reaches the
     // end-of-boot `console: tx spin` measurement that would otherwise show a
@@ -3084,10 +3084,10 @@ private fn kernel_ddb_enter_stopped(
     // restore, which would make the observer agree with the defect -- the
     // exact shape #531 is about. So it asks the console what it is.
     //
-    // Written through the spinning debug path even though the queue may now
-    // be live: the stand-down flushed it and nothing has queued since, so
-    // this is the last byte order can be affected by, and the next queued
-    // byte re-arms the TX interrupt in uart_putc.
+    // Written through the spinning debug path while the complete stop still
+    // excludes every peer and this core masks IRQs. Resume has re-armed any
+    // retained work from atomic hints; it cannot drain until these final
+    // debugger bytes finish and the machine is released.
     if (kernel_log_tx_is_live()) {
         ddb_puts("ddb: console tx=queued\n");
     } else {

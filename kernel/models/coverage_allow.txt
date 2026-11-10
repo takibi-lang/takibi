@@ -42,3 +42,8 @@ OrphanReap fixed ParentExit: the unfixed exit's later hold, which DRAIN_IN_HOLD 
 # GitHub issue #1399: the busy variant checks liveness without network loss.
 TcpAccept busy LoseToL: NETLOSS = FALSE by design; fixed takes it
 TcpAccept busy LoseToP: NETLOSS = FALSE by design; fixed takes it
+
+# A disabled STOP and START acknowledge state without any physical control.
+ConsoleTx flowbothdisabled FlowTake: both configured controls are disabled; the ordinary queue, auxiliary work and request/coalescing actions remain reachable
+ConsoleTx flowbothdisabled FlowClearHint: no control can be taken when both configured bytes are disabled; non-disabled variants cover interrupted retirement
+ConsoleTx flowbothdisabled FlowStore: disabled controls never emit a physical byte; non-disabled variants cover the FIFO store

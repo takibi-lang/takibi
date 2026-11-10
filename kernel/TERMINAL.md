@@ -84,11 +84,14 @@ input becomes readable. The internal scalar UART waiter still receives a
 real byte directly from the interrupt.
 
 TX paths acquire a single atomic pause word without taking the process-run
-lock. Readers publish the desired input-throttle state atomically; CPU 0's console
-poll, and a termios change on any CPU, send the latest request under the
-console lock, so a peer that drains the ring cannot leave the sender
-stopped indefinitely. Kernel diagnostics and debugger flushes remain available
-while terminal output is paused.
+lock. RX, readers and termios changes publish/coalesce the desired
+input-throttle request under the console guard, without waiting for FIFO or
+queue space. Existing TX IRQ service and bounded drains send it after older
+queued bytes; a signal flush preserves that position among the surviving
+bytes. A peer's output pause does not block our independent START/STOP
+response. Zero configured control bytes acknowledge state without emitting
+NUL. No periodic poll or ordinary worker is required. Kernel diagnostics
+and debugger flushes remain available while terminal output is paused.
 
 The 4096-operation echo queue, the transmit queue and the column and
 wire-state words are covered by one console lock (`kernel/printk/console_lock.tkb`,

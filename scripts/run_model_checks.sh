@@ -198,7 +198,19 @@ check_model ConsoleTx Safety 10 \
     norecheck:CInitNoRecheck:NoLostWakeup:violated \
     nested:CInitNested:deadlock:ok \
     nopollwake:CInitNoPollWake:NoLostWakeup:violated \
-    preemptible:CInitPreemptible:pass:ok
+    preemptible:CInitPreemptible:pass:ok \
+    flowfixed:CInitFlowFixed:pass:ok:4 \
+    flowstopdisabled:CInitFlowStopDisabled:pass:ok:4 \
+    flowstartdisabled:CInitFlowStartDisabled:pass:ok:4 \
+    flowbothdisabled:CInitFlowBothDisabled:pass:ok:4 \
+    flownokick:CInitFlowNoKick:FlowNoStranded:violated:4 \
+    flownofence:CInitFlowNoFence:FlowNoOvertake:violated:6 \
+    flownocompact:CInitFlowNoCompact:FlowFenceExact:violated:6 \
+    flowlatehint:CInitFlowLateHint:FlowHintCoversPending:violated:3 \
+    flownorearm:CInitFlowNoRearm:FlowNoStranded:violated:8 \
+    flowbadowner:CInitFlowBadOwner:FlowTerminalQuiet:violated:8 \
+    flowpauseoff:CInitFlowPauseOff:FlowNoStranded:violated:6 \
+    flowhintonly:CInitFlowHintOnly:temporal:ok:4
 
 check_model ConsoleOwner Safety 8 \
     fixed:CInitFixed:pass:ok \

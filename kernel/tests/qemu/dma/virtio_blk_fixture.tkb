@@ -171,7 +171,7 @@ fn dma_fixture_run() !{unsafe} {
     let mut phase = boot_phase_mint();
     qemu_uart_attach_bootstrap(phase);
     uart_init();
-    kernel_log_init();
+    kernel_log_init(phase);
     dma_fixture_attach_registers(phase);
     dma_fixture_attach_network(phase);
     boot_phase_end(phase);

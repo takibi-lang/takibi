@@ -1,7 +1,7 @@
 // Platform-independent UART interrupt glue. Each platform supplies the
 // MMIO-specific uart_rx_ready() and uart_isr_getc() primitives.
 
-let mut uart_rx_handler: fn !{unsafe}(u8) -> void;
+let mut uart_rx_handler: fn !{locks, requires_mmu, requires_devices, unsafe}(u8) -> void;
 
 // Terminal fail-stop diagnostics run with IRQ delivery masked, so they must
 // consume the platform FIFO by polling rather than through uart_rx_handler.
@@ -11,7 +11,7 @@ fn uart_debug_getc() -> u8 !{unsafe} {
     return uart_isr_getc();
 }
 
-fn uart_set_rx_handler(handler: fn !{unsafe}(u8) -> void) !{} {
+fn uart_set_rx_handler(handler: fn !{locks, requires_mmu, requires_devices, unsafe}(u8) -> void) !{} {
     uart_rx_handler = handler;
 }
 

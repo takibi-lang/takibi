@@ -1903,6 +1903,6 @@ fn kernel_uart_rx_isr(c: u8) !{unsafe} {
     terminal_io_receive(guard, c);
     process_run_unlock(guard);
     uart_terminal_resume_output();
-    kernel_log_terminal_flow_poll();
+    kernel_log_terminal_flow_request();
     interrupt_notify();
 }

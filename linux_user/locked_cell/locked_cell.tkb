@@ -118,7 +118,7 @@ private fn bootstrap_cell_body(guard: borrow LockedCellGuard[&cell_a])
     return locked_cell_load(guard, &cell_a);
 }
 private inline fn bootstrap_cell_scope(phase: borrow BootPhase[ended],
-        body: fn !{unsafe}(borrow LockedCellGuard[&cell_a]) -> usize)
+        body: fn !{requires_mmu, unsafe}(borrow LockedCellGuard[&cell_a]) -> usize)
         -> usize !{unsafe} {
     let guard = bootstrap_cell_take(phase);
     let value = body(guard);
@@ -128,7 +128,7 @@ private inline fn bootstrap_cell_scope(phase: borrow BootPhase[ended],
 // Execute the ordinary callback ABI as well as the inlined callsite above.
 // noinline keeps this real held-guard call/release boundary out of line.
 private noinline fn bootstrap_cell_scope_indirect(phase: borrow BootPhase[ended],
-        body: fn !{unsafe}(borrow LockedCellGuard[&cell_a]) -> usize)
+        body: fn !{requires_mmu, unsafe}(borrow LockedCellGuard[&cell_a]) -> usize)
         -> usize !{unsafe} {
     let guard = bootstrap_cell_take(phase);
     let value = body(guard);

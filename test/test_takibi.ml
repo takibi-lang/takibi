@@ -32805,7 +32805,220 @@ fn pick(s: Slot) -> usize { if (s == 0) { return 1; } return s.word; }");
           fn same(s: Slot, t: Slot) -> bool { return s.word == t.word; }");
   ]
 
+(* Concrete function-value contracts must use the complete inferred effect
+   closure, independent of where the value first enters an explicit row. *)
+let function_value_effect_tests =
+  let prefix =
+    "fn wait1493() !{may_block} {}\n\
+     fn hidden1493(c: u8) !{unsafe} { wait1493(); }\n" in
+  let reject name body = Alcotest.test_case name `Quick
+    (expect_type_error "destination contract does not allow"
+      (prefix ^ body)) in
+  let accept name body = Alcotest.test_case name `Quick (expect_ok body) in
+  [
+    reject "direct actual UART-shaped registration"
+      "fn install1493(cb: fn !{unsafe}(u8) -> void) {}
+       fn probe1493() { install1493(hidden1493); }";
+    reject "inferred local alias"
+      "fn probe1493() { let alias = hidden1493;
+         let callback: fn !{unsafe}(u8) -> void = alias; }";
+    reject "mutable inferred alias replacement cannot hide effects"
+      "fn safe1493(c: u8) !{unsafe} {}
+       fn probe1493() { let mut alias = safe1493; alias = hidden1493;
+         let callback: fn !{unsafe}(u8) -> void = alias; }";
+    Alcotest.test_case "inferred alias call retains actual IRQ effects" `Quick
+      (expect_type_error "may block via"
+        (prefix ^ "fn probe1493() !{interrupt, unsafe} {
+           let alias = hidden1493; alias(0); }"));
+    Alcotest.test_case "inferred alias with unknown row stays unknown in IRQ" `Quick
+      (expect_type_error "unknown effects"
+        "fn unmarked1493() {}
+         fn probe1493() !{interrupt} { let alias = unmarked1493; alias(); }");
+    Alcotest.test_case "inferred alias call adds actual effects to summary" `Quick
+      (fun () ->
+        let types = infer (prefix ^ "fn probe1493() { let alias = hidden1493; alias(0); }") in
+        let probe = Types.StringMap.find "probe1493" types.functions in
+        Alcotest.(check bool) "inferred may_block" true
+          (List.mem "may_block" probe.effects));
+    accept "ordinary mutable alias retains its initial actual row"
+      (prefix ^ "fn probe1493() { let mut alias = hidden1493;
+         alias = hidden1493; alias(0); }");
+    Alcotest.test_case "same hidden mutable alias remains blocking in IRQ" `Quick
+      (expect_type_error "may block via"
+        (prefix ^ "fn probe1493() !{interrupt, unsafe} { let mut alias = hidden1493;
+           alias = hidden1493; alias(0); }"));
+    accept "snapshot and replacement conform to the actual initial row"
+      "fn locked1493() !{locks} {}
+       fn broad1493() !{unsafe} { locked1493(); }
+       fn narrow1493() !{unsafe} {}
+       fn probe1493() { let mut alias = broad1493; let snapshot = alias;
+         alias = narrow1493; let callback: fn !{locks, unsafe}() -> void = snapshot; }";
+    accept "written source row conforms to the actual inferred destination"
+      (prefix ^ "fn probe1493(cb: fn !{may_block, unsafe}(u8) -> void) {
+         let mut alias = hidden1493; alias = cb; }");
+    accept "unknown reachable inferred initial row stays unknown in ordinary code"
+      "let mut opaque1493: fn() -> void;
+       fn hidden1493() !{unsafe} { opaque1493(); }
+       fn probe1493() { let mut alias = hidden1493; alias = hidden1493; alias(); }";
+    reject "branch assignment cannot exceed the actual initial row"
+      "fn safe1493(c: u8) !{unsafe} {}
+       fn probe1493(choose: bool) { let mut alias = safe1493;
+         if (choose) { alias = hidden1493; } else { alias = safe1493; } }";
+    reject "tuple alias retains the actual function source"
+      "fn probe1493() { let (callback, number) = (hidden1493, 0);
+         let stored: fn !{unsafe}(u8) -> void = callback; }";
+    reject "let-match initial row cannot hide a wider alternative"
+      "fn safe1493(c: u8) !{unsafe} {}
+       fn probe1493(choose: i32) { let callback = match choose {
+         0 => { safe1493 } _ => { hidden1493 }
+       }; }";
+    accept "let-match initial actual row admits a narrower alternative"
+      (prefix ^ "fn safe1493(c: u8) !{unsafe} {}
+       fn probe1493(choose: i32) { let callback = match choose {
+         0 => { hidden1493 } _ => { safe1493 }
+       }; let stored: fn !{may_block, unsafe}(u8) -> void = callback; }");
+    Alcotest.test_case "let-match admitted source union stays blocking in IRQ" `Quick
+      (expect_type_error "may block via"
+        (prefix ^ "fn safe1493(c: u8) !{unsafe} {}
+         fn probe1493(choose: i32) !{interrupt, unsafe} { let callback = match choose {
+           0 => { hidden1493 } _ => { safe1493 }
+         }; callback(0); }"));
+    Alcotest.test_case "effect obligations reset after a failed compilation" `Quick
+      (fun () ->
+        expect_type_error "destination contract does not allow"
+          (prefix ^ "fn probe1493() { let callback: fn !{unsafe}(u8) -> void = hidden1493; }") ();
+        expect_ok "fn hidden1493(c: u8) !{unsafe} {}
+          fn probe1493() { let callback: fn !{unsafe}(u8) -> void = hidden1493; }" ());
+    Alcotest.test_case "inferred writable pointer rows use actual invariance" `Quick
+      (expect_type_error "invariant behind writable pointers"
+        (prefix ^ "fn safe1493(c: u8) !{unsafe} {}
+         fn probe1493() !{interrupt, unsafe} {
+           let mut broad = hidden1493; let mut narrow = safe1493;
+           let mut alias = &broad; alias = &narrow;
+           *alias = hidden1493; narrow(0); }"));
+    Alcotest.test_case "nested function rows retain actual writable invariance" `Quick
+      (expect_type_error "invariant behind writable pointers"
+        "fn wait1493() !{may_block} {}
+         fn broad1493(cb: fn !{unsafe}(u8) -> void) !{unsafe} { wait1493(); }
+         fn narrow1493(cb: fn !{unsafe}(u8) -> void) !{unsafe} {}
+         fn probe1493() { let mut broad = broad1493; let mut narrow = narrow1493;
+           let mut alias = &broad; alias = &narrow; }");
+    Alcotest.test_case "multi-level pointers remain rejected structurally" `Quick
+      (expect_type_error "nested pointer indirection"
+        (prefix ^ "fn probe1493() { let mut callback = hidden1493;
+           let mut pointer = &callback; let nested = &pointer; }"));
+    Alcotest.test_case "nested written callback rows remain invariant" `Quick
+      (expect_type_error "invariant behind writable pointers"
+        "fn first1493(cb: fn !{}() -> void) !{unsafe} {}
+         fn second1493(cb: fn !{may_block}() -> void) !{unsafe} {}
+         fn probe1493() { let mut first = first1493; let mut second = second1493;
+           let mut alias = &first; alias = &second; }");
+    Alcotest.test_case "array storage enforces its actual element contract" `Quick
+      (expect_type_error "destination contract does not allow"
+        (prefix ^ "fn probe1493() {
+           let mut array: [fn !{unsafe}(u8) -> void; 1] = { hidden1493 }; }"));
+    accept "equal actual inferred rows admit writable pointer aliases"
+      (prefix ^ "fn other1493(c: u8) !{unsafe} { wait1493(); }
+       fn probe1493() { let mut first = hidden1493; let mut second = other1493;
+         let mut alias = &first; alias = &second; *alias = hidden1493; }");
+    accept "actual inferred row matches a written writable pointer row"
+      (prefix ^ "fn probe1493() { let mut callback = hidden1493;
+         let alias: *fn !{may_block, unsafe}(u8) -> void = &callback; }");
+    Alcotest.test_case "valid array contracts and indirect call erase through LLVM" `Quick
+      (expect_codegen_ok
+        (prefix ^ "fn probe1493() {
+           let mut array: [fn !{may_block, unsafe}(u8) -> void; 1] = { hidden1493 };
+           let callback = array[0]; callback(0); }"));
+    Alcotest.test_case "failed unification discards only its deferred effects" `Quick
+      (fun () ->
+        Compilation_state.reset ();
+        Fun.protect ~finally:Compilation_state.reset (fun () ->
+          let source = Types.TFun ([], Types.TVoid, Some ["unsafe"], Some "trial1493") in
+          let expected = Types.TFun ([], Types.TVoid, Some ["unsafe"], None) in
+          Types.unify source expected;
+          let before = !(Types.function_effect_obligations) in
+          let failed = try
+            Types.unify (Types.TTuple [Types.TPtr source; Types.TBool])
+              (Types.TTuple [Types.TPtr expected; Types.TUsize]); false
+            with Types.Unify_error _ -> true in
+          Alcotest.(check bool) "the speculative shape failed" true failed;
+          Alcotest.(check bool) "earlier successful obligations survive unchanged"
+            true (!(Types.function_effect_obligations) == before)));
+    reject "explicit local initializer"
+      "fn probe1493() { let callback: fn !{unsafe}(u8) -> void = hidden1493; }";
+    reject "mutable local assignment"
+      "fn probe1493() { let mut callback: fn !{unsafe}(u8) -> void;
+         callback = hidden1493; }";
+    reject "global aggregate initializer before function inference"
+      "struct GlobalSlot1493 { callback: fn !{unsafe}(u8) -> void; }
+       let mut slot1493: GlobalSlot1493 = { hidden1493 };";
+    reject "global storage through inferred alias"
+      "let mut callback1493: fn !{unsafe}(u8) -> void;
+       fn probe1493() { let alias = hidden1493; callback1493 = alias; }";
+    reject "global assignment"
+      "let mut callback1493: fn !{unsafe}(u8) -> void;
+       fn probe1493() { callback1493 = hidden1493; }";
+    reject "explicit return contract"
+      "fn probe1493() -> fn !{unsafe}(u8) -> void { return hidden1493; }";
+    reject "returned callback then argument"
+      "fn get1493() -> fn !{unsafe}(u8) -> void { return hidden1493; }
+       fn install1493(cb: fn !{unsafe}(u8) -> void) {}
+       fn probe1493() { install1493(get1493()); }";
+    reject "struct field storage"
+      "struct Slot1493 { callback: fn !{unsafe}(u8) -> void; }
+       fn probe1493() { let mut slot: Slot1493 = { hidden1493 }; }";
+    reject "generic callback entrance"
+      "fn install1493(T: type, cb: fn !{unsafe}(u8) -> void, value: T) {}
+       fn probe1493() { let value: bool = true; install1493(hidden1493, value); }";
+    reject "generic target monomorphization"
+      "fn generic1493(T: type, value: T) !{unsafe} { wait1493(); }
+       fn wrapper1493(value: u8) !{unsafe} { generic1493(value); }
+       fn probe1493() { let callback: fn !{unsafe}(u8) -> void = wrapper1493; }";
+    reject "forward recursive helper closure"
+      "fn recursive1493(c: u8) !{unsafe} { other1493(c); }
+       fn other1493(c: u8) { recursive1493(c); wait1493(); }
+       fn probe1493() { let callback: fn !{unsafe}(u8) -> void = recursive1493; }";
+    Alcotest.test_case "unknown indirect hidden by annotated helper" `Quick
+      (expect_type_error "cannot verify the explicit destination contract"
+        "let mut unknown1493: fn() -> void;
+         fn hidden1493() !{unsafe} { unknown1493(); }
+         fn probe1493() { let callback: fn !{unsafe}() -> void = hidden1493; }");
+    Alcotest.test_case "transitive inferred unsafe is a real effect" `Quick
+      (expect_type_error "destination contract does not allow"
+        "fn raw1493() !{unsafe} {}
+         fn wrapper1493() !{locks} { raw1493(); }
+         fn probe1493() { let callback: fn !{locks}() -> void = wrapper1493; }");
+    Alcotest.test_case "hidden no_handler_lock cannot enter unsafe slot" `Quick
+      (expect_type_error "destination contract does not allow"
+        "extern fn lock1493() !{no_handler_lock};
+         fn wrapper1493() !{unsafe} { lock1493(); }
+         fn probe1493() { let callback: fn !{unsafe}() -> void = wrapper1493; }");
+    accept "transitive effects fit destination"
+      (prefix ^ "fn probe1493() {
+         let callback: fn !{may_block, unsafe}(u8) -> void = hidden1493; }");
+    accept "nonempty declaration is not a global closed upper bound"
+      (prefix ^ "fn probe1493() { hidden1493(0); }");
+    accept "function value without explicit destination remains legal"
+      (prefix ^ "fn probe1493() { let callback = hidden1493; }");
+    accept "unknown destination remains legal"
+      (prefix ^ "fn probe1493() { let callback: fn(u8) -> void = hidden1493; }");
+    accept "hidden no_handler_lock is a subeffect of may_block"
+      "extern fn lock1493() !{no_handler_lock};
+       fn wrapper1493() !{unsafe} { lock1493(); }
+       fn probe1493() { let callback: fn !{may_block, unsafe}() -> void = wrapper1493; }";
+    accept "unannotated extern remains trusted effect-free"
+      "extern fn external1493();
+       fn probe1493() { let callback: fn !{}() -> void = external1493; }";
+    Alcotest.test_case "valid contracted callback erases through LLVM" `Quick
+      (expect_codegen_ok
+        "fn leaf1493() !{locks} {}
+         fn wrapper1493() !{unsafe} { leaf1493(); }
+         fn use1493(cb: fn !{locks, unsafe}() -> void) { cb(); }
+         fn probe1493() { let alias = wrapper1493; use1493(alias); }");
+  ]
+
 let named_groups_unisolated = [
+  "function-value-effects", function_value_effect_tests;
   "operator-kinds", operator_kind_tests;
   "struct-pointer-casts", struct_pointer_cast_tests;
 

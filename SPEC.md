@@ -2735,18 +2735,36 @@ MMU-dependent operation, and `!{unsafe}` unchecked memory reasoning.
 `interrupt`, `exception`, and `mmu_off` are declaration roles and are not
 legal in a function-pointer row.
 
-A callback's actual effects must be a subset of the destination contract. An
-effect-free callback may therefore enter a slot permitting operational
+A callback's actual effects must be a subset of the destination contract.
+For a concrete Takibi function value, actual means its inferred transitive
+body/call-graph effects, not only its declaration row. The checker retains
+its concrete source through inferred aliases and static instantiation and
+checks each explicit destination after inference: arguments, initializers,
+assignments and returns follow the same rule. A nonempty declaration row is
+not a closed upper bound on ordinary direct calls. For example, a callback
+marked `!{unsafe}` that calls a `!{may_block}` helper cannot enter a
+`fn !{unsafe}() -> void` contract. A reachable effect-unknown indirect call also
+prevents verification of an explicit destination contract. Inferred aliases
+called indirectly retain the concrete body's transitive effects; an unknown
+row remains unknown. An inferred mutable function value keeps the actual row
+of its initial value: later assignments must fit that row. Inferred joins use
+the same directional row compatibility; they do not silently union effects
+that the initial row does not allow.
+
+An effect-free callback may therefore enter a slot permitting operational
 effects, but the reverse is rejected. An unannotated Takibi function cannot
 enter a `fn !{}(...)` slot until its declaration states `!{}`; that assertion
 is checked against its complete body/call graph. An extern without an
 operational effect remains a trusted effect-free contract.
 
-Indirect calls use their function-pointer row during transitive effect
-analysis. An unannotated function pointer remains effect-unknown and is
+Indirect calls through explicit contracts use their function-pointer row
+during transitive effect analysis. Inferred concrete aliases use their actual
+initial row, with every replacement checked against it. An unannotated function pointer remains effect-unknown and is
 rejected below `!{interrupt}` or `!{}`. Effect rows cannot be invented with a
 cast, and are invariant behind writable pointers so an alias cannot replace a
-non-blocking callback with a blocking one. Effects still erase completely:
+non-blocking callback with a blocking one. Invariance compares both actual
+initial rows when a pointee type is inferred; equal declaration rows alone
+are insufficient. Effects still erase completely:
 they add no LLVM parameter, field, instruction, or metadata.
 
 ### Named synchronous borrowed callbacks

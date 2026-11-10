@@ -774,8 +774,8 @@ modelcheck` requires each to fail:
 | `WriterEnter` | `syscall_write_segment_with` | a terminal write is admitted whole under the run lock | fd lookup and the user-memory copy -- irrelevant to `ProgramOrder`: they run before the chunk is admitted and change no queue or lock | `61104101f684` |
 | `WriterAppend` | `uart_user_write`, `uart_terminal_write_chunk`, `uart_user_write_locked`, `uart_user_write_room_locked`, `syscall_write_segment_with`, `kernel_log_emit_line`, `kernel_log_emit_byte_locked`, `console_lock`, `console_unlock`, `mutex_acquire_measured` | the append to the queue under the console lock, or the decision that there is no room; on every CPU the same queue, and the run lock let go | short counts and partial chunks -- irrelevant to `ProgramOrder`: a partial chunk is a shorter chunk, and the model already appends each whole; nonterminal fd paths -- irrelevant to `ProgramOrder`: they do not append terminal bytes; kernel log lines -- irrelevant to `ProgramOrder`: they share the FIFO order without changing a terminal writer's chunk order; measurement counters -- irrelevant to `ProgramOrder`: they are updated under the same lock and never select queue contents, admission or ownership | `9f9ba59056e6` |
 | `BlockWriter` | `kernel_process_block_uart_tx` | the writer publishes itself asleep under the run lock; `RECHECK` is the room re-check there | successor choice and the switch -- modelled elsewhere: `Wait4Block.Wait4Block` | `d28cda46e101` |
-| `TxTake` | `uart_tx_service`, `uart_tx_drain_into_fifo` | one chunk leaves the queue onto the wire under the console lock and makes room; `NESTED` keeps the lock | the FIFO's capacity and the byte-by-byte drain -- irrelevant to `ProgramOrder`: bytes leave the queue in order, so a chunk taken whole is the same order | `f805ddb9e445` |
-| `PollDrain` | `uart_tx_drain_into_fifo_force`, `uart_terminal_resume_output`, `uart_wire_byte`, `kernel_log_tx_writer_room_locked` | a drain outside the transmit interrupt takes a chunk onto the wire under the console lock and, when it gives writers their room, keeps the interrupt enabled so the service runs the wake | the FIFO and the interrupt's own timing -- irrelevant to `NoLostWakeup`: an enabled TX interrupt is taken once the FIFO falls to its level, which the drained bytes guarantee; the echo queue -- irrelevant to `NoLostWakeup`: echo pending is one more reason the room predicate is false, and the drain that empties it is this action | `db5d17151952` |
+| `TxTake` | `uart_tx_service`, `uart_tx_drain_into_fifo` | one chunk leaves the queue onto the wire under the console lock and makes room; `NESTED` keeps the lock | the FIFO's capacity and the byte-by-byte drain -- irrelevant to `ProgramOrder`: bytes leave the queue in order, so a chunk taken whole is the same order | `7361070f7c98` |
+| `PollDrain` | `uart_tx_drain_into_fifo_force`, `uart_terminal_resume_output`, `uart_wire_byte`, `kernel_log_tx_writer_room_locked` | a drain outside the transmit interrupt takes a chunk onto the wire under the console lock and, when it gives writers their room, keeps the interrupt enabled so the service runs the wake | the FIFO and the interrupt's own timing -- irrelevant to `NoLostWakeup`: an enabled TX interrupt is taken once the FIFO falls to its level, which the drained bytes guarantee; the echo queue -- irrelevant to `NoLostWakeup`: echo pending is one more reason the room predicate is false, and the drain that empties it is this action | `788f46c59048` |
 | `TxWake` | `kernel_process_uart_tx_wake_all` | under the run lock, a writer asleep on room becomes runnable | which other processes wait on UartTx -- irrelevant to `NoLostWakeup`: the model has one writer, and each waiter is woken by the same scan | `20db5755451c` |
 | `Drain` | Retired terminal ring; negative variant only | the former route delays peer chunks independently of the shared queue | the retired implementation -- irrelevant to `ProgramOrder`: this action is reachable only in the unfixed variant and remains its negative control | `e3b0c44298fc` |
 | `Migrate` | `kernel_process_timer_schedule` | the process changes CPU between writes, never inside one while `KERNEL_PREEMPTIBLE` is 0; with `PREEMPTIBLE` (the #638 flip) also between a write's decision and its sleep, and the `preemptible` variant passes | affinity -- irrelevant to `ProgramOrder`: it only forbids some moves, and the model already allows each one it forbids | `c086651575fa` |
@@ -797,6 +797,81 @@ Properties:
 - `AllSent` (liveness, TLC only): every chunk is written and sent, under
   fairness on each action.
 - `TypeOK`: bookkeeping sanity.
+
+### Bounded input-flow and retained-work slice
+
+`FLOW = TRUE` selects the input-flow slice. `FLOW = FALSE` keeps the original
+writer/wake state machine: its actions, constants, fairness and properties
+are unchanged under projection onto `writerVars`; the added variables have
+one fixed initial state. The original fixed variant still explores 64 states.
+The two slices do not multiply each other's state spaces.
+
+The flow slice has two queue slots, three byte admissions, three alternating
+STOP/START requests, one pause/resume cycle, one complete-stop cycle, and one
+unrelated console holder. One additional publication is either echo or an
+owed writer wake; the ordinary queue is present in all three auxiliary cases.
+The queue's serial identities distinguish bytes older and newer than a
+request, including a signal flush that removes an older terminal byte. FIFO
+room and eventual level-IRQ delivery are external fairness assumptions, not
+measured UART timing or a proof of the implementation.
+
+Publication and retirement are split into phases while their real console
+guard remains held. Ordinary actions cannot enter those phases. A complete
+stop may interrupt them and reads only atomic hints: it does not make guarded
+fields a coherent snapshot. A stopped producer finishes its normal kick; a
+consumer with a retired byte finishes its one FIFO store after resume. Peer
+pause-word publication and its later console-mask update are separate actions,
+as are unpause publication and the console drain/kick.
+
+Variants:
+
+- `flowfixed` checks ordering, coalescing, partial publication/retirement,
+  peer pause, complete-stop resume and terminal ownership. The focused run
+  explored 1,233,936 states, depth 36, in 170 seconds with one TLC worker and
+  a 2 GiB heap; this is a component measurement, not the whole model lane.
+- `flowstopdisabled`, `flowstartdisabled` and `flowbothdisabled` preserve
+  disabled control bytes as acknowledgements without physical emission.
+  `FlowNoDuplicate`'s alternating-byte check applies only when both controls
+  are enabled: a disabled opposite control legitimately permits repeated
+  physical STOP or START identities. The both-disabled variant has no
+  physical control-take/clear/store action, with that reason on the coverage
+  list. Queue and auxiliary service remain reachable.
+- `flownokick`, `flownorearm` and `flowpauseoff` lose `FlowNoStranded`;
+  `flownofence` loses `FlowNoOvertake`; `flownocompact` loses `FlowFenceExact`;
+  `flowlatehint` loses `FlowHintCoversPending`; `flowbadowner` loses
+  `FlowTerminalQuiet`.
+- `flowhintonly` retains flow-hint rearm but omits ordinary queue, echo and
+  owed-wake hints. Its sole liveness property, `FlowQuiesces`, fails: DDB can
+  stop a holder or a consumer after the flow hint cleared, leaving retained
+  work with TXIM off and no future producer kick. This models the missing
+  retained-work rearm, not a claim that a kernel race was observed. The
+  original writer/wake and console-owner controls remain separate.
+
+`FlowLatest` and `FlowQuiesces` are bounded liveness evidence under the stated
+fairness. Terminal ownership ends ordinary-progress obligations. A zero
+configured byte updates the acknowledged state without a NUL or a pending
+physical control. Accepted column/wire-last prediction is checked by the
+real boot API probe, not confused with this model's physical wire sequence.
+
+| Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
+| --- | --- | --- | --- | --- |
+| `FlowAppend` | `kernel_log_tx_push`, `uart_user_write_locked` | an ordinary byte is admitted under the console guard, in queue order, with its terminal tag | whole user chunks -- modelled elsewhere: `ConsoleTx.WriterAppend`; the byte's numeric value -- irrelevant to `FlowNoOvertake`: serial admission identities decide its position | `83da922956c5` |
+| `FlowBegin`, `FlowPublish`, `FlowKick` | `kernel_log_terminal_flow_request` | a request retains the console guard across hint publication, guarded desired/pending state, coalescing and the IRQ kick | column/wire prediction and configured nonzero byte values -- irrelevant to `FlowNoStranded`: they change neither pending state nor service (the real boot probe covers their API behavior); unrelated guarded stores between hint phases -- irrelevant to `FlowHintCoversPending`: the stopped observer reads only the atomic hint, and the producer finishes before releasing its guard | `597078f1ccd2` |
+| `FlowTake`, `FlowClearHint` | `kernel_log_tx_flow_take` | the real guard transfers one ready control to a consumer local, retires pending, then clears its hint; a peer pause permits the independent control ahead of paused data | normal metadata stores within a phase -- irrelevant to `FlowHintCoversPending`: no ordinary actor can acquire the retained guard and the complete-stop observer reads only the hint | `542ed13f91ce` |
+| `FlowStore` | `uart_tx_drain_into_fifo_mode`, `uart_tx_store` | the same guarded consumer performs the one FIFO store, including after a stop/resume | physical FIFO timing -- irrelevant to `FlowNoDuplicate`: a store is enabled only after FIFO room was observed, and eventual room is a stated fairness assumption | `826175c0f73d` |
+| `FlowDrain` | `kernel_log_tx_pop`, `uart_tx_drain_into_fifo_mode` | older queued bytes retire in order and decrement the pending control's preceding-byte count; a stopped force drain requires a real try-guard | writer wake details -- modelled elsewhere: `ConsoleTx.TxWake`; FIFO capacity -- irrelevant to `FlowNoOvertake`: capacity delays stores without changing their order | `d5601fdc99a8` |
+| `FlowFlush` | `uart_terminal_flush_output`, `kernel_log_tx_keep_kernel_bytes` | signal flush keeps kernel bytes and recomputes how many surviving bytes precede the control | echo expansion -- irrelevant to `FlowFenceExact`: flow already has priority over the separate echo queue; interrupted compaction stores -- irrelevant to `FlowHintCoversPending`: a stopped observer never reads that guarded snapshot | `7cdea47f1fbe` |
+| `FlowPauseState`, `FlowResumeState` | `terminal_input_decode` | atomic pause/unpause publication under the process-run guard, before the later console operation | terminal decoding other than START/STOP -- irrelevant to `FlowNoStranded`: those outcomes do not publish this pause word | `fddb7c0cd7ad` |
+| `FlowPause` | `uart_terminal_stop_output` | a separate console critical section keeps the flow IRQ enabled despite paused ordinary output | which CPU publishes pause -- irrelevant to `FlowNoStranded`: every CPU uses the same console guard and atomic pause word | `620d81cea616` |
+| `FlowResume` | `uart_terminal_resume_output` | the later console critical section drains/kicks resumed output | the input reader's process-run wake -- modelled elsewhere: `ConsoleTx.TxWake` | `211ca6dacf3c` |
+| `FlowQuiesce` | `uart_tx_service` | a TX service masks its source only when no independent flow remains and ordinary data is absent or paused | the actual run-lock wake -- modelled elsewhere: `ConsoleTx.TxWake` | `2766e2a086c9` |
+| `FlowHold`, `FlowReleaseHold` | `uart_terminal_column`, `console_lock`, `console_unlock` | an unrelated holder may be stopped after publication and resume without an append or implicit output kick | the returned column value -- irrelevant to `FlowQuiesces`: this holder changes no queued work | `954c20eb9bf4` |
+| `FlowStop` | `kernel_log_tx_stand_down_stopped`, `uart_tx_flush_stopped` | complete stop can find a retained console guard, so Busy leaves queued work and disables TXIM | world-stop acquisition -- modelled elsewhere: `WorldStop.Read`; successful try-lock force drain -- modelled elsewhere: `ConsoleTx.FlowDrain` | `5fe1fee9f1eb` |
+| `FlowContinue` | `kernel_log_tx_resume` | exact live-owner restoration under the existing complete-stop borrow rearms flow, unpaused queued/echo data or owed wake from atomic hints | priority and owner identity -- modelled elsewhere: `ConsoleOwner.Resume`; partially published guarded state -- irrelevant to `FlowQuiesces`: hints are atomic and a pre-publication producer finishes its ordinary kick after resume | `423fa3088a83` |
+| `FlowTerminal` | `kernel_log_tx_take_owner`, `kernel_log_tx_resume` | sticky terminal ownership prevents IRQ rearm and ends ordinary progress obligations | console priority arbitration -- modelled elsewhere: `ConsoleOwner.Terminal` | `a9d8ddf59449` |
+| `FlowOfferAux` | `terminal_echo_push`, `uart_tx_drain_into_fifo_mode` | one echo or owed-wake publication has an ordinary producer kick, and may then be retained across a complete stop | simultaneous extra auxiliary work -- irrelevant to `FlowQuiesces`: the resume predicate ORs the hints, so another positive hint only enables service (the model tests each auxiliary kind with the normal queue present) | `24efab69b722` |
+| `FlowDrainEcho` | `terminal_echo_read`, `uart_tx_drain_into_fifo_mode` | echo drains after the normal queue and remains paused except for a complete-stop force drain | echo's byte expansion -- irrelevant to `FlowQuiesces`: each pending expansion is more work behind the same atomic pending hint | `3892e0f0aa1c` |
+| `FlowWakeService` | `uart_tx_service` | TX service retires the owed-wake hint, and its caller can run the wake after releasing the console guard | the sleeping-writer scan -- modelled elsewhere: `ConsoleTx.TxWake` | `2766e2a086c9` |
 
 ## OrphanReap.tla -- who collects a zombie its parent cannot (#1310)
 
@@ -843,10 +918,10 @@ of which may enter DDB, continue, or enter a terminal path.
 
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |
-| `Activate` | `kernel_log_tx_activate` | the platform arms the queue once | the boot probe's re-init (`kernel_log_tx_ownership_reset`) -- irrelevant to `TerminalStays`: it runs on core 0 before any other core or terminal path exists | `693dfdcad0c5` |
-| `EnterDdb` | `kernel_log_tx_stand_down_stopped`, `kernel_log_tx_take_owner`, `kernel_ddb_enter_stopped` | one compare-swap at debugger priority, or Outranked with no token | the queue flush after a successful take, a try-lock since #920 -- irrelevant to `TerminalStays`: it changes no ownership; the world stop -- irrelevant to `TerminalStays`: it only forbids some interleavings, and the model already allows each one it forbids | `4f000e04de58` |
+| `Activate` | `kernel_log_tx_activate` | the platform arms the queue once | the boot probe's re-init (`kernel_log_tx_ownership_reset`) -- irrelevant to `TerminalStays`: it runs on core 0 before any other core or terminal path exists | `3d1aa3a0c197` |
+| `EnterDdb` | `kernel_log_tx_stand_down_stopped`, `kernel_log_tx_take_owner`, `kernel_ddb_enter_stopped` | one compare-swap at debugger priority, or Outranked with no token | the queue flush after a successful take, a try-lock since #920 -- irrelevant to `TerminalStays`: it changes no ownership; the world stop -- irrelevant to `TerminalStays`: it only forbids some interleavings, and the model already allows each one it forbids | `804fdd6bbd6b` |
 | `Terminal` | `kernel_log_tx_stand_down`, `kernel_log_tx_stand_down_stopped`, `kernel_log_tx_take_owner`, `kernel_log_enter_emergency`, `crash_console_run` | a take at emergency or panic priority, or TERMINAL alone when outranked; the core never returns | the per-core emergency byte path -- irrelevant to `TerminalStays`: it makes that core spin and never reads the word; the bounded retry of a lost compare-swap -- irrelevant to `TerminalStays`: each attempt is this one action, and an exhausted retry leaves the word as some other terminal taker set it | `96b941ff1ff2` |
-| `Resume` | `kernel_log_tx_resume` | the compare-swap from DDB's own owner field back to the found owner, keeping TERMINAL; `BLIND` stores it unconditionally | the read-back line DDB prints -- irrelevant to `TerminalStays`: it only reads the word | `a442edb102ac` |
+| `Resume` | `kernel_log_tx_resume` | the compare-swap from DDB's own owner field back to the found owner, keeping TERMINAL; `BLIND` stores it unconditionally | the read-back line DDB prints -- irrelevant to `TerminalStays`: it only reads the word | `423fa3088a83` |
 
 ## UartServe.tla -- the UART serve try-lock under 1-of-N delivery (#925)
 
@@ -877,7 +952,7 @@ the sources stop, everything is served.
 | `Deliver` | `uart_irq_route` | the GIC hands the pending SPI to any idle core of the route, which acknowledges it; `GATE` forbids it while the SPI is active | which cores are online and the route rewrite after each EOI -- irrelevant to `NoStranded`: a narrower route only forbids some deliveries, and pending stays a property of the source | `22d1bdc9ec08` |
 | `TryLockWin` | `uart_irq_serve` | the compare-swap of the busy word from 0 to 1 wins | the per-core taken counter -- irrelevant to `NoStranded`: it is only read by the boot report | `d6de02e82b9d` |
 | `TryLockBusy` | `uart_irq_serve` | the compare-swap finds the word taken; the core goes to its EOI | nothing | `d6de02e82b9d` |
-| `ServeTx` | `uart_irq_service`, `uart_tx_service` | the TX FIFO is refilled above its level | the writer wake under the run lock -- modelled elsewhere: `ConsoleTx.TxWake` | `18e019c77743` |
+| `ServeTx` | `uart_irq_service`, `uart_tx_service` | the TX FIFO is refilled above its level | the writer wake under the run lock -- modelled elsewhere: `ConsoleTx.TxWake` | `68744a7ef5c5` |
 | `DrainRx` | `uart_irq_service`, `uart_rx_drain` | the RX FIFO is drained to RXFE | a BREAK that ends the drain early -- irrelevant to `NoStranded`: the bytes it leaves keep the line asserted, the same as bytes that arrive after the drain | `0e2700a3ec92` |
 | `Release` | `uart_irq_serve` | the busy word is stored back to 0 | nothing | `d6de02e82b9d` |
 | `Eoi` | `rp1_vector_iack`, `uart_irq_after_eoi` | the SPI stops being active on this core | DDB entry after the EOI -- irrelevant to `NoStranded`: the core takes no further UART step, which the model already allows by never delivering to it | `1d97797d26f8` |
@@ -920,7 +995,7 @@ views remain live; this is separate evidence from the bounded model.
 | `Ack`, `PenExit`, `ToggleIrq` | `world_stop_hold`, `kernel_world_stop_serve`, `kernel_ddb_stopped_root_publish`, `kernel_ddb_stopped_root_retire` | ack current request only after entering the pen; exit only when request changes; masked IRQs can delay ack (the quiescent SGI; the debug stop's NMI-priority SGI is taken through the priority mask, #920) | physical instruction timing -- irrelevant to `NoUnstoppedRead`: arbitrary scheduling allows every delay; stopped-root sequence parity and scalar execution-state publication -- irrelevant to `NoUnstoppedRead`: capture precedes ack and does not change stop state, an unsettled root is refused, and complete-stop scalar handle words are generation-validated before inspection | `bb277cc44de1` |
 | `Complete`, `Timeout` | `world_stop_begin_claimed` | all captured targets must ack the current generation; timeout yields no complete authority | spin count -- irrelevant to `NoUnstoppedRead`: timeout may happen at any waiting step | `269c9cb8989b` |
 | `Release` | `world_stop_resume`, `machine_stop_release`, `machine_stop_partial_release` | end the local authority before clearing request and releasing claim, then restore saved initiator IRQs | terminal keep-forever -- irrelevant to `NoUnstoppedRead`: it never resumes or releases the gate | `9c676f3ab022` |
-| `Read` | `kernel_process_ddb_copy`, `kernel_ddb_enter_stopped`, `process_record_inspect_stopped`, `scheduled_process_record_stopped`, `scheduled_process_slot_remove`, `address_space_inspect_stopped`, `fd_context_inspect_stopped`, `fd_block_inspect_stopped`, `kernel_fd_table_stopped_entry`, `process_image_inspect_stopped`, `scheduled_process_diagnostic_copy`, `crash_snapshot_shared_stopped`, `crash_console_dispatch_stopped`, `kernel_net_rx_frame_pending` | inspection requires the borrowed machine authority; scoped pool loans cannot cross resume or slot destruction | pool metadata Busy/Stale refusals and which record fields and memory commands are inspected -- irrelevant to `NoUnstoppedRead`: every successful inspection is gated by the same machine authority, while metadata consistency is a separate trusted mint condition checked before inspection | `68f5bcd4d3d9` |
+| `Read` | `kernel_process_ddb_copy`, `kernel_ddb_enter_stopped`, `process_record_inspect_stopped`, `scheduled_process_record_stopped`, `scheduled_process_slot_remove`, `address_space_inspect_stopped`, `fd_context_inspect_stopped`, `fd_block_inspect_stopped`, `kernel_fd_table_stopped_entry`, `process_image_inspect_stopped`, `scheduled_process_diagnostic_copy`, `crash_snapshot_shared_stopped`, `crash_console_dispatch_stopped`, `kernel_net_rx_frame_pending` | inspection requires the borrowed machine authority; scoped pool loans cannot cross resume or slot destruction | pool metadata Busy/Stale refusals and which record fields and memory commands are inspected -- irrelevant to `NoUnstoppedRead`: every successful inspection is gated by the same machine authority, while metadata consistency is a separate trusted mint condition checked before inspection | `a292f0b0212c` |
 
 ## Keeping models and the kernel in step
 

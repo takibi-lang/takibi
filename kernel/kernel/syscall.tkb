@@ -4250,7 +4250,7 @@ fn syscall_terminal_ioctl(current_authority: borrow ProcessCurrent[current_proce
     }
     process_run_unlock(guard);
     uart_terminal_resume_output();
-    kernel_log_terminal_flow_poll();
+    kernel_log_terminal_flow_request();
     interrupt_notify();
     return SyscallAction::Resume(0);
 }
@@ -4343,7 +4343,7 @@ fn syscall_read_uart(current_authority: borrow ProcessCurrent[current_process, P
             // GitHub issue #830: the reader that drained the ring sends the
             // START itself, on whichever core it runs, as a termios change
             // does; no core polls for it.
-            kernel_log_terminal_flow_poll();
+            kernel_log_terminal_flow_request();
             return SyscallIoResult::Transferred(transferred);
         }
     }

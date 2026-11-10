@@ -64,7 +64,7 @@ let rec mentions_region t =
   match repr t with
   | TIndexedStruct (n, _) ->
       String.length n > 8 && String.sub n 0 8 = "region__"
-  | TFun (ps, _, _) -> List.exists mentions_region ps
+  | TFun (ps, _, _, _) -> List.exists mentions_region ps
   | TTuple ts -> List.exists mentions_region ts
   | TPtr t | TRef t | TRefMut t -> mentions_region t
   | _ -> false
@@ -101,7 +101,7 @@ let bindings formal actual =
     | _ -> ()
   and ty f a =
     match repr f, repr a with
-    | TFun (fs, fr, _), TFun (as_, ar, _) when List.length fs = List.length as_ ->
+    | TFun (fs, fr, _, _), TFun (as_, ar, _, _) when List.length fs = List.length as_ ->
         List.iter2 ty fs as_; ty fr ar
     | TIndexedStruct (_, fs), TIndexedStruct (_, as_)
     | TView (_, fs), TView (_, as_)
