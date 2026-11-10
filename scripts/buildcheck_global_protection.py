@@ -62,7 +62,8 @@ HEADER = "# takibi globals, format "
 COLUMNS = ("file", "line", "name", "visibility", "qualifier", "type", "protection")
 PROTECTED = {"atomic", "lock", "per_cpu", "region", "place", "dma_fixed",
              "protocol", "boot_once", "set_once", "stop", "composite", "slot_owned",
-             "debugger_set", "handle", "exception_publication"}
+             "debugger_set", "handle", "exception_publication", "asid_initializer"}
+SCOPED = {"exception_publication", "asid_initializer"}
 UNPROTECTED = {"none"}
 
 
@@ -89,8 +90,8 @@ def parse_table(text, origin):
         if len(cells) != len(COLUMNS):
             raise TableError(f"{origin}:{number}: {len(cells)} cells, not {len(COLUMNS)}")
         row = dict(zip(COLUMNS, cells))
-        if row["protection"] == "exception_publication":
-            raise TableError(f"{origin}:{number}: exception_publication is derived only by the scoped build admission, never accepted from a raw table")
+        if row["protection"] in SCOPED:
+            raise TableError(f"{origin}:{number}: {row['protection']} is derived only by the scoped build admission, never accepted from a raw table")
         if row["protection"] not in PROTECTED | UNPROTECTED:
             raise TableError(f"{origin}:{number}: unknown protection {row['protection']!r}")
         rows.append(row)
@@ -167,6 +168,67 @@ def exception_publication_admitted(row, origin, source=None, table=None, rules=N
         return False
 
 
+def asid_initializer_admitted(row, origin, sources=None, table=None, rules=None, structs=None):
+    """Only the two actual ASID words, after source/type/layout/caller evidence.
+
+    Privacy/no_copy and linear flow are compiler guarantees. This admission
+    retains a closed bootstrap mint/caller boundary, not a generic boot-cell
+    class or a proof of temporal uniqueness across assembly.
+    """
+    from check_asid_boot_config import PATH, ASID, WORDS, CALLERS, read_sources, source_problems, layout_problems
+    if (row['file'] != PATH or row['name'] not in WORDS or
+            (row['visibility'], row['qualifier'], row['type'], row['protection']) !=
+            ('private', '-', 'AsidBootWord', 'none')):
+        return False
+    import call_graph_table
+    from buildcheck_allowed_callers import read_list, problems_in, controls_fail, ListError
+    from struct_layout_gdb import read_structs
+    try:
+        if sources is None:
+            sources = read_sources(ROOT)
+        if source_problems(sources):
+            return False
+        if structs is None:
+            structs = read_structs(pathlib.Path(origin).with_name('structs.tsv'))
+        if layout_problems(structs):
+            return False
+        if table is None:
+            table = call_graph_table.read(pathlib.Path(origin).with_name('callgraph.tsv'))
+        if not table:
+            return False
+        signatures = {
+            'asid_boot_writer_mint': (PATH, [], 'AsidInitWriter', {'mmu_off', 'unsafe'}),
+            'asid_boot_config_initialize': (PATH, ['writer: sink AsidInitWriter', 'bits: usize'], '-', {'mmu_off'}),
+            'asid_init': (ASID, [], '-', {'mmu_off', 'unsafe'}),
+            'asid_width_bits': (PATH, [], 'usize', set()),
+            'asid_highest_value': (PATH, [], 'usize', set()),
+        }
+        for name, (file, params, returns, declared) in signatures.items():
+            definitions = [r for r in table if r['name'] == name]
+            if len(definitions) != 1:
+                return False
+            actual = definitions[0]
+            if ((actual['file'], actual['params'], actual['returns']) != (file, params, returns)
+                    or set(actual['declared'].split(',')) - {'-'} != declared):
+                return False
+            if not declared and (actual['effects'] or actual['callees']):
+                return False
+        if any(call_graph_table.callee_name(value) in CALLERS
+               for entry in table for value in entry['values']):
+            return False
+        if rules is None:
+            rules = read_list()
+        for helper, allowed in CALLERS.items():
+            matches = [r for r in rules if r['helper'] == helper]
+            if len(matches) != 1 or matches[0]['allowed'] != allowed:
+                return False
+            if problems_in(matches[0], table) or controls_fail(matches[0], table):
+                return False
+        return True
+    except (OSError, ValueError, SystemExit, KeyError, StopIteration, ListError, call_graph_table.TableError):
+        return False
+
+
 def globals_of(tables, debugger_set=None):
     """(file, name) -> row, the union over both kernels. A scalar row named
     in scripts/debugger_set_globals.tsv is classified `debugger_set`."""
@@ -181,9 +243,12 @@ def globals_of(tables, debugger_set=None):
                     row = dict(row, protection="debugger_set")
                 if exception_publication_admitted(row, origin):
                     row = dict(row, protection="exception_publication")
+                if asid_initializer_admitted(row, origin):
+                    row = dict(row, protection="asid_initializer")
                 key = (row["file"], row["name"])
                 previous = found.get(key)
-                if previous and {previous['protection'], row['protection']} == {'none', 'exception_publication'}:
+                if previous and previous['protection'] != row['protection'] and (
+                        previous['protection'] in SCOPED or row['protection'] in SCOPED):
                     # Every platform must supply all premises; union order may
                     # not hide a platform whose evidence is missing or invalid.
                     found[key] = dict(row, protection='none')

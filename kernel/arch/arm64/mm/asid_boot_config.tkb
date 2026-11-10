@@ -1,0 +1,44 @@
+// The ASID hardware configuration has one initializer and plain readers.
+// This source boundary keeps allocator consumers out of its private payloads;
+// no_copy also prevents replacing a word through a default-constructed copy.
+// The two symbols keep their original one-word layout and initial values for
+// MMU-off boot and stopped debugger injection.
+//
+// Current limitations (2026-11-10):
+// - The unsafe mint asserts the one primary MMU-off initialization window.
+//   Its unique caller and exact consuming initializer are build-checked;
+//   linear flow prevents reuse of one writer, not a second unsafe mint.
+// - Library internals, entry assembly and initialization before CPU_ON remain
+//   trusted. This is not a type-level proof of the whole boot epoch.
+// - Readers are plain loads, including before initialization (8/255). There
+//   is no readiness word, lock, atomic instruction or read-before-init stop.
+// - External debugger writes remain trusted and require stopped CPUs. Linked
+//   image checks bind both symbols to their offset-zero eight-byte payloads.
+
+struct no_copy AsidBootWord {
+    private value: usize;
+}
+
+private linear view AsidInitWriter;
+
+// Every AArch64 implementation has at least eight ASID bits. Preserve that
+// architectural floor before the hardware query supplies the final width.
+private let mut asid_bits: AsidBootWord = { 8 };
+private let mut asid_last: AsidBootWord = { 255 };
+
+fn asid_boot_writer_mint() -> AsidInitWriter !{mmu_off, unsafe} {
+    return view AsidInitWriter;
+}
+
+fn asid_boot_config_initialize(writer: sink AsidInitWriter, bits: usize) !{mmu_off} {
+    asid_bits.value = bits;
+    asid_last.value = (1 << bits) - 1;
+}
+
+fn asid_width_bits() -> usize {
+    return asid_bits.value;
+}
+
+fn asid_highest_value() -> usize {
+    return asid_last.value;
+}

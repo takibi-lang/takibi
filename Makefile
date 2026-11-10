@@ -239,6 +239,10 @@ pool-liveness-control: build
 wont-compile-control: build
 	@$(NICE_HEAVY) python3 scripts/buildcheck_wont_compile_samples.py $(TAKIBI)
 
+.PHONY: asid-boot-config-control
+asid-boot-config-control: build
+	@$(NICE_HEAVY) python3 scripts/buildcheck_asid_boot_config.py api $(TAKIBI)
+
 .PHONY: regions-flag-control
 regions-flag-control: build
 	@$(NICE_HEAVY) python3 scripts/buildcheck_regions_flag.py $(TAKIBI)
@@ -301,7 +305,7 @@ CHECK_CPU_BUDGET_REFS    := 18
 # CHECK_TIMEOUT_SECONDS, which is what makes "the fast gate is for checks
 # that read tracked files" a mechanism instead of a sentence: a member that
 # waits is killed and this lane goes red.
-langcheck: unused-function-control forbid-unsafe-control effect-matrix-control language-words-control cli-flags-control pool-liveness-control wont-compile-control regions-flag-control range-obligation-compile-control
+langcheck: asid-boot-config-control unused-function-control forbid-unsafe-control effect-matrix-control language-words-control cli-flags-control pool-liveness-control wont-compile-control regions-flag-control range-obligation-compile-control
 	@bash scripts/lane_timing.sh begin langcheck
 	@bash scripts/run_check_lane.sh check $(CHECK_TIMEOUT_SECONDS) $(CHECK_CPU_BUDGET_MS) $(CHECK_CPU_BUDGET_REFS)
 # -I skips binary files. Without it a build directory left in the worktree
@@ -442,6 +446,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/arch/arm64/kernel/secondary.tkb \
 	kernel/arch/arm64/kernel/timer.tkb \
 	kernel/arch/arm64/mm/asid.tkb \
+	kernel/arch/arm64/mm/asid_boot_config.tkb \
 	kernel/arch/arm64/mm/mmu.tkb \
 	kernel/drivers/virtio_ring.tkb \
 	kernel/drivers/virtio_used.tkb \
@@ -1947,11 +1952,12 @@ $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(
 # this target's own hand-written prerequisite list above.
 -include $(KERNEL_RPI5_MAIN_O).facts/deps.d
 
-$(KERNEL_RPI5_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_RPI5_LINK_LD) $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld
+$(KERNEL_RPI5_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_RPI5_LINK_LD) $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld scripts/buildcheck_asid_boot_config.py scripts/check_asid_boot_config.py scripts/struct_layout_gdb.py
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $(KERNEL_RPI5_MAIN_O) -o $@ $(KERNEL_GC_LIST)
 	python3 scripts/buildcheck_rp1_dma_arena.py $@
 	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 2 --asm-entries "$(KERNEL_ASM_ENTRIES)" --takibi-object $(KERNEL_RPI5_MAIN_O) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O)
 	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool_cell 16
+	python3 scripts/buildcheck_asid_boot_config.py image $@ $(KERNEL_RPI5_MAIN_O).facts/structs.tsv
 	python3 scripts/buildcheck_kernel_same_operand_csel.py $@ 10
 	python3 scripts/buildcheck_kernel_byte_copy.py $@ 0
 
@@ -1983,10 +1989,11 @@ $(KERNEL_RPI5_MAIN_DEBUG_O): $(KERNEL_RPI5_MAIN_O)
 
 -include $(KERNEL_RPI5_MAIN_DEBUG_O).facts/deps.d
 
-$(KERNEL_RPI5_DEBUG_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $(KERNEL_RPI5_MAIN_DEBUG_O) $(KERNEL_RPI5_LINK_LD) $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld
+$(KERNEL_RPI5_DEBUG_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $(KERNEL_RPI5_MAIN_DEBUG_O) $(KERNEL_RPI5_LINK_LD) $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld scripts/buildcheck_asid_boot_config.py scripts/check_asid_boot_config.py scripts/struct_layout_gdb.py
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $(KERNEL_RPI5_MAIN_DEBUG_O) -o $@
 	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 2
 	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool_cell 16
+	python3 scripts/buildcheck_asid_boot_config.py image $@ $(KERNEL_RPI5_MAIN_DEBUG_O).facts/structs.tsv
 
 $(KERNEL_RPI5_DEBUG_METADATA): $(KERNEL_RPI5_MAIN_O)
 	@mkdir -p $(dir $@)
@@ -2134,10 +2141,11 @@ $(KERNEL_QEMU_NET_WAKE_CONTROL_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_E
 # clean-build bootstrap behavior.
 -include $(KERNEL_QEMU_MAIN_O).facts/deps.d
 
-$(KERNEL_QEMU_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_MAIN_O) $(KERNEL_QEMU_LINK_LD) $(KERNEL_RPI5_LINK_LD)
+$(KERNEL_QEMU_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_MAIN_O) $(KERNEL_QEMU_LINK_LD) $(KERNEL_RPI5_LINK_LD) scripts/buildcheck_asid_boot_config.py scripts/check_asid_boot_config.py scripts/struct_layout_gdb.py
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_MAIN_O) -o $@ $(KERNEL_GC_LIST)
 	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 1 --asm-entries "$(KERNEL_ASM_ENTRIES)" --takibi-object $(KERNEL_QEMU_MAIN_O) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O)
 	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool_cell 16
+	python3 scripts/buildcheck_asid_boot_config.py image $@ $(KERNEL_QEMU_MAIN_O).facts/structs.tsv
 	python3 scripts/buildcheck_kernel_same_operand_csel.py $@ 6
 	python3 scripts/buildcheck_kernel_byte_copy.py $@ 0
 
@@ -2193,10 +2201,11 @@ $(KERNEL_QEMU_MAIN_DEBUG_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_T
 # this target's own hand-written prerequisite list above.
 -include $(KERNEL_QEMU_MAIN_DEBUG_O).facts/deps.d
 
-$(KERNEL_QEMU_DEBUG_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_MAIN_DEBUG_O) $(KERNEL_QEMU_LINK_LD) $(KERNEL_RPI5_LINK_LD)
+$(KERNEL_QEMU_DEBUG_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_MAIN_DEBUG_O) $(KERNEL_QEMU_LINK_LD) $(KERNEL_RPI5_LINK_LD) scripts/buildcheck_asid_boot_config.py scripts/check_asid_boot_config.py scripts/struct_layout_gdb.py
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_MAIN_DEBUG_O) -o $@
 	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 1
 	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool_cell 16
+	python3 scripts/buildcheck_asid_boot_config.py image $@ $(KERNEL_QEMU_MAIN_DEBUG_O).facts/structs.tsv
 
 # GitHub issue #766: every field, type, global and function the GDB helpers
 # name must still exist in the debug kernel (its DWARF and symbol table);
@@ -2338,7 +2347,7 @@ $(MODEL_MAP_STAMP): $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_DIR)/mo
 ## a stale row there, fails the build.
 GLOBAL_PROTECTION_TABLES = $(KERNEL_QEMU_MAIN_O).facts/globals.tsv $(KERNEL_RPI5_MAIN_O).facts/globals.tsv
 GLOBAL_PROTECTION_STAMP  = $(KERNEL_DIR)/build/global_protection.ok
-$(GLOBAL_PROTECTION_STAMP): $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O) scripts/buildcheck_global_protection.py scripts/buildcheck_unread_globals.py scripts/global_protection_allowlist.tsv scripts/debugger_set_globals.tsv scripts/buildcheck_dma_mint_files.py scripts/check_exception_cpu_snapshots.py scripts/allowed_callers.tsv scripts/buildcheck_allowed_callers.py
+$(GLOBAL_PROTECTION_STAMP): $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_QEMU_ELF) $(KERNEL_RPI5_ELF) scripts/check_asid_boot_config.py scripts/struct_layout_gdb.py scripts/buildcheck_global_protection.py scripts/buildcheck_unread_globals.py scripts/global_protection_allowlist.tsv scripts/debugger_set_globals.tsv scripts/buildcheck_dma_mint_files.py scripts/check_exception_cpu_snapshots.py scripts/allowed_callers.tsv scripts/buildcheck_allowed_callers.py
 	python3 scripts/buildcheck_global_protection.py $(GLOBAL_PROTECTION_TABLES)
 	python3 scripts/buildcheck_unread_globals.py $(GLOBAL_PROTECTION_TABLES)
 	python3 scripts/buildcheck_dma_mint_files.py $(KERNEL_QEMU_MAIN_O).facts/fields.tsv $(KERNEL_RPI5_MAIN_O).facts/fields.tsv

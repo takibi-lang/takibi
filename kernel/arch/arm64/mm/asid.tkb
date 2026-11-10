@@ -48,9 +48,10 @@
 //   (AArch64 has no exclusives on Device-typed memory, which is what
 //   everything is until the MMU is on) and unnecessary (PSCI has not been
 //   asked for a second core yet).
-// - asid_bits and asid_last are still plain globals, deliberately: written
-//   once by asid_init and never again, which is what keeps
-//   asid_width_bits() and asid_highest_value() lock-free.
+// - Hardware width and limit live behind the private no_copy payloads in
+//   asid_boot_config.tkb. asid_init consumes its erased initializer writer;
+//   the existing getters remain plain loads. Mint uniqueness and boot order
+//   remain the reviewed source/caller boundary, not a whole-epoch proof.
 // - Every production dynamic-root activation is split into preparation and
 //   commit. Scheduler handoffs reserve their Running target before dropping
 //   ProcessRunGuard; teardown/exec restores run in non-preemptible EL1 with a
@@ -67,21 +68,14 @@
 //   invalidates everything; a page-table change invalidates through
 //   kernel/mm/address_space.tkb, which still knows the number it recorded.
 
-// The architectural floor: every AArch64 implementation has at least an
-// 8-bit ASID field, so this is what the width query falls back to when it
-// reports anything this file does not recognise.
 use "kernel/lib/execution_model.tkb";
+use "kernel/arch/arm64/mm/asid_boot_config.tkb";
 use "kernel/lib/pool_lock.tkb";
 use "kernel/lib/locked_cell.tkb";
 use "kernel/lib/occupancy.tkb";
 
-const ASID_BITS_FLOOR: usize = 8;
-
-private let mut asid_bits: usize = ASID_BITS_FLOOR;
-// The highest assignable number. ASID 0 is never assigned -- it is the
-// value TTBR0_EL1 holds before any address space exists, and treating it
-// as "no ASID" is what lets address_space.tkb test `asid != 0`.
-private let mut asid_last: usize = 255;
+// ASID 0 is never assigned: TTBR0_EL1 has that value before an address
+// space exists, so address_space.tkb may test `asid != 0`.
 
 // GitHub issue #452: everything one assignment touches, in one struct
 // behind one lock.
@@ -124,9 +118,9 @@ private let mut asid_cell: LockedCell(AsidState);
 // mapped yet (see kernel/MEMORY_MAP.md's note on that window).
 fn asid_init() !{mmu_off, unsafe} {
     // No mutex_init for the cell's lock; see kernel/lib/mutex.tkb.
-    asid_bits = mmu_asid_bits();
+    let writer = asid_boot_writer_mint();
     // 1 << 16 is 65536 numbers, of which 65535 are assignable.
-    asid_last = (1 << asid_bits) - 1;
+    asid_boot_config_initialize(writer, mmu_asid_bits());
     // locked_cell_load_boot, not locked_cell_value: this runs with the
     // MMU off, where spin_lock is unavailable by architecture rather than
     // by choice (no exclusives on Device-typed memory) and unnecessary
@@ -143,14 +137,6 @@ fn asid_init() !{mmu_off, unsafe} {
 fn asid_reporter_state() -> (usize, usize, usize) !{unsafe} {
     let mut state: AsidState = locked_cell_load_reporter(&asid_cell);
     return (state.generation, state.next, state.rollover_count);
-}
-
-fn asid_width_bits() -> usize {
-    return asid_bits;
-}
-
-fn asid_highest_value() -> usize {
-    return asid_last;
 }
 
 // The four readers below take the lock, which the bare globals they
@@ -219,7 +205,7 @@ must_use variant AsidAssignAttempt {
 fn asid_assign_attempt() -> AsidAssignAttempt {
     let guard = locked_cell_take(&asid_cell);
     let mut state: AsidState = locked_cell_load(guard, &asid_cell);
-    if (state.next > asid_last) {
+    if (state.next > asid_highest_value()) {
         locked_cell_give(&asid_cell, guard);
         return AsidAssignAttempt::RolloverNeeded;
     }
@@ -236,7 +222,7 @@ fn asid_assign_attempt() -> AsidAssignAttempt {
 fn asid_force_rollover_needed() {
     let guard = locked_cell_take(&asid_cell);
     let mut state: AsidState = locked_cell_load(guard, &asid_cell);
-    state.next = asid_last + 1;
+    state.next = asid_highest_value() + 1;
     locked_cell_store(guard, &asid_cell, state);
     locked_cell_give(&asid_cell, guard);
 }
@@ -248,7 +234,7 @@ fn asid_rollover_stopped(stopped: borrow MachineStopped[&kernel_world_stop]) -> 
     let guard = locked_cell_take(&asid_cell);
     let mut state: AsidState = locked_cell_load(guard, &asid_cell);
     let mut rolled: bool = false;
-    if (state.next > asid_last) {
+    if (state.next > asid_highest_value()) {
         asid_rollover(&state);
         locked_cell_store(guard, &asid_cell, state);
         rolled = true;
@@ -302,13 +288,13 @@ fn asid_assign_boot() -> (usize, usize) !{mmu_off, unsafe} {
     return result;
 }
 
-// asid_last and asid_bits stay outside the cell deliberately: asid_init
+// Hardware width and limit stay outside the cell deliberately: asid_init
 // writes them once, before PSCI has been asked for a second core, and
 // nothing writes them again. Keeping them out is what lets
 // asid_width_bits() and asid_highest_value() stay lock-free for the
 // callers that only want to print the width.
 private fn asid_assign_locked(state: borrow &mut AsidState) -> (usize, usize) {
-    if (state.next > asid_last) { asid_rollover(state); }
+    if (state.next > asid_highest_value()) { asid_rollover(state); }
     let value: usize = state.next;
     state.next = state.next + 1;
     return (value, state.generation);

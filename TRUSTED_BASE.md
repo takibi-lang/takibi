@@ -545,6 +545,22 @@ rules globally.
   when this policy and its compiled caller evidence hold on both platforms.
   These are bounded source/caller trust boundaries, not a generic published
   record class or a proof of arbitrary control flow and manual-mint lifetime.
+- ASID hardware configuration uses two private `no_copy` words in
+  `kernel/arch/arm64/mm/asid_boot_config.tkb`, preserving their 8/255 initial
+  payloads and debugger-visible symbols. A private linear erased writer is
+  minted by the unsafe MMU-off bootstrap boundary and consumed to set both
+  words. Existing privacy/no-copy/view/linear checks protect consumers;
+  `scripts/check_asid_boot_config.py` binds the exact small library, single
+  mint/consumption and primary initialization order. Compiled caller facts
+  confine the mint/setter to `asid_init` and it to `kernel_mmu_init`, with
+  function-value and non-vacuity controls. Layout facts and linked normal/debug
+  image checks bind the actual one-word offset-zero payloads and defaults.
+  `asid_initializer` is a scoped build admission only. The library internals,
+  uniqueness of the unsafe mint, assembly boot order before CPU_ON and
+  stopped debugger stores remain trusted. One consumed writer does not prove
+  a unique initialization epoch. Reads remain plain loads without readiness
+  checks; dynamic ASID allocation/generation/rollover retain their existing
+  separate LockedCell and stopped-machine protocol.
 - WorldStop's private generation uses the existing AtomicWord, like its
   other fields. The recursive composite classification checks field types;
   it does not prove the stop protocol. The existing claim gate still

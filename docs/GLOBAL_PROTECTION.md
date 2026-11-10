@@ -22,6 +22,22 @@ classification of all published records or a proof that manually minted CPU
 authority cannot migrate or escape. The compiler separately enforces the
 publication token/mandatory-field protocol and typed per-CPU access.
 
+The build also admits only `asid_boot_config.tkb::asid_bits` and
+`asid_last` as `asid_initializer`. Their raw compiler class is `none`.
+The exact library has private `no_copy` one-word payloads initialized to
+8/255, a private linear erased writer, a consuming two-word initializer and
+plain getters. Compiler rules reject consumer stores, whole-cell copies,
+forged/default writers and writer reuse or storage escape. The admission
+requires that exact source, the single mint/consumption in `asid_init`, its
+MMU-off caller order, actual compiled signatures/caller facts and the
+one-field offset-zero eight-byte layout on each platform. The linked normal
+and debug images separately retain the original symbols and file-backed
+8/255 bytes, so stopped debugger seeds still address the payload itself.
+Missing premises leave either word unprotected. The unsafe mint's uniqueness,
+library internals and assembly/CPU_ON timing remain trusted; linear flow
+proves one consumption per minted writer, not a whole boot epoch. This is
+not a generic initializer classification or a new language capability.
+
 ## Format, version 3
 
 The first line is
@@ -76,6 +92,7 @@ Tried in this order; an array `[T; N]` takes the class of `T`.
 | `place` | `Place(T)` |
 | `atomic` (enum) | `Atomic(E)`: one AtomicWord holding a u8 enum's code, through `atomic_enum_store` / `atomic_enum_load` (#1159) |
 | `boot_once` | `BootOnce(T)`: written under one `BootPhase`, read after by `boot_once_get` |
+| `asid_initializer` (build admission only) | the two exact ASID boot words under the closed source, compiled caller/layout and linked-image checks above; raw tables cannot claim this class |
 | `handle` | an actual compiler-generated `IoHandle(T)` declaration from the region builtins; the maintained boot-attach policy below protects its address word, not the registers' own synchronization |
 | `set_once` | `SetOnce(T)` (kernel/lib/set_once.tkb, #1159): published once with the linear claim `set_once_claim`'s compare-exchange hands out, read by `set_once_get`, at any time and with no lock |
 | `stop` | `StopCell(T)` (kernel/lib/occupancy.tkb, #1159): written only by `stop_cell_set`, which takes `borrow MachineStopped[&kernel_world_stop]`; read by `stop_cell_get`, a plain load, by anyone |
