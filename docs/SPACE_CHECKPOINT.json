@@ -1,13 +1,13 @@
 {
   "date": "2026-11-10",
-  "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "c01be4a9854fd3cea1fb10a1c5c37a6289a09ea4314a852349cd66de209da3b4",
-  "workload": "Rejection-only frontend repair for already-invalid struct-value pointer casts. Maintained valid callers rebuilt on published GREEN3e; kernel sources/lowering/storage/allocation/lifetimes unchanged.",
+  "event": "milestone",
+  "decision": "measured",
+  "source_sha256": "a85971c6ee19622edc94db9047a1f90aa8b0570fb5ac0aa228b846059020275f",
+  "workload": "Compiler-only stopped scalar store; unchanged maintained normal QEMU/RPi5 kernels, actual ELF/object comparisons against verified GREEN3e and compile-only scalar/bounds controls. No kernel consumer migration.",
   "evidence": [
-    "docs/STRUCT_POINTER_CAST_REVIEW.md",
-    "docs/STRUCT_POINTER_CAST_REVIEW.json"
+    "docs/STOPPED_STORE_SPACE.md",
+    "docs/STOPPED_STORE_SPACE.json"
   ],
-  "assessment": "Reuse GREEN3e kernel space/occupancy evidence with actual artifact comparison: both normal ELFs and objects byte-identical; built RPi5 debug object has identical allocated sections and only nonloaded debug metadata/relocation differences. No new runtime storage, allocation, pool hold or lifetime. Unbuilt QEMU debug object and both debug ELFs receive no credit; no physical timing/coherence or compiler-performance claim.",
-  "next_trigger": "Changed accepted-program lowering, kernel storage/allocation/lifetimes, or the next completed kernel feature/layout stage."
+  "assessment": "Adopt bounded scalar/enum store under existing borrowed complete-stop authority. Both production ELF/object pairs are byte-identical; allocated debug sections match, with path-related debug metadata size differences. No allocation, storage or kernel workload change; no physical timing/coherence claim.",
+  "next_trigger": "First real stopped_store consumer, changed complete-stop lifetime or scalar iteration/closure, changed storage/allocation workload, or altered place/bounds lowering."
 }

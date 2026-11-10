@@ -109,7 +109,9 @@ let rec resolve_expr names expr =
   let desc = match expr.desc with
     | IntLit _ | BoolLit _ | StringLit _ | ByteSliceLit _ | Var _ | EnumVariant _
     | EmbedFile _ | ViewLit _ as desc -> desc
-    | Call ("stopped_read", [authority; place]) ->
+    | Call (("stopped_read" | "stopped_store" as name), authority :: place :: rest)
+      when (name = "stopped_read" && rest = [])
+           || (name = "stopped_store" && List.length rest = 1) ->
         (* GitHub issue #1159 rule 1: the place's per_cpu root `g[i]` keeps
            its index; the checker requires the stop authority instead. *)
         let rec keep (p : expr) = match p.desc with
@@ -119,7 +121,7 @@ let rec resolve_expr names expr =
               { p with desc = Index (b, ex i) }
           | Index (b, i) -> { p with desc = Index (keep b, ex i) }
           | _ -> ex p in
-        Call ("stopped_read", [ex authority; keep place])
+        Call (name, ex authority :: keep place :: List.map ex rest)
     | Call (name, args) -> Call (name, List.map ex args)
     | VariantCtor (variant, case, payload) ->
         VariantCtor (variant, case, ex payload)

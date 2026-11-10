@@ -30555,6 +30555,160 @@ fn bad1488() -> *u8 {
       |});
   ]
 
+(* Complete-stop stores retain global/parameter identity and expose no place. *)
+let stopped_store_tests =
+  let base = "
+    struct cpu_authority StoreCpu1159 { private id: {0..<4 as usize}; }
+    linear struct MachineStopped[stop: addr] { private mask: usize; }
+    linear struct MachineStopPartial[stop: addr] { private mask: usize; }
+    enum StoreKind1159: u8 { Off; On; }
+    struct StoreInner1159 { count: {0..<4 as usize}; flags: [u8; 2]; }
+    struct per_cpu StoreRow1159 {
+      private word: usize; private on: bool; private kind: StoreKind1159;
+      private inner: StoreInner1159;
+      private bytes: []u8;
+    }
+    private let mut store1159: [StoreRow1159; 4];
+    private let mut controller1159: usize;
+    " in
+  let guard = "stopped: borrow MachineStopped[&controller1159]" in
+  let bad title fragment params body = Alcotest.test_case title `Quick
+    (expect_type_error fragment (base ^ "fn bad1159(" ^ params ^
+      ") { " ^ body ^ " }")) in
+  let ordinary = guard ^ ", core: {0..<4 as usize}" in
+  [
+    Alcotest.test_case "scalar bool enum nested array stores codegen without traps" `Quick
+      (expect_trap_sites 0 (base ^ "fn good1159(" ^ ordinary ^ ") { " ^ {|
+        stopped_store(stopped, store1159[core].word, 7);
+        stopped_store(stopped, store1159[core].on, true);
+        stopped_store(stopped, store1159[core].kind, StoreKind1159::On);
+        stopped_store(stopped, store1159[core].inner.count, 3);
+        stopped_store(stopped, store1159[core].inner.flags[1], 9);
+      }|}));
+    bad "owned stop is insufficient" "bare borrowed MachineStopped parameter"
+      "stopped: sink MachineStopped[&controller1159], core: {0..<4 as usize}"
+      "stopped_store(stopped, store1159[core].word, 1);";
+    bad "partial stop is insufficient" "bare borrowed MachineStopped parameter"
+      "stopped: borrow MachineStopPartial[&controller1159], core: {0..<4 as usize}"
+      "stopped_store(stopped, store1159[core].word, 1);";
+    bad "integer fake stop rejected" "bare borrowed MachineStopped parameter"
+      "stopped: usize, core: {0..<4 as usize}"
+      "stopped_store(stopped, store1159[core].word, 1);";
+    bad "local authority shadow rejected" "bare borrowed MachineStopped parameter"
+      ordinary "let stopped: usize = 0; stopped_store(stopped, store1159[core].word, 1);";
+    bad "same-type local authority shadow rejected" "bare borrowed MachineStopped parameter"
+      (ordinary ^ ", other: borrow MachineStopped[&controller1159]")
+      "let stopped = other; stopped_store(stopped, store1159[core].word, 1);";
+    bad "parameter shadow of global rejected before index exemption" "actual per_cpu global"
+      (ordinary ^ ", store1159: []usize")
+      "stopped_store(stopped, store1159[core], 1);";
+    bad "local fake root rejected before index exemption" "actual per_cpu global"
+      ordinary "let mut store1159: [usize; 4]; stopped_store(stopped, store1159[core], 1);";
+    bad "wrong global root rejected" "real per_cpu global" ordinary
+      "stopped_store(stopped, controller1159, 1);";
+    bad "whole record forbidden" "scalar or enum leaf only" ordinary
+      "stopped_store(stopped, store1159[core], store1159[core]);";
+    bad "whole nested array forbidden" "scalar or enum leaf only" ordinary
+      "stopped_store(stopped, store1159[core].inner.flags, 0);";
+    bad "slice leaf forbidden" "scalar or enum leaf only" ordinary
+      "stopped_store(stopped, store1159[core].bytes, 0);";
+    bad "slice traversal forbidden" "inline struct/array fields only" ordinary
+      "stopped_store(stopped, store1159[core].bytes[0], 1);";
+    bad "refinement is enforced" "does not fit the refined type" ordinary
+      "stopped_store(stopped, store1159[core].inner.count, 4);";
+    bad "CPU bounds are enforced" "out of bounds" guard
+      "stopped_store(stopped, store1159[4].word, 1);";
+    bad "nested array bounds are enforced" "out of bounds" ordinary
+      "stopped_store(stopped, store1159[core].inner.flags[2], 1);";
+    Alcotest.test_case "store result cannot return a pointer" `Quick
+      (expect_type_error "void" (base ^ "fn bad1159(" ^ ordinary ^
+        ") -> *usize { return stopped_store(stopped, store1159[core].word, 1); }"));
+    bad "store result cannot be addressed" "& requires" ordinary
+      "let address = &stopped_store(stopped, store1159[core].word, 1);";
+    bad "store result is not a writable place" "not an assignable" ordinary
+      "stopped_store(stopped, store1159[core].word, 1) = 2;";
+    Alcotest.test_case "borrowed stop cannot be consumed before a store" `Quick
+      (expect_type_error "borrow" (base ^
+        "extern fn drop1159(stopped: sink MachineStopped[&controller1159]); " ^
+        "fn bad1159(" ^ ordinary ^ ") { drop1159(stopped); " ^
+        "stopped_store(stopped, store1159[core].word, 1); }"));
+    Alcotest.test_case "stop does not grant private field access" `Quick
+      (expect_type_error_files "is private to" [
+        "secret1159.tkb", "struct StoreSecret1159 { private count: usize; }";
+        "store1159.tkb", base ^ "
+          struct per_cpu StoreSecretRow1159 { private inner: StoreSecret1159; }
+          private let mut secrets1159: [StoreSecretRow1159; 4];
+          fn private1159(" ^ ordinary ^ ") {
+            stopped_store(stopped, secrets1159[core].inner.count, 1);
+          }" ]);
+    Alcotest.test_case "stop does not grant a nested lock" `Quick
+      (expect_type_error "is guarded_by(controller1159)" (base ^ "
+        struct StoreLocked1159 { private count: usize guarded_by(controller1159); }
+        struct per_cpu StoreLockedRow1159 { private inner: StoreLocked1159; }
+        private let mut locked1159: [StoreLockedRow1159; 4];
+        fn locked_store1159(" ^ ordinary ^ ") {
+          stopped_store(stopped, locked1159[core].inner.count, 1);
+        }"));
+    Alcotest.test_case "facts classify the destination write and index/value reads" `Quick
+      (fun () ->
+        let src = base ^ "
+          private let mut core1159: {0..<4 as usize};
+          private let mut value1159: usize;
+          fn facts1159(" ^ guard ^ ") {
+            stopped_store(stopped, store1159[core1159].word, value1159);
+          }" in
+        let prog = Declared_type_resolver.run
+            (Monomorphize.run (Dma_fixed_record.run (Publish_record.run (parse src)))) in
+        ignore (Type_inf.infer_program prog);
+        let path = Filename.temp_file "stopped-store-uses-" ".tsv" in
+        Fun.protect ~finally:(fun () -> Sys.remove path) (fun () ->
+          Out_channel.with_open_bin path (fun out -> Global_protection.write_uses out prog);
+          let rows = In_channel.with_open_bin path In_channel.input_lines in
+          let kinds name = List.filter_map (fun row ->
+            match String.split_on_char '\t' row with
+            | [_; _; n; kind; "facts1159"] when n = name -> Some kind
+            | _ -> None) rows |> List.sort_uniq String.compare in
+          Alcotest.(check (list string)) "destination is only a write" ["write"] (kinds "store1159");
+          Alcotest.(check (list string)) "CPU index is read" ["read"] (kinds "core1159");
+          Alcotest.(check (list string)) "value is read" ["read"] (kinds "value1159")));
+    Alcotest.test_case "LLVM emits scalar stores without aggregate loads" `Quick
+      (fun () ->
+        ignore (gen_codegen (base ^ "fn stores1159(" ^ ordinary ^ ") {
+          stopped_store(stopped, store1159[core].word, 7);
+          stopped_store(stopped, store1159[core].on, true);
+          stopped_store(stopped, store1159[core].kind, StoreKind1159::On);
+        }"));
+        let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+        List.iter (fun opcode -> Alcotest.(check bool) opcode true
+          (contains_substring ir opcode)) ["store i64 7"; "store i1 true"; "store i8 1"];
+        let destination = Option.get (Llvm.lookup_global "store1159" !Llvm_gen.the_module) in
+        let rec from_destination p =
+          p = destination || match Llvm.classify_value p with
+          | Llvm.ValueKind.Instruction Llvm.Opcode.GetElementPtr ->
+              from_destination (Llvm.operand p 0)
+          | Llvm.ValueKind.ConstantExpr
+            when Llvm.constexpr_opcode p = Llvm.Opcode.GetElementPtr ->
+              from_destination (Llvm.operand p 0)
+          | _ -> false in
+        let fn = Option.get (Llvm.lookup_function "stores1159" !Llvm_gen.the_module) in
+        Llvm.iter_blocks (fun block -> Llvm.iter_instrs (fun instr ->
+          if Llvm.instr_opcode instr = Llvm.Opcode.Load then
+            Alcotest.(check bool) "no destination load" false
+              (from_destination (Llvm.operand instr 0))) block) fn);
+    bad "root exemption does not outlive the store" "current CPU's authority" ordinary
+      "stopped_store(stopped, store1159[core].word, 1); store1159[core].word = 2;";
+    Alcotest.test_case "unsafe keeps dynamic destination bounds" `Quick
+      (expect_trap_sites 2 (base ^ "fn unsafe_checked1159(" ^ guard ^
+        ", core: usize, slot: usize, p: *usize) !{unsafe} {
+          unsafe { let observed = *p;
+            stopped_store(stopped, store1159[core].inner.flags[slot], observed as u8);
+          }
+        }"));
+    Alcotest.test_case "dynamic CPU and nested bounds lower checked stores" `Quick
+      (expect_trap_sites 2 (base ^ "fn checked1159(" ^ guard ^
+        ", core: usize, slot: usize) { stopped_store(stopped, store1159[core].inner.flags[slot], 1); }"));
+  ]
+
 (* Literal storage must retain readonly access through ordinary slice paths. *)
 let readonly_literal_tests =
   let bad title body = Alcotest.test_case title `Quick
@@ -32269,6 +32423,8 @@ fn pick(s: Slot) -> usize { if (s == 0) { return 1; } return s.word; }");
 let named_groups_unisolated = [
   "operator-kinds", operator_kind_tests;
   "struct-pointer-casts", struct_pointer_cast_tests;
+
+  "stopped-store", stopped_store_tests;
   "readonly-literals", readonly_literal_tests;
   "private-default-construction", private_default_construction_tests;
   "cpu-authority-initialization", cpu_authority_initialization_tests;

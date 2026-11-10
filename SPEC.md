@@ -2228,7 +2228,7 @@ fn kernel_activity_of(stopped: borrow MachineStopped[&kernel_world_stop],
 }
 ```
 
-`stopped_read(stopped, g[i].f...)` is the one way to reach another CPU's
+`stopped_read(stopped, g[i].f...)` copies a scalar from another CPU's
 element of a `per_cpu` global: with every other CPU stopped, no owner can
 be writing it.
 
@@ -2245,6 +2245,22 @@ be writing it.
 - The result is a copy, and its type is a scalar or an enum (not a
   reference): `stopped_read(...)` is not a place, so the read cannot be
   assigned through or borrowed.
+
+`stopped_store(stopped, g[i].f..., value)` writes one inline scalar or enum
+leaf and returns `void`. It requires the actual bare parameter of type
+`borrow MachineStopped[...]` and the actual mutable global binding `g`;
+a shadowing local, parameter, alias or unrelated authority is rejected.
+The destination follows only inline struct fields and fixed-array indices,
+not pointers, references or slices. Whole records and arrays, `AtomicWord`,
+pointers, references and authority values cannot be stored by this operation.
+Only the root CPU index receives the foreign-per-CPU exemption. Ordinary
+field privacy, `guarded_by`, mutability, value type and refinement checks
+still apply; complete-stop authority does not supply an unrelated lock.
+Root and nested array bounds remain checked, including inside `unsafe`.
+The call is not a place and exposes no reference, pointer or reusable view.
+The stop's defining file and complete-stop protocol remain trusted: this
+operation permits bounded access, not arbitrary semantic invariants of
+CPU-state mutations. Existing `stopped_read` behavior is unchanged.
 
 ### Preemption-disabled regions (GitHub issue #638)
 

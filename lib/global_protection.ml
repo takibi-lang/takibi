@@ -244,6 +244,9 @@ let write_uses (out : out_channel) (prog : toplevel list) =
         place "load" inner (Option.get (global_root locals inner))
     | Var n ->
         if S.mem n globals && not (S.mem n locals) then row fn e n kind
+    | Call ("stopped_store", [authority; target; value]) ->
+        sub authority;
+        expr fn locals kind { e with desc = Assign (target, value) }
     | Assign (lhs, rhs) ->
         (match root lhs with
          | Some (n, v) when S.mem n globals && not (S.mem n locals) ->
@@ -347,6 +350,8 @@ let write_fields (out : out_channel) (prog : toplevel list) =
   let bump table f =
     Hashtbl.replace table f (1 + Option.value (Hashtbl.find_opt table f) ~default:0) in
   let rec expr (e : expr) = match e.desc with
+    | Call ("stopped_store", [authority; target; value]) ->
+        expr authority; expr { e with desc = Assign (target, value) }
     | FieldGet (b, f) -> bump reads f; expr b
     | OffsetOf (_, f) -> bump reads f
     | Assign ({ desc = FieldGet (b, f); _ }, rhs)

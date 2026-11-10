@@ -1,0 +1,84 @@
+{
+  "baseline_head": "3e019a8ee35788169cab3f873927ab6a66b85989",
+  "candidate_base": "08d88c747e1a2d886e7a7e89b2f69688862375cf",
+  "baseline_manifest_sha256": "4369b87e161e531e743ea5a5f1ebf8c5a816db5709c5979675279471552b26c3",
+  "workload": "Unchanged maintained normal kernels; builtin has no kernel consumer. Checked scalar-store compiler fixtures are compile-only.",
+  "artifacts": [
+    {
+      "path": "kernel/build/qemu/kernel.elf",
+      "baseline_sha256": "9ec17808f31ada4b5f5a270d2ee9fbf656839b6ea6b94132c68086a7e97d6060",
+      "candidate_sha256": "9ec17808f31ada4b5f5a270d2ee9fbf656839b6ea6b94132c68086a7e97d6060",
+      "baseline_bytes": 1314888,
+      "candidate_bytes": 1314888,
+      "byte_identical": true,
+      "baseline_sections_file": "baseline-kernel_build_qemu_kernel.elf-sections.txt",
+      "baseline_symbols_file": "baseline-kernel_build_qemu_kernel.elf-symbols.txt",
+      "candidate_sections_file": "candidate-kernel_build_qemu_kernel.elf-sections.txt",
+      "candidate_symbols_file": "candidate-kernel_build_qemu_kernel.elf-symbols.txt"
+    },
+    {
+      "path": "kernel/build/qemu/main.o",
+      "baseline_sha256": "7d558c9c74ed903b8feac657a983d0072fec02e69bdb3c752b34f36f1695acd7",
+      "candidate_sha256": "7d558c9c74ed903b8feac657a983d0072fec02e69bdb3c752b34f36f1695acd7",
+      "baseline_bytes": 3000424,
+      "candidate_bytes": 3000424,
+      "byte_identical": true,
+      "baseline_sections_file": "baseline-kernel_build_qemu_main.o-sections.txt",
+      "baseline_symbols_file": "baseline-kernel_build_qemu_main.o-symbols.txt",
+      "candidate_sections_file": "candidate-kernel_build_qemu_main.o-sections.txt",
+      "candidate_symbols_file": "candidate-kernel_build_qemu_main.o-symbols.txt"
+    },
+    {
+      "path": "kernel/build/rpi5/kernel.elf",
+      "baseline_sha256": "6697a03180178cfa8457a448668fb68b64135fdc0c7414fb79fcbf696dfd50b8",
+      "candidate_sha256": "6697a03180178cfa8457a448668fb68b64135fdc0c7414fb79fcbf696dfd50b8",
+      "baseline_bytes": 4736400,
+      "candidate_bytes": 4736400,
+      "byte_identical": true,
+      "baseline_sections_file": "baseline-kernel_build_rpi5_kernel.elf-sections.txt",
+      "baseline_symbols_file": "baseline-kernel_build_rpi5_kernel.elf-symbols.txt",
+      "candidate_sections_file": "candidate-kernel_build_rpi5_kernel.elf-sections.txt",
+      "candidate_symbols_file": "candidate-kernel_build_rpi5_kernel.elf-symbols.txt"
+    },
+    {
+      "path": "kernel/build/rpi5/main.o",
+      "baseline_sha256": "cd2c653434fc8638686fdcae1114551f488977b176eb853139f5a22e87ffa099",
+      "candidate_sha256": "cd2c653434fc8638686fdcae1114551f488977b176eb853139f5a22e87ffa099",
+      "baseline_bytes": 6542008,
+      "candidate_bytes": 6542008,
+      "byte_identical": true,
+      "baseline_sections_file": "baseline-kernel_build_rpi5_main.o-sections.txt",
+      "baseline_symbols_file": "baseline-kernel_build_rpi5_main.o-symbols.txt",
+      "candidate_sections_file": "candidate-kernel_build_rpi5_main.o-sections.txt",
+      "candidate_symbols_file": "candidate-kernel_build_rpi5_main.o-symbols.txt"
+    },
+    {
+      "path": "kernel/build/rpi5/main.debug.o",
+      "baseline_sha256": "529220f78f4c7da75ebbb5fe43e8ec265efe58aa468c342749444e16447bdddf",
+      "candidate_sha256": "fada4d3e5daf75f3632274f88ac1ddcb991377dcaec54af2d6cd2aae6e12753e",
+      "baseline_bytes": 12105728,
+      "candidate_bytes": 12106544,
+      "byte_identical": false,
+      "baseline_sections_file": "baseline-kernel_build_rpi5_main.debug.o-sections.txt",
+      "baseline_symbols_file": "baseline-kernel_build_rpi5_main.debug.o-symbols.txt",
+      "candidate_sections_file": "candidate-kernel_build_rpi5_main.debug.o-sections.txt",
+      "candidate_symbols_file": "candidate-kernel_build_rpi5_main.debug.o-symbols.txt"
+    }
+  ],
+  "debug_allocated_sections_identical": true,
+  "debug_allocated_section_count": 10781,
+  "debug_section_size_changes": {
+    ".debug_line": [
+      382394,
+      383168
+    ],
+    ".debug_str": [
+      437803,
+      437846
+    ]
+  },
+  "debug_str_normalizes_to_baseline": true,
+  "kernel_source_changed": false,
+  "kernel_allowance_rows_removed": 0,
+  "physical_timing_measured": false
+}

@@ -5428,6 +5428,30 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
          place's own value. *)
       gen_expr ?expected_ty locals place
 
+  | Call ("stopped_store", [_; place; value]) ->
+      (* No authority value escapes or executes. Compute a checked inline
+         destination even inside unsafe; the RHS keeps its ordinary context. *)
+      let previous = !unsafe_depth in
+      let ty, ptr, volatile = Fun.protect
+          ~finally:(fun () -> unsafe_depth := previous)
+          (fun () ->
+            unsafe_depth := 0;
+            match place.desc with
+            | FieldGet (base, field) ->
+                (match gen_field_access locals base field with
+                 | FieldPlace (ty, p, io) -> ty, place_ptr p, io
+                 | FieldValue _ -> raise (Error "BUG: stopped_store temporary"))
+            | Index (base, index) ->
+                let ty, p, io = gen_index_place locals base index place.loc in
+                ty, place_ptr p, io
+            | _ -> raise (Error "BUG: invalid stopped_store place")) in
+      let target = match ty with TypeIo t -> t | t -> t in
+      let _, v = gen_expr ~expected_ty:target locals value in
+      let store = build_store (coerce v target) ptr builder in
+      if volatile || (match ty with TypeIo _ -> true | _ -> false)
+      then set_volatile true store;
+      (TypeVoid, const_null (i1_type context))
+
   | Call ("src_loc", []) ->
       (* GitHub issue #1024: an immediate; type_inf checked it packs. *)
       let bits = match Src_loc.pack e.loc with

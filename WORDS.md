@@ -91,7 +91,7 @@ The complete inventory of source words the compiler gives a meaning, generated f
 | --- |
 | `protocol` |
 
-## Compiler builtins (83)
+## Compiler builtins (84)
 
 | Builtin | Kind |
 | --- | --- |
@@ -107,6 +107,7 @@ The complete inventory of source words the compiler gives a meaning, generated f
 | `max` | general |
 | `src_loc` | general |
 | `stopped_read` | general |
+| `stopped_store` | general |
 | `guarded_ref` | general |
 | `i32_min` | general |
 | `wrapping_mul_u32` | general |

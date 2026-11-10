@@ -535,6 +535,8 @@ let active_readonly_borrows : StringSet.t ref = ref StringSet.empty
 (* GitHub issue #1159 rule 1: the current function's parameters of type
    `borrow MachineStopped[...]`, the authorities stopped_read accepts. *)
 let active_stop_borrows : StringSet.t ref = ref StringSet.empty
+(* The new store additionally checks actual global binding identity. *)
+let active_stopped_globals : (ty * bool) StringMap.t ref = ref StringMap.empty
 let stop_authority_name = "MachineStopped"
 (* The root `g[i]` of each stopped_read place, keyed by the index's loc: the
    one per_cpu index the CpuHere rule lets through. *)
@@ -6249,6 +6251,89 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            "%s expects a bare stop authority and a place: \
             %s(stopped, store[i].field)" fname fname)))
 
+  | Call ("stopped_store" as fname, args) ->
+      (match args with
+       | [ ({ desc = Var authority; loc = aloc } as auth); place; value ] ->
+           let parameter = match !active_local_bindings with
+             | Some bindings ->
+                 (match Local_bindings.id_for_expr bindings auth with
+                  | Some id -> IntSet.mem id !active_parameter_bindings
+                  | None -> false)
+             | None -> false in
+           if not parameter || not (StringSet.mem authority !active_stop_borrows) then
+             raise (TypeError (aloc,
+               "stopped_store requires the bare borrowed MachineStopped parameter, not a local, alias or other authority"));
+           (match repr (infer_expr senv eenv tyenv fenv auth) with
+            | TStruct n | TIndexedStruct (n, _) when n = stop_authority_name -> ()
+            | _ -> raise (TypeError (aloc,
+                "stopped_store requires the borrowed complete MachineStopped authority")));
+           let rec root (p : Ast.expr) = match p.desc with
+             | FieldGet (b, _) -> root b
+             | Index (({ desc = Var g; _ } as global), idx)
+               when Hashtbl.mem Per_cpu_registry.globals g -> Some (global, g, idx)
+             | Index (b, _) -> root b
+             | _ -> None in
+           let global, g, idx = match root place with
+             | Some r -> r
+             | None -> raise (TypeError (place.loc,
+                 "stopped_store destination must be an inline scalar field of a real per_cpu global")) in
+           (match StringMap.find_opt g tyenv,
+                  StringMap.find_opt g !active_stopped_globals with
+            | Some entry, Some original when entry == original ->
+                (match entry with
+                 | t, true ->
+                     (match repr t with
+                      | TArray (element, _) ->
+                          (match repr element with
+                           | TStruct n when Per_cpu_registry.is_store n
+                               && Hashtbl.find Per_cpu_registry.globals g = n -> ()
+                           | _ -> raise (TypeError (global.loc,
+                               "stopped_store requires real per_cpu global storage")))
+                      | _ -> raise (TypeError (global.loc,
+                          "stopped_store requires real per_cpu global storage")))
+                 | _, false -> raise (TypeError (global.loc,
+                     "stopped_store requires a mutable global binding")))
+            | _ -> raise (TypeError (global.loc,
+                "stopped_store requires the actual per_cpu global, not a local shadow or alias")));
+           let key = Per_cpu_registry.loc_key idx.loc in
+           let previous = Hashtbl.mem stopped_read_indices key in
+           Hashtbl.replace stopped_read_indices key ();
+           Fun.protect ~finally:(fun () ->
+             if not previous then Hashtbl.remove stopped_read_indices key)
+             (fun () ->
+               (* Only by-value struct/array subplaces: never follow a pointer,
+                  reference or slice stored inside a per-CPU record. *)
+               let rec inline (p : Ast.expr) = match p.desc with
+                 | FieldGet (b, _) ->
+                     inline b;
+                     (match repr (infer_expr senv eenv tyenv fenv b) with
+                      | TStruct _ | TIndexedStruct _ -> ()
+                      | _ -> raise (TypeError (b.loc,
+                          "stopped_store follows inline struct/array fields only")))
+                 | Index ({ desc = Var name; _ }, _) when name = g -> ()
+                 | Index (b, _) ->
+                     inline b;
+                     (match repr (place_undecayed_type senv eenv tyenv fenv b) with
+                      | TArray _ -> ()
+                      | _ -> raise (TypeError (b.loc,
+                          "stopped_store follows inline struct/array fields only")))
+                 | _ -> raise (TypeError (p.loc,
+                     "stopped_store destination must be an inline scalar field")) in
+               inline place;
+               let leaf = infer_expr senv eenv tyenv fenv place in
+               let rec scalar t = match repr t with
+                 | TBool | TI8 | TI16 | TI32 | TI64 | TU8 | TU16 | TU32 | TU64
+                 | TU16Be | TU32Be | TIsize | TUsize -> true
+                 | TRefinedInt (_, _, t) | TMultiple (_, t) | TSingleton (t, _)
+                 | TIo t -> scalar t
+                 | TStruct n -> StringMap.mem n eenv
+                 | _ -> false in
+               if not (scalar leaf) then raise (TypeError (place.loc,
+                 "stopped_store writes a scalar or enum leaf only; no aggregate, pointer, reference or authority"));
+               infer_expr senv eenv tyenv fenv { e with desc = Assign (place, value) })
+       | _ -> raise (TypeError (e.loc, Printf.sprintf
+           "%s expects a bare borrowed stop, an inline place, and a value" fname)))
+
   | Call ("src_loc" as fname, args) ->
       (* GitHub issue #1024: the call site's own location, explicit at the
          call site; no hidden argument reaches a callee. *)
@@ -9079,6 +9164,8 @@ let infer_func ~key senv eenv fenv genv (fdef : Ast.func) : func_info =
     match ty with
     | Some (Ast.TypeBorrow _) -> StringSet.add name names
     | _ -> names) StringSet.empty fdef.params;
+  let previous_globals = !active_stopped_globals in
+  active_stopped_globals := genv;
   let previous_stop = !active_stop_borrows in
   active_stop_borrows := List.fold_left (fun names (name, ty) ->
     match ty with
@@ -9092,7 +9179,8 @@ let infer_func ~key senv eenv fenv genv (fdef : Ast.func) : func_info =
     runtime_bounds_address_taken := previous_bounds_address_taken;
     active_static_scope := previous_scope;
     active_readonly_borrows := previous_readonly;
-    active_stop_borrows := previous_stop) (fun () ->
+    active_stop_borrows := previous_stop;
+    active_stopped_globals := previous_globals) (fun () ->
     check_const_shadowing fdef;
     active_runtime_bounds_key := key;
     runtime_bounds := Runtime_bounds.empty;
@@ -9500,6 +9588,7 @@ let reset_compilation_state () =
   resolved_function_values := StringMap.empty;
   resolved_indirect_call_effects := StringMap.empty;
   global_address_names := StringSet.empty;
+  active_stopped_globals := StringMap.empty;
   (* Reset every module-scoped per-program table up front. Some are reset
      again immediately before their population below; this single preamble
      plus the assertions makes omission visible instead of allowing a table
