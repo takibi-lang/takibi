@@ -21,17 +21,20 @@
 // where the lock is; a separate type is that declaration, and reaching for
 // the wrong acquire is not expressible rather than merely wrong.
 //
-// Current limitations (2026-08-28). Keep this list current as call sites
+// Current limitations (2026-11-10). Keep this list current as call sites
 // change; a limitation that goes stale here is worse than none, since it
 // invites relying on a guarantee that quietly stopped holding.
-// - THE INTERRUPT RULE IS CHECKED, but only for the BLOCKING acquire.
-//   task_mutex_acquire is `!{may_block}`, so an `!{interrupt}` function
-//   that reaches it -- through any depth of calls -- is a compile error
-//   naming the path. task_mutex_trylock is not, because it does not spin
-//   and a handler using it correctly is a real pattern. What that leaves
-//   uncovered: a handler that trylocks in a loop, which is the blocking
-//   acquire written out longhand and which nothing here can tell from a
-//   handler that gives up.
+// - THE INTERRUPT RULE IS CHECKED for the spinning acquire entries:
+//   ordinary task_mutex_acquire carries may_block; short and boot carry
+//   no_handler_lock. Neither effect permits an interrupt-handler caller.
+//   All three currently spin without masking interrupts. The short entry's
+//   caller must retain its preempt-count discipline; the boot entry borrows
+//   the real BootPhase and is confined to the snapshot guard factory by the
+//   compiled caller map. That void leaf alone retains no phase loan after
+//   returning: the factory's scoped returned linear guard retains the loan.
+//   task_mutex_trylock does not spin and has neither handler-ban effect.
+//   A handler that loops on trylock is still not distinguished from one
+//   that gives up.
 // - NO OWNER, NO RECURSION COUNT, NO DEADLOCK DETECTION -- same as Mutex.
 //   Taking the same one twice on one core hangs.
 // - NO LEVEL, and unlike Mutex this one will never need one. A level
@@ -45,12 +48,15 @@
 //   ring slots, and InitOnce). A wrapper over this that declares a higher
 //   rank still reaches 30, so its guard may not be held while another
 //   TaskMutex is taken: those wrappers declare 30 too.
-// - THE RELEASE IS THE CALLER'S OBLIGATION, and nothing here makes it
-//   mandatory. What makes it mandatory at the one call site that exists is
-//   that the caller holds a LINEAR token minted only by the acquire --
-//   see TcpConnectionOwner, which is the whole reason this class has no
-//   guard type of its own.
+// - THE RAW RELEASE IS THE CALLER'S OBLIGATION: these void leaves do not
+//   mint a guard. Wrappers such as BlockDeviceGuard, Ext2MutationGuard,
+//   InitOnceGuard, GuardedFieldGuard and TcpConnectionOwner carry their own
+//   linear ownership and reviewed acquisition/release pairing. The snapshot
+//   boot factory also returns the existing KernelLogSnapshotGuard tied to
+//   its borrowed phase. A linear wrapper's consumption does not itself
+//   prove that its implementation unlocks the correct physical word.
 use "kernel/lib/spinlock.tkb";
+use "kernel/lib/boot_once.tkb";
 
 // One field, at offset 0, for the same reason Mutex has one: a lock address
 // names its AtomicWord lock word.
@@ -78,6 +84,14 @@ fn task_mutex_init(m: *TaskMutex @ id) {
 // safe from a handler. This is the case it declined it FOR.
 fn task_mutex_acquire(m: *TaskMutex @ id)
         !{locks, may_block, unsafe, acquires_lock_30_connection} {
+    spin_lock(&m.word);
+}
+
+// Explicit bootstrap entry: the caller carries the existing boot authority
+// to this acquisition. It never parks and never inspects scheduler context.
+// The enclosing typed guard factory must tie its returned guard to phase.
+fn task_mutex_acquire_boot(m: *TaskMutex @ id, phase: borrow BootPhase[boot])
+        !{locks, no_handler_lock, unsafe, acquires_lock_30_connection} {
     spin_lock(&m.word);
 }
 

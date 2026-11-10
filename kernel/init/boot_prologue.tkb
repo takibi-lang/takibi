@@ -30,7 +30,7 @@ fn kernel_boot_prologue(phase: borrow BootPhase[boot]) !{logs, unsafe} {
     kernel_irq_stack_arm();
     platform_init(phase);
     kernel_log_init();
-    let log_bounds_ok: bool = kernel_log_bounds_probe();
+    let log_bounds_ok: bool = kernel_log_bounds_probe(phase);
     kernel_log_init();
     kernel_boot_log("takibi kernel: EL1\n");
     if (log_bounds_ok) {

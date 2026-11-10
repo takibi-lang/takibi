@@ -169,6 +169,13 @@ synchronization; ordinary call overhead depends on inlining.
 
 ## Returned guard loans and synchronous callbacks
 
+The raw void `task_mutex_acquire_boot` leaf is confined by the compiled caller
+map to `kernel_log_snapshot_take_boot`. That reviewed factory returns the
+existing linear snapshot guard tied to its borrowed BootPhase; the raw leaf
+alone does not extend that borrow after returning. No general caller may use
+the leaf to evade the returned-guard lifetime contract. This explicit boot
+entry spins; ordinary TaskMutex acquisition currently still spins too.
+
 An authority-derived linear guard return checks the caller's consumption,
 lexical lifetime and non-escape obligations. It does not prove that the guard
 mint actually protects the phase/resource it names. The declaring API and its

@@ -29276,6 +29276,92 @@ let stopped_diagnostic_tests =
       }|};
   ]
 
+(* The real boot snapshot factory retains the actual phase through its guard.
+   Real phase, raw boot acquire, factory and terminal release bodies are parsed
+   with their production filenames. Spin primitives and storage preparation are
+   stubs: this is a static API/lifetime test, not lock or storage execution. *)
+let infer_production_boot_snapshot code =
+  let primitives = parse {|
+    const KERNEL_MAX_CORES: usize = 4;
+    struct no_copy AtomicWord { private value: usize; }
+    fn spin_lock(word: *AtomicWord) !{locks, unsafe} {}
+    fn spin_unlock(word: *AtomicWord) !{locks, unsafe} {}
+  |} in
+  let parse_at file source =
+    let lexbuf = Lexing.from_string source in
+    Lexing.set_filename lexbuf file;
+    Parser.program Lexer.read lexbuf in
+  let select file types globals functions =
+    let path = List.find Sys.file_exists ["../" ^ file; file] in
+    let source = In_channel.with_open_bin path In_channel.input_all in
+    let selected = List.filter (function
+      | Ast.StructDef (name, _, _, _, _, _)
+      | Ast.OwnedStructDef (name, _, _, _, _, _, _, _, _) -> List.mem name types
+      | Ast.LetDef (name, _, _, _, _, _, _) -> List.mem name globals
+      | Ast.FuncDef f -> List.mem f.name functions
+      | _ -> false) (parse_at file source) in
+    Alcotest.(check int) (file ^ ": production declarations present")
+      (List.length types + List.length globals + List.length functions)
+      (List.length selected);
+    selected in
+  let phase = select "kernel/lib/boot_once.tkb" ["BootPhase"]
+      ["boot_phase_ended"] ["boot_phase_mint"; "boot_phase_end"] in
+  let mutex = select "kernel/lib/task_mutex.tkb" ["TaskMutex"] []
+      ["task_mutex_acquire_boot"; "task_mutex_release"] in
+  let snapshot = select "kernel/printk/log.tkb" ["KernelLogSnapshotGuard"]
+      ["kernel_log_snapshot_lock"]
+      ["kernel_log_snapshot_take_boot"; "kernel_log_snapshot_give"] in
+  let storage = parse_at "kernel/printk/log.tkb" {|
+    private fn kernel_log_snapshot_prepare(
+        guard: borrow KernelLogSnapshotGuard[&kernel_log_snapshot_lock]) {}
+  |} in
+  let consumer = parse_at "boot_snapshot_consumer.tkb" code in
+  Type_inf.infer_program (Declared_type_resolver.run
+    (Monomorphize.run (Dma_fixed_record.run
+      (Publish_record.run (primitives @ phase @ mutex @ snapshot @ storage @ consumer)))))
+
+let production_boot_snapshot_tests =
+  let bad name fragment code = Alcotest.test_case name `Quick (fun () ->
+    let check messages =
+      if not (List.exists (fun message -> contains_substring message fragment) messages)
+      then Alcotest.failf "expected %s, received %s" fragment
+        (String.concat "; " messages) in
+    match infer_production_boot_snapshot code with
+    | _ -> Alcotest.fail "real boot snapshot API accepted invalid lifetime/authority"
+    | exception Types.TypeError (_, message) -> check [message]
+    | exception Types.MultiTypeError errors -> check (List.map snd errors)) in
+  [
+    Alcotest.test_case "real factory releases before actual phase end" `Quick
+      (fun () -> ignore (infer_production_boot_snapshot {|
+        fn probe() {
+          let phase = boot_phase_mint();
+          let guard = kernel_log_snapshot_take_boot(phase);
+          kernel_log_snapshot_give(guard);
+          boot_phase_end(phase);
+        }
+      |}));
+    bad "real snapshot guard prevents actual phase end"
+      "cannot end authority 'phase' while derived guard 'guard' is live" {|
+        fn probe() {
+          let phase = boot_phase_mint();
+          let guard = kernel_log_snapshot_take_boot(phase);
+          boot_phase_end(phase);
+          kernel_log_snapshot_give(guard);
+        }
+      |};
+    bad "real factory rejects another authority" "BootPhase" {|
+      linear view OtherPhase[id: addr];
+      fn probe(phase: borrow OtherPhase[id]) {
+        let guard = kernel_log_snapshot_take_boot(phase);
+        kernel_log_snapshot_give(guard);
+      }
+    |};
+    bad "real factory cannot erase its loan through a function value"
+      "authority-derived return functions cannot be used as runtime function pointers" {|
+        fn probe() { let factory = kernel_log_snapshot_take_boot; }
+      |};
+  ]
+
 (* Use the production resume bodies, not a copied effect annotation. Only the
    atomic primitive and authority mint are stubbed; no CPU stop is simulated. *)
 let infer_production_stop_boundary ?(clock = false)
@@ -32634,6 +32720,7 @@ let named_groups_unisolated = [
   "record-loan-contracts", record_loan_contract_tests;
   "record-loan-boundaries", record_boundary_tests;
   "stopped-diagnostics", stopped_diagnostic_tests;
+  "production-boot-snapshot", production_boot_snapshot_tests;
   "production-peer-clock", production_peer_clock_tests;
   "production-stop-boundary", production_stop_boundary_tests;
   "production-machine-boundary", production_machine_boundary_tests;

@@ -143,17 +143,33 @@ fn kernel_log_snapshot_take() -> KernelLogSnapshotGuard[&kernel_log_snapshot_loc
         !{may_block, acquires_lock_30_log_snapshot, lock_guard_30_log_snapshot} {
     task_mutex_acquire(&kernel_log_snapshot_lock);
     let mut guard: KernelLogSnapshotGuard[&kernel_log_snapshot_lock] = { 1 };
+    kernel_log_snapshot_prepare(guard);
+    return guard;
+}
+
+// Bootstrap probes have no schedulable continuation. Their returned guard
+// keeps the actual BootPhase borrowed through the snapshot operations.
+fn kernel_log_snapshot_take_boot(phase: borrow BootPhase[boot])
+        -> KernelLogSnapshotGuard[&kernel_log_snapshot_lock] @ boot
+        !{acquires_lock_30_log_snapshot, lock_guard_30_log_snapshot} {
+    task_mutex_acquire_boot(&kernel_log_snapshot_lock, phase);
+    let mut guard: KernelLogSnapshotGuard[&kernel_log_snapshot_lock] = { 1 };
+    kernel_log_snapshot_prepare(guard);
+    return guard;
+}
+
+private fn kernel_log_snapshot_prepare(
+        guard: borrow KernelLogSnapshotGuard[&kernel_log_snapshot_lock]) {
     if (place_is_full(guard, kernel_log_snapshot_store.state) == false) {
         let RegionOf(KernelLogSnapshot)::Taken(claimed) =
                 region_of(kernel_log_snapshot_backing) else {
-            RegionOf(KernelLogSnapshot)::Gone => { return guard; }
+            RegionOf(KernelLogSnapshot)::Gone => { return; }
         };
         match place_put(guard, kernel_log_snapshot_store.state, claimed) {
             Place::Empty => {}
             Place::Full(previous) => { region_release(previous); }
         }
     }
-    return guard;
 }
 
 fn kernel_log_snapshot_give(guard: sink KernelLogSnapshotGuard[&kernel_log_snapshot_lock]) {
@@ -2233,10 +2249,10 @@ private fn kernel_log_overwrite_slot_for_probe(record: usize) !{unsafe} {
 }
 
 // The boot probes' short views of the snapshot, each one guard hold.
-private fn kernel_log_probe_snapshot_record(seq: usize, end: usize, second_check: bool,
+private fn kernel_log_probe_snapshot_record(phase: borrow BootPhase[boot], seq: usize, end: usize, second_check: bool,
                                             overwrite_mid_copy: bool)
         -> KernelLogRecordCopy !{unsafe} {
-    let guard = kernel_log_snapshot_take();
+    let guard = kernel_log_snapshot_take_boot(phase);
     let mut reader: LogRingTraceReader = { false, false, 0 };
     let answer: KernelLogRecordCopy = match place_borrow(guard, kernel_log_snapshot_store.state) {
         Place::Empty => { KernelLogRecordCopy::Lost(0) }
@@ -2249,8 +2265,8 @@ private fn kernel_log_probe_snapshot_record(seq: usize, end: usize, second_check
     return answer;
 }
 
-private fn kernel_log_probe_snapshot_clear() {
-    let guard = kernel_log_snapshot_take();
+private fn kernel_log_probe_snapshot_clear(phase: borrow BootPhase[boot]) {
+    let guard = kernel_log_snapshot_take_boot(phase);
     match place_borrow(guard, kernel_log_snapshot_store.state) {
         Place::Empty => {}
         Place::Full(states) => { region_at(states, 0).length = 0; }
@@ -2258,8 +2274,8 @@ private fn kernel_log_probe_snapshot_clear() {
     kernel_log_snapshot_give(guard);
 }
 
-private fn kernel_log_probe_snapshot_length() -> usize {
-    let guard = kernel_log_snapshot_take();
+private fn kernel_log_probe_snapshot_length(phase: borrow BootPhase[boot]) -> usize {
+    let guard = kernel_log_snapshot_take_boot(phase);
     let answer: usize = match place_borrow(guard, kernel_log_snapshot_store.state) {
         Place::Empty => { 0 }
         Place::Full(states) => { region_at(states, 0).length }
@@ -2268,8 +2284,8 @@ private fn kernel_log_probe_snapshot_length() -> usize {
     return answer;
 }
 
-private fn kernel_log_probe_snapshot_byte(index: {0..<KERNEL_LOG_SNAPSHOT_CAPACITY as usize}) -> u8 {
-    let guard = kernel_log_snapshot_take();
+private fn kernel_log_probe_snapshot_byte(phase: borrow BootPhase[boot], index: {0..<KERNEL_LOG_SNAPSHOT_CAPACITY as usize}) -> u8 {
+    let guard = kernel_log_snapshot_take_boot(phase);
     let answer: u8 = match place_borrow(guard, kernel_log_snapshot_store.state) {
         Place::Empty => { 0 }
         Place::Full(states) => { region_at(states, 0).bytes[index] }
@@ -2283,26 +2299,26 @@ private fn kernel_log_probe_snapshot_byte(index: {0..<KERNEL_LOG_SNAPSHOT_CAPACI
 // not a silent skip. A two-slot record, then records until its head slot is
 // taken over but its continuation slot is not; the continuation's sequence
 // must come back Lost(1), and the snapshot must name it on its loss line.
-private fn kernel_log_stray_continuation_probe() -> bool !{unsafe} {
+private fn kernel_log_stray_continuation_probe(phase: borrow BootPhase[boot]) -> bool !{unsafe} {
     let wide: usize = kernel_log_observe(&kernel_log_head);
     kernel_log_probe_line(118, KERNEL_LOG_SLOT_BYTES);
     if (kernel_log_probe_span(wide) != 2) { return false; }
     kernel_log_overwrite_slot_for_probe(wide);
     let end: usize = kernel_log_observe(&kernel_log_head);
     if (end != wide + KERNEL_LOG_SLOT_COUNT + 1) { return false; }
-    match kernel_log_probe_snapshot_record(wide + 1, end, true, false) {
+    match kernel_log_probe_snapshot_record(phase, wide + 1, end, true, false) {
         KernelLogRecordCopy::Lost(count) => { if (count != 1) { return false; } }
         KernelLogRecordCopy::Kept(_) => { return false; }
         KernelLogRecordCopy::Skipped(_) => { return false; }
     }
     // The whole snapshot, as syslog(2) builds it: the window starts at the
     // continuation, and its loss line ends " first seq=<wide + 1>\n".
-    let snapshot = kernel_log_snapshot_take();
+    let snapshot = kernel_log_snapshot_take_boot(phase);
     let length: usize = kernel_log_snapshot_build(snapshot);
     kernel_log_snapshot_give(snapshot);
     if (length < 7) { return false; }
     let mut tail: [u8; 7] = { 0, 0, 0, 0, 0, 0, 0 };
-    let copier = kernel_log_snapshot_take();
+    let copier = kernel_log_snapshot_take_boot(phase);
     let copied: usize = kernel_log_snapshot_copy(copier, length - 7, tail as []u8);
     kernel_log_snapshot_give(copier);
     if (copied != 7) { return false; }
@@ -2322,27 +2338,27 @@ private fn kernel_log_stray_continuation_probe() -> bool !{unsafe} {
 // byte. The checked reader must drop the record and leave nothing of it in
 // the snapshot; the reader that skips the re-check must return it torn --
 // 'a' then 'b' -- which is what the check exists to catch.
-private fn kernel_log_torn_read_probe() -> bool !{unsafe} {
+private fn kernel_log_torn_read_probe(phase: borrow BootPhase[boot]) -> bool !{unsafe} {
     kernel_log_probe_record(97);
-    kernel_log_probe_snapshot_clear();
+    kernel_log_probe_snapshot_clear(phase);
     let checked_end: usize = kernel_log_observe(&kernel_log_head);
-    match kernel_log_probe_snapshot_record(checked_end - 1, checked_end, true, true) {
+    match kernel_log_probe_snapshot_record(phase, checked_end - 1, checked_end, true, true) {
         KernelLogRecordCopy::Kept(_) => { return false; }
         KernelLogRecordCopy::Lost(_) => {}
         KernelLogRecordCopy::Skipped(_) => { return false; }
     }
-    if (kernel_log_probe_snapshot_length() != 0) { return false; }
+    if (kernel_log_probe_snapshot_length(phase) != 0) { return false; }
     kernel_log_probe_record(97);
     let unchecked_end: usize = kernel_log_observe(&kernel_log_head);
-    match kernel_log_probe_snapshot_record(unchecked_end - 1, unchecked_end, false, true) {
+    match kernel_log_probe_snapshot_record(phase, unchecked_end - 1, unchecked_end, false, true) {
         KernelLogRecordCopy::Lost(_) => { return false; }
         KernelLogRecordCopy::Skipped(_) => { return false; }
         KernelLogRecordCopy::Kept(_) => {}
     }
     // "[000000.000000] " then the text.
-    return kernel_log_probe_snapshot_length() >= 18 &&
-        kernel_log_probe_snapshot_byte(16) == 97 &&
-        kernel_log_probe_snapshot_byte(17) == 98;
+    return kernel_log_probe_snapshot_length(phase) >= 18 &&
+        kernel_log_probe_snapshot_byte(phase, 16) == 97 &&
+        kernel_log_probe_snapshot_byte(phase, 17) == 98;
 }
 
 // The span and metadata of the record that begins at `seq`, for the probe.
@@ -2401,7 +2417,7 @@ private fn kernel_log_second_writer_probe() -> bool !{unsafe} {
 // torn-read control; a line longer than a slot spanning several, and one
 // longer than the stage split into a continuation record; and a fatal report
 // bypassing a partial line, which stays staged and invisible.
-fn kernel_log_bounds_probe() -> bool !{unsafe} {
+fn kernel_log_bounds_probe(phase: borrow BootPhase[boot]) -> bool !{unsafe} {
     static_assert(KERNEL_LOG_TEXT_WORDS ==
                   KERNEL_LOG_SLOT_COUNT * KERNEL_LOG_SLOT_WORDS,
                   "one run of text words per slot");
@@ -2427,15 +2443,15 @@ fn kernel_log_bounds_probe() -> bool !{unsafe} {
         kernel_log_observe(&kernel_log_commit_lost) != 0) {
         return false;
     }
-    let snapshot = kernel_log_snapshot_take();
+    let snapshot = kernel_log_snapshot_take_boot(phase);
     let snapshot_length: usize = kernel_log_snapshot_build(snapshot);
     kernel_log_snapshot_give(snapshot);
-    if (snapshot_length < 3 || kernel_log_probe_snapshot_byte(0) != 60 ||
-        kernel_log_probe_snapshot_byte(1) != 52 || kernel_log_probe_snapshot_byte(2) != 62) {
+    if (snapshot_length < 3 || kernel_log_probe_snapshot_byte(phase, 0) != 60 ||
+        kernel_log_probe_snapshot_byte(phase, 1) != 52 || kernel_log_probe_snapshot_byte(phase, 2) != 62) {
         return false;
     }
-    if (kernel_log_torn_read_probe() == false) { return false; }
-    if (kernel_log_stray_continuation_probe() == false) { return false; }
+    if (kernel_log_torn_read_probe(phase) == false) { return false; }
+    if (kernel_log_stray_continuation_probe(phase) == false) { return false; }
     if (kernel_log_second_writer_probe() == false) { return false; }
     let wide: usize = kernel_log_observe(&kernel_log_head);
     kernel_log_probe_line(121, KERNEL_LOG_SLOT_BYTES);
