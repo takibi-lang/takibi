@@ -2,12 +2,15 @@
   "date": "2026-11-10",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "ba6c7da11e3e370d7ac764cffcc14a1ceaf33ca12df6230a464c51f90f7522da",
-  "workload": "Existing destructive boot log bounds/torn/stray snapshot probes under the real BootPhase; existing ordinary snapshot API and storage. No allocator, pool, retained-capacity, snapshot payload, initialization or teardown workload change. Standard normal linked QEMU/RPi5 images and selected actual function frames; existing allocator occupancy evidence reused because its workload is unchanged.",
+  "source_sha256": "4c30b90193dc2cdb03cb2056a7d20da04751da18a1d3361c5e99823d50c5f7c1",
+  "workload": "Combined real BootPhase-bound boot snapshot probes and scoped two-word ASID initialization/assignment/rollover/debugger access in standard normal/debug QEMU and RPi5 images. Existing snapshot payload/store, ASID words, allocator capacities, retained allocation and lifetime workload are unchanged. Actual combined images are compared with independently hash-bound published86 baseline; prior allocator occupancy evidence remains at its original unchanged-workload boundary.",
   "evidence": [
     "docs/BOOT_SNAPSHOT_AUTHORITY_REVIEW.md",
-    "docs/BOOT_SNAPSHOT_AUTHORITY_REVIEW.json"
+    "docs/BOOT_SNAPSHOT_AUTHORITY_REVIEW.json",
+    "docs/ASID_BOOT_CONFIG_SPACE_REVIEW.md",
+    "docs/ASID_BOOT_CONFIG_SPACE_REVIEW.json",
+    "docs/BOOT_ASID_INTEGRATION_SPACE_REVIEW.json"
   ],
-  "assessment": "Matched published86 comparison: QEMU text +288 B and RPi5 +272 B, explained by +184 B text-symbol coverage, +24/+8 B section gaps and +80 B unwind each. Data/BSS, every data/BSS symbol size and RAM boundary unchanged. New factory/leaf and shared prepare retain bounded measured code/helper-frame costs; no stack-reduction or whole-call-path claim. Existing payload/pool/allocator workload unchanged. Standard QEMU/RPi5 lanes exercise runtime; this review records source/image/selected-frame evidence rather than physical cycles.",
-  "next_trigger": "Sleeping Mutex backend/consumer integration, changed authority lifetime or storage/allocator workload, or the next completed kernel feature/layout stage."
+  "assessment": "Actual combined linked text aggregates grow QEMU normal/debug 384/448 B and RPi5 368/432 B. Normal .text grows 240/224 B, debug .text 304/288 B; unwind grows 144 B in each image. Data/BSS sizes and every data/BSS symbol size are unchanged. QEMU debug BSS start/end shift by 4096 B within the existing reserved image span; all usable_ram_start boundaries and allocator capacities remain unchanged, and the actual memory-map check passes. Accept the measured fixed code/helper and getter-call costs of the two approved existing-type boundaries. Individual reports retain selected-frame and nested-helper limitations; this is no physical-cycle or whole-call-stack proof. No new allocation or speculative optimization is introduced.",
+  "next_trigger": "Sleeping Mutex backend/consumer integration, changed snapshot authority/storage lifetime, another ASID writer or initializer/reader representation, changed allocation workload, or the next completed kernel feature/layout stage."
 }

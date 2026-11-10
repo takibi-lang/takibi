@@ -1,0 +1,269 @@
+{
+  "baseline": "86c0cf5442e52c2834da7e866cec256598537e8f",
+  "candidate_production_head": "29e8f86eec328b44c1c7cefc468a8fa82b59dc01",
+  "accepted_units": {
+    "boot_snapshot": "e42b014f37aff64318419d4090e50722cc024eca",
+    "asid_initializer": "bf67c02721e8b22aac84432f0e5e38b851543fb1"
+  },
+  "boundary": "Actual combined normal/debug QEMU/RPi5 objects and linked images versus independently hash-bound published86 artifacts. Fixed code/data/storage accounting; no physical-cycle or whole-call-path stack claim. Individual source-bound reports retain their narrower instruction/frame evidence.",
+  "artifacts": {
+    "qemu/main.o": {
+      "before_sha256": "74c56084512352727e58914e8ea3cf2b53ccf571a68c2b837b2eba1facf8ce08",
+      "after_sha256": "df578864b6270915dc34dc1fcb0ffc5778cad25c664b107d238d00ee38cb624e",
+      "before_bytes": 3000424,
+      "after_bytes": 3002000
+    },
+    "qemu/main.debug.o": {
+      "before_sha256": "9175af50451fdac00bd819f61cd6c3b191afa415f4115332404c9ef50c8381fe",
+      "after_sha256": "fb043e6bfe1fd396aa32fad5c301c61ddc4d316400e8100f45743b8064262d0d",
+      "before_bytes": 7834008,
+      "after_bytes": 7838664
+    },
+    "qemu/kernel.elf": {
+      "before_sha256": "443e0b57012f7eb57d4c714d5db889945ca5ce3bd82a71ddf78bf8a4ac96cbec",
+      "after_sha256": "3afea3cccacba9946ac9228a03563007f66432f7ba8a760b5411c97ae2d88efa",
+      "before_bytes": 1314888,
+      "after_bytes": 1315416
+    },
+    "qemu/kernel-debug.elf": {
+      "before_sha256": "fef90556b583e9ebdcceb110629b07531f4b39d49103a74f3aab07d302518b93",
+      "after_sha256": "f5fd1042d693104c2b36f2a0bb4f26f3ecb33c35d8bd53ee059beabb0f65388d",
+      "before_bytes": 3471776,
+      "after_bytes": 3474184
+    },
+    "rpi5/main.o": {
+      "before_sha256": "07bb2f7b6deb4420f535f54a582f16d47cf2f6782b2c45dddef510bd74b65b20",
+      "after_sha256": "611451d3bef0e9092e6e25e3b935dc5fa2a78268f4ebe013f2d425cc97bc1cf8",
+      "before_bytes": 6542008,
+      "after_bytes": 6543384
+    },
+    "rpi5/main.debug.o": {
+      "before_sha256": "d5dbecb33cf3dc8709b6076141e8b47bf891d4dbeff80629039c1b2375fe74d4",
+      "after_sha256": "16f00016d182e9946120fceac91014f2a76a8857b4f97e2e385bd3ede355badd",
+      "before_bytes": 12105736,
+      "after_bytes": 12110096
+    },
+    "rpi5/kernel.elf": {
+      "before_sha256": "31bd73f9ad65ee976aed0f861b5c70f4bb3f0ecd89570bddd0142f3e22b88edc",
+      "after_sha256": "41d418a98d3040973ffa5cc9421173502a5180e06c42b620cdd5ded4f6274003",
+      "before_bytes": 4736400,
+      "after_bytes": 4736928
+    },
+    "rpi5/kernel-debug.elf": {
+      "before_sha256": "4ad66174db4a29189234f403d58c4259dcca1a79b19b1774c5a7ccff8460f2cc",
+      "after_sha256": "9e77ecb94699e4a5a60e0cca071aee92b3aff928bcf5a6f5d79713c5f951755b",
+      "before_bytes": 7144760,
+      "after_bytes": 7147192
+    }
+  },
+  "images": {
+    "qemu/kernel.elf": {
+      "before": {
+        "text": 822728,
+        "data": 4616,
+        "bss": 1314816
+      },
+      "after": {
+        "text": 823112,
+        "data": 4616,
+        "bss": 1314816
+      },
+      "delta": {
+        "text": 384,
+        "data": 0,
+        "bss": 0
+      },
+      "section_changes": {
+        ".eh_frame": {
+          "before": 122928,
+          "after": 123072
+        },
+        ".text": {
+          "before": 644896,
+          "after": 645136
+        }
+      },
+      "data_bss_symbol_changes": {},
+      "layout_before": {
+        "__bss_end": 1075494912,
+        "__bss_start": 1074573312,
+        "usable_ram_start": 1075904512
+      },
+      "layout_after": {
+        "__bss_end": 1075494912,
+        "__bss_start": 1074573312,
+        "usable_ram_start": 1075904512
+      }
+    },
+    "qemu/kernel-debug.elf": {
+      "before": {
+        "text": 899300,
+        "data": 4616,
+        "bss": 1314816
+      },
+      "after": {
+        "text": 899748,
+        "data": 4616,
+        "bss": 1314816
+      },
+      "delta": {
+        "text": 448,
+        "data": 0,
+        "bss": 0
+      },
+      "section_changes": {
+        ".debug_info": {
+          "before": 557356,
+          "after": 557692
+        },
+        ".debug_line": {
+          "before": 361370,
+          "after": 362435
+        },
+        ".debug_loc": {
+          "before": 499647,
+          "after": 499720
+        },
+        ".debug_pubnames": {
+          "before": 155540,
+          "after": 155672
+        },
+        ".debug_pubtypes": {
+          "before": 17427,
+          "after": 17444
+        },
+        ".debug_ranges": {
+          "before": 94688,
+          "after": 94768
+        },
+        ".debug_str": {
+          "before": 383703,
+          "after": 383881
+        },
+        ".eh_frame": {
+          "before": 121532,
+          "after": 121676
+        },
+        ".text": {
+          "before": 723712,
+          "after": 724016
+        }
+      },
+      "data_bss_symbol_changes": {},
+      "layout_before": {
+        "__bss_end": 1075568640,
+        "__bss_start": 1074647040,
+        "usable_ram_start": 1075970048
+      },
+      "layout_after": {
+        "__bss_end": 1075572736,
+        "__bss_start": 1074651136,
+        "usable_ram_start": 1075970048
+      }
+    },
+    "rpi5/kernel.elf": {
+      "before": {
+        "text": 4207460,
+        "data": 5592,
+        "bss": 1929216
+      },
+      "after": {
+        "text": 4207828,
+        "data": 5592,
+        "bss": 1929216
+      },
+      "delta": {
+        "text": 368,
+        "data": 0,
+        "bss": 0
+      },
+      "section_changes": {
+        ".eh_frame": {
+          "before": 133640,
+          "after": 133784
+        },
+        ".text": {
+          "before": 688676,
+          "after": 688900
+        }
+      },
+      "data_bss_symbol_changes": {},
+      "layout_before": {
+        "__bss_end": 7852032,
+        "__bss_start": 6316032,
+        "usable_ram_start": 8257536
+      },
+      "layout_after": {
+        "__bss_end": 7852032,
+        "__bss_start": 6316032,
+        "usable_ram_start": 8257536
+      }
+    },
+    "rpi5/kernel-debug.elf": {
+      "before": {
+        "text": 4292848,
+        "data": 5592,
+        "bss": 1843200
+      },
+      "after": {
+        "text": 4293280,
+        "data": 5592,
+        "bss": 1843200
+      },
+      "delta": {
+        "text": 432,
+        "data": 0,
+        "bss": 0
+      },
+      "section_changes": {
+        ".debug_info": {
+          "before": 634932,
+          "after": 635268
+        },
+        ".debug_line": {
+          "before": 382401,
+          "after": 383491
+        },
+        ".debug_loc": {
+          "before": 553976,
+          "after": 554049
+        },
+        ".debug_pubnames": {
+          "before": 170282,
+          "after": 170414
+        },
+        ".debug_pubtypes": {
+          "before": 20740,
+          "after": 20757
+        },
+        ".debug_ranges": {
+          "before": 108688,
+          "after": 108768
+        },
+        ".debug_str": {
+          "before": 437803,
+          "after": 437981
+        },
+        ".eh_frame": {
+          "before": 133116,
+          "after": 133260
+        },
+        ".text": {
+          "before": 775468,
+          "after": 775756
+        }
+      },
+      "data_bss_symbol_changes": {},
+      "layout_before": {
+        "__bss_end": 7852032,
+        "__bss_start": 6402048,
+        "usable_ram_start": 8257536
+      },
+      "layout_after": {
+        "__bss_end": 7852032,
+        "__bss_start": 6402048,
+        "usable_ram_start": 8257536
+      }
+    }
+  }
+}
