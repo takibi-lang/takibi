@@ -39,8 +39,11 @@ LANES_DEF = re.compile(r"^CICHECK_LANES := (.*)$", re.M)
 TARGETS = re.compile(r"^(cicheck(?: cicheck-[a-z]+)*):\n", re.M)
 MATRIX = re.compile(r"^\s+part: \[([^\]]*)\]\s*$", re.M)
 # #1193: allcheck builds first (allcheck-prebuild), then runs its lanes.
+MODEL_JOB_ARG = r'(?: MODELCHECK_JOBS="\$\$\{MODELCHECK_JOBS\}")?'
 ALLCHECK = re.compile(r"resource_lease_run_suite allcheck bash -c \\\n\t+"
-                      r"'\$\(MAKE\) allcheck-prebuild && \$\(MAKE\) ([a-z ]+?)' \\\n\t+\|\|")
+                      r"'\$\(MAKE\)" + MODEL_JOB_ARG +
+                      r" allcheck-prebuild && \$\(MAKE\)" + MODEL_JOB_ARG +
+                      r" ([a-z ]+?)' \\\n\t+\|\|")
 RUN = "make cicheck-${{ matrix.part }}"
 BUDGET = 'python3 scripts/ci_time_budget.py "$CI_JOB_START"'
 UPLOAD = "      - name: Preserve failure evidence\n        if: failure() || cancelled()\n"
@@ -164,6 +167,16 @@ def swap(text, old, new):
 
 def controls(makefile, ci, part_lanes, qemu_lanes):
     cases = CaseCount()
+    # A propagated job setting is an argument, never another lane. Keep
+    # accepting the older command shape as well as the explicit assignment.
+    legacy = makefile.replace(' MODELCHECK_JOBS="$${MODELCHECK_JOBS}"', "")
+    assert not problems(legacy, ci, part_lanes, qemu_lanes)
+    cases.note()
+    malformed = makefile.replace(' MODELCHECK_JOBS="$${MODELCHECK_JOBS}"',
+                                 ' MODELCHECK_JOBS="unrecognised"', 1)
+    assert malformed != makefile
+    assert problems(malformed, ci, part_lanes, qemu_lanes)
+    cases.note()
     race = part_lanes["race"]
     moved = dict(part_lanes, qemu=part_lanes["qemu"] + race[:1])
     dropped = dict(part_lanes, race=race[1:])

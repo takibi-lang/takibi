@@ -12,7 +12,7 @@ import sys
 import tempfile
 
 sys.dont_write_bytecode = True
-from pass_line import report_pass
+from pass_line import CaseCount, report_pass
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -27,6 +27,7 @@ def main() -> int:
     run = run.split("\n", 1)[1]
     judge = "failures=0" + source.split("failures=0", 1)[1].split(
         "for model in ", 1)[0]
+    count = CaseCount()
     cases = [
         ("pass", "", True),
         ("serial", "", True),
@@ -113,9 +114,10 @@ print("PASS fake control")
                 assert len(active) <= int(env["JOBS"])
             assert not active
             assert len(started) == (2 if mode == "missing-command" else 3)
+            count.note()
     report_pass("model queue controls",
                 "shared trace queue preserves negative-model exits and rejects "
-                "failed, missing or stale control results", scenarios=len(cases))
+                "failed, missing or stale control results", scenarios=count.ran)
     return 0
 
 

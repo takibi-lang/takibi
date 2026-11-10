@@ -3005,6 +3005,9 @@ allcheck-prebuild: build
 	@$(LINUX_BUILD_LOCK_RUN) $(MAKE) _linuxbuild
 
 .PHONY: allcheck
+# Keep model jobs below the measured allcheck contention point. Empty values
+# follow the runner's unset convention; explicit nonempty overrides survive.
+allcheck: override export MODELCHECK_JOBS := $(or $(strip $(MODELCHECK_JOBS)),$(shell nproc | awk '{print ($$1 < 16 ? $$1 : 16)}'))
 allcheck:
 	@status=0; . scripts/resource_lease.sh; \
 	rm -rf "$(LANE_TIMING_DIR)"; mkdir -p "$(LANE_TIMING_DIR)"; \
@@ -3014,7 +3017,7 @@ allcheck:
 	rm -rf "$(AWAIT_TIMING_DIR)"; mkdir -p "$(AWAIT_TIMING_DIR)"; \
 	export TAKIBI_AWAIT_TIMING_DIR="$(AWAIT_TIMING_DIR)"; \
 	resource_lease_run_suite allcheck bash -c \
-		'$(MAKE) allcheck-prebuild && $(MAKE) langcheck slowcheck test linuxcheck modelcheck kernelcheck' \
+		'$(MAKE) MODELCHECK_JOBS="$${MODELCHECK_JOBS}" allcheck-prebuild && $(MAKE) MODELCHECK_JOBS="$${MODELCHECK_JOBS}" langcheck slowcheck test linuxcheck modelcheck kernelcheck' \
 		|| status=$$?; \
 	echo; \
 	python3 scripts/summarize_lane_timing.py "$(LANE_TIMING_DIR)" || true; \
