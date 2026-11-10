@@ -6,9 +6,10 @@ An optional checker path permits the same controls to reject an old checker.
 Every negative requires both nonzero exit and its particular diagnostic.
 """
 
-import os
+from contextlib import redirect_stderr, redirect_stdout
+import importlib.util
+import io
 from pathlib import Path
-import subprocess
 import sys
 import tempfile
 
@@ -27,33 +28,57 @@ private fn entry() {
 }
 fn kernel_process_block_control() {}
 """
-HARNESS = r"""import importlib.util, pathlib, sys
-sys.dont_write_bytecode = True
-sys.path.insert(0, sys.argv[3])
-spec = importlib.util.spec_from_file_location('slot_checker', sys.argv[1])
-checker = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(checker)
-checker.ROOT = pathlib.Path(sys.argv[2])
-production_pools, production_controls = checker.POOLS, checker.controls
-def controls():
-    # Its built-in rank controls cover all five production pools. Run them
-    # unchanged under their own configuration, then check this one-pool tree.
-    fixture_pools = checker.POOLS
-    checker.POOLS = production_pools
+
+
+def load_checker(path):
+    spec = importlib.util.spec_from_file_location("slot_checker", path)
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    return checker
+
+
+def invoke(checker, root):
+    """Call the real main and observe its real exit branch without waiting.
+
+    The original built-in controls keep their production pool configuration;
+    only the temporary one-pool source tree uses the holders fixture rule.
+    Unexpected exceptions propagate instead of becoming intended rejections.
+    """
+    original_root = checker.ROOT
+    original_pools = checker.POOLS
+    original_controls = checker.controls
+    fixture_pools = [("kernel/pool.tkb", ACQUIRE, "ExecWindowSlot", "holders")]
+
+    def controls():
+        checker.POOLS = original_pools
+        try:
+            original_controls()
+        finally:
+            checker.POOLS = fixture_pools
+
+    stdout, stderr = io.StringIO(), io.StringIO()
+    status = 0
     try:
-        production_controls()
-    finally:
+        checker.ROOT = root
         checker.POOLS = fixture_pools
-checker.controls = controls
-checker.POOLS = [('kernel/pool.tkb', 'exec_window_slot_acquire',
-                  'ExecWindowSlot', 'holders')]
-checker.main()
-"""
+        checker.controls = controls
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            try:
+                checker.main()
+            except SystemExit as error:
+                assert error.code is None or isinstance(error.code, int), error
+                status = error.code or 0
+    finally:
+        checker.ROOT = original_root
+        checker.POOLS = original_pools
+        checker.controls = original_controls
+    return status, stdout.getvalue(), stderr.getvalue()
 
 
 def main():
-    checker = Path(sys.argv[1]) if len(sys.argv) == 2 else (
+    path = Path(sys.argv[1]) if len(sys.argv) == 2 else (
         ROOT / "scripts/check_slot_pool_entries.py")
+    checker = load_checker(path)
     value = "is used as a function value and reaches a slot acquire"
     held = "holds a ExecWindowSlot and reaches entry, an entry point"
     sleep = "reaches a scheduler sleep; release the slot before the wait"
@@ -115,17 +140,17 @@ def main():
         (root / "kernel").mkdir()
         for label, extra, diagnostic in cases:
             (root / "kernel/pool.tkb").write_text(BASE + extra + "\n")
-            result = subprocess.run(
-                [sys.executable, "-c", HARNESS, str(checker.resolve()), str(root),
-                 str(ROOT / "scripts")], capture_output=True, text=True,
-                env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"), timeout=3)
+            original = checker.ROOT, checker.POOLS, checker.controls
+            status, stdout, stderr = invoke(checker, root)
             count.note()
-            output = result.stdout + result.stderr
+            assert all(before is after for before, after in zip(
+                original, (checker.ROOT, checker.POOLS, checker.controls))), label
+            output = stdout + stderr
             if diagnostic is None:
-                assert result.returncode == 0, (label, result.returncode, output)
+                assert status == 0, (label, status, output)
                 assert "PASS slot-pool-entries:" in output, (label, output)
             else:
-                assert result.returncode != 0, (label, "accepted", output)
+                assert status != 0, (label, "accepted", output)
                 assert diagnostic in output, (label, diagnostic, output)
     report_pass("slot-pool-entries-controls",
                 "direct nonholders accept; aliases and escaped acquiring "
