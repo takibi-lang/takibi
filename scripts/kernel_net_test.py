@@ -118,6 +118,19 @@ MARKER_SAFETY_SECONDS = 10.0
 MARKER_BUDGET_SECONDS = max(5.0, PHASE_BUDGET_SECONDS - MARKER_SAFETY_SECONDS)
 
 
+def phase_note(name: str, state: str) -> None:
+    """Report the peer clock; this neither renews nor moves any deadline.
+
+    The shell's timeout starts before Python imports, so remaining is relative
+    to STARTED_AT, not a claim to know the exact external kill instant.
+    """
+    now = time.monotonic()
+    print("  peer phase: name=%s state=%s monotonic=%.6f elapsed=%.3f "
+          "remaining=%.3f origin=peer-start" %
+          (name, state, now, now - STARTED_AT,
+           STARTED_AT + OUTER_BUDGET_SECONDS - now), flush=True)
+
+
 def uart_progress_stamp():
     """Only captured bytes count as guest progress, not a touched log."""
     if UART_PROGRESS_FILE is None:
@@ -134,6 +147,7 @@ def uart_progress_stamp():
 
 def wait_for_marker(marker, label):
     """Renew a readiness wait on UART progress, bounded by the outer ceiling."""
+    phase_note(label, "wait-begin")
     began = time.monotonic()
     last_progress = began
     stamp = uart_progress_stamp()
@@ -152,6 +166,7 @@ def wait_for_marker(marker, label):
             print("  waited %.1fs for the %s marker and it never arrived "
                   "(%s; no-progress budget %.1fs)" %
                   (now - began, label, reason, MARKER_BUDGET_SECONDS))
+            phase_note(label, "wait-failed")
             return False
         if deadline != guarded_deadline:
             # Share this finite wait with the UART watchdog. Renew only on
@@ -159,6 +174,7 @@ def wait_for_marker(marker, label):
             guard_httpd_peer(deadline - now)
             guarded_deadline = deadline
         time.sleep(0.1)
+    phase_note(label, "ready")
     return True
 
 
@@ -980,6 +996,7 @@ def send_until_reply(sock: socket.socket, frame: bytes, check) -> bool:
 
 
 def main() -> int:
+    phase_note("peer", "begin")
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((QEMU_HOST, LOCAL_PORT))
     sock.settimeout(RETRY_TIMEOUT_SECS)
@@ -1017,6 +1034,7 @@ def main() -> int:
         "PASS" if ok_bad_csum else "FAIL")
     print("  SYN with bad TCP checksum (silent): %s" % bad_csum_result)
 
+    phase_note("echo", "begin")
     ok_handshake = ok_bad_csum and do_handshake(
         sock, HANDSHAKE_CLIENT_PORT, HANDSHAKE_CLIENT_ISN)
     print("  three-way handshake:                %s" % ("PASS" if ok_handshake else "FAIL"))
@@ -1031,6 +1049,7 @@ def main() -> int:
         sock, RECONNECT_CLIENT_PORT, RECONNECT_CLIENT_ISN, closing_ack)
     print("  reconnect after close:              %s" % ("PASS" if ok_reconnect else "FAIL"))
 
+    phase_note("echo", "passed" if ok_reconnect else "failed")
     http_ok = False
     if ok_reconnect:
         # The echo fixture and /bin/user_payload use different listeners.
@@ -1044,7 +1063,9 @@ def main() -> int:
                   "was nothing to connect to")
             sock.close()
             return 1
+        phase_note("init-connected", "begin")
         init_ok = init_script_fixture(sock)
+        phase_note("init-connected", "passed" if init_ok else "failed")
         print("  waiting for HTTP daemon listener")
         for _attempt in range(60):
             try:
@@ -1062,6 +1083,7 @@ def main() -> int:
                       "there was nothing to request from")
                 sock.close()
                 return 1
+        phase_note("fixture-http", "begin")
         root_body = HTTP_ASSETS[0][1].read_bytes()
         concurrent_http_ok = init_ok and concurrent_http_requests(
             sock, root_body, "text/html")
@@ -1070,6 +1092,8 @@ def main() -> int:
             for port, isn in zip(HTTP_FIXTURE_CLIENT_PORTS, HTTP_FIXTURE_CLIENT_ISNS)
         )
 
+        phase_note("fixture-http", "passed" if http_ok else "failed")
+
     normal_ok = ok_reconnect and http_ok
     if (normal_ok and INTERACTIVE_READY_FILE is not None):
         if not wait_for_marker(INTERACTIVE_READY_FILE, "init-managed HTTPd"):
@@ -1077,27 +1101,36 @@ def main() -> int:
             sock.close()
             return 1
         if HTTPD_IDLE_SECONDS > 0:
+            phase_note("httpd-idle", "begin")
             print("  leaving HTTPd idle for %.0fs:              TEST" %
                   HTTPD_IDLE_SECONDS)
             guard_httpd_peer(HTTPD_IDLE_SECONDS + 2.0)
             time.sleep(HTTPD_IDLE_SECONDS)
+            phase_note("httpd-idle", "end")
+        phase_note("interactive-arp", "begin")
         guard_httpd_peer(12.0)
         arp_ok = send_until_reply(
             sock, build_arp_request(SERVER_IP), check_arp_reply)
         print("  ARP while HTTPd is listening:       %s" %
               ("PASS" if arp_ok else "FAIL"))
+        phase_note("interactive-arp", "passed" if arp_ok else "failed")
         interactive_ok = arp_ok
         if interactive_ok:
             for (path, source, mime), port, isn in zip(
                     HTTP_ASSETS, HTTP_CLIENT_PORTS, HTTP_CLIENT_ISNS):
+                phase_note("interactive-http:" + path, "begin")
                 guard_httpd_peer(12.0)
                 if not http_request(
                         sock, port, isn, path, source.read_bytes(), mime):
+                    phase_note("interactive-http:" + path, "failed")
                     interactive_ok = False
                     break
+                phase_note("interactive-http:" + path, "passed")
+        phase_note("peer", "passed" if interactive_ok else "failed")
         sock.close()
         return 0 if interactive_ok else 1
 
+    phase_note("peer", "passed" if normal_ok else "failed")
     sock.close()
     return 0 if normal_ok else 1
 

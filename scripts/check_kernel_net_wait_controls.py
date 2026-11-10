@@ -8,6 +8,7 @@ from pathlib import Path
 import struct
 import sys
 import tempfile
+import types
 
 from pass_line import CaseCount, report_pass
 
@@ -253,8 +254,167 @@ def run(events, *, initial=False, tracked=True, immediate=False):
         return status, clock.now, deadlines, output.getvalue()
 
 
+
+def phase_controls():
+    """Run actual main under a modeled outer kill, not a fake late PASS.
+
+    Prior TCP/init/concurrent exchanges are readiness-style stand-ins. ARP
+    retries and HTTP body/type verdicts are the actual peer functions.
+    """
+    class OuterKill(BaseException):
+        pass
+
+    class DeadlineClock(Clock):
+        def __init__(self):
+            super().__init__([])
+            self.sleeps = []
+            self.idle_done = False
+
+        def sleep(self, seconds):
+            start = self.now
+            self.sleeps.append((start, seconds))
+            if start + seconds >= 270.0:
+                super().sleep(270.0 - start)
+                raise OuterKill()
+            super().sleep(seconds)
+            if seconds == 31.0:
+                self.idle_done = True
+
+    for at, arp, http, expected in (
+            (240.0, "valid", "valid", 124),
+            (200.0, "valid", "valid", 0),
+            (200.0, "invalid", "valid", 1),
+            (200.0, "missing", "valid", 1),
+            (200.0, "valid", "body", 1),
+            (200.0, "valid", "type", 1),
+            (200.0, "valid", "missing", 1)):
+        CASES.note()
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "ready"
+            marker.touch()
+            peer = load_peer(["peer", "100", "101", "--interactive-ready-file", str(marker)])
+            clock = DeadlineClock()
+            peer.time = clock
+            peer.STARTED_AT, peer.OUTER_BUDGET_SECONDS = 0.0, 270.0
+            peer.HTTPD_IDLE_SECONDS = 31.0
+            closing_ack = b"phase-control retained ACK"
+            peer.test_syn_wrong_port_silent = lambda *args: True
+            peer.test_syn_bad_checksum_silent = lambda *args: True
+            peer.test_data_echo = lambda *args: True
+            peer.test_close = lambda *args: (True, closing_ack)
+            peer.init_script_fixture = lambda *args: True
+
+            def handshake(*args):
+                if args[1] == peer.RECONNECT_CLIENT_PORT:
+                    assert len(args) == 4 and args[3] == closing_ack
+                else:
+                    assert args[1] == peer.HANDSHAKE_CLIENT_PORT and len(args) == 3
+                return True
+
+            peer.do_handshake = handshake
+
+            class FakeSocket:
+                def __init__(self):
+                    self.pending = []
+                    self.final_arps = 0
+                    self.timeout = None
+                    self.closed = False
+
+                def bind(self, endpoint):
+                    assert endpoint == (peer.QEMU_HOST, peer.LOCAL_PORT)
+
+                def settimeout(self, seconds):
+                    self.timeout = seconds
+
+                def sendto(self, frame, destination):
+                    assert destination == (peer.QEMU_HOST, peer.QEMU_PORT)
+                    assert frame == peer.build_arp_request(peer.SERVER_IP)
+                    if clock.idle_done:
+                        self.final_arps += 1
+                    reply = (peer.CLIENT_MAC + peer.SERVER_MAC + peer.ARP_ETHERTYPE
+                             + b"\x00\x01\x08\x00\x06\x04\x00\x02"
+                             + peer.SERVER_MAC + peer.SERVER_IP + peer.CLIENT_MAC + peer.CLIENT_IP)
+                    if clock.idle_done and arp == "missing":
+                        return len(frame)
+                    if clock.idle_done and arp == "invalid":
+                        reply = reply[:-1] + bytes([reply[-1] ^ 1])
+                    self.pending.append(reply)
+                    return len(frame)
+
+                def recvfrom(self, size):
+                    assert size == 2000
+                    if self.pending:
+                        return self.pending.pop(0), (peer.QEMU_HOST, peer.QEMU_PORT)
+                    clock.sleep(self.timeout)
+                    raise timeout_error()
+
+                def close(self):
+                    self.closed = True
+
+            sock = FakeSocket()
+            timeout_error = peer.socket.timeout
+            peer.socket = types.SimpleNamespace(socket=lambda *args: sock,
+                AF_INET=peer.socket.AF_INET, SOCK_DGRAM=peer.socket.SOCK_DGRAM,
+                timeout=timeout_error)
+            # ICMP is a successful prior-phase stand-in; the original ARP
+            # implementation and its checks remain active before and after idle.
+            send = peer.send_until_reply
+            peer.send_until_reply = lambda sock, frame, check: (
+                send(sock, frame, check) if frame[12:14] == peer.ARP_ETHERTYPE else True)
+
+            def concurrent(*args):
+                clock.sleep(at - clock.now)
+                return True
+
+            peer.concurrent_http_requests = concurrent
+            calls = []
+
+            def response(sock, port, isn, path):
+                if clock.idle_done:
+                    calls.append(path)
+                asset = next(asset for asset in peer.HTTP_ASSETS if asset[0] == path)
+                body, mime = asset[1].read_bytes(), asset[2]
+                if clock.idle_done:
+                    if http == "missing":
+                        return None
+                    if http == "body":
+                        body += b"invalid"
+                    if http == "type":
+                        mime = "application/invalid"
+                return b"HTTP/1.0 200 OK\r\nContent-Type: " + mime.encode() + b"\r\n\r\n" + body
+
+            peer.raw_http_response = response
+            output = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(output):
+                    result = peer.main()
+            except OuterKill:
+                result = 124
+            text = output.getvalue()
+            assert result == expected and clock.now <= 270.0, (at, arp, http, text)
+            assert (at, 31.0) in clock.sleeps
+            begin = ("name=httpd-idle state=begin monotonic=%.6f elapsed=%.3f "
+                     "remaining=%.3f origin=peer-start" % (at, at, 270.0 - at))
+            assert begin in text, text
+            if expected == 124:
+                assert clock.now == 270.0 and not clock.idle_done and not sock.closed
+                assert "name=httpd-idle state=end" not in text
+                assert "name=interactive-arp state=begin" not in text
+                assert sock.final_arps == 0 and not calls
+            else:
+                assert clock.idle_done and sock.closed
+                assert "name=httpd-idle state=end monotonic=231.000000" in text
+                assert "name=interactive-arp state=begin" in text
+                assert sock.final_arps == (30 if arp != "valid" else 1)
+                assert calls == ([] if arp != "valid" else
+                                 ["/", "/index.html", "/about.html", "/icon.png"]
+                                 if http == "valid" else ["/"])
+                assert "name=peer state=" + ("passed" if expected == 0 else "failed") in text
+
+
 def main():
     closing_ack_controls()
+    phase_controls()
     for events, options, success, elapsed, diagnostic in (
         ([], {"immediate": True}, True, 0.0, ""),
         ([(3.0, "marker")], {}, True, 3.0, ""),
@@ -318,7 +478,8 @@ def main():
     report_pass("kernel-net readiness controls",
                 "guest bytes renew waits; touches and silence do not; the "
                 "outer ceiling, watchdog and wiring hold; closing ACK replay "
-                "keeps the reconnect retry bounds and reply checks",
+                "keeps the reconnect retry bounds and reply checks; peer phase "
+                "timestamps distinguish interrupted idle from ARP/HTTP failures",
                 cases=CASES.ran)
     return 0
 
