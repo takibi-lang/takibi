@@ -312,6 +312,11 @@ aligned to its own size, so masking an address gives its chunk base.
 
 State: **HAND**. The numbers behind it are CHECKED (const) below.
 
+The ASID configuration has literal initial payloads 8/255 in its private
+initializer library. Source-policy and linked normal/debug image checks bind
+those actual defaults and debugger-visible word layouts; they are not a
+separate configurable `const` limit.
+
 <!-- checked: consts -->
 
 | Constant | Value | Defined in | State |
@@ -320,7 +325,6 @@ State: **HAND**. The numbers behind it are CHECKED (const) below.
 | `BOOTSTRAP_PAGE_COUNT` | 2048 | `kernel/mm/page.tkb` | CHECKED (const); pre-DTB page tables only, not runtime capacity |
 | `KERNEL_STACK_PAGES` | 4 | `kernel/kernel/process.tkb` | CHECKED (const) |
 | `KERNEL_STACK_SHIFT` | 14 | `kernel/kernel/process.tkb` | CHECKED (const) |
-| `ASID_BITS_FLOOR` | 8 | `kernel/arch/arm64/mm/asid.tkb` | CHECKED (const) |
 | `USER_SPACE_PAGE_COUNT` | 262144 | `kernel/mm/address_space.tkb` | CHECKED (const) |
 | `USER_RANGE_WINDOW` | `0x40000000` | `kernel/mm/user_memory.tkb` | CHECKED (const) |
 | `PROCESS_HEAP_PAGES_DEFAULT` | 128 | `kernel/mm/process_image.tkb` | CHECKED (const) |

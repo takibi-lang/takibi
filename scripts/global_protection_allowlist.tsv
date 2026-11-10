@@ -7,8 +7,6 @@
 # is not a non-write use of the global or a file naming it. Being named shows a reader
 # exists; the rest of the cell is a reviewer's claim, not a checked one.
 kernel/arch/arm64/kernel/platform_uart_common.tkb	uart_rx_handler	read-by uart_rx_drain: 2026-10-31 retain-singleton: the UART receive path calls it; uart_init and uart_set_rx_handler store it at boot before the IRQ is unmasked, an order nothing checks
-kernel/arch/arm64/mm/asid.tkb	asid_bits	read-by asid_width_bits: 2026-10-31 written once by asid_init with the MMU off, where the compiler refuses an atomic call; read lock-free after
-kernel/arch/arm64/mm/asid.tkb	asid_last	read-by asid_highest_value,asid_assign_locked: 2026-10-31 written once by asid_init with the MMU off, where the compiler refuses an atomic call; read lock-free after
 kernel/init/test_driver.tkb	boot_exec_windows	read-by kernel_test_driver_run: 2026-10-31 boot: the loader check's windows, core 0 once before any exec
 kernel/init/test_driver.tkb	boot_execution	read-by kernel_process_child_exec_prepare_with,kernel_exec_primary_is_busybox_extras: 2026-10-31 boot: written by the boot thread before PID 1 runs, read-only for every later exec; BootOnce would fit but reads as a two-field record
 kernel/init/test_driver.tkb	rootfs_metadata	read-by kernel_test_driver_run: 2026-10-31 retain-boot: the boot read of the image's metadata; the exec plan borrows this permanent buffer afterward

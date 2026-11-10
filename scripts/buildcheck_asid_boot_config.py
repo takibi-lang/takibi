@@ -83,7 +83,7 @@ def image(elf, facts):
         raise ValueError('; '.join(found))
     report_pass('asid-boot-config image',
                 'linked asid_bits/asid_last retain offset-zero eight-byte 8/255 data for debugger seeds',
-                words=2)
+                words=len(symbols))
 
 
 POSITIVE = '''
@@ -129,6 +129,7 @@ NEGATIVE = (
 
 
 def api(compiler):
+    accepted, rejected = 0, 0
     with tempfile.TemporaryDirectory(prefix='takibi-asid-api-') as temporary:
         work = Path(temporary)
         for name, body, diagnostic in (('valid', POSITIVE, ''), *NEGATIVE):
@@ -142,14 +143,16 @@ def api(compiler):
             if not diagnostic:
                 if result.returncode != 0:
                     raise ValueError(f'{name}: valid real API rejected: {output}')
+                accepted += 1
             else:
                 if result.returncode == 0:
                     raise ValueError(f'{name}: invalid real API accepted')
                 if diagnostic not in output:
                     raise ValueError(f'{name}: expected {diagnostic!r}, received {output}')
+                rejected += 1
     report_pass('asid-boot-config API',
                 'real MMU-off initialization/plain reads compile; consumer mutation and forged/reused/escaping authority fail',
-                accepted=1, rejected=len(NEGATIVE))
+                accepted=accepted, rejected=rejected)
 
 
 def main(argv):

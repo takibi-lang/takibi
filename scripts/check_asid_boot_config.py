@@ -110,15 +110,24 @@ def layout_problems(structs):
             ('AsidBootWord must have one offset-zero eight-byte field',))
 
 
+def evidence_counts(sources):
+    code = code_skeleton(sources.get(PATH, ''))
+    words = len(re.findall(r'\bprivate\s+let\s+mut\s+(?:asid_bits|asid_last)\s*:', code))
+    mints = len(re.findall(r'\breturn\s+view\s+AsidInitWriter\s*;', code))
+    return words, mints
+
+
 def main():
-    found = source_problems(read_sources())
+    sources = read_sources()
+    found = source_problems(sources)
     for message in found:
         print('FAIL asid-boot-config: ' + message)
     if found:
         return 1
+    words, mints = evidence_counts(sources)
     report_pass('asid-boot-config',
                 'exact two-word API and single MMU-off initializer retain the boot boundary',
-                words=2, mints=1)
+                words=words, mints=mints)
     return 0
 
 

@@ -1,0 +1,1855 @@
+{
+  "baseline_commit": "86c0cf5442e52c2834da7e866cec256598537e8f",
+  "candidate_source_head": "d1b3c8a7ef57416569d0336593fe1a962ac28fbc",
+  "artifacts": {
+    "qemu/main.o": {
+      "before_sha256": "74c56084512352727e58914e8ea3cf2b53ccf571a68c2b837b2eba1facf8ce08",
+      "before_file_bytes": 3000424,
+      "after_sha256": "46d8398ae4479ed338011678da1ab97995de59edbaf9c2ba60b1f46943d799d9",
+      "after_file_bytes": 3000776,
+      "sizes": {
+        "before": {
+          "text": 818151,
+          "data": 136,
+          "bss": 904023
+        },
+        "after": {
+          "text": 818247,
+          "data": 136,
+          "bss": 904023
+        }
+      },
+      "changed_symbol_sizes": {
+        "ASID_BITS_FLOOR": {
+          "before": {
+            "size": 8,
+            "kind": "R"
+          },
+          "after": null
+        },
+        "asid_assign_attempt": {
+          "before": {
+            "size": 168,
+            "kind": "T"
+          },
+          "after": {
+            "size": 172,
+            "kind": "T"
+          }
+        },
+        "asid_assign_locked": {
+          "before": {
+            "size": 72,
+            "kind": "T"
+          },
+          "after": {
+            "size": 64,
+            "kind": "T"
+          }
+        },
+        "asid_boot_config_initialize": {
+          "before": null,
+          "after": {
+            "size": 52,
+            "kind": "T"
+          }
+        },
+        "asid_boot_writer_mint": {
+          "before": null,
+          "after": {
+            "size": 16,
+            "kind": "T"
+          }
+        },
+        "asid_force_rollover_needed": {
+          "before": {
+            "size": 100,
+            "kind": "T"
+          },
+          "after": {
+            "size": 108,
+            "kind": "T"
+          }
+        },
+        "asid_init": {
+          "before": {
+            "size": 100,
+            "kind": "T"
+          },
+          "after": {
+            "size": 72,
+            "kind": "T"
+          }
+        },
+        "asid_rollover_stopped": {
+          "before": {
+            "size": 152,
+            "kind": "T"
+          },
+          "after": {
+            "size": 148,
+            "kind": "T"
+          }
+        }
+      },
+      "asid": {
+        "asid_boot_writer_mint": {
+          "before": null,
+          "after": {
+            "size": 16,
+            "kind": "T"
+          }
+        },
+        "asid_boot_config_initialize": {
+          "before": null,
+          "after": {
+            "size": 52,
+            "kind": "T"
+          }
+        },
+        "asid_init": {
+          "before": {
+            "size": 100,
+            "kind": "T"
+          },
+          "after": {
+            "size": 72,
+            "kind": "T"
+          }
+        },
+        "asid_width_bits": {
+          "before": {
+            "size": 28,
+            "kind": "T"
+          },
+          "after": {
+            "size": 28,
+            "kind": "T"
+          }
+        },
+        "asid_highest_value": {
+          "before": {
+            "size": 28,
+            "kind": "T"
+          },
+          "after": {
+            "size": 28,
+            "kind": "T"
+          }
+        },
+        "asid_assign_attempt": {
+          "before": {
+            "size": 168,
+            "kind": "T"
+          },
+          "after": {
+            "size": 172,
+            "kind": "T"
+          }
+        },
+        "asid_force_rollover_needed": {
+          "before": {
+            "size": 100,
+            "kind": "T"
+          },
+          "after": {
+            "size": 108,
+            "kind": "T"
+          }
+        },
+        "asid_rollover_stopped": {
+          "before": {
+            "size": 152,
+            "kind": "T"
+          },
+          "after": {
+            "size": 148,
+            "kind": "T"
+          }
+        },
+        "asid_assign_locked": {
+          "before": {
+            "size": 72,
+            "kind": "T"
+          },
+          "after": {
+            "size": 64,
+            "kind": "T"
+          }
+        }
+      },
+      "asid_frames": {
+        "asid_boot_writer_mint": {
+          "before": null,
+          "after": 16
+        },
+        "asid_boot_config_initialize": {
+          "before": null,
+          "after": 16
+        },
+        "asid_init": {
+          "before": 32,
+          "after": 32
+        },
+        "asid_width_bits": {
+          "before": 16,
+          "after": 16
+        },
+        "asid_highest_value": {
+          "before": 16,
+          "after": 16
+        },
+        "asid_assign_attempt": {
+          "before": 48,
+          "after": 64
+        },
+        "asid_force_rollover_needed": {
+          "before": 32,
+          "after": 48
+        },
+        "asid_rollover_stopped": {
+          "before": 64,
+          "after": 64
+        },
+        "asid_assign_locked": {
+          "before": 32,
+          "after": 32
+        }
+      },
+      "changed_instruction_or_relocation_bodies": [
+        "asid_assign_attempt",
+        "asid_assign_locked",
+        "asid_boot_config_initialize",
+        "asid_boot_writer_mint",
+        "asid_force_rollover_needed",
+        "asid_init",
+        "asid_rollover_stopped"
+      ],
+      "changed_frames": {
+        "asid_assign_attempt": {
+          "before": 48,
+          "after": 64
+        },
+        "asid_boot_writer_mint": {
+          "before": null,
+          "after": 16
+        },
+        "asid_force_rollover_needed": {
+          "before": 32,
+          "after": 48
+        },
+        "asid_boot_config_initialize": {
+          "before": null,
+          "after": 16
+        }
+      },
+      "changed_payload_sections": {
+        ".eh_frame": {
+          "before": 127248,
+          "after": 127312,
+          "delta": 64
+        },
+        ".rodata.ASID_BITS_FLOOR": {
+          "before": 8,
+          "after": 0,
+          "delta": -8
+        },
+        ".text.takibi.asid_assign_attempt": {
+          "before": 168,
+          "after": 172,
+          "delta": 4
+        },
+        ".text.takibi.asid_assign_locked": {
+          "before": 72,
+          "after": 64,
+          "delta": -8
+        },
+        ".text.takibi.asid_boot_config_initialize": {
+          "before": 0,
+          "after": 52,
+          "delta": 52
+        },
+        ".text.takibi.asid_boot_writer_mint": {
+          "before": 0,
+          "after": 16,
+          "delta": 16
+        },
+        ".text.takibi.asid_force_rollover_needed": {
+          "before": 100,
+          "after": 108,
+          "delta": 8
+        },
+        ".text.takibi.asid_init": {
+          "before": 100,
+          "after": 72,
+          "delta": -28
+        },
+        ".text.takibi.asid_rollover_stopped": {
+          "before": 152,
+          "after": 148,
+          "delta": -4
+        }
+      }
+    },
+    "qemu/main.debug.o": {
+      "before_sha256": "9175af50451fdac00bd819f61cd6c3b191afa415f4115332404c9ef50c8381fe",
+      "before_file_bytes": 7834008,
+      "after_sha256": "fd30076d9657437cdefebcb7350cf9fb8fd0f631ffc4b426567111a1922bf6b0",
+      "after_file_bytes": 7835920,
+      "sizes": {
+        "before": {
+          "text": 1130742,
+          "data": 136,
+          "bss": 904023
+        },
+        "after": {
+          "text": 1130806,
+          "data": 136,
+          "bss": 904023
+        }
+      },
+      "changed_symbol_sizes": {
+        "ASID_BITS_FLOOR": {
+          "before": {
+            "size": 8,
+            "kind": "R"
+          },
+          "after": null
+        },
+        "asid_assign_attempt": {
+          "before": {
+            "size": 204,
+            "kind": "T"
+          },
+          "after": {
+            "size": 196,
+            "kind": "T"
+          }
+        },
+        "asid_boot_config_initialize": {
+          "before": null,
+          "after": {
+            "size": 52,
+            "kind": "T"
+          }
+        },
+        "asid_boot_writer_mint": {
+          "before": null,
+          "after": {
+            "size": 16,
+            "kind": "T"
+          }
+        },
+        "asid_force_rollover_needed": {
+          "before": {
+            "size": 128,
+            "kind": "T"
+          },
+          "after": {
+            "size": 116,
+            "kind": "T"
+          }
+        },
+        "asid_init": {
+          "before": {
+            "size": 124,
+            "kind": "T"
+          },
+          "after": {
+            "size": 100,
+            "kind": "T"
+          }
+        },
+        "asid_rollover_stopped": {
+          "before": {
+            "size": 176,
+            "kind": "T"
+          },
+          "after": {
+            "size": 168,
+            "kind": "T"
+          }
+        }
+      },
+      "asid": {
+        "asid_boot_writer_mint": {
+          "before": null,
+          "after": {
+            "size": 16,
+            "kind": "T"
+          }
+        },
+        "asid_boot_config_initialize": {
+          "before": null,
+          "after": {
+            "size": 52,
+            "kind": "T"
+          }
+        },
+        "asid_init": {
+          "before": {
+            "size": 124,
+            "kind": "T"
+          },
+          "after": {
+            "size": 100,
+            "kind": "T"
+          }
+        },
+        "asid_width_bits": {
+          "before": {
+            "size": 28,
+            "kind": "T"
+          },
+          "after": {
+            "size": 28,
+            "kind": "T"
+          }
+        },
+        "asid_highest_value": {
+          "before": {
+            "size": 28,
+            "kind": "T"
+          },
+          "after": {
+            "size": 28,
+            "kind": "T"
+          }
+        },
+        "asid_assign_attempt": {
+          "before": {
+            "size": 204,
+            "kind": "T"
+          },
+          "after": {
+            "size": 196,
+            "kind": "T"
+          }
+        },
+        "asid_force_rollover_needed": {
+          "before": {
+            "size": 128,
+            "kind": "T"
+          },
+          "after": {
+            "size": 116,
+            "kind": "T"
+          }
+        },
+        "asid_rollover_stopped": {
+          "before": {
+            "size": 176,
+            "kind": "T"
+          },
+          "after": {
+            "size": 168,
+            "kind": "T"
+          }
+        },
+        "asid_assign_locked": {
+          "before": {
+            "size": 76,
+            "kind": "T"
+          },
+          "after": {
+            "size": 76,
+            "kind": "T"
+          }
+        }
+      },
+      "asid_frames": {
+        "asid_boot_writer_mint": {
+          "before": null,
+          "after": 16
+        },
+        "asid_boot_config_initialize": {
+          "before": null,
+          "after": 16
+        },
+        "asid_init": {
+          "before": 64,
+          "after": 64
+        },
+        "asid_width_bits": {
+          "before": 16,
+          "after": 16
+        },
+        "asid_highest_value": {
+          "before": 16,
+          "after": 16
+        },
+        "asid_assign_attempt": {
+          "before": 96,
+          "after": 96
+        },
+        "asid_force_rollover_needed": {
+          "before": 64,
+          "after": 64
+        },
+        "asid_rollover_stopped": {
+          "before": 96,
+          "after": 96
+        },
+        "asid_assign_locked": {
+          "before": 32,
+          "after": 48
+        }
+      },
+      "changed_instruction_or_relocation_bodies": [
+        "asid_assign_attempt",
+        "asid_assign_locked",
+        "asid_boot_config_initialize",
+        "asid_boot_writer_mint",
+        "asid_force_rollover_needed",
+        "asid_init",
+        "asid_rollover_stopped"
+      ],
+      "changed_frames": {
+        "asid_assign_locked": {
+          "before": 32,
+          "after": 48
+        },
+        "asid_boot_writer_mint": {
+          "before": null,
+          "after": 16
+        },
+        "asid_boot_config_initialize": {
+          "before": null,
+          "after": 16
+        }
+      },
+      "changed_payload_sections": {
+        ".eh_frame": {
+          "before": 182384,
+          "after": 182440,
+          "delta": 56
+        },
+        ".rodata.ASID_BITS_FLOOR": {
+          "before": 8,
+          "after": 0,
+          "delta": -8
+        },
+        ".text.takibi.asid_assign_attempt": {
+          "before": 204,
+          "after": 196,
+          "delta": -8
+        },
+        ".text.takibi.asid_boot_config_initialize": {
+          "before": 0,
+          "after": 52,
+          "delta": 52
+        },
+        ".text.takibi.asid_boot_writer_mint": {
+          "before": 0,
+          "after": 16,
+          "delta": 16
+        },
+        ".text.takibi.asid_force_rollover_needed": {
+          "before": 128,
+          "after": 116,
+          "delta": -12
+        },
+        ".text.takibi.asid_init": {
+          "before": 124,
+          "after": 100,
+          "delta": -24
+        },
+        ".text.takibi.asid_rollover_stopped": {
+          "before": 176,
+          "after": 168,
+          "delta": -8
+        }
+      }
+    },
+    "qemu/kernel.elf": {
+      "before_sha256": "443e0b57012f7eb57d4c714d5db889945ca5ce3bd82a71ddf78bf8a4ac96cbec",
+      "before_file_bytes": 1314888,
+      "after_sha256": "fd2df9fe4fa000a8b582f152b922eb99e5bf2b34e4e51b8d39b7be3df481f577",
+      "after_file_bytes": 1315104,
+      "sizes": {
+        "before": {
+          "text": 822728,
+          "data": 4616,
+          "bss": 1314816
+        },
+        "after": {
+          "text": 822824,
+          "data": 4616,
+          "bss": 1314816
+        }
+      },
+      "changed_symbol_sizes": {
+        "asid_assign_attempt": {
+          "before": {
+            "size": 168,
+            "kind": "T"
+          },
+          "after": {
+            "size": 172,
+            "kind": "T"
+          }
+        },
+        "asid_assign_locked": {
+          "before": {
+            "size": 72,
+            "kind": "T"
+          },
+          "after": {
+            "size": 64,
+            "kind": "T"
+          }
+        },
+        "asid_boot_config_initialize": {
+          "before": null,
+          "after": {
+            "size": 52,
+            "kind": "T"
+          }
+        },
+        "asid_boot_writer_mint": {
+          "before": null,
+          "after": {
+            "size": 16,
+            "kind": "T"
+          }
+        },
+        "asid_force_rollover_needed": {
+          "before": {
+            "size": 100,
+            "kind": "T"
+          },
+          "after": {
+            "size": 108,
+            "kind": "T"
+          }
+        },
+        "asid_init": {
+          "before": {
+            "size": 100,
+            "kind": "T"
+          },
+          "after": {
+            "size": 72,
+            "kind": "T"
+          }
+        },
+        "asid_rollover_stopped": {
+          "before": {
+            "size": 152,
+            "kind": "T"
+          },
+          "after": {
+            "size": 148,
+            "kind": "T"
+          }
+        }
+      },
+      "asid": {
+        "asid_boot_writer_mint": {
+          "before": null,
+          "after": {
+            "size": 16,
+            "kind": "T"
+          }
+        },
+        "asid_boot_config_initialize": {
+          "before": null,
+          "after": {
+            "size": 52,
+            "kind": "T"
+          }
+        },
+        "asid_init": {
+          "before": {
+            "size": 100,
+            "kind": "T"
+          },
+          "after": {
+            "size": 72,
+            "kind": "T"
+          }
+        },
+        "asid_width_bits": {
+          "before": {
+            "size": 28,
+            "kind": "T"
+          },
+          "after": {
+            "size": 28,
+            "kind": "T"
+          }
+        },
+        "asid_highest_value": {
+          "before": {
+            "size": 28,
+            "kind": "T"
+          },
+          "after": {
+            "size": 28,
+            "kind": "T"
+          }
+        },
+        "asid_assign_attempt": {
+          "before": {
+            "size": 168,
+            "kind": "T"
+          },
+          "after": {
+            "size": 172,
+            "kind": "T"
+          }
+        },
+        "asid_force_rollover_needed": {
+          "before": {
+            "size": 100,
+            "kind": "T"
+          },
+          "after": {
+            "size": 108,
+            "kind": "T"
+          }
+        },
+        "asid_rollover_stopped": {
+          "before": {
+            "size": 152,
+            "kind": "T"
+          },
+          "after": {
+            "size": 148,
+            "kind": "T"
+          }
+        },
+        "asid_assign_locked": {
+          "before": {
+            "size": 72,
+            "kind": "T"
+          },
+          "after": {
+            "size": 64,
+            "kind": "T"
+          }
+        }
+      },
+      "changed_data_bss_symbols": {},
+      "usable_ram_start": {
+        "before": 1075904512,
+        "after": 1075904512
+      },
+      "changed_payload_sections": {
+        ".eh_frame": {
+          "before": 122928,
+          "after": 122992,
+          "delta": 64
+        },
+        ".text": {
+          "before": 644896,
+          "after": 644928,
+          "delta": 32
+        }
+      }
+    },
+    "qemu/kernel-debug.elf": {
+      "before_sha256": "fef90556b583e9ebdcceb110629b07531f4b39d49103a74f3aab07d302518b93",
+      "before_file_bytes": 3471776,
+      "after_sha256": "851173d09f20add6ddc6e533ed284d5d42a2a58183c249357fccb17a7bb3ceb4",
+      "after_file_bytes": 3473184,
+      "sizes": {
+        "before": {
+          "text": 899300,
+          "data": 4616,
+          "bss": 1314816
+        },
+        "after": {
+          "text": 899420,
+          "data": 4616,
+          "bss": 1314816
+        }
+      },
+      "changed_symbol_sizes": {
+        "asid_assign_attempt": {
+          "before": {
+            "size": 204,
+            "kind": "T"
+          },
+          "after": {
+            "size": 196,
+            "kind": "T"
+          }
+        },
+        "asid_boot_config_initialize": {
+          "before": null,
+          "after": {
+            "size": 52,
+            "kind": "T"
+          }
+        },
+        "asid_boot_writer_mint": {
+          "before": null,
+          "after": {
+            "size": 16,
+            "kind": "T"
+          }
+        },
+        "asid_force_rollover_needed": {
+          "before": {
+            "size": 128,
+            "kind": "T"
+          },
+          "after": {
+            "size": 116,
+            "kind": "T"
+          }
+        },
+        "asid_init": {
+          "before": {
+            "size": 124,
+            "kind": "T"
+          },
+          "after": {
+            "size": 100,
+            "kind": "T"
+          }
+        },
+        "asid_rollover_stopped": {
+          "before": {
+            "size": 176,
+            "kind": "T"
+          },
+          "after": {
+            "size": 168,
+            "kind": "T"
+          }
+        }
+      },
+      "asid": {
+        "asid_boot_writer_mint": {
+          "before": null,
+          "after": {
+            "size": 16,
+            "kind": "T"
+          }
+        },
+        "asid_boot_config_initialize": {
+          "before": null,
+          "after": {
+            "size": 52,
+            "kind": "T"
+          }
+        },
+        "asid_init": {
+          "before": {
+            "size": 124,
+            "kind": "T"
+          },
+          "after": {
+            "size": 100,
+            "kind": "T"
+          }
+        },
+        "asid_width_bits": {
+          "before": {
+            "size": 28,
+            "kind": "T"
+          },
+          "after": {
+            "size": 28,
+            "kind": "T"
+          }
+        },
+        "asid_highest_value": {
+          "before": {
+            "size": 28,
+            "kind": "T"
+          },
+          "after": {
+            "size": 28,
+            "kind": "T"
+          }
+        },
+        "asid_assign_attempt": {
+          "before": {
+            "size": 204,
+            "kind": "T"
+          },
+          "after": {
+            "size": 196,
+            "kind": "T"
+          }
+        },
+        "asid_force_rollover_needed": {
+          "before": {
+            "size": 128,
+            "kind": "T"
+          },
+          "after": {
+            "size": 116,
+            "kind": "T"
+          }
+        },
+        "asid_rollover_stopped": {
+          "before": {
+            "size": 176,
+            "kind": "T"
+          },
+          "after": {
+            "size": 168,
+            "kind": "T"
+          }
+        },
+        "asid_assign_locked": {
+          "before": {
+            "size": 76,
+            "kind": "T"
+          },
+          "after": {
+            "size": 76,
+            "kind": "T"
+          }
+        }
+      },
+      "changed_data_bss_symbols": {},
+      "usable_ram_start": {
+        "before": 1075970048,
+        "after": 1075970048
+      },
+      "changed_payload_sections": {
+        ".eh_frame": {
+          "before": 121532,
+          "after": 121588,
+          "delta": 56
+        },
+        ".text": {
+          "before": 723712,
+          "after": 723776,
+          "delta": 64
+        }
+      }
+    },
+    "rpi5/main.o": {
+      "before_sha256": "07bb2f7b6deb4420f535f54a582f16d47cf2f6782b2c45dddef510bd74b65b20",
+      "before_file_bytes": 6542008,
+      "after_sha256": "1aa0c468dce733b57bd1ef0cd4d8e88f1c62cefa97259e528f5ceb97f456d0d1",
+      "after_file_bytes": 6542352,
+      "sizes": {
+        "before": {
+          "text": 4192650,
+          "data": 336,
+          "bss": 1173531
+        },
+        "after": {
+          "text": 4192746,
+          "data": 336,
+          "bss": 1173531
+        }
+      },
+      "changed_symbol_sizes": {
+        "ASID_BITS_FLOOR": {
+          "before": {
+            "size": 8,
+            "kind": "R"
+          },
+          "after": null
+        },
+        "asid_assign_attempt": {
+          "before": {
+            "size": 168,
+            "kind": "T"
+          },
+          "after": {
+            "size": 172,
+            "kind": "T"
+          }
+        },
+        "asid_assign_locked": {
+          "before": {
+            "size": 72,
+            "kind": "T"
+          },
+          "after": {
+            "size": 64,
+            "kind": "T"
+          }
+        },
+        "asid_boot_config_initialize": {
+          "before": null,
+          "after": {
+            "size": 52,
+            "kind": "T"
+          }
+        },
+        "asid_boot_writer_mint": {
+          "before": null,
+          "after": {
+            "size": 16,
+            "kind": "T"
+          }
+        },
+        "asid_force_rollover_needed": {
+          "before": {
+            "size": 100,
+            "kind": "T"
+          },
+          "after": {
+            "size": 108,
+            "kind": "T"
+          }
+        },
+        "asid_init": {
+          "before": {
+            "size": 100,
+            "kind": "T"
+          },
+          "after": {
+            "size": 72,
+            "kind": "T"
+          }
+        },
+        "asid_rollover_stopped": {
+          "before": {
+            "size": 152,
+            "kind": "T"
+          },
+          "after": {
+            "size": 148,
+            "kind": "T"
+          }
+        }
+      },
+      "asid": {
+        "asid_boot_writer_mint": {
+          "before": null,
+          "after": {
+            "size": 16,
+            "kind": "T"
+          }
+        },
+        "asid_boot_config_initialize": {
+          "before": null,
+          "after": {
+            "size": 52,
+            "kind": "T"
+          }
+        },
+        "asid_init": {
+          "before": {
+            "size": 100,
+            "kind": "T"
+          },
+          "after": {
+            "size": 72,
+            "kind": "T"
+          }
+        },
+        "asid_width_bits": {
+          "before": {
+            "size": 28,
+            "kind": "T"
+          },
+          "after": {
+            "size": 28,
+            "kind": "T"
+          }
+        },
+        "asid_highest_value": {
+          "before": {
+            "size": 28,
+            "kind": "T"
+          },
+          "after": {
+            "size": 28,
+            "kind": "T"
+          }
+        },
+        "asid_assign_attempt": {
+          "before": {
+            "size": 168,
+            "kind": "T"
+          },
+          "after": {
+            "size": 172,
+            "kind": "T"
+          }
+        },
+        "asid_force_rollover_needed": {
+          "before": {
+            "size": 100,
+            "kind": "T"
+          },
+          "after": {
+            "size": 108,
+            "kind": "T"
+          }
+        },
+        "asid_rollover_stopped": {
+          "before": {
+            "size": 152,
+            "kind": "T"
+          },
+          "after": {
+            "size": 148,
+            "kind": "T"
+          }
+        },
+        "asid_assign_locked": {
+          "before": {
+            "size": 72,
+            "kind": "T"
+          },
+          "after": {
+            "size": 64,
+            "kind": "T"
+          }
+        }
+      },
+      "asid_frames": {
+        "asid_boot_writer_mint": {
+          "before": null,
+          "after": 16
+        },
+        "asid_boot_config_initialize": {
+          "before": null,
+          "after": 16
+        },
+        "asid_init": {
+          "before": 32,
+          "after": 32
+        },
+        "asid_width_bits": {
+          "before": 16,
+          "after": 16
+        },
+        "asid_highest_value": {
+          "before": 16,
+          "after": 16
+        },
+        "asid_assign_attempt": {
+          "before": 48,
+          "after": 64
+        },
+        "asid_force_rollover_needed": {
+          "before": 32,
+          "after": 48
+        },
+        "asid_rollover_stopped": {
+          "before": 64,
+          "after": 64
+        },
+        "asid_assign_locked": {
+          "before": 32,
+          "after": 32
+        }
+      },
+      "changed_instruction_or_relocation_bodies": [
+        "asid_assign_attempt",
+        "asid_assign_locked",
+        "asid_boot_config_initialize",
+        "asid_boot_writer_mint",
+        "asid_force_rollover_needed",
+        "asid_init",
+        "asid_rollover_stopped"
+      ],
+      "changed_frames": {
+        "asid_assign_attempt": {
+          "before": 48,
+          "after": 64
+        },
+        "asid_boot_writer_mint": {
+          "before": null,
+          "after": 16
+        },
+        "asid_force_rollover_needed": {
+          "before": 32,
+          "after": 48
+        },
+        "asid_boot_config_initialize": {
+          "before": null,
+          "after": 16
+        }
+      },
+      "changed_payload_sections": {
+        ".eh_frame": {
+          "before": 137608,
+          "after": 137672,
+          "delta": 64
+        },
+        ".rodata.ASID_BITS_FLOOR": {
+          "before": 8,
+          "after": 0,
+          "delta": -8
+        },
+        ".text.takibi.asid_assign_attempt": {
+          "before": 168,
+          "after": 172,
+          "delta": 4
+        },
+        ".text.takibi.asid_assign_locked": {
+          "before": 72,
+          "after": 64,
+          "delta": -8
+        },
+        ".text.takibi.asid_boot_config_initialize": {
+          "before": 0,
+          "after": 52,
+          "delta": 52
+        },
+        ".text.takibi.asid_boot_writer_mint": {
+          "before": 0,
+          "after": 16,
+          "delta": 16
+        },
+        ".text.takibi.asid_force_rollover_needed": {
+          "before": 100,
+          "after": 108,
+          "delta": 8
+        },
+        ".text.takibi.asid_init": {
+          "before": 100,
+          "after": 72,
+          "delta": -28
+        },
+        ".text.takibi.asid_rollover_stopped": {
+          "before": 152,
+          "after": 148,
+          "delta": -4
+        }
+      }
+    },
+    "rpi5/main.debug.o": {
+      "before_sha256": "d5dbecb33cf3dc8709b6076141e8b47bf891d4dbeff80629039c1b2375fe74d4",
+      "before_file_bytes": 12105736,
+      "after_sha256": "2b07a5bf9a6ce7c6c5a576c130723f2783ac6d108b3223f504764e5f7ce57acf",
+      "after_file_bytes": 12107592,
+      "sizes": {
+        "before": {
+          "text": 4574145,
+          "data": 336,
+          "bss": 1173531
+        },
+        "after": {
+          "text": 4574209,
+          "data": 336,
+          "bss": 1173531
+        }
+      },
+      "changed_symbol_sizes": {
+        "ASID_BITS_FLOOR": {
+          "before": {
+            "size": 8,
+            "kind": "R"
+          },
+          "after": null
+        },
+        "asid_assign_attempt": {
+          "before": {
+            "size": 204,
+            "kind": "T"
+          },
+          "after": {
+            "size": 196,
+            "kind": "T"
+          }
+        },
+        "asid_boot_config_initialize": {
+          "before": null,
+          "after": {
+            "size": 52,
+            "kind": "T"
+          }
+        },
+        "asid_boot_writer_mint": {
+          "before": null,
+          "after": {
+            "size": 16,
+            "kind": "T"
+          }
+        },
+        "asid_force_rollover_needed": {
+          "before": {
+            "size": 128,
+            "kind": "T"
+          },
+          "after": {
+            "size": 116,
+            "kind": "T"
+          }
+        },
+        "asid_init": {
+          "before": {
+            "size": 124,
+            "kind": "T"
+          },
+          "after": {
+            "size": 100,
+            "kind": "T"
+          }
+        },
+        "asid_rollover_stopped": {
+          "before": {
+            "size": 176,
+            "kind": "T"
+          },
+          "after": {
+            "size": 168,
+            "kind": "T"
+          }
+        }
+      },
+      "asid": {
+        "asid_boot_writer_mint": {
+          "before": null,
+          "after": {
+            "size": 16,
+            "kind": "T"
+          }
+        },
+        "asid_boot_config_initialize": {
+          "before": null,
+          "after": {
+            "size": 52,
+            "kind": "T"
+          }
+        },
+        "asid_init": {
+          "before": {
+            "size": 124,
+            "kind": "T"
+          },
+          "after": {
+            "size": 100,
+            "kind": "T"
+          }
+        },
+        "asid_width_bits": {
+          "before": {
+            "size": 28,
+            "kind": "T"
+          },
+          "after": {
+            "size": 28,
+            "kind": "T"
+          }
+        },
+        "asid_highest_value": {
+          "before": {
+            "size": 28,
+            "kind": "T"
+          },
+          "after": {
+            "size": 28,
+            "kind": "T"
+          }
+        },
+        "asid_assign_attempt": {
+          "before": {
+            "size": 204,
+            "kind": "T"
+          },
+          "after": {
+            "size": 196,
+            "kind": "T"
+          }
+        },
+        "asid_force_rollover_needed": {
+          "before": {
+            "size": 128,
+            "kind": "T"
+          },
+          "after": {
+            "size": 116,
+            "kind": "T"
+          }
+        },
+        "asid_rollover_stopped": {
+          "before": {
+            "size": 176,
+            "kind": "T"
+          },
+          "after": {
+            "size": 168,
+            "kind": "T"
+          }
+        },
+        "asid_assign_locked": {
+          "before": {
+            "size": 76,
+            "kind": "T"
+          },
+          "after": {
+            "size": 76,
+            "kind": "T"
+          }
+        }
+      },
+      "asid_frames": {
+        "asid_boot_writer_mint": {
+          "before": null,
+          "after": 16
+        },
+        "asid_boot_config_initialize": {
+          "before": null,
+          "after": 16
+        },
+        "asid_init": {
+          "before": 64,
+          "after": 64
+        },
+        "asid_width_bits": {
+          "before": 16,
+          "after": 16
+        },
+        "asid_highest_value": {
+          "before": 16,
+          "after": 16
+        },
+        "asid_assign_attempt": {
+          "before": 96,
+          "after": 96
+        },
+        "asid_force_rollover_needed": {
+          "before": 64,
+          "after": 64
+        },
+        "asid_rollover_stopped": {
+          "before": 96,
+          "after": 96
+        },
+        "asid_assign_locked": {
+          "before": 32,
+          "after": 48
+        }
+      },
+      "changed_instruction_or_relocation_bodies": [
+        "asid_assign_attempt",
+        "asid_assign_locked",
+        "asid_boot_config_initialize",
+        "asid_boot_writer_mint",
+        "asid_force_rollover_needed",
+        "asid_init",
+        "asid_rollover_stopped"
+      ],
+      "changed_frames": {
+        "asid_assign_locked": {
+          "before": 32,
+          "after": 48
+        },
+        "asid_boot_writer_mint": {
+          "before": null,
+          "after": 16
+        },
+        "asid_boot_config_initialize": {
+          "before": null,
+          "after": 16
+        }
+      },
+      "changed_payload_sections": {
+        ".eh_frame": {
+          "before": 208568,
+          "after": 208624,
+          "delta": 56
+        },
+        ".rodata.ASID_BITS_FLOOR": {
+          "before": 8,
+          "after": 0,
+          "delta": -8
+        },
+        ".text.takibi.asid_assign_attempt": {
+          "before": 204,
+          "after": 196,
+          "delta": -8
+        },
+        ".text.takibi.asid_boot_config_initialize": {
+          "before": 0,
+          "after": 52,
+          "delta": 52
+        },
+        ".text.takibi.asid_boot_writer_mint": {
+          "before": 0,
+          "after": 16,
+          "delta": 16
+        },
+        ".text.takibi.asid_force_rollover_needed": {
+          "before": 128,
+          "after": 116,
+          "delta": -12
+        },
+        ".text.takibi.asid_init": {
+          "before": 124,
+          "after": 100,
+          "delta": -24
+        },
+        ".text.takibi.asid_rollover_stopped": {
+          "before": 176,
+          "after": 168,
+          "delta": -8
+        }
+      }
+    },
+    "rpi5/kernel.elf": {
+      "before_sha256": "31bd73f9ad65ee976aed0f861b5c70f4bb3f0ecd89570bddd0142f3e22b88edc",
+      "before_file_bytes": 4736400,
+      "after_sha256": "c06e5db8cf09dd7684af706070031f74800eace3148e7e9349a48e2a68e5bc7f",
+      "after_file_bytes": 4736616,
+      "sizes": {
+        "before": {
+          "text": 4207460,
+          "data": 5592,
+          "bss": 1929216
+        },
+        "after": {
+          "text": 4207556,
+          "data": 5592,
+          "bss": 1929216
+        }
+      },
+      "changed_symbol_sizes": {
+        "asid_assign_attempt": {
+          "before": {
+            "size": 168,
+            "kind": "T"
+          },
+          "after": {
+            "size": 172,
+            "kind": "T"
+          }
+        },
+        "asid_assign_locked": {
+          "before": {
+            "size": 72,
+            "kind": "T"
+          },
+          "after": {
+            "size": 64,
+            "kind": "T"
+          }
+        },
+        "asid_boot_config_initialize": {
+          "before": null,
+          "after": {
+            "size": 52,
+            "kind": "T"
+          }
+        },
+        "asid_boot_writer_mint": {
+          "before": null,
+          "after": {
+            "size": 16,
+            "kind": "T"
+          }
+        },
+        "asid_force_rollover_needed": {
+          "before": {
+            "size": 100,
+            "kind": "T"
+          },
+          "after": {
+            "size": 108,
+            "kind": "T"
+          }
+        },
+        "asid_init": {
+          "before": {
+            "size": 100,
+            "kind": "T"
+          },
+          "after": {
+            "size": 72,
+            "kind": "T"
+          }
+        },
+        "asid_rollover_stopped": {
+          "before": {
+            "size": 152,
+            "kind": "T"
+          },
+          "after": {
+            "size": 148,
+            "kind": "T"
+          }
+        }
+      },
+      "asid": {
+        "asid_boot_writer_mint": {
+          "before": null,
+          "after": {
+            "size": 16,
+            "kind": "T"
+          }
+        },
+        "asid_boot_config_initialize": {
+          "before": null,
+          "after": {
+            "size": 52,
+            "kind": "T"
+          }
+        },
+        "asid_init": {
+          "before": {
+            "size": 100,
+            "kind": "T"
+          },
+          "after": {
+            "size": 72,
+            "kind": "T"
+          }
+        },
+        "asid_width_bits": {
+          "before": {
+            "size": 28,
+            "kind": "T"
+          },
+          "after": {
+            "size": 28,
+            "kind": "T"
+          }
+        },
+        "asid_highest_value": {
+          "before": {
+            "size": 28,
+            "kind": "T"
+          },
+          "after": {
+            "size": 28,
+            "kind": "T"
+          }
+        },
+        "asid_assign_attempt": {
+          "before": {
+            "size": 168,
+            "kind": "T"
+          },
+          "after": {
+            "size": 172,
+            "kind": "T"
+          }
+        },
+        "asid_force_rollover_needed": {
+          "before": {
+            "size": 100,
+            "kind": "T"
+          },
+          "after": {
+            "size": 108,
+            "kind": "T"
+          }
+        },
+        "asid_rollover_stopped": {
+          "before": {
+            "size": 152,
+            "kind": "T"
+          },
+          "after": {
+            "size": 148,
+            "kind": "T"
+          }
+        },
+        "asid_assign_locked": {
+          "before": {
+            "size": 72,
+            "kind": "T"
+          },
+          "after": {
+            "size": 64,
+            "kind": "T"
+          }
+        }
+      },
+      "changed_data_bss_symbols": {},
+      "usable_ram_start": {
+        "before": 8257536,
+        "after": 8257536
+      },
+      "changed_payload_sections": {
+        ".eh_frame": {
+          "before": 133640,
+          "after": 133704,
+          "delta": 64
+        },
+        ".text": {
+          "before": 688676,
+          "after": 688708,
+          "delta": 32
+        }
+      }
+    },
+    "rpi5/kernel-debug.elf": {
+      "before_sha256": "4ad66174db4a29189234f403d58c4259dcca1a79b19b1774c5a7ccff8460f2cc",
+      "before_file_bytes": 7144760,
+      "after_sha256": "b83c8f389c26bc31f6c079b3d6cf7e66ed3f568bba81a17cb932c73c577df012",
+      "after_file_bytes": 7146184,
+      "sizes": {
+        "before": {
+          "text": 4292848,
+          "data": 5592,
+          "bss": 1843200
+        },
+        "after": {
+          "text": 4292968,
+          "data": 5592,
+          "bss": 1843200
+        }
+      },
+      "changed_symbol_sizes": {
+        "asid_assign_attempt": {
+          "before": {
+            "size": 204,
+            "kind": "T"
+          },
+          "after": {
+            "size": 196,
+            "kind": "T"
+          }
+        },
+        "asid_boot_config_initialize": {
+          "before": null,
+          "after": {
+            "size": 52,
+            "kind": "T"
+          }
+        },
+        "asid_boot_writer_mint": {
+          "before": null,
+          "after": {
+            "size": 16,
+            "kind": "T"
+          }
+        },
+        "asid_force_rollover_needed": {
+          "before": {
+            "size": 128,
+            "kind": "T"
+          },
+          "after": {
+            "size": 116,
+            "kind": "T"
+          }
+        },
+        "asid_init": {
+          "before": {
+            "size": 124,
+            "kind": "T"
+          },
+          "after": {
+            "size": 100,
+            "kind": "T"
+          }
+        },
+        "asid_rollover_stopped": {
+          "before": {
+            "size": 176,
+            "kind": "T"
+          },
+          "after": {
+            "size": 168,
+            "kind": "T"
+          }
+        }
+      },
+      "asid": {
+        "asid_boot_writer_mint": {
+          "before": null,
+          "after": {
+            "size": 16,
+            "kind": "T"
+          }
+        },
+        "asid_boot_config_initialize": {
+          "before": null,
+          "after": {
+            "size": 52,
+            "kind": "T"
+          }
+        },
+        "asid_init": {
+          "before": {
+            "size": 124,
+            "kind": "T"
+          },
+          "after": {
+            "size": 100,
+            "kind": "T"
+          }
+        },
+        "asid_width_bits": {
+          "before": {
+            "size": 28,
+            "kind": "T"
+          },
+          "after": {
+            "size": 28,
+            "kind": "T"
+          }
+        },
+        "asid_highest_value": {
+          "before": {
+            "size": 28,
+            "kind": "T"
+          },
+          "after": {
+            "size": 28,
+            "kind": "T"
+          }
+        },
+        "asid_assign_attempt": {
+          "before": {
+            "size": 204,
+            "kind": "T"
+          },
+          "after": {
+            "size": 196,
+            "kind": "T"
+          }
+        },
+        "asid_force_rollover_needed": {
+          "before": {
+            "size": 128,
+            "kind": "T"
+          },
+          "after": {
+            "size": 116,
+            "kind": "T"
+          }
+        },
+        "asid_rollover_stopped": {
+          "before": {
+            "size": 176,
+            "kind": "T"
+          },
+          "after": {
+            "size": 168,
+            "kind": "T"
+          }
+        },
+        "asid_assign_locked": {
+          "before": {
+            "size": 76,
+            "kind": "T"
+          },
+          "after": {
+            "size": 76,
+            "kind": "T"
+          }
+        }
+      },
+      "changed_data_bss_symbols": {},
+      "usable_ram_start": {
+        "before": 8257536,
+        "after": 8257536
+      },
+      "changed_payload_sections": {
+        ".eh_frame": {
+          "before": 133116,
+          "after": 133172,
+          "delta": 56
+        },
+        ".text": {
+          "before": 775468,
+          "after": 775532,
+          "delta": 64
+        }
+      }
+    }
+  },
+  "candidate_production_source_sha256": "8313bb7d0f591f396fdc351d7188a81c407b65602a20954e01e60057c57c4f2c",
+  "baseline_identity": "Actual clean post-land86 root artifacts, copied with independent root manifest and before/copy/after byte/hash binding; normal artifacts match prior tracked review, debug artifacts retain distinct identities.",
+  "measurement_boundary": "Linked image/accounting and actual object function instructions/single frames; not physical instruction cycles or a whole-call-stack proof."
+}

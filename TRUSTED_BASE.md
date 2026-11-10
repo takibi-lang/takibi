@@ -553,8 +553,10 @@ rules globally.
   `scripts/check_asid_boot_config.py` binds the exact small library, single
   mint/consumption and primary initialization order. Compiled caller facts
   confine the mint/setter to `asid_init` and it to `kernel_mmu_init`, with
-  function-value and non-vacuity controls. Layout facts and linked normal/debug
-  image checks bind the actual one-word offset-zero payloads and defaults.
+  function-value and non-vacuity controls. Layout facts and
+  `scripts/buildcheck_asid_boot_config.py` bind actual normal/debug linked
+  symbols, one-word offset-zero payloads and defaults; its separate-file API
+  controls exercise the real private types.
   `asid_initializer` is a scoped build admission only. The library internals,
   uniqueness of the unsafe mint, assembly boot order before CPU_ON and
   stopped debugger stores remain trusted. One consumed writer does not prove

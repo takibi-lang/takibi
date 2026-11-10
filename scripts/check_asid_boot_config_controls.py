@@ -7,7 +7,7 @@ from unittest.mock import patch
 import buildcheck_global_protection as protection
 from buildcheck_allowed_callers import read_list
 from buildcheck_asid_boot_config import image_problems, section_records, symbol_records
-from check_asid_boot_config import ASID, BOOT, CALLERS, ENTRIES, PATH, read_sources, source_problems
+from check_asid_boot_config import ASID, BOOT, CALLERS, ENTRIES, PATH, evidence_counts, read_sources, source_problems
 from control_patch import replace_in_function, replace_once
 from pass_line import CaseCount, report_pass
 
@@ -22,6 +22,10 @@ def expect(ok, label):
 def main():
     sources = read_sources()
     expect(not source_problems(sources), 'maintained source')
+    expect(evidence_counts(sources) == (2, 1), 'report counts actual declarations and mint')
+    expect(evidence_counts({}) == (0, 0), 'missing source has no report evidence')
+    expect(evidence_counts({PATH: '// private let mut asid_bits: AsidBootWord; return view AsidInitWriter;\n'}) == (0, 0),
+           'prose has no report evidence')
     rows = {
         'asid_boot_writer_mint': (PATH, [], 'AsidInitWriter', 'mmu_off,unsafe'),
         'asid_boot_config_initialize': (PATH, ['writer: sink AsidInitWriter', 'bits: usize'], '-', 'mmu_off'),
@@ -136,11 +140,13 @@ def main():
     2: 0000000000001008 8 OBJECT GLOBAL DEFAULT 1 asid_last
 '''
     symbols = symbol_records(symbol_text)
+    expect(not symbol_records(''), 'missing symbol table has no report evidence')
     sections = section_records('  [ 1] .data PROGBITS 0000000000001000 000040 000010 00 WA 0 0 8\n')
     expect(not image_problems(data, symbols, sections, structs), 'linked byte/layout parser')
     image_cases = [
         (b'', symbols, sections, structs),
         (data, symbols[:1], sections, structs),
+        (data, [], sections, structs),
         (data, symbols + symbols[:1], sections, structs),
         (data, [dict(symbols[0], size=16), symbols[1]], sections, structs),
         (data, [dict(symbols[0], kind='FUNC'), symbols[1]], sections, structs),
