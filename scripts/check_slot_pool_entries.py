@@ -27,6 +27,13 @@ hold for it. Its rule is the one the leaf rule approximates: no function
 that holds a slot -- one handed a SyscallSlot, or one that acquires it --
 reaches an entry point through the file's call graph.
 
+Function names used as values are conservative graph edges too. A function
+that reaches an acquire, mutation lock or scheduler sleep cannot be captured
+as a callback: a global, field,
+argument or returned function value could later be invoked by a holder with
+no graph edge to its installer. This check does not prove nonescape, so even
+a local nonholder alias is refused; direct nonholder calls remain allowed.
+
 No slot is held across a sleeping wait (maintainer, 2026-10-17). A syscall
 sleeps only after its handler has returned: the dispatcher hands back
 SyscallAction::Block and kernel_syscall_block_return calls one of
@@ -57,7 +64,7 @@ import sys
 from pathlib import Path
 
 from pass_line import report_pass
-from source_scan import code_only, function_header, per_file
+from source_scan import code_skeleton, function_header, per_file
 
 ROOT = Path(__file__).resolve().parent.parent
 # (file, acquire, token, rule): "leaf" -- no function in the file names an
@@ -84,23 +91,19 @@ INNER_GUARDS = ["BlockDeviceGuard", "TcpConnectionOwner", "XhciRingGuard",
                 "MscDmaGuard"]
 # The scheduler sleeps a syscall takes after its handler returns.
 SLEEP = re.compile(r"^(?:kernel_process_block_\w+|kernel_syscall_block_return)$")
-CALL = re.compile(r"\b(\w+)\s*\(")
+IDENTIFIER = re.compile(r"\b[A-Za-z_]\w*\b")
+DIRECT_ARGUMENTS = re.compile(r"\s*\(")
 FUNCTION = function_header(suffix=r"\s*\(")
 
 
-# Shared with every code-property check: blanks `//` and `/* */` comments,
-# keeps string literals (GitHub issue #815).
-strip_comments = code_only
-
-
 def functions(text):
-    """name -> (signature, body) with comments removed."""
+    """name -> (signature, body) with comments and literals blanked."""
     return dict(function_rows(text))
 
 
 @per_file
 def function_rows(text):
-    code = strip_comments(text)
+    code = code_skeleton(text)
     starts = [(m.start(), m.group(1)) for m in FUNCTION.finditer(code)]
     out = []
     for index, (start, name) in enumerate(starts):
@@ -112,8 +115,14 @@ def function_rows(text):
     return tuple(out)
 
 
+@per_file
+def references(body):
+    """Conservative names: a function value can be invoked through an alias."""
+    return frozenset(IDENTIFIER.findall(body))
+
+
 def callees(body, known):
-    return {m.group(1) for m in CALL.finditer(body)} & known
+    return references(body) & known
 
 
 def reach(start, graph):
@@ -132,13 +141,13 @@ def holders_of(fns, acquire, token):
     return {name for name, (signature, body) in fns.items()
             if name != acquire and
             (re.search(r"\b" + token + r"\b", signature) or
-             re.search(r"\b" + acquire + r"\s*\(", body))}
+             acquire in references(body))}
 
 
 def problems_in(text, acquire, token, rule="leaf", sleepers=frozenset()):
     fns = functions(text)
     entries = {name for name, (_, body) in fns.items()
-               if re.search(r"\b" + acquire + r"\s*\(", body)}
+               if acquire in references(body)}
     problems = []
     for entry in sorted(entries):
         if re.search(r"\b" + token + r"\b", fns[entry][0]):
@@ -163,7 +172,7 @@ def problems_in(text, acquire, token, rule="leaf", sleepers=frozenset()):
                     "point that acquires its own slot; pass the caller's "
                     "slot to the internal version instead")
         signature, body = fns[holder]
-        for callee in sorted({m.group(1) for m in CALL.finditer(body)}):
+        for callee in sorted(references(body)):
             if callee in sleepers or SLEEP.match(callee):
                 problems.append(
                     f"{holder} holds a {token} and calls {callee}, which "
@@ -192,7 +201,7 @@ def sleepers_in(files):
     for name, bodies in fns.items():
         called = set()
         for body in bodies:
-            called |= {m.group(1) for m in CALL.finditer(body)}
+            called |= references(body)
         graph[name] = called
     sleeping = {name for name, called in graph.items()
                 if SLEEP.match(name)}
@@ -216,8 +225,8 @@ def nesting_problems(files):
             continue
         for name, (signature, body) in functions(text).items():
             fns.setdefault(name, []).append((signature, body))
-    graph = {name: {m.group(1) for _, body in rows
-                    for m in CALL.finditer(body)} & set(fns)
+    known = set(fns)
+    graph = {name: set().union(*(references(body) for _, body in rows)) & known
              for name, rows in fns.items()}
     problems = []
     closure = {}
@@ -234,16 +243,15 @@ def nesting_problems(files):
             held_calls = set()
             for signature, body in fns[holder]:
                 # Substring first: this runs per function, per pool.
-                taken = (re.search(r"\b" + acquire + r"\s*\(", body)
+                taken = (re.search(r"\b" + acquire + r"\b", body)
                          if acquire in body else None)
                 if token in signature and re.search(r"\b" + token + r"\b",
                                                     signature):
-                    held_calls |= {m.group(1) for m in CALL.finditer(body)}
+                    held_calls |= references(body)
                 elif taken:
-                    # What the function did before the acquire, it did
-                    # holding nothing: the mutation lock comes first.
-                    held_calls |= {m.group(1) for m in
-                                   CALL.finditer(body[taken.end():])}
+                    # Conservatively start at a reference to the acquire,
+                    # including one captured for an indirect invocation.
+                    held_calls |= references(body[taken.end():])
             reached = set(held_calls)
             for callee in held_calls:
                 reached |= reached_from(callee)
@@ -262,6 +270,64 @@ def nesting_problems(files):
             for target in sorted(reached_from(name) & set(RANK)):
                 problems.append(f"{name} holds a {token} and reaches {target}; "
                                 "that lock is inside every slot pool")
+    return problems
+
+
+def function_value_problems(files):
+    """A protected function value may escape its source holder context.
+
+    Tracking its name in a local graph is insufficient for a global or
+    struct callback installed elsewhere. Refuse values of known transitive
+    acquirers, sleepers and outer lockers, even a local nonholder alias:
+    this source check does not prove nonescape. Direct nonholder calls
+    remain supported. Integer-to-function casts and unknown external
+    targets are not resolved by this check.
+    """
+    fns = {}
+    for path, text in files.items():
+        if path.startswith("kernel/") and "/tests/" not in path:
+            for name, (_, body) in functions(text).items():
+                fns.setdefault(name, []).append(body)
+    boundaries = {name: {"a slot acquire"} for name in RANK}
+    boundaries[MUTATION_TAKE] = {"the ext2 mutation lock"}
+    for name, bodies in fns.items():
+        names = {name}
+        for body in bodies:
+            names |= references(body)
+        for target in names:
+            if SLEEP.match(target):
+                boundaries[target] = {"a scheduler sleep"}
+    known = set(fns) | set(boundaries)
+    reverse = {}
+    for name, bodies in fns.items():
+        for body in bodies:
+            for callee in callees(body, known):
+                reverse.setdefault(callee, set()).add(name)
+    todo = list(boundaries)
+    while todo:
+        target = todo.pop()
+        for caller in reverse.get(target, ()):
+            kinds = boundaries.get(caller, set()) | boundaries[target]
+            if kinds != boundaries.get(caller):
+                boundaries[caller] = kinds
+                todo.append(caller)
+    problems = []
+    for path, text in sorted(files.items()):
+        code = code_skeleton(text)
+        for match in IDENTIFIER.finditer(code):
+            name = match.group(0)
+            kinds = boundaries.get(name)
+            # Direct references to a scheduler boundary are protected even
+            # when only its external declaration is present in these files.
+            if kinds is None and SLEEP.match(name):
+                kinds = {"a scheduler sleep"}
+            if kinds and not DIRECT_ARGUMENTS.match(code, match.end()):
+                line = code.count("\n", 0, match.start()) + 1
+                problems.append(
+                    f"{path}:{line}: {name} is used as a function value "
+                    f"and reaches {' / '.join(sorted(kinds))}; "
+                    "its holder context cannot "
+                    "be established, so call it directly instead")
     return problems
 
 
@@ -382,11 +448,17 @@ def main():
         for problem in nesting:
             print(f"ERROR slot-pool-entries: {problem}")
         sys.exit(1)
+    escaped = function_value_problems(files)
+    if escaped:
+        for problem in escaped:
+            print(f"ERROR slot-pool-entries: {problem}")
+        sys.exit(1)
     report_pass("slot-pool-entries",
                 f"{total} entry points across {len(POOLS)} slot pools acquire "
                 "a slot, no slot holder reaches another entry point or any of "
                 f"{len(sleepers)} functions that reach a scheduler sleep, and "
-                f"no slot is returned ({len(files)} files scanned, fourteen "
+                "no slot is returned or protected function captured as a "
+                f"value ({len(files)} files scanned, fourteen "
                 "controls)",
                 entries=total, files=len(files), sleepers=len(sleepers))
 

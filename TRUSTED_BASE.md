@@ -623,7 +623,13 @@ rules globally.
   rather than a type rule, keeps one slot per operation, keeps every slot
   holder of every pool from reaching a scheduler sleep
   (`kernel_process_block_*`), and keeps a slot from being returned out of
-  the function that acquired it.
+  the function that acquired it. The source graph conservatively follows
+  known function references as well as direct calls. Function values that
+  transitively reach an acquire, the ext2 mutation lock or a scheduler
+  sleep are refused, including local nonholder aliases: the check does not
+  prove nonescape. This is a source/build policy, not arbitrary indirect
+  call soundness; integer-to-function casts and unknown external callback
+  targets are not resolved by it.
 - Definite initialization (SPEC.md, "Definite Initialization") trusts three
   premises. A `scratch` global's element is reached only by its own CPU, so
   any index names the same place (`kernel/kernel/syscall.tkb`'s
