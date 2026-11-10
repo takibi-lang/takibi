@@ -108,7 +108,7 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
 
 ### Territory A: the trunk, in this order
 
-**Priority update, 2026-11-09.** ExecutionState uses existing per_cpu/CpuHere
+**Priority update, 2026-11-10.** ExecutionState uses existing per_cpu/CpuHere
 authority; its runtime and four-core RPi5 cost review are complete. RootHeld
 activation-entry protection now retains actual current or same-generation
 owner/Running authority through direct and prepared commit paths, with must-use
@@ -119,10 +119,11 @@ lifetime/callback foundation (#1481); no extra bootstrap stack. The four
 retained exception diagnostic stores use typed per-CPU/complete-stop access
 and the narrowly admitted publication mirror; parent #1159 remains open for
 other globals. The exception/net boundaries and reverted-churn timing-policy
-correction are complete. Production boot-selftest fixture classification
-and CPU-independent exec reservation ownership await separate maintainer
-decisions; continue independent raw-CPU reader review and add no blanket
-exclusion or reservation workaround.
+correction are complete. Protect production-reachable boot/selftest state
+with typed guards, owners or phases, without a live-fixture exemption.
+Investigate explicit linear ownership for CPU-independent exec reservations
+using existing types first; add no reservation workaround. Continue
+independent raw-CPU reader review while a concrete new decision is parked.
 
 **Assigned queue (maintainer, 2026-10-23, pruned 2026-10-25).** Memory
 safety and multicore backbone only. Taken in order whenever the numbered
@@ -207,7 +208,7 @@ owners are TaskMutex, the spare stack stays masked). #980
 
 ### Territory B: supporting the pillars, by priority
 
-**Priority update, 2026-11-09.** The network queue boundary under #1159 is
+**Priority update, 2026-11-10.** The network queue boundary under #1159 is
 published, preserving nonblocking receive and pending IRQ/capability
 bookkeeping. The approved guard-lifetime and synchronous borrowed-callback
 compiler foundation for #1481 is published with RootHeld. Integrate the real
@@ -216,7 +217,12 @@ preemption flip. Carry actual boot/driver authority to acquisition and use
 explicit try acquisition in secondary boot probes. Retain pin/stack and
 waiter lifecycle guarantees, measure actual contended scheduling and cost,
 and review the ext2 reader-drain premise separately from lock acquisition.
-Preserve non-sleeping paths and add no dedicated bootstrap stack.
+Preserve non-sleeping paths and add no dedicated bootstrap stack. For boot
+mount, implement per-command acquisition with explicit driver-phase and Busy
+outcomes, preserving cache/read-ahead and publication order. Measure the RPi5
+path before proposing optimization; retain no change as an option. Immutable
+global arrays must preserve readonly provenance; park the FDT fixture/API
+migration choice while continuing independent approved work.
 
 **Assigned queue (maintainer, 2026-10-23, re-cut 2026-10-25).**
 Low-dependency issues A does not hold, in this order; compiler work in
