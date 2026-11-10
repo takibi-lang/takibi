@@ -124,7 +124,8 @@ with typed guards, owners or phases, without a live-fixture exemption.
 The UART registration boundary waits for the approved actual function-value
 effect conformance repair (#1493), including approved bounded input-flow
 requests served by the existing TX IRQ. Preserve the IRQ logging ban and
-review ordering, queue-full, peer-pause and emergency-console behavior.
+review ordering, queue-full, peer-pause and emergency-console behavior,
+including retained-work rearm after complete-stop return (#1494).
 Investigate explicit linear ownership for CPU-independent exec reservations
 using existing types first; add no reservation workaround. Continue
 independent raw-CPU reader review while a concrete new decision is parked.
@@ -212,9 +213,10 @@ owners are TaskMutex, the spare stack stays masked). #980
 
 ### Territory B: supporting the pillars, by priority
 
-**Priority update, 2026-11-10.** The network queue boundary under #1159 is
-published, preserving nonblocking receive and pending IRQ/capability
-bookkeeping. The approved guard-lifetime and synchronous borrowed-callback
+**Priority update, 2026-11-10.** Close the foreign-holder existing-sleep
+checker gap (#1495) first, preserving the retained-stack TaskMutex park
+policy. The network queue boundary under #1159 is published, preserving
+nonblocking receive and pending IRQ/capability bookkeeping. The approved guard-lifetime and synchronous borrowed-callback
 compiler foundation for #1481 is published with RootHeld. Integrate the real
 waiting Mutex scheduler and consumer work on that combination before the
 preemption flip. Carry actual boot/driver authority to acquisition and use
