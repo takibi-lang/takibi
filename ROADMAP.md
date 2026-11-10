@@ -130,6 +130,16 @@ Investigate explicit linear ownership for CPU-independent exec reservations
 using existing types first; add no reservation workaround. Continue
 independent raw-CPU reader review while a concrete new decision is parked.
 
+**Ownership review update, 2026-11-10.** Scoped ASID initialization is
+published. Boot exec scratch migration waits for an explicit choice between
+aggregate loan provenance and a scalar-plan/borrowed-image API; actual
+production lifetime controls demonstrate the current retaining-plan gap.
+The separate nested-index consumed-owner defect (#1500) needs compiler
+repair direction before relying on that ownership check. Preserve both
+witnesses and continue independent work. Publication of #1493/#1494 also
+waits for the DDB Busy/Partial refusal-output decision; the earlier compiler
+and input-flow choices remain approved.
+
 **Assigned queue (maintainer, 2026-10-23, pruned 2026-10-25).** Memory
 safety and multicore backbone only. Taken in order whenever the numbered
 trunk items below have no step ready; an item that reaches a decision is
@@ -213,13 +223,17 @@ owners are TaskMutex, the spare stack stays masked). #980
 
 ### Territory B: supporting the pillars, by priority
 
-**Priority update, 2026-11-10.** Investigate late shrink-wrapped stack
-allocations (#1497); the per-frame gate measures only its documented
-prologue window. The Linux cold
+**Priority update, 2026-11-10.** The LLVM frame metadata/bridge choice
+(#1497) waits for a maintainer decision; the current per-frame gate measures
+only its documented prologue window. The Linux cold
 handoff and matched USB-root plan (#1158) waits for a maintainer decision.
 The network queue boundary under #1159 is published, preserving nonblocking
 receive and pending IRQ/capability bookkeeping. The approved guard-lifetime and synchronous borrowed-callback
-compiler foundation for #1481 is published with RootHeld. Integrate the real
+compiler foundation for #1481 is published with RootHeld, and the real
+BootPhase-bound log snapshot foundation is published. Review bounded
+Place/metadata lock pairs under the existing counted short contract before
+changing the ordinary backend. Actual private kernel-stack admission needs
+review; Running/RootHeld alone does not establish that premise. Integrate the real
 waiting Mutex scheduler and consumer work on that combination before the
 preemption flip. Carry actual boot/driver authority to acquisition and use
 explicit try acquisition in secondary boot probes. Retain pin/stack and
