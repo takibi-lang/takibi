@@ -2295,13 +2295,15 @@ fn pending_tcp_chain_probe(ready: borrow NetRxCanAcquire[net]) -> bool !{unsafe}
            tcp_retx_live_count() == 0;
 }
 
-// The probe checks the chain, not the bytes a segment carries, so its
-// segments copy this rather than a connection's transmit frame.
-private let mut pending_tcp_probe_frame: [u8; 1514];
-
 fn pending_tcp_chain_probe_body(ready: borrow NetRxCanAcquire[net], owner_a: borrow TcpConnectionOwner[first_pool, first],
                                  owner_b: borrow TcpConnectionOwner[second_pool, second])
         -> bool !{unsafe} {
+    // The chain probe copies a zero frame into each owned retransmit entry.
+    // Initialize every byte before the nonretaining borrowed copy boundary.
+    let mut probe_frame: [u8; 1514];
+    for position: usize in 0..<1514 {
+        probe_frame[position] = 0;
+    }
     let conn: &mut TcpConnection = tcp_connection_of(owner_a);
     let other: &mut TcpConnection = tcp_connection_of(owner_b);
     let live_before: usize = tcp_retx_live_count();
@@ -2312,13 +2314,13 @@ fn pending_tcp_chain_probe_body(ready: borrow NetRxCanAcquire[net], owner_a: bor
     let mut queued: usize = 0;
     for i: usize in 0..<5 {
         if (pending_tcp_record(ready, owner_a, PendingTcpKind::Data,
-                               pending_tcp_probe_frame as [u8; 1514..],
+                               probe_frame as [u8; 1514..],
                                1000 + i, NET_KEPT_NONE) != 0) {
             queued = queued + 1;
         }
         if (i == 2) {
             if (pending_tcp_record(ready, owner_b, PendingTcpKind::Fin,
-                                   pending_tcp_probe_frame as [u8; 1514..], 9999, NET_KEPT_NONE)
+                                   probe_frame as [u8; 1514..], 9999, NET_KEPT_NONE)
                     == 0) {
                 return false;
             }
@@ -2382,7 +2384,7 @@ fn pending_tcp_chain_probe_body(ready: borrow NetRxCanAcquire[net], owner_a: bor
     let (chunks_after, _cap_a, _nonfree_a, _bytes_a) = tcp_retx_pool_space_stats();
     if (live_before == 0 && chunks_after != 1) { return false; }
     if (pending_tcp_record(ready, owner_a, PendingTcpKind::Data,
-                           pending_tcp_probe_frame as [u8; 1514..], 1, NET_KEPT_NONE) == 0) {
+                           probe_frame as [u8; 1514..], 1, NET_KEPT_NONE) == 0) {
         return false;
     }
     pending_tcp_reset_all(ready, conn);

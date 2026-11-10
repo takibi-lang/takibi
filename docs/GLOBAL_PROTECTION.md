@@ -1102,3 +1102,12 @@ Both production tables classify the array as composite, naturally retiring
 only its plain allowance. The same CPU-0 driver records all four results
 before storing and reports them after the sharing pair; timings, mailboxes
 and source/caller ordering remain separate trusted premises.
+
+### Pending TCP chain probe frame (2026-11-10)
+
+The chain probe's frame is a locally owned array, fully zero-initialized by a
+constant-bound checked loop. Its three existing borrowed calls copy into owned
+retransmit entries; no source view is returned. The obsolete global allowance
+is removed using both fresh compiler tables. This uses existing initialization,
+bounds and borrow rules, without a fixture exemption or classifier change.
+See TCP_PROBE_LOCAL_FRAME_SPACE.md for the active-frame and fixed-image costs.

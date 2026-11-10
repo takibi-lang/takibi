@@ -1,0 +1,772 @@
+{
+  "baseline_head": "90224091f4a9bdfeec348d67e244e6c20d0d4140",
+  "baseline_source_sha256": "4c30b90193dc2cdb03cb2056a7d20da04751da18a1d3361c5e99823d50c5f7c1",
+  "candidate_worktree": "/workspaces/takibi-claude/.claude/worktrees/codex-1501-local-tcp-probe-frame",
+  "candidate_tcp_sha256": "a2fd3992413c05e811b269eb189e5900f59dafaba4193d6f383db447df1521e2",
+  "artifacts": {
+    "qemu/main.o": {
+      "before_sha256": "df578864b6270915dc34dc1fcb0ffc5778cad25c664b107d238d00ee38cb624e",
+      "after_sha256": "5419e9ebcd21d35e1902a473a26bcb97ac2231e1e3649339514cdee3c286372c",
+      "before_file_bytes": 3002000,
+      "after_file_bytes": 3001824,
+      "before": {
+        "text": 818511,
+        "data": 136,
+        "bss": 904023
+      },
+      "after": {
+        "text": 818543,
+        "data": 136,
+        "bss": 902509
+      },
+      "changed_symbol_sizes": {
+        "pending_tcp_chain_probe_body": {
+          "before": {
+            "address": 0,
+            "size": 796,
+            "kind": "T"
+          },
+          "after": {
+            "address": 0,
+            "size": 828,
+            "kind": "T"
+          }
+        },
+        "pending_tcp_probe_frame": {
+          "before": {
+            "address": 0,
+            "size": 1514,
+            "kind": "B"
+          },
+          "after": null
+        }
+      },
+      "ram_symbols": {
+        "usable_ram_start": {
+          "before": null,
+          "after": null
+        },
+        "__bss_start": {
+          "before": null,
+          "after": null
+        },
+        "__bss_end": {
+          "before": null,
+          "after": null
+        },
+        "boot_stack_bottom": {
+          "before": null,
+          "after": null
+        },
+        "boot_stack_top": {
+          "before": null,
+          "after": null
+        }
+      },
+      "before_full_body_sp": [
+        "0:      \tsub\tsp, sp, #0x100",
+        "140:      \tadd\tsp, sp, #0x100"
+      ],
+      "before_selected_frame_bytes": 256,
+      "after_full_body_sp": [
+        "0:      \tstp\tx29, x30, [sp, #-0x60]!",
+        "1c:      \tsub\tsp, sp, #0x6b0",
+        "14c:      \tadd\tsp, sp, #0x6b0",
+        "164:      \tldp\tx29, x30, [sp], #0x60"
+      ],
+      "after_selected_frame_bytes": 1808,
+      "changed_section_sizes": {
+        ".bss.pending_tcp_probe_frame": {
+          "before": 1514,
+          "after": null
+        },
+        ".text.takibi.pending_tcp_chain_probe_body": {
+          "before": 796,
+          "after": 828
+        }
+      }
+    },
+    "qemu/main.debug.o": {
+      "before_sha256": "895d2eb93362ef6877985ff95e6eae6a3f6131efcae95605c476c3b51feab04b",
+      "after_sha256": "c79cdc706306541dc72f3a99075c0f9f4efa743995c4daaa17ba91b75b7d784f",
+      "before_file_bytes": 7837728,
+      "after_file_bytes": 7838400,
+      "before": {
+        "text": 1131126,
+        "data": 136,
+        "bss": 904023
+      },
+      "after": {
+        "text": 1131138,
+        "data": 136,
+        "bss": 902509
+      },
+      "changed_symbol_sizes": {
+        "pending_tcp_chain_probe_body": {
+          "before": {
+            "address": 0,
+            "size": 828,
+            "kind": "T"
+          },
+          "after": {
+            "address": 0,
+            "size": 840,
+            "kind": "T"
+          }
+        },
+        "pending_tcp_probe_frame": {
+          "before": {
+            "address": 0,
+            "size": 1514,
+            "kind": "B"
+          },
+          "after": null
+        }
+      },
+      "ram_symbols": {
+        "usable_ram_start": {
+          "before": null,
+          "after": null
+        },
+        "__bss_start": {
+          "before": null,
+          "after": null
+        },
+        "__bss_end": {
+          "before": null,
+          "after": null
+        },
+        "boot_stack_bottom": {
+          "before": null,
+          "after": null
+        },
+        "boot_stack_top": {
+          "before": null,
+          "after": null
+        }
+      },
+      "before_full_body_sp": [
+        "0:      \tsub\tsp, sp, #0x1a0",
+        "144:      \tadd\tsp, sp, #0x1a0"
+      ],
+      "before_selected_frame_bytes": 416,
+      "after_full_body_sp": [
+        "0:      \tstp\tx29, x30, [sp, #-0x60]!",
+        "1c:      \tsub\tsp, sp, #0x730",
+        "13c:      \tadd\tsp, sp, #0x730",
+        "154:      \tldp\tx29, x30, [sp], #0x60"
+      ],
+      "after_selected_frame_bytes": 1936,
+      "changed_section_sizes": {
+        ".bss.pending_tcp_probe_frame": {
+          "before": 1514,
+          "after": null
+        },
+        ".text.takibi.pending_tcp_chain_probe_body": {
+          "before": 828,
+          "after": 840
+        }
+      }
+    },
+    "qemu/kernel.elf": {
+      "before_sha256": "3afea3cccacba9946ac9228a03563007f66432f7ba8a760b5411c97ae2d88efa",
+      "after_sha256": "6d8bc647c8d510066ae23b8842aeb5de806bcdb85f820749f058993b63531052",
+      "before_file_bytes": 1315416,
+      "after_file_bytes": 1315336,
+      "before": {
+        "text": 823112,
+        "data": 4616,
+        "bss": 1314816
+      },
+      "after": {
+        "text": 823144,
+        "data": 4608,
+        "bss": 1314816
+      },
+      "changed_symbol_sizes": {
+        "pending_tcp_chain_probe_body": {
+          "before": {
+            "address": 1074143296,
+            "size": 796,
+            "kind": "T"
+          },
+          "after": {
+            "address": 1074143296,
+            "size": 828,
+            "kind": "T"
+          }
+        },
+        "pending_tcp_probe_frame": {
+          "before": {
+            "address": 1075239936,
+            "size": 1514,
+            "kind": "B"
+          },
+          "after": null
+        }
+      },
+      "ram_symbols": {
+        "usable_ram_start": {
+          "before": {
+            "address": 1075904512,
+            "size": 0,
+            "kind": "B"
+          },
+          "after": {
+            "address": 1075904512,
+            "size": 0,
+            "kind": "B"
+          }
+        },
+        "__bss_start": {
+          "before": {
+            "address": 1074573312,
+            "size": 0,
+            "kind": "B"
+          },
+          "after": {
+            "address": 1074573312,
+            "size": 0,
+            "kind": "B"
+          }
+        },
+        "__bss_end": {
+          "before": {
+            "address": 1075494912,
+            "size": 0,
+            "kind": "B"
+          },
+          "after": {
+            "address": 1075494912,
+            "size": 0,
+            "kind": "B"
+          }
+        },
+        "boot_stack_bottom": {
+          "before": {
+            "address": 1075527680,
+            "size": 0,
+            "kind": "B"
+          },
+          "after": {
+            "address": 1075527680,
+            "size": 0,
+            "kind": "B"
+          }
+        },
+        "boot_stack_top": {
+          "before": {
+            "address": 1075544048,
+            "size": 0,
+            "kind": "B"
+          },
+          "after": {
+            "address": 1075544048,
+            "size": 0,
+            "kind": "B"
+          }
+        }
+      },
+      "changed_section_sizes": {
+        ".got": {
+          "before": 4480,
+          "after": 4472
+        },
+        ".text": {
+          "before": 645136,
+          "after": 645168
+        }
+      }
+    },
+    "qemu/kernel-debug.elf": {
+      "before_sha256": "8c97a7f25288915d6592e37253f799d59066495cee63285f42964b4fa58b1cde",
+      "after_sha256": "b4c271e2ccbbb1aa35626cd930261a0c10db4962b5324b5e0fd5a424a65d0196",
+      "before_file_bytes": 3473256,
+      "after_file_bytes": 3474104,
+      "before": {
+        "text": 899748,
+        "data": 4616,
+        "bss": 1314816
+      },
+      "after": {
+        "text": 899764,
+        "data": 4608,
+        "bss": 1314816
+      },
+      "changed_symbol_sizes": {
+        "pending_tcp_chain_probe_body": {
+          "before": {
+            "address": 1074200256,
+            "size": 828,
+            "kind": "T"
+          },
+          "after": {
+            "address": 1074200256,
+            "size": 840,
+            "kind": "T"
+          }
+        },
+        "pending_tcp_probe_frame": {
+          "before": {
+            "address": 1075317760,
+            "size": 1514,
+            "kind": "B"
+          },
+          "after": null
+        }
+      },
+      "ram_symbols": {
+        "usable_ram_start": {
+          "before": {
+            "address": 1075970048,
+            "size": 0,
+            "kind": "B"
+          },
+          "after": {
+            "address": 1075970048,
+            "size": 0,
+            "kind": "B"
+          }
+        },
+        "__bss_start": {
+          "before": {
+            "address": 1074651136,
+            "size": 0,
+            "kind": "B"
+          },
+          "after": {
+            "address": 1074651136,
+            "size": 0,
+            "kind": "B"
+          }
+        },
+        "__bss_end": {
+          "before": {
+            "address": 1075572736,
+            "size": 0,
+            "kind": "B"
+          },
+          "after": {
+            "address": 1075572736,
+            "size": 0,
+            "kind": "B"
+          }
+        },
+        "boot_stack_bottom": {
+          "before": {
+            "address": 1075593216,
+            "size": 0,
+            "kind": "B"
+          },
+          "after": {
+            "address": 1075593216,
+            "size": 0,
+            "kind": "B"
+          }
+        },
+        "boot_stack_top": {
+          "before": {
+            "address": 1075609584,
+            "size": 0,
+            "kind": "B"
+          },
+          "after": {
+            "address": 1075609584,
+            "size": 0,
+            "kind": "B"
+          }
+        }
+      },
+      "changed_section_sizes": {
+        ".got": {
+          "before": 4480,
+          "after": 4472
+        },
+        ".text": {
+          "before": 724016,
+          "after": 724032
+        }
+      }
+    },
+    "rpi5/main.o": {
+      "before_sha256": "611451d3bef0e9092e6e25e3b935dc5fa2a78268f4ebe013f2d425cc97bc1cf8",
+      "after_sha256": "8a4e1166853f36cc4d3bdb405759a6171b195fc734e93ca286c708319d6e8a9a",
+      "before_file_bytes": 6543384,
+      "after_file_bytes": 6543144,
+      "before": {
+        "text": 4193010,
+        "data": 336,
+        "bss": 1173531
+      },
+      "after": {
+        "text": 4193038,
+        "data": 336,
+        "bss": 1172017
+      },
+      "changed_symbol_sizes": {
+        "pending_tcp_chain_probe_body": {
+          "before": {
+            "address": 0,
+            "size": 772,
+            "kind": "T"
+          },
+          "after": {
+            "address": 0,
+            "size": 800,
+            "kind": "T"
+          }
+        },
+        "pending_tcp_probe_frame": {
+          "before": {
+            "address": 0,
+            "size": 1514,
+            "kind": "B"
+          },
+          "after": null
+        }
+      },
+      "ram_symbols": {
+        "usable_ram_start": {
+          "before": null,
+          "after": null
+        },
+        "__bss_start": {
+          "before": null,
+          "after": null
+        },
+        "__bss_end": {
+          "before": null,
+          "after": null
+        },
+        "boot_stack_bottom": {
+          "before": null,
+          "after": null
+        },
+        "boot_stack_top": {
+          "before": null,
+          "after": null
+        }
+      },
+      "before_full_body_sp": [
+        "0:      \tsub\tsp, sp, #0xa0",
+        "150:      \tadd\tsp, sp, #0xa0"
+      ],
+      "before_selected_frame_bytes": 160,
+      "after_full_body_sp": [
+        "0:      \tstp\tx29, x30, [sp, #-0x60]!",
+        "1c:      \tsub\tsp, sp, #0x630",
+        "158:      \tadd\tsp, sp, #0x630",
+        "170:      \tldp\tx29, x30, [sp], #0x60"
+      ],
+      "after_selected_frame_bytes": 1680,
+      "changed_section_sizes": {
+        ".bss.pending_tcp_probe_frame": {
+          "before": 1514,
+          "after": null
+        },
+        ".text.takibi.pending_tcp_chain_probe_body": {
+          "before": 772,
+          "after": 800
+        }
+      }
+    },
+    "rpi5/main.debug.o": {
+      "before_sha256": "0ba391d81651602c6500e7ac0d67807b937c37a85cdafa1306162e041dbc5c7c",
+      "after_sha256": "37f168cfd69883a74b424d9d6bcbf3fc85f4db3a2d8cc7c045478c659fb2f82f",
+      "before_file_bytes": 12109168,
+      "after_file_bytes": 12109840,
+      "before": {
+        "text": 4574525,
+        "data": 336,
+        "bss": 1173531
+      },
+      "after": {
+        "text": 4574553,
+        "data": 336,
+        "bss": 1172017
+      },
+      "changed_symbol_sizes": {
+        "pending_tcp_chain_probe_body": {
+          "before": {
+            "address": 0,
+            "size": 812,
+            "kind": "T"
+          },
+          "after": {
+            "address": 0,
+            "size": 840,
+            "kind": "T"
+          }
+        },
+        "pending_tcp_probe_frame": {
+          "before": {
+            "address": 0,
+            "size": 1514,
+            "kind": "B"
+          },
+          "after": null
+        }
+      },
+      "ram_symbols": {
+        "usable_ram_start": {
+          "before": null,
+          "after": null
+        },
+        "__bss_start": {
+          "before": null,
+          "after": null
+        },
+        "__bss_end": {
+          "before": null,
+          "after": null
+        },
+        "boot_stack_bottom": {
+          "before": null,
+          "after": null
+        },
+        "boot_stack_top": {
+          "before": null,
+          "after": null
+        }
+      },
+      "before_full_body_sp": [
+        "0:      \tsub\tsp, sp, #0x120",
+        "13c:      \tadd\tsp, sp, #0x120"
+      ],
+      "before_selected_frame_bytes": 288,
+      "after_full_body_sp": [
+        "0:      \tstp\tx29, x30, [sp, #-0x60]!",
+        "1c:      \tsub\tsp, sp, #0x6b0",
+        "144:      \tadd\tsp, sp, #0x6b0",
+        "15c:      \tldp\tx29, x30, [sp], #0x60"
+      ],
+      "after_selected_frame_bytes": 1808,
+      "changed_section_sizes": {
+        ".bss.pending_tcp_probe_frame": {
+          "before": 1514,
+          "after": null
+        },
+        ".text.takibi.pending_tcp_chain_probe_body": {
+          "before": 812,
+          "after": 840
+        }
+      }
+    },
+    "rpi5/kernel.elf": {
+      "before_sha256": "41d418a98d3040973ffa5cc9421173502a5180e06c42b620cdd5ded4f6274003",
+      "after_sha256": "c64ab9332c61e7be5bd990de6bf3f7c6e9b20e98e59012e9a2ae74be80fe1e57",
+      "before_file_bytes": 4736928,
+      "after_file_bytes": 4736848,
+      "before": {
+        "text": 4207828,
+        "data": 5592,
+        "bss": 1929216
+      },
+      "after": {
+        "text": 4207828,
+        "data": 5584,
+        "bss": 1929216
+      },
+      "changed_symbol_sizes": {
+        "pending_tcp_chain_probe_body": {
+          "before": {
+            "address": 2510304,
+            "size": 772,
+            "kind": "T"
+          },
+          "after": {
+            "address": 2510304,
+            "size": 800,
+            "kind": "T"
+          }
+        },
+        "pending_tcp_probe_frame": {
+          "before": {
+            "address": 7465920,
+            "size": 1514,
+            "kind": "B"
+          },
+          "after": null
+        }
+      },
+      "ram_symbols": {
+        "usable_ram_start": {
+          "before": {
+            "address": 8257536,
+            "size": 0,
+            "kind": "B"
+          },
+          "after": {
+            "address": 8257536,
+            "size": 0,
+            "kind": "B"
+          }
+        },
+        "__bss_start": {
+          "before": {
+            "address": 6316032,
+            "size": 0,
+            "kind": "B"
+          },
+          "after": {
+            "address": 6316032,
+            "size": 0,
+            "kind": "B"
+          }
+        },
+        "__bss_end": {
+          "before": {
+            "address": 7852032,
+            "size": 0,
+            "kind": "B"
+          },
+          "after": {
+            "address": 7852032,
+            "size": 0,
+            "kind": "B"
+          }
+        },
+        "boot_stack_bottom": {
+          "before": {
+            "address": 7880704,
+            "size": 0,
+            "kind": "B"
+          },
+          "after": {
+            "address": 7880704,
+            "size": 0,
+            "kind": "B"
+          }
+        },
+        "boot_stack_top": {
+          "before": {
+            "address": 7897072,
+            "size": 0,
+            "kind": "B"
+          },
+          "after": {
+            "address": 7897072,
+            "size": 0,
+            "kind": "B"
+          }
+        }
+      },
+      "changed_section_sizes": {
+        ".got": {
+          "before": 5256,
+          "after": 5248
+        }
+      }
+    },
+    "rpi5/kernel-debug.elf": {
+      "before_sha256": "e94157da60a58519cc5bf48f3ced2287c2c92bd4bba4feec94c1a80ea3d16ea4",
+      "after_sha256": "229b6d90aa4e4de277d7db31f0ffae6d7c744644593c0f777e1b7933807ab66d",
+      "before_file_bytes": 7146264,
+      "after_file_bytes": 7147120,
+      "before": {
+        "text": 4293280,
+        "data": 5592,
+        "bss": 1843200
+      },
+      "after": {
+        "text": 4293312,
+        "data": 5584,
+        "bss": 1843200
+      },
+      "changed_symbol_sizes": {
+        "pending_tcp_chain_probe_body": {
+          "before": {
+            "address": 2570144,
+            "size": 812,
+            "kind": "T"
+          },
+          "after": {
+            "address": 2570144,
+            "size": 840,
+            "kind": "T"
+          }
+        },
+        "pending_tcp_probe_frame": {
+          "before": {
+            "address": 7465920,
+            "size": 1514,
+            "kind": "B"
+          },
+          "after": null
+        }
+      },
+      "ram_symbols": {
+        "usable_ram_start": {
+          "before": {
+            "address": 8257536,
+            "size": 0,
+            "kind": "B"
+          },
+          "after": {
+            "address": 8257536,
+            "size": 0,
+            "kind": "B"
+          }
+        },
+        "__bss_start": {
+          "before": {
+            "address": 6402048,
+            "size": 0,
+            "kind": "B"
+          },
+          "after": {
+            "address": 6402048,
+            "size": 0,
+            "kind": "B"
+          }
+        },
+        "__bss_end": {
+          "before": {
+            "address": 7852032,
+            "size": 0,
+            "kind": "B"
+          },
+          "after": {
+            "address": 7852032,
+            "size": 0,
+            "kind": "B"
+          }
+        },
+        "boot_stack_bottom": {
+          "before": {
+            "address": 7880704,
+            "size": 0,
+            "kind": "B"
+          },
+          "after": {
+            "address": 7880704,
+            "size": 0,
+            "kind": "B"
+          }
+        },
+        "boot_stack_top": {
+          "before": {
+            "address": 7897072,
+            "size": 0,
+            "kind": "B"
+          },
+          "after": {
+            "address": 7897072,
+            "size": 0,
+            "kind": "B"
+          }
+        }
+      },
+      "changed_section_sizes": {
+        ".got": {
+          "before": 5256,
+          "after": 5248
+        },
+        ".text": {
+          "before": 775756,
+          "after": 775788
+        }
+      }
+    }
+  }
+}

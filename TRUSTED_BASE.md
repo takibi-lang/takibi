@@ -1023,3 +1023,11 @@ access excludes plain field loads/stores; CPU-0-only writer/reader ordering
 and valid sample phases remain trusted. The four stores follow all four
 lock/owner timings, and the four loads follow each timed sharing pair. No
 atomic multiword snapshot or whole mailbox protocol proof is implied.
+
+The pending TCP chain probe owns its zero frame locally. Existing checked
+constant-bound initialization and the borrowed nonretaining copy API replace
+the mutable global allowance. The retransmit implementation still copies
+1514 bytes to its owned entry only when no kept slot is supplied. Its existing
+raw entry access, compiler/lowering correctness and nested call-stack capacity
+remain trusted; the measured per-function ceiling is not a whole-path bound.
+See docs/TCP_PROBE_LOCAL_FRAME_SPACE.md for the storage lifetime measurement.
