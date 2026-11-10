@@ -687,6 +687,11 @@ rules globally.
 - LLVM lowering, the assembler, linker scripts, firmware interfaces, and the
   target CPU are trusted to implement the representations and instructions the
   compiler requests.
+  The private `publish_copy` result uses function-entry storage, with its
+  reset still emitted at each copy; a real builtin-in-loop IR regression
+  checks placement and confines its address to the internal stores/load.
+  LLVM's final frame layout remains trusted. This bounded temporary lifetime
+  does not prove total stack fit (see `docs/PUBLISH_COPY_STORAGE_REVIEW.md`).
 
 - Kernel stack bytes (#637, #672) are read and written only in
   kernel/kernel/stack_poison.tkb. A process stack is reached through its

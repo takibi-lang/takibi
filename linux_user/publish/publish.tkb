@@ -142,6 +142,15 @@ fn app_main() {
     uart_puts("kept");
     report(publish_copy(&slot, &snapshot));
 
+    // One copy site is reused after success and refusal. Its private
+    // result must be reset on every iteration, while a refusal leaves the
+    // previous snapshot intact.
+    for i: usize in 0..<8 {
+        write_or_abandon(i, i + 10, i + 20, i + 1, i % 2 == 0);
+        uart_puts("loop");
+        report(publish_copy(&slot, &snapshot));
+    }
+
     // GitHub issue #534: the byte-array record, through the same states.
     report_line("line empty", publish_copy(&line_slot, &line_copy));
     write_line(65, 8, 1);

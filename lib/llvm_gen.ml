@@ -5314,7 +5314,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              (Option.get (Publish_registry.publication_field sname)) in
            let llty = Hashtbl.find struct_lltypes sname in
            let fn = block_parent (insertion_block builder) in
-           let result = build_alloca ity "publish.copy.result" builder in
+           let result = entry_alloca ity "publish.copy.result" in
            ignore (build_store (const_int ity 0) result builder);
            let copy_bb = append_block context "publish.copy" fn in
            let recheck_bb = append_block context "publish.recheck" fn in

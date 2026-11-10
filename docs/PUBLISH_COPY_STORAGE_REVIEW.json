@@ -1,0 +1,341 @@
+{
+  "date": "2026-11-10",
+  "baseline_commit": "b95036dffe406fbeb1905e72a74db9ce46da6919",
+  "candidate_llvm_gen_sha256": "e3618936339be2fbb282325e89e0237afb53ad5fd91f41c4677c7c5928aa812a",
+  "artifacts": {
+    "qemu/main.o": {
+      "before_sha256": "7d558c9c74ed903b8feac657a983d0072fec02e69bdb3c752b34f36f1695acd7",
+      "after_sha256": "74c56084512352727e58914e8ea3cf2b53ccf571a68c2b837b2eba1facf8ce08",
+      "before_file_bytes": 3000424,
+      "after_file_bytes": 3000424,
+      "sizes": {
+        "before": {
+          "text": 818171,
+          "data": 136,
+          "bss": 904023
+        },
+        "after": {
+          "text": 818151,
+          "data": 136,
+          "bss": 904023
+        }
+      },
+      "changed_symbol_sizes": {
+        "diagnostic_trace_copy_cpu": {
+          "before": {
+            "address": 0,
+            "size": 340,
+            "kind": "T"
+          },
+          "after": {
+            "address": 0,
+            "size": 320,
+            "kind": "T"
+          }
+        }
+      },
+      "usable_ram_start": {
+        "before": null,
+        "after": null
+      }
+    },
+    "qemu/main.debug.o": {
+      "before_sha256": "3b4ac35d0d5fce28524ff72a4951d0e07be3cf177dab7842a4c3339d0ffd35db",
+      "after_sha256": "646fd1c1c72ecda333ac12c8ea4e55fe9d8056ac5fb4aacb963d8c2431e2dc9a",
+      "before_file_bytes": 7834992,
+      "after_file_bytes": 7834936,
+      "sizes": {
+        "before": {
+          "text": 1130770,
+          "data": 136,
+          "bss": 904023
+        },
+        "after": {
+          "text": 1130742,
+          "data": 136,
+          "bss": 904023
+        }
+      },
+      "changed_symbol_sizes": {
+        "diagnostic_trace_copy_cpu": {
+          "before": {
+            "address": 0,
+            "size": 384,
+            "kind": "T"
+          },
+          "after": {
+            "address": 0,
+            "size": 356,
+            "kind": "T"
+          }
+        }
+      },
+      "usable_ram_start": {
+        "before": null,
+        "after": null
+      }
+    },
+    "qemu/kernel.elf": {
+      "before_sha256": "9ec17808f31ada4b5f5a270d2ee9fbf656839b6ea6b94132c68086a7e97d6060",
+      "after_sha256": "443e0b57012f7eb57d4c714d5db889945ca5ce3bd82a71ddf78bf8a4ac96cbec",
+      "before_file_bytes": 1314888,
+      "after_file_bytes": 1314888,
+      "sizes": {
+        "before": {
+          "text": 822760,
+          "data": 4616,
+          "bss": 1314816
+        },
+        "after": {
+          "text": 822728,
+          "data": 4616,
+          "bss": 1314816
+        }
+      },
+      "changed_symbol_sizes": {
+        "diagnostic_trace_copy_cpu": {
+          "before": {
+            "address": 1073795472,
+            "size": 340,
+            "kind": "T"
+          },
+          "after": {
+            "address": 1073795472,
+            "size": 320,
+            "kind": "T"
+          }
+        }
+      },
+      "usable_ram_start": {
+        "before": {
+          "address": 1075904512,
+          "size": 0,
+          "kind": "B"
+        },
+        "after": {
+          "address": 1075904512,
+          "size": 0,
+          "kind": "B"
+        }
+      }
+    },
+    "qemu/kernel-debug.elf": {
+      "before_sha256": "8e3bd6d5521ee6551379e791c604768f3924f67b7fa1a9bdfd55e1411d825a0d",
+      "after_sha256": "0853118154f4f3d0268c58824efdfa653a99d5a73a96ad06d9d6de88e1e789f5",
+      "before_file_bytes": 3472704,
+      "after_file_bytes": 3472704,
+      "sizes": {
+        "before": {
+          "text": 899316,
+          "data": 4616,
+          "bss": 1314816
+        },
+        "after": {
+          "text": 899300,
+          "data": 4616,
+          "bss": 1314816
+        }
+      },
+      "changed_symbol_sizes": {
+        "diagnostic_trace_copy_cpu": {
+          "before": {
+            "address": 1073806384,
+            "size": 384,
+            "kind": "T"
+          },
+          "after": {
+            "address": 1073806384,
+            "size": 356,
+            "kind": "T"
+          }
+        }
+      },
+      "usable_ram_start": {
+        "before": {
+          "address": 1075970048,
+          "size": 0,
+          "kind": "B"
+        },
+        "after": {
+          "address": 1075970048,
+          "size": 0,
+          "kind": "B"
+        }
+      }
+    },
+    "rpi5/main.o": {
+      "before_sha256": "cd2c653434fc8638686fdcae1114551f488977b176eb853139f5a22e87ffa099",
+      "after_sha256": "07bb2f7b6deb4420f535f54a582f16d47cf2f6782b2c45dddef510bd74b65b20",
+      "before_file_bytes": 6542008,
+      "after_file_bytes": 6542008,
+      "sizes": {
+        "before": {
+          "text": 4192682,
+          "data": 336,
+          "bss": 1173531
+        },
+        "after": {
+          "text": 4192650,
+          "data": 336,
+          "bss": 1173531
+        }
+      },
+      "changed_symbol_sizes": {
+        "diagnostic_trace_copy_cpu": {
+          "before": {
+            "address": 0,
+            "size": 352,
+            "kind": "T"
+          },
+          "after": {
+            "address": 0,
+            "size": 320,
+            "kind": "T"
+          }
+        }
+      },
+      "usable_ram_start": {
+        "before": null,
+        "after": null
+      }
+    },
+    "rpi5/main.debug.o": {
+      "before_sha256": "571489347dcee78aa109eb8ab00155389d1334836b6fe57f1fd4933a745e6975",
+      "after_sha256": "24d62d27d035dbbff01cd08b17e8f0ad81038b1469bf3e7af0f0f987e80700d3",
+      "before_file_bytes": 12106656,
+      "after_file_bytes": 12106664,
+      "sizes": {
+        "before": {
+          "text": 4574173,
+          "data": 336,
+          "bss": 1173531
+        },
+        "after": {
+          "text": 4574145,
+          "data": 336,
+          "bss": 1173531
+        }
+      },
+      "changed_symbol_sizes": {
+        "diagnostic_trace_copy_cpu": {
+          "before": {
+            "address": 0,
+            "size": 384,
+            "kind": "T"
+          },
+          "after": {
+            "address": 0,
+            "size": 356,
+            "kind": "T"
+          }
+        }
+      },
+      "usable_ram_start": {
+        "before": null,
+        "after": null
+      }
+    },
+    "rpi5/kernel.elf": {
+      "before_sha256": "6697a03180178cfa8457a448668fb68b64135fdc0c7414fb79fcbf696dfd50b8",
+      "after_sha256": "31bd73f9ad65ee976aed0f861b5c70f4bb3f0ecd89570bddd0142f3e22b88edc",
+      "before_file_bytes": 4736400,
+      "after_file_bytes": 4736400,
+      "sizes": {
+        "before": {
+          "text": 4207492,
+          "data": 5592,
+          "bss": 1929216
+        },
+        "after": {
+          "text": 4207460,
+          "data": 5592,
+          "bss": 1929216
+        }
+      },
+      "changed_symbol_sizes": {
+        "diagnostic_trace_copy_cpu": {
+          "before": {
+            "address": 2153440,
+            "size": 352,
+            "kind": "T"
+          },
+          "after": {
+            "address": 2153440,
+            "size": 320,
+            "kind": "T"
+          }
+        }
+      },
+      "usable_ram_start": {
+        "before": {
+          "address": 8257536,
+          "size": 0,
+          "kind": "B"
+        },
+        "after": {
+          "address": 8257536,
+          "size": 0,
+          "kind": "B"
+        }
+      }
+    },
+    "rpi5/kernel-debug.elf": {
+      "before_sha256": "1dbfce376b8f471331b11b24f278ef1eef66558d2aa2f79216075dd4a865481f",
+      "after_sha256": "7233a73b7604e43f74a0a54fd11ff564e81e986f0b29dd0814dbb7ed945738eb",
+      "before_file_bytes": 7145688,
+      "after_file_bytes": 7145696,
+      "sizes": {
+        "before": {
+          "text": 4292880,
+          "data": 5592,
+          "bss": 1843200
+        },
+        "after": {
+          "text": 4292848,
+          "data": 5592,
+          "bss": 1843200
+        }
+      },
+      "changed_symbol_sizes": {
+        "diagnostic_trace_copy_cpu": {
+          "before": {
+            "address": 2164704,
+            "size": 384,
+            "kind": "T"
+          },
+          "after": {
+            "address": 2164688,
+            "size": 356,
+            "kind": "T"
+          }
+        }
+      },
+      "usable_ram_start": {
+        "before": {
+          "address": 8257536,
+          "size": 0,
+          "kind": "B"
+        },
+        "after": {
+          "address": 8257536,
+          "size": 0,
+          "kind": "B"
+        }
+      }
+    }
+  },
+  "changed_object_functions": {
+    "qemu/main.o": [
+      "diagnostic_trace_copy_cpu"
+    ],
+    "qemu/main.debug.o": [
+      "diagnostic_trace_copy_cpu"
+    ],
+    "rpi5/main.o": [
+      "diagnostic_trace_copy_cpu"
+    ],
+    "rpi5/main.debug.o": [
+      "diagnostic_trace_copy_cpu"
+    ]
+  }
+}

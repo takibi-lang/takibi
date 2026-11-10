@@ -21979,6 +21979,57 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
            2 (count_substring ir "ldar $0, [$1]")));
 
   Alcotest.test_case
+    "issue #1498: publish_copy in a loop reuses entry storage and resets each copy"
+    `Quick
+    (fun () ->
+       with_codegen_target "aarch64-none-elf" (fun () ->
+         expect_codegen_ok
+           "struct publish Ev { seq: usize; value: usize; }
+            let mut slot: Ev;
+            let mut out: Ev;
+            fn issue1498_copy_loop() -> usize {
+              let mut sum: usize = 0;
+              for i: usize in 0..<8 {
+                let taken = publish_copy(&slot, &out);
+                if (taken != 0) { sum = sum + taken + out.value; }
+              }
+              return sum;
+            }" ();
+         let open Llvm in
+         let fn = Option.get (lookup_function "issue1498_copy_loop"
+           !Llvm_gen.the_module) in
+         let slots = ref [] in
+         iter_blocks (fun block -> iter_instrs (fun instr ->
+           if instr_opcode instr = Opcode.Alloca
+              && value_name instr = "publish.copy.result" then
+             slots := instr :: !slots) block) fn;
+         Alcotest.(check int) "one slot for the loop's copy" 1 (List.length !slots);
+         let slot = List.hd !slots in
+         Alcotest.(check bool) "private result allocated once at function entry"
+           true (instr_parent slot = entry_block fn);
+         let resets = ref [] and reads = ref 0 in
+         iter_blocks (fun block -> iter_instrs (fun instr ->
+           match instr_opcode instr with
+           | Opcode.Store when operand instr 1 = slot ->
+               if is_constant (operand instr 0)
+                  && int64_of_const (operand instr 0) = Some 0L then
+                 resets := block :: !resets
+           | Opcode.Load when operand instr 0 = slot -> incr reads
+           | _ -> ()) block) fn;
+         iter_uses (fun use ->
+           let instr = user use in
+           let private_access = match instr_opcode instr with
+             | Opcode.Load -> operand instr 0 = slot
+             | Opcode.Store -> operand instr 1 = slot && operand instr 0 <> slot
+             | _ -> false in
+           Alcotest.(check bool) "private address is only a load/store address"
+             true private_access) slot;
+         Alcotest.(check int) "one reset per copy" 1 (List.length !resets);
+         Alcotest.(check bool) "zero reset stays inside the loop" true
+           (List.hd !resets <> entry_block fn);
+         Alcotest.(check int) "result is consumed after the copy" 1 !reads));
+
+  Alcotest.test_case
     "issue #299: publish_begin clears the commit word before the payload"
     `Quick
     (fun () ->
