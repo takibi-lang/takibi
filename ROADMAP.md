@@ -213,9 +213,12 @@ owners are TaskMutex, the spare stack stays masked). #980
 
 ### Territory B: supporting the pillars, by priority
 
-**Priority update, 2026-11-10.** The network queue boundary under #1159 is
-published, preserving nonblocking receive and pending IRQ/capability
-bookkeeping. The approved guard-lifetime and synchronous borrowed-callback
+**Priority update, 2026-11-10.** Correct the hexadecimal frame-size
+measurement gap (#1496) before relying on the per-frame gate; review the
+existing exception measurements before changing budgets. The Linux cold
+handoff and matched USB-root plan (#1158) waits for a maintainer decision.
+The network queue boundary under #1159 is published, preserving nonblocking
+receive and pending IRQ/capability bookkeeping. The approved guard-lifetime and synchronous borrowed-callback
 compiler foundation for #1481 is published with RootHeld. Integrate the real
 waiting Mutex scheduler and consumer work on that combination before the
 preemption flip. Carry actual boot/driver authority to acquisition and use
