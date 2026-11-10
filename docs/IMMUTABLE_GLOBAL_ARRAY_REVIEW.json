@@ -1,0 +1,252 @@
+{
+  "assessment": "Reuse normal kernel space/occupancy evidence: both normal ELFs and objects are byte-identical. Native-only copies add 70848 fixed-frame bytes and 824 linked-image bytes; readonly fixture storage is unchanged. Compiler binaries differ, while all non-app_main native function bodies and readonly data sections are identical. No production API, pool, allocation or lifetime migration.",
+  "candidate_compiler_sha256": "2a464d27cb4505a75d27a9b7e72932b110b2c51b0d52eb4da261aca9a96a5872",
+  "candidate_production_source_sha256": "74afc22c5a4e22231b40ea7f0dc24a16600a29fbe4f606ab085b9c6d68e18ae6",
+  "candidate_source_head": "27fb7db764b3813b5c136bf9b0eb8aa19b45a486",
+  "changed_native_object_sections": [
+    ".eh_frame",
+    ".rela.text.takibi.app_main",
+    ".symtab",
+    ".text.takibi.app_main"
+  ],
+  "checks": {
+    "allbuild_code_equivalent_commit": "27fb7db764b3813b5c136bf9b0eb8aa19b45a486",
+    "allbuild_elapsed_seconds": 306.96285966201685,
+    "allbuild_execution_diff_sha256": "c12d9b7bae5efc07d24bec6cd8bd09002f1e5fe03e799971b100f7402914b667",
+    "allbuild_execution_head": "bffdc6b0cd4be1b3462e08f1ba0bc6f11028d614",
+    "allbuild_log_sha256": "b93284befa0b3e86ef1a4aaeaa595ff9f0d0f50284b5b964381852d850dc9ed5",
+    "allbuild_source_unchanged": true,
+    "allbuild_status": 0,
+    "eager_root_filter_control_intended_failures": 3,
+    "eager_root_filter_control_test_status": 1,
+    "fixed_focused_status": 0,
+    "focused_cases": 24,
+    "missing_guard_control_intended_failures": 1,
+    "missing_guard_control_test_status": 1
+  },
+  "date": "2026-11-10",
+  "kernel_baseline_head": "08d88c747e1a2d886e7a7e89b2f69688862375cf",
+  "kernel_baseline_manifest_sha256": "37d9de3febcff02329f5192eca167148ab5cecf67c76dcfcc22267eb067028de",
+  "kernel_baseline_receipt_count": 35,
+  "native_artifacts": {
+    "baseline": {
+      "app_main_text_bytes": 5731,
+      "elf_bytes": 117224,
+      "elf_sha256": "588becb7c1c8d222a0c4484ed9b7b2a3d5678e4b6334fd67d8425f1b82effee4",
+      "linked_rodata_bytes": 74495,
+      "linked_text_bytes": 32176,
+      "object_bytes": 184000,
+      "object_sha256": "8b2de0efb4077a47f1aa899ff888c74746183c3053c146bd7b01c575767318a2",
+      "stack": {
+        "fixed_frame_bytes_excluding_return_address": 4936,
+        "local_reservation_bytes": 4888,
+        "maximum_outgoing_argument_bytes_from_emitted_stack_sequence": 384,
+        "maximum_sp_delta_excluding_call_return_and_callees": 5320,
+        "saved_register_bytes": 48,
+        "scope": "Actual app_main emitted stack instruction sequence; not a whole-program call-chain bound."
+      }
+    },
+    "candidate": {
+      "app_main_text_bytes": 6553,
+      "elf_bytes": 118048,
+      "elf_sha256": "b1efe91ddf63ec541e23f67fbe96b39961ccf4b531becc746dd1d141b6057bd0",
+      "linked_rodata_bytes": 74495,
+      "linked_text_bytes": 33000,
+      "object_bytes": 184832,
+      "object_sha256": "0bfd289494845b16c9990aa4836a15d77eb2d22afe80d6cbc8993b1fdda9b6c2",
+      "stack": {
+        "fixed_frame_bytes_excluding_return_address": 75784,
+        "local_reservation_bytes": 75736,
+        "maximum_outgoing_argument_bytes_from_emitted_stack_sequence": 384,
+        "maximum_sp_delta_excluding_call_return_and_callees": 76168,
+        "saved_register_bytes": 48,
+        "scope": "Actual app_main emitted stack instruction sequence; not a whole-program call-chain bound."
+      }
+    }
+  },
+  "native_baseline": {
+    "compiler_sha256": "fc674ff5bcaabd52818e014fa68c0ebe608db64764d23312aff1b9341787796a",
+    "inputs": {
+      "kernel/boot/fdt.tkb": "b6cedc24fa38d19553776def4de2e2622527753bc73ba90849db285c4cd28f77",
+      "kernel/printk/number.tkb": "fdabb6356b789cea061d526db6149935462733f0b1fc02c9bbda9bdeec670ca4",
+      "linux_user/build/fdt_fixture.dtb": "1acc20733bb845a8aa4e381cd1f651c9f5061a5121f6bb761a3fbd729fc3eb9c",
+      "linux_user/build/fdt_invalid_device_fixture.dtb": "f0fdbb0741f66fdb28ff37ca67f6cfeed10cc2a655fd8830c1c279d816807733",
+      "linux_user/build/fdt_invalid_gic_fixture.dtb": "b8cc247cc242f049960fc92cb2f6f137b073a38c114b294b89d6838e140a6410",
+      "linux_user/build/fdt_invalid_interrupt_fixture.dtb": "43b8e9f6a8ee72e28a66b51a42a803684040754052ae45d628764f5eeaddca02",
+      "linux_user/build/fdt_invalid_memory_fixture.dtb": "dc9dafb2c06147c15f96dc07b3a3e2918430e4cd2a10121e8d003c1006cec5af",
+      "linux_user/build/fdt_invalid_pcie_dma_ranges_fixture.dtb": "0942fa48eaf3ef8b0e7da554e17778e92b3a3c2f23882a1840033fed2bdf3863",
+      "linux_user/build/fdt_invalid_pcie_ranges_fixture.dtb": "f84feb943f57cdda8ae3eb645cc709d50e739598f0dc615f8e0b3b9ab71a5dc3",
+      "linux_user/build/fdt_invalid_reservation_fixture.dtb": "46cda703dfdbe7ddccf1bc88abe2575a79107e3d2af9bcf5fb6c4952da9f8c5b",
+      "linux_user/build/fdt_invalid_tree_reservation_fixture.dtb": "f2b994c3344bd84f5acb82d37c5c50d2ec41bad99e8a3fbee9e410e1db7be31c",
+      "linux_user/build/fdt_invalid_virtio_fixture.dtb": "fe43b1182dbdfbb3c5d74853cc621049c6f22459c1332248f5b56a91cc165fff",
+      "linux_user/build/fdt_missing_interrupt_fixture.dtb": "16ef5a34a5b38aedd1d53e8d9215a82cecfbad18f06c2a3b071d722633bb2602",
+      "linux_user/build/fdt_psci_smc_fixture.dtb": "1066728db0b71a03669f2b1280724b2f270616a6c0adaadaaa34c84a4f9c8931",
+      "linux_user/build/fdt_seed_kaslr_fixture.dtb": "0f133e061d0f0157a7bd0e119112bcd84b8ca67d64e1e10f114db47858a41e24",
+      "linux_user/build/fdt_seed_nested_fixture.dtb": "96106d4701ce80380525e639ce66f10cb64c1cd3a9d0f53565c7606a235fd7a0",
+      "linux_user/build/fdt_seed_rng_fixture.dtb": "ee0b8dfcabddccb2ad49a1afd0200607cbe94820e47cca819974b2f64201ecad",
+      "linux_user/build/fdt_seed_short_fixture.dtb": "4681e6b8a9b3aae87815675df29be63c94df07a796a5fad41127b84a1e6d6fff",
+      "linux_user/build/fdt_seed_zero_rng_fixture.dtb": "fd8c057851d68dc45078e4ec45e700854669e0c8a937dd5512149f28194ea916",
+      "linux_user/build/startup.o": "af94eeea0fb72666e454626b2c51bd6b1ace8cd93d74e0939925e88fb7476fa2",
+      "linux_user/build/syscall.o": "4f57abf997071c707b19723f60f2210c28d2d5a5e8c5f76864916bc93374f58e",
+      "linux_user/common/print.tkb": "82aa5c29caae667c915747c692cb54d92a239d745c2996be0637e553be7fd081",
+      "linux_user/common/runtime.tkb": "c84f3d41ecd60bdd9b752a819cb319633d672270f6713b419dc631f9739a3da7",
+      "linux_user/common_linux/print.tkb": "0e44ec53cde54a5c6fdb59e54e6d77a7ca31b120e3430451b54b6cba24651c45",
+      "linux_user/common_linux/uart.tkb": "1a0f39d28932d2ecdf1e65363aa93e5d23634bb0c9406cfba44b67122159a0f8",
+      "linux_user/fdt/fdt.tkb": "ecb75927dce9c2dc02d7bd792295621be13ff6eaac0b253ac8994b39b2d5195b"
+    },
+    "reproduces_preserved_object_and_elf": true
+  },
+  "native_candidate": {
+    "compiler_sha256": "2a464d27cb4505a75d27a9b7e72932b110b2c51b0d52eb4da261aca9a96a5872",
+    "inputs": {
+      "kernel/boot/fdt.tkb": "b6cedc24fa38d19553776def4de2e2622527753bc73ba90849db285c4cd28f77",
+      "kernel/printk/number.tkb": "fdabb6356b789cea061d526db6149935462733f0b1fc02c9bbda9bdeec670ca4",
+      "linux_user/build/fdt_fixture.dtb": "1acc20733bb845a8aa4e381cd1f651c9f5061a5121f6bb761a3fbd729fc3eb9c",
+      "linux_user/build/fdt_invalid_device_fixture.dtb": "f0fdbb0741f66fdb28ff37ca67f6cfeed10cc2a655fd8830c1c279d816807733",
+      "linux_user/build/fdt_invalid_gic_fixture.dtb": "b8cc247cc242f049960fc92cb2f6f137b073a38c114b294b89d6838e140a6410",
+      "linux_user/build/fdt_invalid_interrupt_fixture.dtb": "43b8e9f6a8ee72e28a66b51a42a803684040754052ae45d628764f5eeaddca02",
+      "linux_user/build/fdt_invalid_memory_fixture.dtb": "dc9dafb2c06147c15f96dc07b3a3e2918430e4cd2a10121e8d003c1006cec5af",
+      "linux_user/build/fdt_invalid_pcie_dma_ranges_fixture.dtb": "0942fa48eaf3ef8b0e7da554e17778e92b3a3c2f23882a1840033fed2bdf3863",
+      "linux_user/build/fdt_invalid_pcie_ranges_fixture.dtb": "f84feb943f57cdda8ae3eb645cc709d50e739598f0dc615f8e0b3b9ab71a5dc3",
+      "linux_user/build/fdt_invalid_reservation_fixture.dtb": "46cda703dfdbe7ddccf1bc88abe2575a79107e3d2af9bcf5fb6c4952da9f8c5b",
+      "linux_user/build/fdt_invalid_tree_reservation_fixture.dtb": "f2b994c3344bd84f5acb82d37c5c50d2ec41bad99e8a3fbee9e410e1db7be31c",
+      "linux_user/build/fdt_invalid_virtio_fixture.dtb": "fe43b1182dbdfbb3c5d74853cc621049c6f22459c1332248f5b56a91cc165fff",
+      "linux_user/build/fdt_missing_interrupt_fixture.dtb": "16ef5a34a5b38aedd1d53e8d9215a82cecfbad18f06c2a3b071d722633bb2602",
+      "linux_user/build/fdt_psci_smc_fixture.dtb": "1066728db0b71a03669f2b1280724b2f270616a6c0adaadaaa34c84a4f9c8931",
+      "linux_user/build/fdt_seed_kaslr_fixture.dtb": "0f133e061d0f0157a7bd0e119112bcd84b8ca67d64e1e10f114db47858a41e24",
+      "linux_user/build/fdt_seed_nested_fixture.dtb": "96106d4701ce80380525e639ce66f10cb64c1cd3a9d0f53565c7606a235fd7a0",
+      "linux_user/build/fdt_seed_rng_fixture.dtb": "ee0b8dfcabddccb2ad49a1afd0200607cbe94820e47cca819974b2f64201ecad",
+      "linux_user/build/fdt_seed_short_fixture.dtb": "4681e6b8a9b3aae87815675df29be63c94df07a796a5fad41127b84a1e6d6fff",
+      "linux_user/build/fdt_seed_zero_rng_fixture.dtb": "fd8c057851d68dc45078e4ec45e700854669e0c8a937dd5512149f28194ea916",
+      "linux_user/build/startup.o": "af94eeea0fb72666e454626b2c51bd6b1ace8cd93d74e0939925e88fb7476fa2",
+      "linux_user/build/syscall.o": "4f57abf997071c707b19723f60f2210c28d2d5a5e8c5f76864916bc93374f58e",
+      "linux_user/common/print.tkb": "82aa5c29caae667c915747c692cb54d92a239d745c2996be0637e553be7fd081",
+      "linux_user/common/runtime.tkb": "c84f3d41ecd60bdd9b752a819cb319633d672270f6713b419dc631f9739a3da7",
+      "linux_user/common_linux/print.tkb": "0e44ec53cde54a5c6fdb59e54e6d77a7ca31b120e3430451b54b6cba24651c45",
+      "linux_user/common_linux/uart.tkb": "1a0f39d28932d2ecdf1e65363aa93e5d23634bb0c9406cfba44b67122159a0f8",
+      "linux_user/fdt/fdt.tkb": "12146267167f782ad383bad992e98a9306decf51e2d90aa4f3ba7643a1454084"
+    },
+    "readonly_fixture_symbols": [
+      {
+        "bytes": 3914,
+        "kind": "R",
+        "name": "fdt_missing_interrupt_fixture"
+      },
+      {
+        "bytes": 4096,
+        "kind": "R",
+        "name": "fdt_invalid_pcie_dma_ranges_fixture"
+      },
+      {
+        "bytes": 4108,
+        "kind": "R",
+        "name": "fdt_invalid_interrupt_fixture"
+      },
+      {
+        "bytes": 4124,
+        "kind": "R",
+        "name": "fdt_invalid_pcie_ranges_fixture"
+      },
+      {
+        "bytes": 4152,
+        "kind": "R",
+        "name": "fdt_invalid_virtio_fixture"
+      },
+      {
+        "bytes": 4156,
+        "kind": "R",
+        "name": "fdt_fixture"
+      },
+      {
+        "bytes": 4156,
+        "kind": "R",
+        "name": "fdt_invalid_gic_fixture"
+      },
+      {
+        "bytes": 4156,
+        "kind": "R",
+        "name": "fdt_psci_smc_fixture"
+      },
+      {
+        "bytes": 4172,
+        "kind": "R",
+        "name": "fdt_invalid_reservation_fixture"
+      },
+      {
+        "bytes": 4201,
+        "kind": "R",
+        "name": "fdt_seed_short_fixture"
+      },
+      {
+        "bytes": 4203,
+        "kind": "R",
+        "name": "fdt_seed_kaslr_fixture"
+      },
+      {
+        "bytes": 4208,
+        "kind": "R",
+        "name": "fdt_invalid_tree_reservation_fixture"
+      },
+      {
+        "bytes": 4216,
+        "kind": "R",
+        "name": "fdt_invalid_device_fixture"
+      },
+      {
+        "bytes": 4236,
+        "kind": "R",
+        "name": "fdt_invalid_memory_fixture"
+      },
+      {
+        "bytes": 4237,
+        "kind": "R",
+        "name": "fdt_seed_nested_fixture"
+      },
+      {
+        "bytes": 4256,
+        "kind": "R",
+        "name": "fdt_seed_rng_fixture"
+      },
+      {
+        "bytes": 4256,
+        "kind": "R",
+        "name": "fdt_seed_zero_rng_fixture"
+      }
+    ]
+  },
+  "normal_kernel_artifacts": [
+    {
+      "baseline_bytes": 1314888,
+      "baseline_sha256": "9ec17808f31ada4b5f5a270d2ee9fbf656839b6ea6b94132c68086a7e97d6060",
+      "byte_identical": true,
+      "candidate_bytes": 1314888,
+      "candidate_sha256": "9ec17808f31ada4b5f5a270d2ee9fbf656839b6ea6b94132c68086a7e97d6060",
+      "path": "kernel/build/qemu/kernel.elf"
+    },
+    {
+      "baseline_bytes": 3000424,
+      "baseline_sha256": "7d558c9c74ed903b8feac657a983d0072fec02e69bdb3c752b34f36f1695acd7",
+      "byte_identical": true,
+      "candidate_bytes": 3000424,
+      "candidate_sha256": "7d558c9c74ed903b8feac657a983d0072fec02e69bdb3c752b34f36f1695acd7",
+      "path": "kernel/build/qemu/main.o"
+    },
+    {
+      "baseline_bytes": 4736400,
+      "baseline_sha256": "6697a03180178cfa8457a448668fb68b64135fdc0c7414fb79fcbf696dfd50b8",
+      "byte_identical": true,
+      "candidate_bytes": 4736400,
+      "candidate_sha256": "6697a03180178cfa8457a448668fb68b64135fdc0c7414fb79fcbf696dfd50b8",
+      "path": "kernel/build/rpi5/kernel.elf"
+    },
+    {
+      "baseline_bytes": 6542008,
+      "baseline_sha256": "cd2c653434fc8638686fdcae1114551f488977b176eb853139f5a22e87ffa099",
+      "byte_identical": true,
+      "candidate_bytes": 6542008,
+      "candidate_sha256": "cd2c653434fc8638686fdcae1114551f488977b176eb853139f5a22e87ffa099",
+      "path": "kernel/build/rpi5/main.o"
+    }
+  ],
+  "scope": "Incremental readonly-provenance correction: normal linked kernels and native FDT fixture costs. No guest, hardware timing, whole-callgraph stack or compiler-performance claim."
+}

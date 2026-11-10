@@ -160,10 +160,11 @@ parameter value, or top-level declaration name.
   volatile-qualified value type (same LLVM representation as `T`). **`*io
   T`** (`= *(io T)`, i.e. `TypePtr(TypeIo T)`) is a volatile MMIO pointer.
   See "MMIO / Volatile" below.
-- **`[T; N]`** is a fixed-size array. It decays to `*T` when used as an
-  ordinary expression (e.g. passed to a function), and can only be
-  *declared* at local or global scope, never as a function parameter type
-  directly.
+- **`[T; N]`** is a fixed-size array, declared only at local or global
+  scope, never as a function parameter type directly. Local arrays and
+  mutable global arrays decay to `*T` in ordinary expressions (e.g. as
+  function arguments). Immutable global arrays retain readonly access
+  instead, as described below.
 - **`[]T` / `[T; N..]`** is a slice: a fat value (`{ptr, usize}` pair)
   carrying a compile-time-known *minimum* length. `[]T` means "minimum 0,
   length unknown at compile time"; `[T; N..]` means "at least N elements,
@@ -252,6 +253,8 @@ parameter value, or top-level declaration name.
   reference to a struct element is permitted; a writable reference or raw
   element address is not. This adds no uninitialized immutable storage form
   and does not make a pointer stored in an element's value deeply readonly.
+  The same rule applies when the array type is inferred from `embed_file`
+  or an array value copy, including uses in later global initializers.
 - `let mut x: T;` (no initializer) is *also* allowed at **local** scope,
   for any `T` including scalars, arrays, and structs -- unlike the global
   case, the initial content is undefined (whatever was already on the
@@ -3105,7 +3108,8 @@ readonly), `.len`, `slice_eq` and `slice_copy`'s source side; they reject
 element stores and every conversion to a writable slice or raw pointer
 outside `unsafe`. `[]T` flows into a `[]const T` position; the minimum
 length rule applies unchanged. A slice made from an array place reached
-through a shared `&T` is readonly whatever slice type the cast spells.
+through a shared `&T`, or rooted in an immutable global array, is readonly
+whatever slice type the cast spells.
 
 A pointer to a struct or array (`&T`, `&mut T`, `*T`, `*align(N) T`) can be
 viewed as its bytes with `p as []const u8` (GitHub issue #794): the length
