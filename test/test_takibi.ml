@@ -30793,6 +30793,52 @@ let immutable_global_array_tests =
           let mut bytes1489: [u8; 1]; bytes1489[0] = 3; return bytes1489[0];
         }
       |}));
+    Alcotest.test_case "inferred embedded root rejects global pointer decay" `Quick
+      (fun () -> with_embed_fixture "abcd" (fun path ->
+        expect_type_error "immutable global array" (Printf.sprintf {|
+          let inferred1489 = embed_file("%s");
+          let alias1489: *u8 = inferred1489 as *u8;
+        |} path) ()));
+    Alcotest.test_case "inferred embedded root rejects global writable slice" `Quick
+      (fun () -> with_embed_fixture "abcd" (fun path ->
+        expect_type_error "readonly" (Printf.sprintf {|
+          let inferred1489 = embed_file("%s");
+          let alias1489: []u8 = inferred1489 as []u8;
+        |} path) ()));
+    Alcotest.test_case "inferred global array copy retains readonly in initializers" `Quick
+      (expect_type_error "readonly" (root ^ {|
+        let copied1489 = bytes1489;
+        let alias1489: []u8 = copied1489 as []u8;
+      |}));
+    Alcotest.test_case "inferred global array value copies codegen" `Quick
+      (expect_trap_sites 0 (root ^ {|
+        let copied1489 = bytes1489;
+        let mut mutable1489 = bytes1489;
+        fn good1489() -> u8 {
+          mutable1489[0] = 9;
+          if (copied1489[0] == 1) { return mutable1489[0]; }
+          return 0;
+        }
+      |}));
+    Alcotest.test_case "inferred embedded root rejects function writes" `Quick
+      (fun () -> with_embed_fixture "abcd" (fun path ->
+        expect_type_error "immutable global array" (Printf.sprintf {|
+          let inferred1489 = embed_file("%s");
+          fn bad1489() { inferred1489[0] = 9; }
+        |} path) ()));
+    Alcotest.test_case "inferred embedded readonly views and shadows codegen" `Quick
+      (fun () -> with_embed_fixture "abcd" (fun path ->
+        expect_trap_sites 0 (Printf.sprintf {|
+          let inferred1489 = embed_file("%s");
+          fn good1489() -> u8 {
+            if (true) {
+              let mut inferred1489: [u8; 1];
+              inferred1489[0] = 9;
+            }
+            let readonly1489 = inferred1489 as []const u8;
+            return readonly1489[0];
+          }
+        |} path) ()));
   ]
 
 (* Literal storage must retain readonly access through ordinary slice paths. *)

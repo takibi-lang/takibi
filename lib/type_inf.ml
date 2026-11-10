@@ -525,14 +525,17 @@ let place_static_identities : static_term StringMap.t ref = ref StringMap.empty
 let global_address_names : StringSet.t ref = ref StringSet.empty
 let locally_bound_names : StringSet.t ref = ref StringSet.empty
 (* Immutable array storage is identified by its actual environment binding,
-   not just its name: a local shadow must not hide the root after its scope. *)
+   not just its name: a local shadow must not hide the root after its scope.
+   Keep unresolved globals too: embed_file and array copies learn their array
+   type during global initialization, before a later initializer uses them. *)
 let immutable_global_array_bindings : (ty * bool) StringMap.t ref = ref StringMap.empty
 
 let immutable_global_array tyenv (e : Ast.expr) = match e.desc with
   | Ast.Var name ->
       (match StringMap.find_opt name tyenv,
              StringMap.find_opt name !immutable_global_array_bindings with
-       | Some entry, Some global when entry == global -> Some name
+       | Some ((ty, _) as entry), Some global when entry == global ->
+           (match repr ty with TArray _ -> Some name | _ -> None)
        | _ -> None)
   | _ -> None
 
@@ -12028,9 +12031,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.ExceptionRestoreDef _     -> m
     | Ast.GenericStructDef _       -> m
   ) StringMap.empty prog in
-  immutable_global_array_bindings := StringMap.filter (fun name (ty, is_mut) ->
-    StringSet.mem name !global_address_names && not is_mut
-    && (match repr ty with TArray _ -> true | _ -> false)) genv;
+  immutable_global_array_bindings := StringMap.filter (fun name (_, is_mut) ->
+    StringSet.mem name !global_address_names && not is_mut) genv;
   (* Pass 2: check global initializers.
      GitHub issue #77: a plain List.iter used to be enough here, since no
      global initializer had ever needed to change genv's own STORED type
@@ -12176,9 +12178,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              else StringMap.add name (bind_ty, is_mutable) genv)
     | _ -> genv
   ) genv prog in
-  immutable_global_array_bindings := StringMap.filter (fun name (ty, is_mut) ->
-    StringSet.mem name !global_address_names && not is_mut
-    && (match repr ty with TArray _ -> true | _ -> false)) genv;
+  immutable_global_array_bindings := StringMap.filter (fun name (_, is_mut) ->
+    StringSet.mem name !global_address_names && not is_mut) genv;
   (* Preserve source-level parameter modes for call-site checks. Ordinary
      HM types intentionally erase borrow/sink wrappers, but `borrow mut`
      still needs the caller's place mutability and exclusivity checked. *)
