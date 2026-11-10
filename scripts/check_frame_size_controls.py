@@ -42,6 +42,32 @@ def main():
                    any("gone: budget entry" in p for p in found)))
     checks.append(("small frame passes",
                    problems({"small": 32}, budget={}, ceiling=2048) == []))
+    # LLVM 19 prints hexadecimal immediates by default. The saved pair is
+    # part of the frame even when a later sub alone fits the ceiling.
+    for pair, sub in [("48", "2048"), ("0x30", "0x800")]:
+        listing = ("0000000000000000 <above_ceiling>:\n"
+                   f"       0:\tstp\tx29, x30, [sp, #-{pair}]!\n"
+                   f"       4:\tsub\tsp, sp, #{sub}\n")
+        measured = frames(listing)
+        checks.append((f"{pair} pair allocation accumulates",
+                       measured == {"above_ceiling": 2096}))
+        checks.append((f"{pair} pair crosses ceiling",
+                       any("frame 2096 B exceeds the 2048 B ceiling" in p
+                           for p in problems(measured, budget={}))))
+        checks.append((f"{pair} pair crosses recorded budget",
+                       any("frame 2096 B exceeds its recorded budget 2048 B" in p
+                           for p in problems(measured,
+                                             budget={"above_ceiling": 2048}))))
+    valid = frames("0000000000000000 <at_ceiling>:\n"
+                   "       0:\tstp\tx29, x30, [sp, #-0x30]!\n"
+                   "       4:\tsub\tsp, sp, #0x7d0\n")
+    checks.append(("hexadecimal pair at ceiling passes",
+                   valid == {"at_ceiling": 2048} and
+                   problems(valid, budget={}) == []))
+    checks.append(("hexadecimal pair alone is measured",
+                   frames("0000000000000000 <pair_only>:\n"
+                          "       0:\tstp\tx29, x30, [sp, #-0x20]!\n") ==
+                   {"pair_only": 32}))
     bad = [name for name, ok in checks if not ok]
     if bad:
         for name in bad:

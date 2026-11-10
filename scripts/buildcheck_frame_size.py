@@ -12,7 +12,7 @@ This reads the prologue of every function in an aarch64 object or ELF
 CEILING bytes, unless BUDGET names the function: a listed function may not
 exceed its recorded frame, and an entry whose function is gone, or is now
 below the ceiling, is refused as stale. It bounds single frames, not paths;
-a whole-call-graph stack bound is the stronger, unfiled compiler-side rung.
+a whole-call-graph stack bound is the stronger compiler-side rung (#58).
 
 Usage: buildcheck_frame_size.py OBJECT...
 """
@@ -24,22 +24,24 @@ from pass_line import report_pass
 
 CEILING = 2048
 
-# Functions above the ceiling when it was introduced, with their frame in
-# the largest image measured (the qemu debug image) and why each is
-# accepted. Lower an entry when its frame shrinks; delete it at or under
-# the ceiling.
+# Existing exceptions, with their full frame in the largest image measured
+# (the debug images) and why each is accepted. The #1496 correction includes
+# the 96-byte stp allocation omitted from both records by the old parser,
+# measured against the already accepted c37c938b objects; it accepts no
+# physical frame growth. Lower an entry when its frame shrinks; delete it
+# at or under the ceiling.
 BUDGET = {
     # Boot-only scheduler probe, run once on the boot stack early in boot.
-    "kernel_process_scheduler_probe": 3216,
+    "kernel_process_scheduler_probe": 3312,
     # ext2 write path; runs on a process stack with a shallow caller chain.
-    "ext2_update_regular_file": 2544,
+    "ext2_update_regular_file": 2640,
 }
 
 PROLOGUE_LINES = 12
 
 
 def frames(text):
-    """Map function name -> frame bytes from `llvm-objdump -d` output."""
+    """Map function name -> frame bytes from decimal or hex objdump output."""
     result = {}
     current = None
     size = 0
@@ -54,9 +56,9 @@ def frames(text):
         if current is None or seen >= PROLOGUE_LINES:
             continue
         seen += 1
-        m = re.search(r"stp\s+x29, x30, \[sp, #-(\d+)\]!", line)
+        m = re.search(r"stp\s+x29, x30, \[sp, #-(0x[0-9a-f]+|\d+)\]!", line)
         if m:
-            size += int(m.group(1))
+            size += int(m.group(1), 0)
         m = re.search(r"sub\s+sp, sp, #(0x[0-9a-f]+|\d+)(, lsl #12)?", line)
         if m:
             value = int(m.group(1), 0)

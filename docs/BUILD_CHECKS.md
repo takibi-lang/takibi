@@ -204,7 +204,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_comment_strippers_controls.py` | each pre-#818 stripper shape is refused; a commented shape, a longer comment anchor and `source_scan` itself pass; stale allow-list entries are refused |
 | `check_text_search.py` | no `String.sub s i m = x` (or `<>`) at a non-zero offset in lib/ or bin/: a search must use `lib/text_search.ml`, which does not allocate per position (#917) |
 | `check_text_search_controls.py` | each pre-#917 search shape is refused; a prefix test at 0, a value use, a comment and `==` pass |
-| `check_frame_size_controls.py` | Controls for `buildcheck_frame_size.py`: the prologue parser reads `stp`/`sub` (with `lsl #12`) frames; an unbudgeted 6 KiB frame (#1081's shape) and a budgeted one over its entry are refused, as are stale entries; a small frame and a budgeted one within its entry pass |
+| `check_frame_size_controls.py` | Controls for `buildcheck_frame_size.py`: the prologue parser reads decimal and hexadecimal `stp`/`sub` (with `lsl #12`) frames, including a saved pair that takes a frame over the ceiling; an unbudgeted 6 KiB frame (#1081's shape) and a budgeted one over its entry are refused, as are stale entries; a small frame and a budgeted one within its entry pass |
 | `check_compile_alloc_budget_controls.py` | the pre-#917 allocation, one word over budget, malformed counts and an unknown target are refused by `buildcheck_compile_alloc_budget.py`; the budget and the measurement pass (#923) |
 | `check_fast_gate_no_spawn.py` | no fast-gate Python member spawns a non-git process (subprocess, os.system, os.exec/spawn) unless reviewed with why it stays fast (#808: a member waiting on children overran the 10 s bound under the parallel allcheck; such members are `slowcheck_*`) |
 | `check_fast_gate_no_spawn_controls.py` | a Python child, a compiler child, a computed argv, os.system and os.execv are refused; git and a spawn named in a string pass; stale reviewed entries are refused |
@@ -384,7 +384,7 @@ run them, and why they sit outside both globs above.
 | `buildcheck_cpu_authority_mints.py` | run by each kernel object rule on its `--facts callgraph.tsv`: every public `CpuHere` return is refused except the exact approved exception-only constructor in `cpu_authority.tkb`, whose compiled callers and function-value uses are confined by its exact `allowed_callers.tsv` row; foreign calls, function values, counterfeit public returns and loss of the private region mint are refused. Manual exception authority is trusted, not a scoped `preempt_off` loan (#704, #1159, #638) |
 | `buildcheck_dma_mint_files.py` | run once on both kernels' `--facts fields.tsv`: every `dma_fixed` record is declared in a listed mint file, and each listed file exists and still declares one in some kernel; read from the tables' `file` and `qualifier` columns, not the .tkb text; a planted record in a driver file and the listed records removed are its controls (#716, #717, #567) |
 | `buildcheck_world_stop_rank.py` | run by each kernel object's rule on the same `--facts callgraph.tsv` table: `world_stop_machine_begin` declares an `acquires_lock_<rank>_world_stop` rank below every other declared lock class, and its unranked body `world_stop_machine_begin_holding_probe` is called only from it or a `*_probe` function (#641). Planted tables with a non-probe caller, a missing rank, a lower class and a renamed stop are refused. Moved off `.tkb` text from `check_world_stop_refusals.py` (#567) |
-| `buildcheck_frame_size.py` | run by each kernel object's rule (qemu and rpi5 main.o, and the qemu debug object, whose frames are the largest): no function's stack frame, read from its prologue, exceeds 2048 B unless its `BUDGET` entry names it, and a budgeted one may not exceed its entry; a stale entry is refused. Bounds single frames, not call paths: #1081's by-value load plan grew exec-path frames to 6.5 KiB and overflowed the 16 KiB boot stack in the debug images, which no check before QEMU saw |
+| `buildcheck_frame_size.py` | run by each kernel object's rule (qemu and rpi5 main.o, and the qemu debug object, whose frames are the largest): no function's stack frame, read from recognized `stp`/`sub` allocations in its first 12 prologue lines (decimal or hexadecimal), exceeds 2048 B unless its `BUDGET` entry names it, and a budgeted one may not exceed its entry; a stale entry is refused. Bounds single frames, not call paths: #1081's by-value load plan grew exec-path frames to 6.5 KiB and overflowed the 16 KiB boot stack in the debug images, which no check before QEMU saw |
 | `buildcheck_kernel_unused_coverage.py` | every kernel file a target compiles is checked for unused functions or exempt for a stated reason |
 | `buildcheck_range_obligations.py` | z3 (pinned in `scripts/fetch_model_tools.sh`) proves every range the compiler derived for a kernel main.o (`--facts rangeobl`, format in [RANGE_OBLIGATIONS.md](RANGE_OBLIGATIONS.md)); `sat` prints the counterexample, `unknown` fails; `--control` plants #935's rule and #961's min/max placeholder (#984) and must report each (`make range-obligation-control`, in modelcheck) (#952); `--control-compiles` only compiles that control, needs no z3, and runs in langcheck (`make range-obligation-compile-control`), so a compiler change that breaks the control fails there rather than in a land's modelcheck |
 | `buildcheck_compile_alloc_budget.py` | the QEMU kernel main.o compile allocates no more OCaml heap words (`--facts allocwords`) than its recorded budget; a load-independent guard on compiler speed (#923) |
@@ -426,6 +426,18 @@ The scripts themselves are authoritative for exact mechanics. This table is
 maintained by hand and generated from nothing, which is why
 `check_agents_paths.py` refuses a check that is missing from it: a complete
 inventory that nothing enforces is the one that goes stale first.
+
+The stack-frame checker bounds recognized prologue allocations, not whole
+call paths, recursion, dynamic stack use or interrupt nesting. The two
+existing large-frame records include the complete saved-register allocation:
+3312 B for `kernel_process_scheduler_probe` and 2640 B for
+`ext2_update_regular_file`. Their correction from 3216/2544 B includes the
+96 B pre-indexed `stp` that the former decimal-only parser omitted from the
+already accepted c37c938b debug objects. This was a measurement correction,
+with unchanged physical frames and exception rationale, not acceptance of
+larger frames or a proof that a whole stack fits. The original introduction's
+physical object measurements were not reconstructed. The 2048 B default
+ceiling and future-growth rejection remain.
 
 ## Publication boundary
 
