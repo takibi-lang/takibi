@@ -213,9 +213,9 @@ owners are TaskMutex, the spare stack stays masked). #980
 
 ### Territory B: supporting the pillars, by priority
 
-**Priority update, 2026-11-10.** Correct the hexadecimal frame-size
-measurement gap (#1496) before relying on the per-frame gate; review the
-existing exception measurements before changing budgets. The Linux cold
+**Priority update, 2026-11-10.** Investigate late shrink-wrapped stack
+allocations (#1497); the per-frame gate measures only its documented
+prologue window. The Linux cold
 handoff and matched USB-root plan (#1158) waits for a maintainer decision.
 The network queue boundary under #1159 is published, preserving nonblocking
 receive and pending IRQ/capability bookkeeping. The approved guard-lifetime and synchronous borrowed-callback
