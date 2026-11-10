@@ -245,7 +245,13 @@ parameter value, or top-level declaration name.
   global (reassignment and `&NAME` are compile errors, and it must have
   an initializer); `let mut NAME: T = e;` is a mutable global variable.
   `let mut x: T;` (no initializer) is allowed at global scope, relying on
-  BSS zero-clearing.
+  BSS zero-clearing. An immutable global array's elements are readonly:
+  indexing may read them, and slice casts, aliases and subviews retain
+  readonly access even when spelled `as []T`. They cannot be stored through,
+  passed as writable slices, or decay to writable raw pointers. A shared
+  reference to a struct element is permitted; a writable reference or raw
+  element address is not. This adds no uninitialized immutable storage form
+  and does not make a pointer stored in an element's value deeply readonly.
 - `let mut x: T;` (no initializer) is *also* allowed at **local** scope,
   for any `T` including scalars, arrays, and structs -- unlike the global
   case, the initial content is undefined (whatever was already on the
@@ -485,8 +491,10 @@ parameter value, or top-level declaration name.
   appear in an array size that depends on a generic's own type parameter.
 - Function call, `*expr` (dereference), `&ident` (address-of; taking the
   address of an immutable *local* variable is a compile error, but
-  `&global_var` is always allowed since globals are always mutable
-  storage). `&` accepts a bare variable, a struct field, or an array/slice
+  `&global_var` requires a mutable global binding). A shared reference
+  to a struct element of an immutable global array is allowed; it cannot
+  grant writable access to that element. `&` accepts a bare variable, a
+  struct field, or an array/slice
   element (`&s`, `&s.field`, `&arr[i]`). Element addressing carries the same
   compile-time or runtime bounds obligation as reading `arr[i]`. Indexing a
   raw pointer is excluded: `&raw[i]` cannot mint a safe reference from an

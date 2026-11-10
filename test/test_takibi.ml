@@ -30709,6 +30709,92 @@ let stopped_store_tests =
         ", core: usize, slot: usize) { stopped_store(stopped, store1159[core].inner.flags[slot], 1); }"));
   ]
 
+(* Immutable global array roots retain the existing readonly view discipline. *)
+let immutable_global_array_tests =
+  let root = "private let bytes1489: [u8; 4] = { 1, 2, 3, 4 }; " in
+  let bad title fragment body = Alcotest.test_case title `Quick
+      (expect_type_error fragment (root ^ "fn bad1489() { " ^ body ^ " }")) in
+  [
+    bad "direct global element store" "immutable global array" "bytes1489[0] = 7;";
+    bad "slice alias retains readonly" "readonly slice"
+      "let s = bytes1489 as []u8; let alias = s; alias[0] = 7;";
+    bad "subview retains readonly" "readonly slice"
+      "let s = bytes1489[1..<4]; let tail = s[1..<3]; tail[0] = 7;";
+    bad "explicit writable slice annotation" "readonly"
+      "let s: []u8 = bytes1489 as []u8;";
+    bad "slice recast cannot erase readonly" "readonly"
+      "let s = bytes1489 as []u8; let writable = s as []u8;";
+    Alcotest.test_case "expired local shadow does not hide immutable root" `Quick
+      (expect_type_error "immutable global array" (root ^
+        "fn bad1489() { if (true) { let mut bytes1489: [u8; 1]; bytes1489[0] = 0; } bytes1489[0] = 7; }"));
+    Alcotest.test_case "raw parameter cannot receive immutable decay" `Quick
+      (expect_type_error "immutable global array" (root ^
+        "extern fn raw1489(p: *u8); fn bad1489() { raw1489(bytes1489); }"));
+    bad "bare decay cannot export writable pointer" "immutable global array"
+      "let pointer: *u8 = bytes1489;";
+    bad "element address cannot export writable pointer" "immutable global array"
+      "let pointer: *u8 = &bytes1489[0];";
+    bad "readonly slice cannot export raw pointer" "readonly"
+      "let s = bytes1489 as []u8; let pointer = s as *u8;";
+    Alcotest.test_case "global pointer-element slice preserves mint restriction" `Quick
+      (expect_type_error "nested pointer indirection" {|
+        let mut pointed1489: u8 = 1;
+        let pointers1489: [*u8; 1] = { &pointed1489 };
+        fn bad1489() { let slice1489 = pointers1489 as []const *u8; }
+      |});
+    bad "global cannot be copy destination" "readonly"
+      "let copied = slice_copy(bytes1489 as []u8, bs\"abcd\");";
+    Alcotest.test_case "writable parameter rejects global slice" `Quick
+      (expect_type_error "readonly" (root ^
+        "fn mutate1489(s: []u8) { if (s.len > 0) { s[0] = 7; } } " ^
+        "fn bad1489() { mutate1489(bytes1489 as []u8); }"));
+    Alcotest.test_case "writable result cannot escape global subview" `Quick
+      (expect_type_error "readonly" (root ^
+        "fn bad1489() -> []u8 { return bytes1489[0..<4]; }"));
+    Alcotest.test_case "record element field stays readonly" `Quick
+      (expect_type_error "immutable global array" {|
+        struct GlobalRow1489 { value: usize; }
+        let rows1489: [GlobalRow1489; 1] = { { 0 } };
+        fn bad1489() { rows1489[0].value = 7; }
+      |});
+    Alcotest.test_case "record element cannot export exclusive reference" `Quick
+      (expect_type_error "immutable global array" {|
+        struct GlobalRow1489 { value: usize; }
+        let rows1489: [GlobalRow1489; 1] = { { 0 } };
+        fn bad1489() { let reference: &mut GlobalRow1489 = &rows1489[0]; }
+      |});
+    Alcotest.test_case "shared record element reference codegen" `Quick
+      (expect_trap_sites 0 {|
+        struct GlobalRow1489 { value: usize; }
+        let rows1489: [GlobalRow1489; 1] = { { 0 } };
+        fn value1489(row: &GlobalRow1489) -> usize { return row.value; }
+        fn good1489() -> usize { return value1489(&rows1489[0]); }
+      |});
+    Alcotest.test_case "readonly global reads borrows copies and local shadow codegen" `Quick
+      (expect_trap_sites 0 (root ^ {|
+        let mut mutable1489: [u8; 4];
+        fn first1489(s: borrow [const u8; 4..]) -> u8 { return s[0]; }
+        fn result1489() -> [const u8; 3..] { return bytes1489[1..<4]; }
+        fn good1489() -> usize {
+          let mut local: [u8; 4];
+          let copied = slice_copy(local as []u8, bytes1489 as []u8);
+          local[0] = 9;
+          mutable1489[0] = 8;
+          let s = mutable1489 as []u8;
+          s[1] = 6;
+          let byte = bytes1489[0];
+          if (slice_eq(bytes1489 as []const u8, local as []const u8)) {
+            return copied;
+          }
+          return (first1489(bytes1489 as []u8) as usize) +
+                 (byte as usize) + (bytes1489[2] as usize);
+        }
+        fn shadow1489() -> u8 {
+          let mut bytes1489: [u8; 1]; bytes1489[0] = 3; return bytes1489[0];
+        }
+      |}));
+  ]
+
 (* Literal storage must retain readonly access through ordinary slice paths. *)
 let readonly_literal_tests =
   let bad title body = Alcotest.test_case title `Quick
@@ -32425,6 +32511,7 @@ let named_groups_unisolated = [
   "struct-pointer-casts", struct_pointer_cast_tests;
 
   "stopped-store", stopped_store_tests;
+  "immutable-global-arrays", immutable_global_array_tests;
   "readonly-literals", readonly_literal_tests;
   "private-default-construction", private_default_construction_tests;
   "cpu-authority-initialization", cpu_authority_initialization_tests;

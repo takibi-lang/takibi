@@ -293,7 +293,61 @@ fn report_psci(label: *u8, result: FdtPsciMethodResult) {
 }
 
 fn app_main() !{unsafe} {
-    let blob: usize = (fdt_fixture as *u8) as usize;
+    // The raw-address FDT API reads fresh mutable copies. Keep their
+    // backing arrays in this frame through every parser and map use.
+    let mut fdt_fixture_copy: [u8; 4156];
+    slice_copy(fdt_fixture_copy as []u8,
+               fdt_fixture as []const u8);
+    let mut fdt_invalid_memory_fixture_copy: [u8; 4236];
+    slice_copy(fdt_invalid_memory_fixture_copy as []u8,
+               fdt_invalid_memory_fixture as []const u8);
+    let mut fdt_invalid_reservation_fixture_copy: [u8; 4172];
+    slice_copy(fdt_invalid_reservation_fixture_copy as []u8,
+               fdt_invalid_reservation_fixture as []const u8);
+    let mut fdt_invalid_tree_reservation_fixture_copy: [u8; 4208];
+    slice_copy(fdt_invalid_tree_reservation_fixture_copy as []u8,
+               fdt_invalid_tree_reservation_fixture as []const u8);
+    let mut fdt_invalid_device_fixture_copy: [u8; 4216];
+    slice_copy(fdt_invalid_device_fixture_copy as []u8,
+               fdt_invalid_device_fixture as []const u8);
+    let mut fdt_invalid_interrupt_fixture_copy: [u8; 4108];
+    slice_copy(fdt_invalid_interrupt_fixture_copy as []u8,
+               fdt_invalid_interrupt_fixture as []const u8);
+    let mut fdt_missing_interrupt_fixture_copy: [u8; 3914];
+    slice_copy(fdt_missing_interrupt_fixture_copy as []u8,
+               fdt_missing_interrupt_fixture as []const u8);
+    let mut fdt_invalid_gic_fixture_copy: [u8; 4156];
+    slice_copy(fdt_invalid_gic_fixture_copy as []u8,
+               fdt_invalid_gic_fixture as []const u8);
+    let mut fdt_invalid_pcie_ranges_fixture_copy: [u8; 4124];
+    slice_copy(fdt_invalid_pcie_ranges_fixture_copy as []u8,
+               fdt_invalid_pcie_ranges_fixture as []const u8);
+    let mut fdt_invalid_pcie_dma_ranges_fixture_copy: [u8; 4096];
+    slice_copy(fdt_invalid_pcie_dma_ranges_fixture_copy as []u8,
+               fdt_invalid_pcie_dma_ranges_fixture as []const u8);
+    let mut fdt_invalid_virtio_fixture_copy: [u8; 4152];
+    slice_copy(fdt_invalid_virtio_fixture_copy as []u8,
+               fdt_invalid_virtio_fixture as []const u8);
+    let mut fdt_psci_smc_fixture_copy: [u8; 4156];
+    slice_copy(fdt_psci_smc_fixture_copy as []u8,
+               fdt_psci_smc_fixture as []const u8);
+    let mut fdt_seed_rng_fixture_copy: [u8; 4256];
+    slice_copy(fdt_seed_rng_fixture_copy as []u8,
+               fdt_seed_rng_fixture as []const u8);
+    let mut fdt_seed_kaslr_fixture_copy: [u8; 4203];
+    slice_copy(fdt_seed_kaslr_fixture_copy as []u8,
+               fdt_seed_kaslr_fixture as []const u8);
+    let mut fdt_seed_zero_rng_fixture_copy: [u8; 4256];
+    slice_copy(fdt_seed_zero_rng_fixture_copy as []u8,
+               fdt_seed_zero_rng_fixture as []const u8);
+    let mut fdt_seed_short_fixture_copy: [u8; 4201];
+    slice_copy(fdt_seed_short_fixture_copy as []u8,
+               fdt_seed_short_fixture as []const u8);
+    let mut fdt_seed_nested_fixture_copy: [u8; 4237];
+    slice_copy(fdt_seed_nested_fixture_copy as []u8,
+               fdt_seed_nested_fixture as []const u8);
+
+    let blob: usize = (fdt_fixture_copy as *u8) as usize;
     report_device("qemu pl011",
                   fdt_find_compatible_reg(blob, bs"arm,pl011"));
     report_device("rpi5 system timer", fdt_find_compatible_reg(
@@ -320,20 +374,20 @@ fn app_main() !{unsafe} {
         fdt_find_compatible_rp1_gpio_regions(
             blob, bs"raspberrypi,rp1-gpio"));
     let invalid_pcie_ranges_blob: usize =
-        (fdt_invalid_pcie_ranges_fixture as *u8) as usize;
+        (fdt_invalid_pcie_ranges_fixture_copy as *u8) as usize;
     report_device("invalid pcie ranges", fdt_find_compatible_pcie_reg(
         invalid_pcie_ranges_blob, bs"arm,pl011-axi"));
     report_pcie_map("invalid pcie map", fdt_find_pcie_address_map(
         invalid_pcie_ranges_blob, bs"brcm,bcm2712-pcie", 0x1000120000));
     let invalid_pcie_dma_ranges_blob: usize =
-        (fdt_invalid_pcie_dma_ranges_fixture as *u8) as usize;
+        (fdt_invalid_pcie_dma_ranges_fixture_copy as *u8) as usize;
     report_pcie_map("invalid pcie dma map", fdt_find_pcie_address_map(
         invalid_pcie_dma_ranges_blob,
         bs"brcm,bcm2712-pcie", 0x1000120000));
     report_device("missing device",
                   fdt_find_compatible_reg(blob, bs"not,a-device"));
     let invalid_device_blob: usize =
-        (fdt_invalid_device_fixture as *u8) as usize;
+        (fdt_invalid_device_fixture_copy as *u8) as usize;
     report_device("invalid device", fdt_find_compatible_reg(
         invalid_device_blob, bs"arm,pl011"));
     report_mip("invalid mip0", fdt_find_compatible_mip_regions(
@@ -359,12 +413,12 @@ fn app_main() !{unsafe} {
             blob, bs"virtio,mmio", 2));
     report_psci("psci default", fdt_find_psci_method(blob));
     let psci_smc_blob: usize =
-        (fdt_psci_smc_fixture as *u8) as usize;
+        (fdt_psci_smc_fixture_copy as *u8) as usize;
     report_psci("psci smc", fdt_find_psci_method(psci_smc_blob));
     report_interrupt("missing interrupt", fdt_find_compatible_gic_interrupt(
         blob, bs"not,a-device"));
     let invalid_interrupt_blob: usize =
-        (fdt_invalid_interrupt_fixture as *u8) as usize;
+        (fdt_invalid_interrupt_fixture_copy as *u8) as usize;
     report_interrupt("invalid interrupt", fdt_find_compatible_gic_interrupt(
         invalid_interrupt_blob, bs"arm,pl011"));
     report_psci("psci malformed",
@@ -372,7 +426,7 @@ fn app_main() !{unsafe} {
     report_interrupt("invalid timer interrupt",
                      fdt_find_armv8_timer_interrupt(invalid_interrupt_blob));
     let missing_interrupt_blob: usize =
-        (fdt_missing_interrupt_fixture as *u8) as usize;
+        (fdt_missing_interrupt_fixture_copy as *u8) as usize;
     report_interrupt("missing interrupt property",
                      fdt_find_compatible_gic_interrupt(
                          missing_interrupt_blob, bs"arm,pl011"));
@@ -384,7 +438,7 @@ fn app_main() !{unsafe} {
         fdt_find_compatible_gic_transport_index(
             missing_interrupt_blob, bs"virtio,mmio", 0));
     let invalid_virtio_blob: usize =
-        (fdt_invalid_virtio_fixture as *u8) as usize;
+        (fdt_invalid_virtio_fixture_copy as *u8) as usize;
     report_transport("invalid virtio 1",
         fdt_find_compatible_gic_transport_index(
             invalid_virtio_blob, bs"virtio,mmio", 1));
@@ -393,7 +447,7 @@ fn app_main() !{unsafe} {
     report_gic("rpi5 gic", fdt_find_compatible_gicv2_regions(
         blob, bs"arm,gic-400"));
     let invalid_gic_blob: usize =
-        (fdt_invalid_gic_fixture as *u8) as usize;
+        (fdt_invalid_gic_fixture_copy as *u8) as usize;
     report_psci("psci disabled", fdt_find_psci_method(invalid_gic_blob));
     report_gic("invalid gic", fdt_find_compatible_gicv2_regions(
         invalid_gic_blob, bs"arm,cortex-a15-gic"));
@@ -402,29 +456,29 @@ fn app_main() !{unsafe} {
     report_memory(fdt_detect_memory(blob), blob);
 
     let invalid_memory_blob: usize =
-        (fdt_invalid_memory_fixture as *u8) as usize;
+        (fdt_invalid_memory_fixture_copy as *u8) as usize;
     report_memory(fdt_detect_memory(invalid_memory_blob), invalid_memory_blob);
 
     let invalid_reservation_blob: usize =
-        (fdt_invalid_reservation_fixture as *u8) as usize;
+        (fdt_invalid_reservation_fixture_copy as *u8) as usize;
     report_memory(fdt_detect_memory(invalid_reservation_blob), invalid_reservation_blob);
 
     let invalid_tree_reservation_blob: usize =
-        (fdt_invalid_tree_reservation_fixture as *u8) as usize;
+        (fdt_invalid_tree_reservation_fixture_copy as *u8) as usize;
     report_memory(fdt_detect_memory(invalid_tree_reservation_blob), invalid_tree_reservation_blob);
 
     // GitHub issue #1227: /chosen seeds. The plain blob has no /chosen.
     report_seed("seed none", fdt_find_boot_seed(blob));
     report_seed("seed rng",
-        fdt_find_boot_seed((fdt_seed_rng_fixture as *u8) as usize));
+        fdt_find_boot_seed((fdt_seed_rng_fixture_copy as *u8) as usize));
     report_seed("seed kaslr",
-        fdt_find_boot_seed((fdt_seed_kaslr_fixture as *u8) as usize));
+        fdt_find_boot_seed((fdt_seed_kaslr_fixture_copy as *u8) as usize));
     report_seed("seed zero-rng",
-        fdt_find_boot_seed((fdt_seed_zero_rng_fixture as *u8) as usize));
+        fdt_find_boot_seed((fdt_seed_zero_rng_fixture_copy as *u8) as usize));
     report_seed("seed short",
-        fdt_find_boot_seed((fdt_seed_short_fixture as *u8) as usize));
+        fdt_find_boot_seed((fdt_seed_short_fixture_copy as *u8) as usize));
     report_seed("seed nested",
-        fdt_find_boot_seed((fdt_seed_nested_fixture as *u8) as usize));
+        fdt_find_boot_seed((fdt_seed_nested_fixture_copy as *u8) as usize));
     // One byte into the header the magic no longer matches, and every
     // reader refuses before it reads anything else.
     report_memory(fdt_detect_memory(blob + 1), blob + 1);

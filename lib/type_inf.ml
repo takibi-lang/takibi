@@ -524,6 +524,24 @@ let rec is_integer_ty t =
 let place_static_identities : static_term StringMap.t ref = ref StringMap.empty
 let global_address_names : StringSet.t ref = ref StringSet.empty
 let locally_bound_names : StringSet.t ref = ref StringSet.empty
+(* Immutable array storage is identified by its actual environment binding,
+   not just its name: a local shadow must not hide the root after its scope. *)
+let immutable_global_array_bindings : (ty * bool) StringMap.t ref = ref StringMap.empty
+
+let immutable_global_array tyenv (e : Ast.expr) = match e.desc with
+  | Ast.Var name ->
+      (match StringMap.find_opt name tyenv,
+             StringMap.find_opt name !immutable_global_array_bindings with
+       | Some entry, Some global when entry == global -> Some name
+       | _ -> None)
+  | _ -> None
+
+let reject_immutable_array_decay tyenv (e : Ast.expr) =
+  match immutable_global_array tyenv e with
+  | Some name -> raise (TypeError (e.loc, Printf.sprintf
+      "immutable global array '%s' cannot decay to a writable pointer; \
+       read an element or use a readonly slice" name))
+  | None -> ()
 (* The immutable binders a `LetMatch` (let-match, let-else) made in the current
    function, as their tyenv entries. Such a binder is immutable afterwards but
    codegen stores it in a stack slot, so unlike another immutable binding it has
@@ -3858,6 +3876,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            (* Array types decay to pointer. io T is a value type: return T (volatile handled in codegen) *)
            (match repr t with
             | TArray (inner, _) ->
+                reject_immutable_array_decay tyenv e;
                 (* GitHub issue #102: an array declared `align(N)` decays to
                    a PROVEN *align(N) T, not a plain *T -- this is the
                    actual motivating shape (examples/common_stm32/eth.tkb's
@@ -4315,6 +4334,14 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
      through refined_or_base; scripts/check_refined_range_constructor.py *)
   | Cast (target_ty, e) ->
       let src_ty = match target_ty, e.desc with
+        | Ast.TypeSlice _, Var name when immutable_global_array tyenv e <> None ->
+            (* A checked slice source is not writable pointer decay. *)
+            check_private_global_access e.loc name;
+            (match repr (place_undecayed_type senv eenv tyenv fenv e) with
+             | TArray (element, _) ->
+                 check_no_nested_ptr_mint e.loc element;
+                 TPtr element
+             | _ -> assert false)
         | Ast.TypeSlice _, FieldGet (base_expr, fname) ->
             infer_field_access ~slice_source:true ~decay:true
               senv eenv tyenv fenv e.loc base_expr fname
@@ -7096,6 +7123,7 @@ and check_no_temporary_field_place ~operation senv eenv tyenv fenv
    readonly; the same chain check_no_write_through_shared_ref walks. *)
 and place_reads_through_shared_ref senv eenv tyenv fenv (e : Ast.expr) : bool =
   match e.desc with
+  | Var _ -> immutable_global_array tyenv e <> None
   | FieldGet (inner_expr, _) ->
       (match repr (infer_expr senv eenv tyenv fenv inner_expr) with
        | TRef _ -> true
@@ -7112,6 +7140,11 @@ and place_reads_through_shared_ref senv eenv tyenv fenv (e : Ast.expr) : bool =
 
 and check_no_write_through_shared_ref senv eenv tyenv fenv (e : Ast.expr) : unit =
   match e.desc with
+  | Var _ ->
+      (match immutable_global_array tyenv e with
+       | Some name -> raise (TypeError (e.loc, Printf.sprintf
+           "cannot write through immutable global array '%s'; use mutable storage" name))
+       | None -> ())
   | FieldGet (inner_expr, _) ->
       let inner_ty = infer_expr senv eenv tyenv fenv inner_expr in
       (match repr inner_ty with
@@ -9589,6 +9622,7 @@ let reset_compilation_state () =
   resolved_indirect_call_effects := StringMap.empty;
   global_address_names := StringSet.empty;
   active_stopped_globals := StringMap.empty;
+  immutable_global_array_bindings := StringMap.empty;
   (* Reset every module-scoped per-program table up front. Some are reset
      again immediately before their population below; this single preamble
      plus the assertions makes omission visible instead of allowing a table
@@ -11994,6 +12028,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.ExceptionRestoreDef _     -> m
     | Ast.GenericStructDef _       -> m
   ) StringMap.empty prog in
+  immutable_global_array_bindings := StringMap.filter (fun name (ty, is_mut) ->
+    StringSet.mem name !global_address_names && not is_mut
+    && (match repr ty with TArray _ -> true | _ -> false)) genv;
   (* Pass 2: check global initializers.
      GitHub issue #77: a plain List.iter used to be enough here, since no
      global initializer had ever needed to change genv's own STORED type
@@ -12139,6 +12176,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              else StringMap.add name (bind_ty, is_mutable) genv)
     | _ -> genv
   ) genv prog in
+  immutable_global_array_bindings := StringMap.filter (fun name (ty, is_mut) ->
+    StringSet.mem name !global_address_names && not is_mut
+    && (match repr ty with TArray _ -> true | _ -> false)) genv;
   (* Preserve source-level parameter modes for call-site checks. Ordinary
      HM types intentionally erase borrow/sink wrappers, but `borrow mut`
      still needs the caller's place mutability and exclusivity checked. *)
