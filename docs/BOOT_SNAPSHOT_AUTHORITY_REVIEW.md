@@ -53,10 +53,9 @@ fail because the invalid phase-end order is accepted. No setup failure gets
 negative credit.
 
 Retain the explained fixed code and helper cost. No extra optimization or
-new allocation mechanism is selected. Existing QEMU/RPi5 runtime acceptance
-is supplied by the coordinator's final combined-HEAD allcheck; no duplicate
-standalone board lane or new physical timing claim is made here. Actual
-sleeping/contended scheduling and its fast-path/physical costs remain the
-subsequent Mutex work. Measure again when that backend/consumer integration,
+new allocation mechanism is selected. Standard QEMU/RPi5 lanes exercise the existing boot/log runtime.
+This report records source, image and selected-frame evidence, not physical
+cycles. Fast-path and contended sleeping-Mutex cycle measurements lie outside
+this report's boundary. Measure again when that backend/consumer integration,
 a changed authority/storage/allocator lifetime, or the next kernel feature
 or layout stage changes this boundary.

@@ -613,7 +613,7 @@
   "limits": [
     "Selected frame observations use existing prefix parser; full selected bodies were scanned for negative SP adjustments, all within first12 instructions (54 bodies/54 adjustments). This does not repair the separate general late-prologue limitation.",
     "Ordinary take frame32->16 plus nested prepare32 is an additional helper cost, not an apparent stack reduction or whole-call-path proof.",
-    "No new standalone physical timing claim. Coordinator final combined-HEAD allcheck supplies existing QEMU/RPi5 runtime acceptance; full sleeping Mutex contended scheduling/cost remains unfinished."
+    "Standard QEMU/RPi5 lanes exercise existing boot/log runtime. This report records source/image/selected-frame evidence, not physical cycles or contended sleeping-Mutex scheduling costs."
   ],
   "next_trigger": "Sleeping Mutex backend/consumer integration, changed authority lifetime or storage/allocator workload, or the next completed kernel feature/layout stage."
 }

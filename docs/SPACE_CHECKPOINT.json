@@ -8,6 +8,6 @@
     "docs/BOOT_SNAPSHOT_AUTHORITY_REVIEW.md",
     "docs/BOOT_SNAPSHOT_AUTHORITY_REVIEW.json"
   ],
-  "assessment": "Matched published86 comparison: QEMU text +288 B and RPi5 +272 B, explained by +184 B text-symbol coverage, +24/+8 B section gaps and +80 B unwind each. Data/BSS, every data/BSS symbol size and RAM boundary unchanged. New factory/leaf and shared prepare retain bounded measured code/helper-frame costs; no stack-reduction or whole-call-path claim. Existing payload/pool/allocator workload unchanged. Final combined-HEAD runtime/hardware acceptance remains coordinator publication work.",
+  "assessment": "Matched published86 comparison: QEMU text +288 B and RPi5 +272 B, explained by +184 B text-symbol coverage, +24/+8 B section gaps and +80 B unwind each. Data/BSS, every data/BSS symbol size and RAM boundary unchanged. New factory/leaf and shared prepare retain bounded measured code/helper-frame costs; no stack-reduction or whole-call-path claim. Existing payload/pool/allocator workload unchanged. Standard QEMU/RPi5 lanes exercise runtime; this review records source/image/selected-frame evidence rather than physical cycles.",
   "next_trigger": "Sleeping Mutex backend/consumer integration, changed authority lifetime or storage/allocator workload, or the next completed kernel feature/layout stage."
 }
