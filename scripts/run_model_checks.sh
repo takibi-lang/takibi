@@ -49,6 +49,14 @@ QUEUE="$OUT/jobs.list"
 EXPECT="$OUT/expect.list"
 : >"$EXPECT"
 
+# Trace controls share the same job budget as the ordinary model jobs.
+# Queue them first: at JOBS=1 they run before the longer model checks.
+# Each group runs one TLC at a time rather than starting another JOBS pool.
+TRACE_CONTROLS_LOG="$OUT/protocol-trace-controls.log"
+RING_TRACE_CONTROLS_LOG="$OUT/log-ring-trace-controls.log"
+echo "$TRACE_CONTROLS_LOG env MODELCHECK_JOBS=1 python3 $REPO_ROOT/scripts/protocol_trace_tlc_controls.py" >>"$QUEUE"
+echo "$RING_TRACE_CONTROLS_LOG env MODELCHECK_JOBS=1 python3 $REPO_ROOT/scripts/log_ring_trace_tlc_controls.py" >>"$QUEUE"
+
 # Each job is one line: a log path, then the command that writes it. Every
 # Apalache run gets its own --out-dir, since concurrent runs sharing one
 # would write into each other's.
@@ -304,36 +312,30 @@ check_model RxTransfer_omitrefresh Safety 8 generated:CInit:Safety:violated
 check_model PacketBuffer Safety 8 generated:CInit:pass:ok
 MDIR="$MODELS"
 
-# GitHub issue #606, stage 2: the protocol-trace check is TLC run on
-# StackOwnershipTrace.tla. Its controls (the recorded windows accepted, each
-# planted defect refused) run beside the model jobs; each is a short TLC.
-TRACE_CONTROLS_LOG="$OUT/protocol-trace-controls.log"
-python3 "$REPO_ROOT/scripts/protocol_trace_tlc_controls.py" >"$TRACE_CONTROLS_LOG" 2>&1 &
-trace_controls_pid=$!
-# GitHub issue #656: the same for the log ring, LogRingTrace.tla.
-RING_TRACE_CONTROLS_LOG="$OUT/log-ring-trace-controls.log"
-python3 "$REPO_ROOT/scripts/log_ring_trace_tlc_controls.py" >"$RING_TRACE_CONTROLS_LOG" 2>&1 &
-ring_trace_controls_pid=$!
-
 # Run. A job's own exit status is not the verdict -- an unfixed variant is
 # SUPPOSED to fail -- so every job is allowed to fail here and judged below.
-(cd "$MODELS" && xargs -P "$JOBS" -L 1 sh -c 'log="$0"; "$@" >"$log" 2>&1 || true' <"$QUEUE")
+(cd "$MODELS" && xargs -P "$JOBS" -L 1 sh -c '
+    log="$0"
+    rm -f "$log.exit" || exit 1
+    status=0
+    "$@" >"$log" 2>&1 || status=$?
+    printf "%s\n" "$status" >"$log.exit"
+' <"$QUEUE")
 
 failures=0
 fail() { echo "FAIL modelcheck: $*"; failures=$((failures + 1)); }
 
-if wait "$trace_controls_pid"; then
-    grep "^PASS" "$TRACE_CONTROLS_LOG"
-else
-    cat "$TRACE_CONTROLS_LOG"
-    fail "the protocol-trace TLC controls (see $TRACE_CONTROLS_LOG)"
-fi
-if wait "$ring_trace_controls_pid"; then
-    grep "^PASS" "$RING_TRACE_CONTROLS_LOG"
-else
-    cat "$RING_TRACE_CONTROLS_LOG"
-    fail "the log-ring-trace TLC controls (see $RING_TRACE_CONTROLS_LOG)"
-fi
+# Unlike expected faulty model variants, a control group must exit zero.
+# A stale PASS line or one printed before a later failure is not a verdict.
+for log in "$TRACE_CONTROLS_LOG" "$RING_TRACE_CONTROLS_LOG"; do
+    if [ -f "$log.exit" ] && [ "$(cat "$log.exit")" = 0 ] &&
+            grep -q '^PASS' "$log"; then
+        grep '^PASS' "$log"
+    else
+        [ ! -f "$log" ] || cat "$log"
+        fail "the trace TLC controls (see $log and $log.exit)"
+    fi
+done
 
 for model in $(cut -d' ' -f1 "$EXPECT" | uniq); do
     grep -q "Type checker \[OK\]" "$OUT/$model.typecheck.log" ||
