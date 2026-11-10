@@ -266,13 +266,128 @@ def main():
         block_cases.append(("borrowed holder remains held", "",
                             "fn operation(slot: borrow BlockSlot[0]) { "
                             "block_slot_release(slot); block_read(); }", held_block))
+        sleep_block = ("operation holds a BlockSlot and calls "
+                       "kernel_process_block_control, which " + sleep)
+        foreign_sleep_cases = [
+            ("foreign borrowed direct sleep",
+             "fn operation(slot: borrow BlockSlot[0]) { "
+             "kernel_process_block_control(); }", sleep_block),
+            ("foreign borrowed release does not end loan",
+             "fn operation(slot: borrow BlockSlot[0]) { "
+             "block_slot_release(slot); kernel_process_block_control(); }", sleep_block),
+            ("foreign borrowed transitive sleep",
+             "fn helper() { kernel_process_block_control(); }\n"
+             "fn operation(slot: borrow BlockSlot[0]) { helper(); }",
+             "operation holds a BlockSlot and calls helper, which " + sleep),
+            ("foreign borrowed indirect sleep",
+             "fn operation(slot: borrow BlockSlot[0]) { "
+             "let callback = kernel_process_block_control; callback(); }", sleep_block),
+            ("foreign borrowed indirect transitive sleep",
+             "fn helper() { kernel_process_block_control(); }\n"
+             "fn operation(slot: borrow BlockSlot[0]) { "
+             "let callback = helper; callback(); }",
+             "operation holds a BlockSlot and calls helper, which " + sleep),
+            ("foreign local direct sleep",
+             "fn operation() { let slot = block_slot_acquire(); "
+             "kernel_process_block_control(); block_slot_release(slot); }", sleep_block),
+            ("foreign local backing issuer sleep",
+             "fn operation() { let slot = block_slot_acquire_from(0); "
+             "kernel_process_block_control(); block_slot_release(slot); }", sleep_block),
+            ("foreign local transitive sleep",
+             "fn helper() { kernel_process_block_control(); }\n"
+             "fn operation() { let slot = block_slot_acquire(); "
+             "helper(); block_slot_release(slot); }",
+             "operation holds a BlockSlot and calls helper, which " + sleep),
+            ("foreign local indirect sleep",
+             "fn operation() { let slot = block_slot_acquire(); "
+             "let callback = kernel_process_block_control; callback(); "
+             "block_slot_release(slot); }", sleep_block),
+            ("foreign sleep after release",
+             "fn operation() { let slot = block_slot_acquire(); "
+             "block_slot_release(slot); kernel_process_block_control(); }", None),
+            ("foreign transitive sleep after release",
+             "fn helper() { kernel_process_block_control(); }\n"
+             "fn operation() { let slot = block_slot_acquire(); "
+             "block_slot_release(slot); helper(); }", None),
+            ("foreign sleep before acquire",
+             "fn operation() { kernel_process_block_control(); "
+             "let slot = block_slot_acquire(); block_slot_release(slot); }", None),
+            ("foreign conditional release still held",
+             "fn operation() { let slot = block_slot_acquire(); "
+             "if (flag) { block_slot_release(slot); } "
+             "kernel_process_block_control(); }", sleep_block),
+            ("foreign safe borrowed holder",
+             "fn safe() {} fn operation(slot: borrow BlockSlot[0]) { safe(); }", None),
+            ("foreign direct nonholder sleep",
+             "fn operation() { kernel_process_block_control(); }", None),
+            ("foreign retained-stack TaskMutex wait",
+             "fn kernel_task_mutex_park() {}\n"
+             "fn operation(slot: borrow BlockSlot[0]) { kernel_task_mutex_park(); }", None),
+            ("foreign borrowed comments and literals",
+             'fn operation(slot: borrow BlockSlot[0]) { '
+             'print("kernel_process_block_control()"); '
+             '/* kernel_process_block_control(); */ }', None),
+        ]
+        foreign_cases = foreign_sleep_cases + [
+            ("foreign returned acquired slot",
+             "fn leak() -> BlockSlot[0] { let slot = block_slot_acquire(); "
+             "return slot; }",
+             "leak returns a BlockSlot; a slot must be released"),
+            ("foreign returned sink slot",
+             "fn leak(slot: sink BlockSlot[0]) -> BlockSlot[0] { return slot; }",
+             "leak returns a BlockSlot; a slot must be released"),
+            ("foreign returned borrowed slot",
+             "fn leak(slot: borrow BlockSlot[0]) -> borrow BlockSlot[0] { return slot; }",
+             "leak returns a BlockSlot; a slot must be released"),
+            ("foreign sink release",
+             "fn consume(slot: sink BlockSlot[0]) { block_slot_release(slot); }", None),
+            ("foreign borrowed scalar return",
+             "fn number(slot: borrow BlockSlot[0]) -> usize { return slot.index; }", None),
+        ]
+        block_cases.extend((label, "", cache, diagnostic)
+                           for label, cache, diagnostic in foreign_cases)
         for label, memory, cache, diagnostic in block_cases:
             (block / "memory.tkb").write_text(BLOCK_MEMORY + memory + "\n")
             (block / "block_cache.tkb").write_text(cache + "\n")
             check_case(checker, root, label, diagnostic, count, BLOCK_POOL)
+        # Repeat the file-boundary discriminators for every existing pool.
+        for _, acquire, token, _ in checker.POOLS:
+            if token == "BlockSlot":
+                continue
+            release = acquire.removesuffix("_acquire") + "_release"
+            pool = ("kernel/pool.tkb", acquire, token, "holders")
+            (root / "kernel/pool.tkb").write_text(
+                f"fn {acquire}() -> {token}[0] {{}}\n"
+                f"fn {release}(slot: sink {token}[0]) {{}}\n"
+                f"fn entry() {{ let slot = {acquire}(); {release}(slot); }}\n"
+                "fn kernel_process_block_control() {}\n")
+            for label, body, diagnostic in [
+                ("borrowed", f"fn held(slot: borrow {token}[0]) {{ bridge(); }}",
+                 f"held holds a {token} and calls bridge, which " + sleep),
+                ("acquired", f"fn held() {{ let slot = {acquire}(); "
+                 f"bridge(); {release}(slot); }}",
+                 f"held holds a {token} and calls bridge, which " + sleep),
+                ("released", f"fn held() {{ let slot = {acquire}(); "
+                 f"{release}(slot); bridge(); }}", None),
+                ("returned", f"fn leak() -> {token}[0] {{ "
+                 f"let slot = {acquire}(); return slot; }}",
+                 f"leak returns a {token}; a slot must be released"),
+                ("sink release", f"fn consume(slot: sink {token}[0]) {{ "
+                 f"{release}(slot); }}", None),
+                ("borrowed scalar", f"fn number(slot: borrow {token}[0]) "
+                 "-> usize { return slot.index; }", None),
+            ]:
+                # Separate holder, bridge and pool files exercise the global closure.
+                (block / "block_cache.tkb").write_text(body)
+                (block / "memory.tkb").write_text(
+                    "fn bridge() { kernel_process_block_control(); }\n")
+                (block / "block_slot.tkb").write_text("")
+                check_case(checker, root, token + " foreign " + label,
+                           diagnostic, count, pool)
     report_pass("slot-pool-entries-controls",
                 "direct nonholders accept; aliases and escaped acquiring "
-                "callbacks reject without weakening sleep, rank or return checks",
+                "callbacks reject; foreign holders obey sleep and return rules "
+                f"without weakening rank or release intervals ({count.ran} scenarios)",
                 scenarios=count.ran)
 
 

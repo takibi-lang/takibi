@@ -629,8 +629,10 @@ rules globally.
   sleep are refused, including local nonholder aliases: the check does not
   prove nonescape. This is a source/build policy, not arbitrary indirect
   call soundness; integer-to-function casts and unknown external callback
-  targets are not resolved by it. The rank check covers foreign borrowers
-  and groups the BlockSlot wrapper with its existing backing issuer. For
+  targets are not resolved by it. The rank and existing scheduler-sleep checks
+  cover foreign borrowers, and slot return signatures are checked across
+  production kernel files, with only the named issuers exempt. The check
+  groups the BlockSlot wrapper with its existing backing issuer. For
   local acquisitions it recognizes only direct let bindings through a
   same-block standalone canonical release of that token, with no intervening
   shadow or reassignment. Other consumption remains a conservative held

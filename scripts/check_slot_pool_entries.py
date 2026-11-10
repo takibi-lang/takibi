@@ -18,8 +18,9 @@ So, per pool, the entry points -- the functions that call the acquire --
 must be leaves of the file's call graph from the inside: no function in the
 pool's file names one, and none of them is itself handed a slot. Internal
 work takes the caller's slot as a `borrow` parameter instead. The whole-kernel
-nesting check also covers holders in other files: BlockSlot is intentionally
-borrowed by block_cache.tkb, so file isolation is not a general premise.
+nesting, sleep and return checks also cover other kernel files: BlockSlot is
+intentionally borrowed by block_cache.tkb, so file isolation is not a general
+premise.
 
 SyscallSlot (kernel/kernel/syscall.tkb) is a pool whose entry points the
 same file's dispatcher calls, so "never called from inside the file" cannot
@@ -313,8 +314,10 @@ def acquired_references(body, acquire):
     return frozenset(held)
 
 
-def nesting_problems(files):
-    """Holders of a pool reaching something outer, over the kernel's graph."""
+def nesting_problems(files, sleepers=None):
+    """Global slot returns and held intervals reaching forbidden boundaries."""
+    if sleepers is None:
+        sleepers = sleepers_in(files)
     fns = {}
     for path, text in files.items():
         if not path.startswith("kernel/") or "/tests/" in path:
@@ -339,12 +342,24 @@ def nesting_problems(files):
                 continue
             held_calls = set()
             for signature, body in fns[holder]:
+                arrow = signature.find("->")
+                if arrow >= 0 and re.search(r"\b" + token + r"\b",
+                                             signature[arrow:]):
+                    problems.append(
+                        f"{holder} returns a {token}; a slot must be released by "
+                        "the function that acquired it")
                 # Substring first: this runs per function, per pool.
                 if token in signature and re.search(r"\b" + token + r"\b",
                                                     signature):
                     held_calls |= references(body)
                 elif any(name in body for name in issuers):
                     held_calls |= acquired_references(body, acquire)
+            for callee in sorted(held_calls):
+                if callee in sleepers or SLEEP.match(callee):
+                    problems.append(
+                        f"{holder} holds a {token} and calls {callee}, which "
+                        "reaches a scheduler sleep; release the slot before "
+                        "the wait")
             reached = set(held_calls)
             for callee in held_calls:
                 reached |= reached_from(callee)
@@ -538,7 +553,7 @@ def main():
                 print(f"ERROR slot-pool-entries: {problem}")
             sys.exit(1)
         total += len(entries)
-    nesting = nesting_problems(files)
+    nesting = nesting_problems(files, sleepers)
     if nesting:
         for problem in nesting:
             print(f"ERROR slot-pool-entries: {problem}")
