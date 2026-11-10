@@ -1,13 +1,13 @@
 {
   "date": "2026-11-10",
-  "event": "milestone",
-  "decision": "measured",
-  "source_sha256": "921ee6dea2b75bbafed24e7419307e509e5116625be3ba755b5434279a911d02",
-  "workload": "Protocol trace process/core shadows and existing bounded boot/replay; actual normal/debug QEMU/RPi5 ELF/object/facts against verified published GREEN4ee. Existing pool occupancy reused only for unchanged allocation/lifetime workload.",
+  "event": "incremental",
+  "decision": "reuse",
+  "source_sha256": "c01be4a9854fd3cea1fb10a1c5c37a6289a09ea4314a852349cd66de209da3b4",
+  "workload": "Rejection-only frontend repair for already-invalid struct-value pointer casts. Maintained valid callers rebuilt on published GREEN3e; kernel sources/lowering/storage/allocation/lifetimes unchanged.",
   "evidence": [
-    "docs/PROTOCOL_SHADOW_SPACE.md",
-    "docs/PROTOCOL_SHADOW_SPACE.json"
+    "docs/STRUCT_POINTER_CAST_REVIEW.md",
+    "docs/STRUCT_POINTER_CAST_REVIEW.json"
   ],
-  "assessment": "Adopt existing no_copy plus guarded_ref storage: exactly two composite globals, rows offset0 and retained3072/64B. Production text +16/+64B and unwind +8B each; debug text +80/+96B. Data/GOT/BSS/usable RAM start and production frames unchanged; debug helper frames +16-32B. No physical timing/coherence or whole-callgraph stack claim; frame parser undercount remains separate.",
-  "next_trigger": "Next completed feature or changed shadow dimensions/event representation/guard passing/stack call structure/retained allocation or lifetimes."
+  "assessment": "Reuse GREEN3e kernel space/occupancy evidence with actual artifact comparison: both normal ELFs and objects byte-identical; built RPi5 debug object has identical allocated sections and only nonloaded debug metadata/relocation differences. No new runtime storage, allocation, pool hold or lifetime. Unbuilt QEMU debug object and both debug ELFs receive no credit; no physical timing/coherence or compiler-performance claim.",
+  "next_trigger": "Changed accepted-program lowering, kernel storage/allocation/lifetimes, or the next completed kernel feature/layout stage."
 }
