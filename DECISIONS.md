@@ -630,3 +630,5 @@ condition below applies, and reports the land afterwards.
 - 2026-11-11 #1481 RetxGuard: choose option A. Migrate the single acquire/release pair to the existing PreemptOff[0] counted short contract, retaining lock identity, rank, handler restrictions and physical unlock before span end. Per-entry retry identity is a separate requirement. [active] #1481
 
 - 2026-11-11 #1481 private-stack admission: choose option B. Design ordinary blocking-acquire APIs to require scoped authority proving eligibility to park, and review boot, driver and idle diversions together. Bind trusted admission minting to the actual private stack, current task generation and physical ownership. Do not treat Running, RootHeld or FrameRef alone as sufficient. [active] #1481
+
+- 2026-11-11 #1159 scratch lifetime origins: choose option B at the direct-reference boundary. Track owner provenance through direct addresses of owned_by places, pointer projections and reborrows as well as slices, aggregates and direct results. Check existing staging and block-write callers under these rules. Preserve explicit external/indirect trust boundaries and reject unsupported retention. [active] #1159
