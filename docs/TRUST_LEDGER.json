@@ -4893,6 +4893,40 @@
       "changes": {
         "unprotected_globals": "SetOnce: the pin-sharing fixture publishes the validated handle table with one claim"
       }
+    },
+    {
+      "date": "2026-11-11",
+      "head": "3216a11c",
+      "counts": {
+        "raw_mint_files": 14,
+        "frame_lines": 12851,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 80,
+        "raw_deref_io": 10,
+        "raw_deref_builtin_region": 113,
+        "raw_deref_generated": 0,
+        "unsafe_blocks": 138,
+        "extern_fns": 73,
+        "invariant_stop_sites": 137,
+        "static_assert_premises": 11,
+        "assembly_lines": 2845,
+        "per_cpu_ordinary_arrays": 50,
+        "per_cpu_stores": 13,
+        "raw_cpu_id_calls": 136,
+        "trust_build_checks": 25,
+        "tla_review_stamps": 174,
+        "judge_defects_range": 1,
+        "judge_defects_init": 0,
+        "judge_defects_region_overlay": 0,
+        "unprotected_globals": 22,
+        "frame_api_ratchet": 7
+      },
+      "changes": {
+        "frame_lines": "#1493 bounded flow request and pre-IRQ API probe; #1494 retained-work rearm, FIFO room fence, and returning debugger refusal guard. File lines measure review surface.",
+        "judge_obligations_init": "Range judge: added initialization obligations are checked coverage, without a new trusted assumption.",
+        "range_obligations_qemu": "Range judge: additional derived initialization obligations in the flow probe and refusal reporting; arithmetic proof rules are unchanged.",
+        "tla_review_stamps": "#1493/#1494 add source-mapped bounded flow, retained-work, and FIFO-room actions with independent failing controls."
+      }
     }
   ]
 }
