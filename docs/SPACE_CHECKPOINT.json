@@ -1,13 +1,12 @@
 {
   "date": "2026-11-11",
-  "event": "incremental",
+  "event": "milestone",
   "decision": "measured",
-  "source_sha256": "73387fcc0e0a12ba7d5502486d0e7a93370de918760c6b2e47918371669e13ca",
-  "workload": "Build both QEMU and RPi5 kernels in normal and debug configurations with both TCP changes applied. Compare linked sections, data/BSS symbols, usable RAM start, and LLVM static frames against the published 4e04b15a production sources. The intervening reset-control change touched only the roadmap and a host test script.",
+  "source_sha256": "5d48f5e28bca29478c673b6aad9a831850094aac163fd60a3deafaaecab16654",
+  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto fd1c25a8: this branch's review, rebound to the merged sources (upstream's record was 2026-11-11 incremental/measured). Standard linked QEMU and RPi5 kernels, plus the maintained QEMU bounded boot pool endpoints and termios flow scenario.",
   "evidence": [
-    "docs/PIN_SHARING_SET_ONCE_SPACE.md",
-    "docs/TCP_FRAME_GUARD_SPACE.md"
+    "docs/CONSOLE_FLOW_SPACE_2026-11-11.txt"
   ],
-  "assessment": "Combined text growth is 968/984 B in normal QEMU/RPi5 and 1008/1056 B in debug. Data, BSS and usable RAM start match in each comparison. The only data/BSS symbol size change is the handle cell from 768 to 776 B. The largest changed frame is the debug pin setup at 1680 B. TCP acquire frames are 32/48 B and release frames are 16/48 B in normal/debug. This measures linked space and individual static frames.",
-  "next_trigger": "Measure when the pin handle layout, allocation or retention changes, at the next counted short-lock migration, or at the completed sleeping TaskMutex milestone."
+  "assessment": "Text grows 4000 B on QEMU and 4048 B on RPi5. Two static TX symbols grow by 8 B each. Data sections grow 8 B each, usable RAM starts and normal QEMU pool endpoints are unchanged. Adopt the measured bounded cost for IRQ-safe flow requests and debugger return safety.",
+  "next_trigger": "Change to TX or diagnostic storage, queue capacity, or the kernel allocation workload."
 }
