@@ -410,6 +410,23 @@ def peer_settings_shell_ready(output: bytes, setup: str) -> bool:
         output[at + len(PEER_SETTINGS_DONE):], setup))
 
 
+def validate_peer_command_echo(text: str, typed: bytes, sent: bool,
+                               unsent_context: str, silence: str) -> None:
+    expected_line = typed.decode("ascii")
+    if not sent:
+        raise RuntimeError(
+            f"the requested command {expected_line!r} was not sent; "
+            + unsent_context + silence)
+    echoed = any(
+        line.removeprefix("/ # ").removeprefix(" # ") == expected_line
+        for line in text.splitlines())
+    if not echoed:
+        raise RuntimeError(
+            f"the echo of {expected_line!r} was not the typed text on a "
+            "line of its own: characters missing or delayed (GitHub "
+            "issue #657)" + silence)
+
+
 def write_uart_line(connection, line: bytes) -> None:
     # The kernel UART ISR currently drains one byte per interrupt. Pace the
     # synthetic console like typed input so a command longer than a 16-byte
@@ -1021,17 +1038,20 @@ def main() -> int:
             note = fixture_failure + "; " + note
         raise RuntimeError(note)
 
-    # Every path out of the loop above breaks on a marker, so reaching the
-    # deadline means the guest stopped sending. Say so wherever a downstream
-    # check reports what it was still waiting for: a lifecycle diagnosis reads
-    # as a protocol fault, and under a saturated host the real answer is that
-    # the guest went quiet -- see GitHub issue #509, where that cost a day.
-    # Append rather than substitute: the protocol diagnosis and the silence
-    # diagnosis answer different questions and are both useful in artifacts.
+    # The capture can end at its inactivity deadline or its outer ceiling.
+    # Preserve which deadline expired and whether bytes were still arriving.
+    # A missing lifecycle boundary carries this timing context alongside its
+    # own diagnosis; GitHub issue #509 established the silence distinction.
     silence = ""
-    if time.monotonic() >= deadline:
+    now = time.monotonic()
+    if now >= deadline:
+        ceiling_reached = (not break_asked and
+                           now >= capture_started + args.ceiling)
+        diagnostic_budget = args.ceiling if ceiling_reached else args.timeout
         silence = silence_note(
-            time.monotonic() - last_chunk_at, args.timeout, bytes(output))
+            now - last_chunk_at, diagnostic_budget, bytes(output))
+        if ceiling_reached:
+            silence = f"; outer capture ceiling {args.ceiling:g}s reached" + silence
     # A BREAK that produced no prompt is a finding, not a failed attempt --
     # see this file's QMP_CHARDEV comment. Say which of the two it was, since
     # they call for opposite next steps: a kernel stopped in a loop is read
@@ -1061,19 +1081,25 @@ def main() -> int:
     # arrive with characters missing and the missing ones turn up later, and
     # nothing compared it, so it passed unnoticed until it landed in a
     # transcript that was compared.
-    for typed, wanted in ((b"/bin/peer-settings", args.peer_settings),
-                          (b"/bin/peer-tty", args.peer_tty)):
-        if not wanted:
-            continue
-        expected_line = typed.decode("ascii")
-        echoed = any(
-            line.removeprefix("/ # ").removeprefix(" # ") == expected_line
-            for line in text.splitlines())
-        if not echoed:
-            raise RuntimeError(
-                f"the echo of {expected_line!r} was not the typed text on a "
-                "line of its own: characters missing or delayed (GitHub "
-                "issue #657)" + silence)
+    unsent_context = ""
+    if ((args.peer_settings and not peer_settings_sent) or
+            (args.peer_tty and not peer_tty_sent)):
+        settings_complete = (
+            not args.peer_settings or
+            peer_settings_shell_ready(output, shell_setup))
+        unsent_context = (
+            "send prerequisites were not reached before capture ended "
+            f"(terminal checks done={terminal_scenario.done}, "
+            f"HTTPd ready={httpd_ready}, "
+            f"peer console ready={peer_command_ready(output, args.stop_marker)}, "
+            f"settings complete={settings_complete}); "
+            + diagnose_lifecycle(output, httpd_sent, httpd_ready))
+    for typed, wanted, sent in (
+            (b"/bin/peer-settings", args.peer_settings, peer_settings_sent),
+            (b"/bin/peer-tty", args.peer_tty, peer_tty_sent)):
+        if wanted:
+            validate_peer_command_echo(
+                text, typed, sent, unsent_context, silence)
     if args.validate_ash:
         lines = text.splitlines()
         try:

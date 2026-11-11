@@ -71,6 +71,67 @@ def main():
     CASES.note()
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
+        # The actual capture keeps receiving bytes through its outer ceiling,
+        # but never reaches the prerequisites for sending the requested probe.
+        uart = TimedUart([(at, control.BOOT_FIRST) for at in (4, 9, 14, 19, 23)])
+        with contextlib.redirect_stdout(io.StringIO()):
+            outcome = control.drive(driver, uart, root, timeout=8,
+                                    ash_only=False, peer_settings=True)
+        assert outcome.verdict, "an unstarted requested phase must fail"
+        assert b"/bin/peer-settings" not in outcome.commands, outcome.commands
+        assert "was not sent" in outcome.verdict, outcome.verdict
+        assert "send prerequisites" in outcome.verdict, outcome.verdict
+        assert "outer capture ceiling 24s reached" in outcome.verdict, outcome.verdict
+        assert "#657" not in outcome.verdict, outcome.verdict
+        assert "characters missing" not in outcome.verdict, outcome.verdict
+        assert "24s budget" in outcome.verdict, outcome.verdict
+        assert math.isclose(outcome.elapsed, 24, abs_tol=0.11), outcome.elapsed
+        capture = read(root / "uart.log.await-timing.jsonl")
+        assert capture[-1]["status"] == "not-arrived", capture
+
+        # Prove the actual CLI still exits nonzero as well as naming the
+        # unstarted phase. The clock and UART stay entirely in this process.
+        CASES.note()
+        clock = control.Clock()
+        endpoint = TimedUart([(at, control.BOOT_FIRST)
+                              for at in (4, 9, 14, 19, 23)])
+        endpoint.clock = clock
+        serial = control.FakeSerial(endpoint)
+        argv = [str(control.DRIVER), "--port", "socket://127.0.0.1:1",
+                "--log", str(root / "cli-uart.log"),
+                "--stdin", str(root / "ash.stdin"),
+                "--expected", str(root / "ash.expected"),
+                "--timeout", "8", "--peer-settings"]
+        output = io.StringIO()
+        status = 0
+        with contextlib.redirect_stdout(output), patch("sys.argv", argv), \
+                patch("serial.serial_for_url", serial.serial_for_url), \
+                patch("time.monotonic", clock.monotonic), \
+                patch("time.sleep", clock.sleep):
+            try:
+                runpy.run_path(str(control.DRIVER), run_name="__main__")
+            except SystemExit as error:
+                status = error.code
+        assert status == 1, status
+        assert "was not sent" in output.getvalue(), output.getvalue()
+        assert "outer capture ceiling 24s reached" in output.getvalue(), output.getvalue()
+        assert "#657" not in output.getvalue(), output.getvalue()
+        assert b"/bin/peer-settings" not in endpoint.commands, endpoint.commands
+
+    CASES.note()
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        with contextlib.redirect_stdout(io.StringIO()):
+            outcome = control.drive(
+                driver, control.FakeUart(control.BOOT_FIRST + control.BOOT_LAST),
+                root, timeout=8, ash_only=False)
+        assert not outcome.verdict, outcome.verdict
+        assert b"/bin/peer-settings" not in outcome.commands, outcome.commands
+        assert b"/bin/peer-tty" not in outcome.commands, outcome.commands
+
+    CASES.note()
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
 
         class UnavailableSerial(control.FakeSerial):
             def serial_for_url(self, url, **kwargs):
@@ -106,7 +167,7 @@ def main():
                 runpy.run_path(str(control.DRIVER), run_name='__main__')
             except SystemExit as error:
                 status = error.code
-        assert status != 0, status
+        assert status == 1, status
         assert 'could not open UART' in output.getvalue(), output.getvalue()
         assert all(not path.exists() for path in stale), stale
 
@@ -122,7 +183,8 @@ def main():
         assert capture[0]['status'] == 'not-arrived'
         assert capture[0]['timeout_seconds'] == 24
     report_pass('uart-await controls', 'connection budget, capture ceiling, late progress, '
-                'missing markers and DDB preserve original deadlines and verdicts', cases=CASES.ran)
+                'unstarted requested probes, missing markers and DDB preserve '
+                'original deadlines and verdicts', cases=CASES.ran)
     return 0
 
 

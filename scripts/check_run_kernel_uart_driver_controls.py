@@ -209,6 +209,34 @@ def main() -> int:
             ["ls /bin", "ps"], setup) != ["ps", "process rows"]:
         failures.append("a listed filename that equals a later command was removed")
 
+    # A requested command may never have reached its send prerequisites.
+    # Keep that failure separate from corruption of a command actually sent.
+    for typed in (b"/bin/peer-settings", b"/bin/peer-tty"):
+        line = typed.decode("ascii")
+        for sent, text, expected in (
+            (False, "", "was not sent"),
+            (False, "/ # " + line, "was not sent"),
+            (True, line, None),
+            (True, "/ # " + line, None),
+            (True, " # " + line, None),
+            (True, "", "issue #657"),
+            (True, line[:-1], "issue #657"),
+            (True, line[:5] + "\nforeign output\n" + line[5:], "issue #657"),
+        ):
+            CASES.note()
+            try:
+                driver.validate_peer_command_echo(
+                    text, typed, sent, "send prerequisites: listener missing", "")
+            except RuntimeError as error:
+                message = str(error)
+                if expected is None or expected not in message:
+                    failures.append(f"{line}: unexpected echo verdict {message}")
+                if not sent and "issue #657" in message:
+                    failures.append(f"{line}: an unsent command was called corrupted")
+            else:
+                if expected is not None:
+                    failures.append(f"{line}: accepted an incomplete requested phase")
+
     for failure in failures:
         print(f"ERROR\tuart-driver-silence: {failure}")
     if failures:
@@ -219,7 +247,8 @@ def main() -> int:
         "uart-driver-silence",
         "a timed-out capture says whether the guest stopped or merely "
         "ran late and names its last line; an interactive command waits "
-        "for its workload, stop and fresh post-settings prompt boundaries; exact wrapped echoes "
+        "for its workload, stop and fresh post-settings prompt boundaries; "
+        "unsent requested probes fail separately from sent echo corruption; exact wrapped echoes "
         "and dynamic ps PIDs normalize while wrong and incomplete output stays",
         cases=CASES.ran)
     return 0
