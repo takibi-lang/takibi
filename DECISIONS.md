@@ -622,3 +622,11 @@ condition below applies, and reports the land afterwards.
 - 2026-11-10 #1159 boot exec scratch lifetime: explore option A, tracking the scratch owner through aggregate fields, variants and direct-call results. Use the real ELF APIs to measure the reach and limits of static tracking and assess other applicable shapes. Keep the existing pool and require evidence before adopting a broader language rule. [active] #1159
 
 - 2026-11-11 #1159 pin sharing handles: publish all 32 validated handles together through one SetOnce. Read one bounds-checked handle by value without copying the array or returning a reference. Preserve the existing locking, timed loop and late-worker retention. Verify generated copies and the existing frame ceiling on both targets in normal and debug builds. [active] #1159
+
+- 2026-11-11 #1159 boot exec scratch lifetime: adopt option A after the prototype. Design body-checked argument-to-result lifetime dependencies for the direct calls, aggregate copies and variant/match shapes required by the real ELF APIs. Reject unsupported retention and unknown external or indirect transfer. Preserve the pool and runtime representation; validate production callers and measured frame/space costs. [active] #1159
+
+- 2026-11-11 #1502 contains_stable_owner: choose option A. Apply the existing type-syntax checks throughout indexed and sliced bases. Accept the structural predicate on erased views consistently in direct and nested expressions as specified, while rejecting actual runtime layout queries with source diagnostics. [active] #1502
+
+- 2026-11-11 #1481 RetxGuard: choose option A. Migrate the single acquire/release pair to the existing PreemptOff[0] counted short contract, retaining lock identity, rank, handler restrictions and physical unlock before span end. Per-entry retry identity is a separate requirement. [active] #1481
+
+- 2026-11-11 #1481 private-stack admission: choose option B. Design ordinary blocking-acquire APIs to require scoped authority proving eligibility to park, and review boot, driver and idle diversions together. Bind trusted admission minting to the actual private stack, current task generation and physical ownership. Do not treat Running, RootHeld or FrameRef alone as sufficient. [active] #1481
