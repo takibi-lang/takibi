@@ -121,11 +121,11 @@ and the narrowly admitted publication mirror; parent #1159 remains open for
 other globals. The exception/net boundaries and reverted-churn timing-policy
 correction are complete. Protect production-reachable boot/selftest state
 with typed guards, owners or phases, without a live-fixture exemption.
-The UART registration boundary waits for the approved actual function-value
-effect conformance repair (#1493), including approved bounded input-flow
-requests served by the existing TX IRQ. Preserve the IRQ logging ban and
-review ordering, queue-full, peer-pause and emergency-console behavior,
-including retained-work rearm after complete-stop return (#1494).
+Actual function-value effect checking is complete (#1493). UART input-flow
+requests use the existing TX IRQ, and complete debugger returns rearm
+retained TX work. Busy/Partial refusals serialize UART output or retain a
+diagnostic record (#1494). Next, complete typed UART registration under
+#1159. The wider DDB safety review (#1286) remains open.
 Investigate explicit linear ownership for CPU-independent exec reservations
 using existing types first; add no reservation workaround. Continue
 independent raw-CPU reader review while a concrete new decision is parked.
@@ -139,8 +139,7 @@ held-span repair (#1500) is complete. Explore aggregate lifetime tracking
 against the real boot exec scratch API (#1159). The pin sharing handles migration
 uses one SetOnce publication for all 32 handles and reads one handle by
 value. Verify the generated copies and existing frame ceiling before
-removing the allowance. The DDB Busy/Partial output policy is approved for
-the UART migration (#1493/#1494).
+removing the allowance.
 
 **Assigned queue (maintainer, 2026-10-23, pruned 2026-10-25).** Memory
 safety and multicore backbone only. Taken in order whenever the numbered
