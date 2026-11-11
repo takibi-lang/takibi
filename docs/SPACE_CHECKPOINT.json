@@ -3,10 +3,11 @@
   "event": "incremental",
   "decision": "measured",
   "source_sha256": "73387fcc0e0a12ba7d5502486d0e7a93370de918760c6b2e47918371669e13ca",
-  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 1f1c5e05: this branch's review, rebound to the merged sources (upstream's record was 2026-11-11 incremental/measured). Standard normal QEMU and RPi5 linked kernels at the same build inputs. Compare the TCP frame Place acquire and give, static wrapper and caller frames, fixed image sections, data/BSS symbol sizes and the start of usable RAM.",
+  "workload": "Build both QEMU and RPi5 kernels in normal and debug configurations with both TCP changes applied. Compare linked sections, data/BSS symbols, usable RAM start, and LLVM static frames against the published 4e04b15a production sources. The intervening reset-control change touched only the roadmap and a host test script.",
   "evidence": [
+    "docs/PIN_SHARING_SET_ONCE_SPACE.md",
     "docs/TCP_FRAME_GUARD_SPACE.md"
   ],
-  "assessment": "Both targets add 32 B of linked text. Data, BSS, reservations and the 8 B guard layout are unchanged. The acquire wrapper static frame adds 16 B. The give and four direct callers have unchanged static frames. This review measures the fixed image and static frames.",
-  "next_trigger": "The next counted short-lock migration, change in frame or allocator storage, or completed sleeping TaskMutex milestone."
+  "assessment": "Combined text growth is 968/984 B in normal QEMU/RPi5 and 1008/1056 B in debug. Data, BSS and usable RAM start match in each comparison. The only data/BSS symbol size change is the handle cell from 768 to 776 B. The largest changed frame is the debug pin setup at 1680 B. TCP acquire frames are 32/48 B and release frames are 16/48 B in normal/debug. This measures linked space and individual static frames.",
+  "next_trigger": "Measure when the pin handle layout, allocation or retention changes, at the next counted short-lock migration, or at the completed sleeping TaskMutex milestone."
 }
