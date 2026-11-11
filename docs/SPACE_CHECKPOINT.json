@@ -1,12 +1,12 @@
 {
   "date": "2026-11-11",
-  "event": "milestone",
-  "decision": "measured",
-  "source_sha256": "5d48f5e28bca29478c673b6aad9a831850094aac163fd60a3deafaaecab16654",
-  "workload": "Actual combined sources on published fd1c25a8. Compare all four normal/debug QEMU and RPi5 linked images and static frames, plus the maintained normal QEMU bounded boot pool endpoints and termios TX scenario.",
+  "event": "incremental",
+  "decision": "reuse",
+  "source_sha256": "125d3fdfdf47abca553594f6283be32e3323313cf802cd5b0d19c06645d3ace9",
+  "workload": "Reuse the published console-flow normal/debug QEMU and RPi5 image, frame, bounded pool endpoint and termios TX workload observations. This correction visits nested type syntax and consistently accepts the existing structural predicate on erased views.",
   "evidence": [
     "docs/CONSOLE_FLOW_SPACE_2026-11-11.txt"
   ],
-  "assessment": "Normal text grows 4000 B QEMU / 4048 B RPi5, debug 4608/4640 B; data grows 8 B each. QEMU debug image reservation grows 32768 B, leaving 261592 pages in the 1024 MiB profile and 0x658000 B to the 0x880000 image ceiling. Other measured image profiles keep their allocator start. Normal QEMU pool endpoints match the baseline; adopt the measured cost.",
+  "assessment": "Both maintained target builds and native builds pass. The change repairs frontend type validation and declared-type normalization without changing lowering, kernel storage or allocation inputs. The valid nested layout control produces the same object as the baseline, so the existing workload evidence applies to this small correction.",
   "next_trigger": "Change to TX or diagnostic storage, queue capacity, or the kernel allocation workload."
 }
