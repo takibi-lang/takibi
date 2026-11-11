@@ -10,26 +10,26 @@ starting its 4096 pin/unpin timing interval.
 
 ## Linked images
 
-Measured with LLVM 19 from the maintained images, against 96e3db02.
+Measured with LLVM 19 from the maintained images, against 4e04b15a.
 Both sides use the same platform and normal or debug build target.
 
 | Target | Text before | Text after | Data | BSS | Usable RAM start |
 | --- | ---: | ---: | ---: | ---: | --- |
 | QEMU normal | 823144 | 824080 | 4608 | 1314816 | 0x40210000 |
 | QEMU debug | 899764 | 900740 | 4608 | 1314816 | 0x40220000 |
-| RPi5 normal | 4207828 | 4208780 | 5584 | 1929216 | 0x7e0000 |
-| RPi5 debug | 4293312 | 4294336 | 5584 | 1843200 | 0x7e0000 |
+| RPi5 normal | 4210788 | 4211740 | 5584 | 1925120 | 0x7e0000 |
+| RPi5 debug | 4296272 | 4297296 | 5584 | 1843200 | 0x7e0000 |
 
 Data, BSS and usable RAM start are identical within each pair. In each
-image, the handle symbol grows from 768 to 776 bytes: 32 handles at 24
-bytes each and one eight-byte publication word. Existing BSS alignment
+image, the handle symbol grows from 768 to 776 bytes. It holds 32 handles
+at 24 bytes each and one eight-byte publication word. Existing BSS alignment
 absorbs the eight bytes. Pool payload and state layout, the single
 page of capacity, and the retention boundary use the same workload.
 
 ## Stack and copies
 
-Object prologues on both platforms give the same frames within each
-mode. All values are bytes and the ceiling is 2048 bytes per function.
+LLVM stack-size records give the same frames on both platforms within
+each mode. All values are bytes and the ceiling is 2048 bytes per function.
 
 | Function | Normal before | Normal after | Debug before | Debug after |
 | --- | ---: | ---: | ---: | ---: |
@@ -42,7 +42,7 @@ Setup initializes one 768-byte local and passes a 768-byte publication
 argument. The publisher copies the value into the cell before the
 release store. The local clear makes the existing definite-assignment
 check accept an early-exit fill loop. Each successful iteration
-replaces one entry with its real handle; any allocation failure exits
+replaces one entry with its real handle. Any allocation failure exits
 before the claim. Layout and live-count validation still gate the claim.
 
 In all four objects, the reader calls the acquire check at cell offset
@@ -53,6 +53,12 @@ path returns the outcome tag without reading the payload. There is
 no array copy or returned reference on the read path. The acquire
 check's own frame is 16 bytes in both modes. This records per-function
 stack use and generated work outside the timing interval.
+
+The normal and debug QEMU boots at 25b3811c each completed three paired
+4096-operation samples across four cores and returned the pool page. Both
+passed the existing pool-contention view. The five setup, cycles, cleanup,
+indexed-read and acquire-check instruction bodies are identical after
+rebasing onto the LLVM frame-metadata gate.
 
 The one-time setup frame and text growth fit the existing limits. The
 published handles still identify pool slots whose liveness is checked
