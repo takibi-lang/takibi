@@ -620,3 +620,5 @@ condition below applies, and reports the land afterwards.
 
 - 2026-11-10 #1500 nested indexed places: choose option A. Apply existing consumed-owner and held-span checks throughout nested indexed places while preserving evaluation and place semantics. Verify faithful rejections and valid live-owner uses. [active] #1500
 - 2026-11-10 #1159 boot exec scratch lifetime: explore option A, tracking the scratch owner through aggregate fields, variants and direct-call results. Use the real ELF APIs to measure the reach and limits of static tracking and assess other applicable shapes. Keep the existing pool and require evidence before adopting a broader language rule. [active] #1159
+
+- 2026-11-11 #1159 pin sharing handles: publish all 32 validated handles together through one SetOnce. Read one bounds-checked handle by value without copying the array or returning a reference. Preserve the existing locking, timed loop and late-worker retention. Verify generated copies and the existing frame ceiling on both targets in normal and debug builds. [active] #1159

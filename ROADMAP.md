@@ -134,14 +134,13 @@ independent raw-CPU reader review while a concrete new decision is parked.
 its fully zeroed frame locally through the existing nonretaining copy API;
 all four measured frames fit the existing ceiling. Continue the remaining
 production-reachable global migrations without a fixture exemption.
-Scoped ASID initialization is published. Boot exec scratch migration waits for an explicit choice between
-aggregate loan provenance and a scalar-plan/borrowed-image API; actual
-production lifetime controls demonstrate the current retaining-plan gap.
-The separate nested-index consumed-owner defect (#1500) needs compiler
-repair direction before relying on that ownership check. Preserve both
-witnesses and continue independent work. Publication of #1493/#1494 also
-waits for the DDB Busy/Partial refusal-output decision; the earlier compiler
-and input-flow choices remain approved.
+Scoped ASID initialization is published. Repair nested indexed ownership and
+held-span checks (#1500), then explore aggregate lifetime tracking against
+the real boot exec scratch API (#1159). The pin sharing handles migration
+uses one SetOnce publication for all 32 handles and reads one handle by
+value. Verify the generated copies and existing frame ceiling before
+removing the allowance. The DDB Busy/Partial output policy is approved for
+the UART migration (#1493/#1494).
 
 **Assigned queue (maintainer, 2026-10-23, pruned 2026-10-25).** Memory
 safety and multicore backbone only. Taken in order whenever the numbered
