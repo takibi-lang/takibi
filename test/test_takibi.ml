@@ -31072,6 +31072,123 @@ let production_boot_snapshot_tests =
       |};
   ]
 
+(* Real retransmit guard and span bodies, with spin/count primitives stubbed.
+   These are compile-time ownership/effect controls, not lock execution. *)
+let infer_production_retx code =
+  ignore (parse "const KERNEL_MAX_CORES: usize = 4;");
+  let parse_at file source =
+    let lexbuf = Lexing.from_string source in
+    Lexing.set_filename lexbuf file;
+    Parser.program Lexer.read lexbuf in
+  let select file types functions =
+    let path = match List.find_opt Sys.file_exists ["../" ^ file; file] with
+      | Some path -> path
+      | None -> Alcotest.failf "missing production test dependency %s" file
+    in
+    let source = In_channel.with_open_bin path In_channel.input_all in
+    let declarations = List.filter (function
+      | Ast.StructDef (name, _, _, _, _, _)
+      | Ast.OwnedStructDef (name, _, _, _, _, _, _, _, _) -> List.mem name types
+      | Ast.FuncDef f -> List.mem f.name functions
+      | _ -> false) (parse_at file source) in
+    Alcotest.(check int) (file ^ ": production declarations present")
+      (List.length types + List.length functions) (List.length declarations);
+    declarations in
+  let primitives = parse_at "kernel/kernel/cpu_authority.tkb" {|
+    struct no_copy AtomicWord { private value: usize; }
+    fn spin_lock(word: *AtomicWord) !{locks, unsafe} {}
+    fn spin_unlock(word: *AtomicWord) !{locks, unsafe} {}
+    fn preempt_count_add(value: usize) -> usize { return 1; }
+    private fn preempt_off_exit() {}
+    extern fn retx_test_wait() !{may_block};
+  |} in
+  let span = select "kernel/kernel/cpu_authority.tkb" ["CpuHere"; "PreemptOff"]
+      ["preempt_span_begin"; "preempt_span_end"] in
+  let mutex = select "kernel/lib/task_mutex.tkb" ["TaskMutex"]
+      ["task_mutex_acquire"; "task_mutex_acquire_short"; "task_mutex_release"] in
+  let retx = select "kernel/net/tcp.tkb" ["RetxGuard"]
+      ["retx_lock"; "retx_unlock"] in
+  let consumer = parse_at "kernel/net/tcp.tkb" code in
+  Type_inf.infer_program (Declared_type_resolver.run
+    (Monomorphize.run (primitives @ span @ mutex @ retx @ consumer)))
+
+let production_retx_guard_tests =
+  let bad name fragment code = Alcotest.test_case name `Quick (fun () ->
+    let check messages =
+      if not (List.exists (fun message -> contains_substring message fragment) messages)
+      then Alcotest.failf "expected %s, received %s" fragment
+        (String.concat "; " messages) in
+    match infer_production_retx code with
+    | _ -> Alcotest.fail "real retransmit guard accepted invalid use"
+    | exception Types.TypeError (_, message) -> check [message]
+    | exception Types.MultiTypeError errors -> check (List.map snd errors)) in
+  let prefix = "private let mut retx_test_mutex: TaskMutex;\n" in
+  [
+    Alcotest.test_case "real retransmit pair orders count and physical lock" `Quick
+      (fun () ->
+        let file = "kernel/net/tcp.tkb" in
+        let path = List.find Sys.file_exists ["../" ^ file; file] in
+        let source = In_channel.with_open_bin path In_channel.input_all in
+        Compilation_state.reset ();
+        let lexbuf = Lexing.from_string
+            ("const KERNEL_MAX_CORES: usize = 4;\n" ^ source) in
+        Lexing.set_filename lexbuf file;
+        let declarations = Parser.program Lexer.read lexbuf in
+        List.iter (fun (name, expected) ->
+          let body = Option.get (List.find_map (function
+            | Ast.FuncDef f when f.name = name -> Some f.body
+            | _ -> None) declarations) in
+          let calls = List.filter_map (fun (stmt : Ast.stmt) ->
+            match stmt.desc with
+            | Ast.Let (_, _, _, Some { desc = Ast.Call (callee, _); _ }, _)
+            | Ast.Expr { desc = Ast.Call (callee, _); _ } -> Some callee
+            | _ -> None) body in
+          Alcotest.(check (list string)) name expected calls
+        ) [
+          ("retx_lock", ["preempt_span_begin"; "task_mutex_acquire_short"]);
+          ("retx_unlock", ["task_mutex_release"; "preempt_span_end"]);
+        ]);
+    Alcotest.test_case "real retransmit guard releases before blocking" `Quick
+      (fun () -> ignore (infer_production_retx (prefix ^ {|
+        fn probe() {
+          let guard = retx_lock(&retx_test_mutex);
+          retx_unlock(guard, &retx_test_mutex);
+          retx_test_wait();
+        }
+      |})));
+    bad "real retransmit guard excludes blocking"
+      "while PreemptOff 'guard' is held" (prefix ^ {|
+        fn probe() {
+          let guard = retx_lock(&retx_test_mutex);
+          retx_test_wait();
+          retx_unlock(guard, &retx_test_mutex);
+        }
+      |});
+    bad "real retransmit guard excludes interrupt handlers"
+      "takes a lock no handler may reach" (prefix ^ {|
+        fn probe() !{interrupt, unsafe} {
+          let guard = retx_lock(&retx_test_mutex);
+          retx_unlock(guard, &retx_test_mutex);
+        }
+      |});
+    bad "real retransmit guard retains mutex identity"
+      "static value mismatch" (prefix ^ {|
+        private let mut retx_other_mutex: TaskMutex;
+        fn probe() {
+          let guard = retx_lock(&retx_test_mutex);
+          retx_unlock(guard, &retx_other_mutex);
+        }
+      |});
+    bad "real retransmit guard cannot release twice"
+      "already consumed" (prefix ^ {|
+        fn probe() {
+          let guard = retx_lock(&retx_test_mutex);
+          retx_unlock(guard, &retx_test_mutex);
+          retx_unlock(guard, &retx_test_mutex);
+        }
+      |});
+  ]
+
 (* Use the production resume bodies, not a copied effect annotation. Only the
    atomic primitive and authority mint are stubbed; no CPU stop is simulated. *)
 let infer_production_stop_boundary ?(clock = false)
@@ -35145,6 +35262,7 @@ let named_groups_unisolated = [
   "record-loan-boundaries", record_boundary_tests;
   "stopped-diagnostics", stopped_diagnostic_tests;
   "production-boot-snapshot", production_boot_snapshot_tests;
+  "production-retx-guard", production_retx_guard_tests;
   "production-peer-clock", production_peer_clock_tests;
   "production-stop-boundary", production_stop_boundary_tests;
   "production-machine-boundary", production_machine_boundary_tests;

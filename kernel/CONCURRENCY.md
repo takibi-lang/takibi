@@ -677,8 +677,9 @@ build enforces each:
    after the release (`preempt_lock_raise`/`preempt_lock_lower`, #1350), so
    after the flip such a holder cannot be switched off a core where a
    `PreemptOff` span's waiter spins for it. The script refuses a wrapper
-   without the pair. The TCP frame Place lock also holds the count. Its
-   `FrameGuard` carries a linear `PreemptOff` span from before the short
+   without the pair. The TCP frame Place and retransmit chain/retry locks
+   also hold the count. Their `FrameGuard` and `RetxGuard` carry a linear
+   `PreemptOff` span from before the short
    acquire until after the physical unlock. The span check rejects blocking
    calls while the guard is live. TaskMutexes held across a user copy or a
    completion wait do not hold the count.

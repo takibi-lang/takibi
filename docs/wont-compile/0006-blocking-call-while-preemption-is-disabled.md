@@ -122,7 +122,9 @@ CPU authority is minted outside a block except the boot probe's.
 
 ## Limits of this entry
 
-While `KERNEL_PREEMPTIBLE` is 0 the region lowers to no disable or enable
-instruction; the mint file asserts the constant. The region is lexical; a
-region that ends elsewhere, such as at a lock release, waits for the linear
-token form (#638, #789).
+The lexical region and linear `PreemptOff` token spans use a per-CPU preempt
+count. While `KERNEL_PREEMPTIBLE` is 0 no switch decision consults that count;
+the mint file asserts the constant. A span may end in another function when
+its token is consumed, including a token carried by a guard. While that guard
+is live, the compiler rejects calls that may block, as specified in `SPEC.md`.
+The primitive pair and its ordering around the physical lock remain trusted.

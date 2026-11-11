@@ -1178,3 +1178,11 @@ the mutable global allowance. The retransmit implementation still copies
 raw entry access, compiler/lowering correctness and nested call-stack capacity
 remain trusted; the measured per-function ceiling is not a whole-path bound.
 See docs/TCP_PROBE_LOCAL_FRAME_SPACE.md for the storage lifetime measurement.
+
+The retransmit chain/retry guard also carries the existing counted
+PreemptOff span. Type checks exclude blocking while the guard is live and
+retain rank, mutex identity and handler restrictions. The mint's count
+effect and the physical lock primitives remain reviewed implementation
+boundaries. Source tests check the wrapper's begin/acquire and release/end
+ordering. Per-entry retry association remains module-private.
+See docs/TCP_RETX_GUARD_SPACE.md for the linked-image and static-frame cost.

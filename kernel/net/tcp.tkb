@@ -585,13 +585,11 @@ struct RetxRetryState {
     retries: usize;
 }
 
-// GitHub issue #451: a linear STRUCT, not an erased view. Since #1071 the
-// lock is a TaskMutex, which masks nothing, so the guard carries no
-// interrupt state; `held` is a placeholder field. No interrupt handler
-// reaches this lock (the acquire is `may_block`). Identity is unchanged:
-// `[lock: addr]` still makes another container's guard a compile error.
+// The retransmit chain and retry state use a counted short TaskMutex.
+// The guard retains the preemption span until after the physical unlock.
+// The lock index preserves mutex identity, and no handler may take it.
 private linear struct RetxGuard[lock: addr] {
-    private held: usize;
+    private span: PreemptOff[0];
 }
 private let mut tcp_retx_chain: RetxChain;
 // GitHub issue #672 layer 3: the built-in region_pool, as the frame pool
@@ -1891,16 +1889,18 @@ fn kernel_tcp_inject_drop_next_fin() !{unsafe} {
 }
 
 fn retx_lock(m: *TaskMutex @ address) -> RetxGuard[address]
-        !{may_block, acquires_lock_30_retx, lock_guard_30_retx} borrows(m) {
-    task_mutex_acquire(m);
-    let mut guard: RetxGuard[address] = { 1 };
+        !{no_handler_lock, acquires_lock_30_retx, lock_guard_30_retx} borrows(m) {
+    let span = preempt_span_begin();
+    task_mutex_acquire_short(m);
+    let mut guard: RetxGuard[address] = { span };
     return guard;
 }
 
 fn retx_unlock(guard: sink RetxGuard[address],
-                    m: *TaskMutex @ address)  borrows(m) {
-    let held: usize = guard.held;
+                    m: *TaskMutex @ address) borrows(m) {
+    let span = guard.span;
     task_mutex_release(m);
+    preempt_span_end(span);
 }
 
 // The retry state is copied or replaced only while both the lock guard and
