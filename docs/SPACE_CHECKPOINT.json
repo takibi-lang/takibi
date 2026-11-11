@@ -2,11 +2,11 @@
   "date": "2026-11-11",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "5b91d47fceed32e5a96d03d47fd0f2b5c0d7a2f5039fa7d32875d8732aba4b0d",
-  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 4e04b15a: this branch's review, rebound to the merged sources (upstream's record was 2026-11-11 incremental/measured). The bounded boot pin-sharing fixture, with 32 validated RegionHandles, paired 4096-operation rounds, one pool page, and existing completion/retention; normal and debug linked QEMU and RPi5 images.",
+  "source_sha256": "73387fcc0e0a12ba7d5502486d0e7a93370de918760c6b2e47918371669e13ca",
+  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 1f1c5e05: this branch's review, rebound to the merged sources (upstream's record was 2026-11-11 incremental/measured). Standard normal QEMU and RPi5 linked kernels at the same build inputs. Compare the TCP frame Place acquire and give, static wrapper and caller frames, fixed image sections, data/BSS symbol sizes and the start of usable RAM.",
   "evidence": [
-    "docs/PIN_SHARING_SET_ONCE_SPACE.md"
+    "docs/TCP_FRAME_GUARD_SPACE.md"
   ],
-  "assessment": "Adopt one SetOnce. The symbol grows by 8 bytes inside existing BSS alignment. Normal QEMU/RPi5 text grows by 936/952 bytes, with no image-reservation change. The setup frame grows to 1632 normal and 1680 debug bytes. The indexed reader loads one 24-byte handle outside the timed loop. Pool capacity and allocation workload are unchanged.",
-  "next_trigger": "Measure when handle count or layout changes, or when the fixture allocation or late-worker retention boundary changes."
+  "assessment": "Both targets add 32 B of linked text. Data, BSS, reservations and the 8 B guard layout are unchanged. The acquire wrapper static frame adds 16 B. The give and four direct callers have unchanged static frames. This review measures the fixed image and static frames.",
+  "next_trigger": "The next counted short-lock migration, change in frame or allocator storage, or completed sleeping TaskMutex milestone."
 }
