@@ -667,8 +667,11 @@ build enforces each:
    after the release (`preempt_lock_raise`/`preempt_lock_lower`, #1350), so
    after the flip such a holder cannot be switched off a core where a
    `PreemptOff` span's waiter spins for it. The script refuses a wrapper
-   without the pair. The other `TaskMutex` locks, which can be held across a
-   user copy or a completion wait, do not hold the count.
+   without the pair. The TCP frame Place lock also holds the count. Its
+   `FrameGuard` carries a linear `PreemptOff` span from before the short
+   acquire until after the physical unlock. The span check rejects blocking
+   calls while the guard is live. TaskMutexes held across a user copy or a
+   completion wait do not hold the count.
 
 A world stop's window cannot wait on one either: a peer that holds an
 unmasked lock acknowledges the stop, but the stop's guard ranks at the IRQ level (40), so an

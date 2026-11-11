@@ -683,13 +683,11 @@ struct NetFrame {
 // cross-pool mixup falls to intrusive_pool_slot_is_valid at runtime
 // rather than to `static value mismatch` at compile time. Stated here
 // because it is the price of the container, not a surprise.
-// GitHub issue #451: a linear STRUCT, not an erased view. Since #1071 the
-// lock is a TaskMutex, which masks nothing, so the guard carries no
-// interrupt state; `held` is a placeholder field. No interrupt handler
-// reaches this lock (the acquire is `may_block`). Identity is unchanged:
-// `[lock: addr]` still makes another container's guard a compile error.
+// The guard keeps the task on its CPU while it exchanges a frame Place.
+// The TaskMutex leaves interrupts unmasked, so no handler may take it.
+// The lock index ties the guard to this connection's frame mutex.
 private linear struct FrameGuard[lock: addr] {
-    private held: usize;
+    private span: PreemptOff[0];
 }
 // GitHub issue #672 layer 3: the built-in region_pool. A frame is a slot
 // whose permission the connection parks in its frame places; the pool
@@ -742,16 +740,18 @@ private fn tcp_frame_pool_return_empty(
 
 
 fn tcp_frame_lock(m: *TaskMutex @ address) -> FrameGuard[address]
-        !{may_block, acquires_lock_30_frame, lock_guard_30_frame} {
-    task_mutex_acquire(m);
-    let mut guard: FrameGuard[address] = { 1 };
+        !{no_handler_lock, acquires_lock_30_frame, lock_guard_30_frame} {
+    let span = preempt_span_begin();
+    task_mutex_acquire_short(m);
+    let mut guard: FrameGuard[address] = { span };
     return guard;
 }
 
 fn tcp_frame_unlock(guard: sink FrameGuard[address],
                     m: *TaskMutex @ address) {
-    let held: usize = guard.held;
+    let span = guard.span;
     task_mutex_release(m);
+    preempt_span_end(span);
 }
 
 // Give a parked frame back. #370's cost in full: the handle came out of a
