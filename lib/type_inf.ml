@@ -13871,21 +13871,6 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             (path_to_string p))))
         (TaintEnv.get name taints)
     in
-    (* GitHub issue #217: an Index/SliceOf base is no longer always a bare
-       ident -- region taint is deliberately keyed only by directly tracked
-       local NAMES (see the "no component/case shape for runtime
-       aggregates" limitation below), so a FieldGet/Index-chain base has no
-       single tracked name to check liveness against. Apply the real check
-       only when the base still reduces to the one shape it can say
-       anything about (a bare Var); any other restricted shape is silently
-       skipped here, matching the pre-existing "aggregate region tracking
-       is not implemented" limitation rather than pretending to check
-       something this design cannot yet check. *)
-    let require_region_live_base loc taints moved (base : Ast.expr) =
-      match base.desc with
-      | Ast.Var name -> require_region_live loc taints moved name
-      | _ -> ()
-    in
     (* A taint names its authority by the current surface place key. Reusing
        that key for a new owner/guard would otherwise make an old derived
        value appear authorized by the new value and revive it after the old
@@ -14006,7 +13991,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     let pending_guard_arguments = ref [] in
     let pending_region_arguments = ref [] in
     let pending_witness_arguments = ref [] in
-    let rec check_expr taints moved consume (e : Ast.expr) =
+    let rec check_expr ?(as_place = false) taints moved consume (e : Ast.expr) =
       match e.desc with
       | Ast.ViewLit (name, _) ->
           if Hashtbl.find_opt view_kinds name = Some Ast.KindLinear
@@ -14048,8 +14033,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             mv_consume p moved
           end else moved
       | Ast.FieldGet (base_expr, fname) ->
-          require_no_region_aggregate_load e.loc e
-            (expr_taint taints base_expr);
+          if not as_place then
+            require_no_region_aggregate_load e.loc e (expr_taint taints base_expr);
           (match base_expr.desc with
            | Ast.Var base_name when
                (match pvar_expr base_expr base_name with
@@ -14087,7 +14072,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                let p = pfield base_name fname in
                require_available e.loc moved p;
                if consume then mv_consume p moved else moved
-           | _ -> check_expr taints moved false base_expr)
+           | _ -> check_expr ~as_place taints moved false base_expr)
       | Ast.Call (("dma_begin_rx" | "dma_finish_owned_rx"
                   | "dma_begin_tx" | "dma_finish_owned_tx") as operation,
                   [owner; _]) ->
@@ -14647,10 +14632,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           require_no_taint_address e.loc taints a;
           check_expr taints moved false a
       | Ast.Deref a ->
-          require_no_region_aggregate_load e.loc e (expr_taint taints a);
+          if not as_place then
+            require_no_region_aggregate_load e.loc e (expr_taint taints a);
           check_expr taints moved false a
       | Ast.Unsafe a ->
-          check_expr taints moved consume a
+          check_expr ~as_place taints moved consume a
       | Ast.Bnot a | Ast.Cast (_, a) ->
           check_expr taints moved false a
       | Ast.StructLit xs ->
@@ -14667,17 +14653,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              vanish into a dropped temporary (OWNERSHIP_KERNEL.md 5.9). *)
           List.fold_left (fun m x -> check_expr taints m consume x) moved xs
       | Ast.Index (base, i) ->
-          (* Index/SliceOf bases are not visited as ordinary Var/FieldGet
-             expressions (place_undecayed_type reads them directly, not
-             infer_expr), so the region use check must fire here
-             explicitly (they are how a derived frame slice is actually
-             read). *)
-          require_region_live_base e.loc taints moved base;
-          require_no_region_aggregate_load e.loc e (base_taint taints base);
-          check_expr taints moved false i
+          if not as_place then
+            require_no_region_aggregate_load e.loc e (base_taint taints base);
+          let moved = check_expr taints moved false i in
+          check_expr ~as_place:true taints moved false base
       | Ast.SliceOf (base, lo, hi) ->
-          require_region_live_base e.loc taints moved base;
-          check_expr taints (check_expr taints moved false lo) false hi
+          let moved = check_expr ~as_place:true taints moved false base in
+          let moved = check_expr taints moved false lo in
+          check_expr taints moved false hi
       | Ast.SizeOf _ | Ast.AlignOf _ | Ast.ContainsStableOwner _ | Ast.OffsetOf _ | Ast.IntLit _
       | Ast.BoolLit _ | Ast.StringLit _ | Ast.ByteSliceLit _ | Ast.EmbedFile _ -> moved
       | Ast.EnumVariant (vtype, _) ->
@@ -14739,9 +14722,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
            | Ast.FieldGet (base_expr, _) ->
                check_expr taints (check_expr taints moved false base_expr) false rhs
            | Ast.Index (base, i) ->
-               require_region_live_base e.loc taints moved base;
-               check_expr taints (check_expr taints moved false i) false rhs
+               check_index_store taints moved base i rhs
            | _ -> moved (* not an lvalue; infer_expr already rejected it *))
+    and check_index_store taints moved base index rhs =
+      (* Match LLVM evaluation order: index, RHS, then the destination
+         storage. Finding a place evaluates its selectors without moving
+         the base or copying intermediate aggregates. *)
+      let moved = check_expr taints moved false index in
+      let moved = check_expr taints moved false rhs in
+      check_expr ~as_place:true taints moved false base
     in
     (* Scope-end checks apply to LINEAR and MUST_USE obligations. Affine
        permits weakening by definition; maybe-consumed still rejects double
@@ -14939,10 +14928,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                        false rhs,
                      declared, taints))
            | Ast.Index (base, i) ->
-               require_region_live_base loc taints moved base;
                require_no_taint_escape loc taints `Store rhs;
-               (check_expr taints (check_expr taints moved false i) false rhs,
-                declared, taints)
+               (check_index_store taints moved base i rhs, declared, taints)
            | _ ->
                (* Not an lvalue shape infer_expr's own Assign case would
                   have already rejected during type inference -- this
@@ -15559,8 +15546,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.FieldGet (x, _) -> visit_expr x
       | Ast.Unsafe x -> contains_unsafe := true; visit_expr x
       | Ast.StructLit xs | Ast.TupleLit xs -> List.iter visit_expr xs
-      | Ast.Index (_, index) -> visit_expr index
-      | Ast.SliceOf (_, lo, hi) -> visit_expr lo; visit_expr hi
+      | Ast.Index (base, index) -> visit_expr base; visit_expr index
+      | Ast.SliceOf (base, lo, hi) -> visit_expr base; visit_expr lo; visit_expr hi
       | Ast.Assign (lhs, rhs) -> visit_expr lhs; visit_expr rhs
       | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.ByteSliceLit _ | Ast.Var _
       | Ast.ViewLit _ | Ast.EnumVariant _ | Ast.SizeOf _ | Ast.AlignOf _

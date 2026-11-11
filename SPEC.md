@@ -2365,7 +2365,9 @@ private let mut block_cache_tick: [usize; KERNEL_MAX_CORES] owned_by(BlockSlot.i
   the declared stride, spelled as a literal or a const of that value.
 - `t` is a variable of type `T` (owned, `borrow` or `borrow mut`), and `t.f`
   may be read in this position even outside `T`'s file: the declaration
-  names the field, and only to select.
+  names the field, and only to select. The token must still be live when
+  the selector is evaluated, including in a nested place such as
+  `g[t.f].bytes[j]`. Evaluating the selector does not consume the token.
 - `k` is an integer literal, a const, or a variable proven in `0..<S` by
   its type or the value facts at that point (a `for` variable over
   `0..<S`, a `{0..<S as usize}` parameter).

@@ -2836,6 +2836,18 @@ let owned_by_ok =
    }
    fn main() {}"
 
+(* An indexed slot owns a row whose inline array is accessed as a place. *)
+let nested_slot_fixture = {|
+linear struct NestedSlot[unit: usize] { private index: {0..<1 as usize}; }
+struct NestedRow { bytes: [u8; 2]; }
+private let mut nested_rows: [NestedRow; 1] owned_by(NestedSlot.index, 1);
+fn acquire_nested() -> NestedSlot[0] {
+  let mut slot: NestedSlot[0] = { 0 };
+  return slot;
+}
+fn release_nested(slot: sink NestedSlot[0]) {}
+|}
+
 (* GitHub issue #752: the shape of usb_xhci.tkb's Bulk-Only command order,
    header -> CDB bytes -> run, as a linear token the header mints. *)
 let msc_cbw_typestate_fixture =
@@ -3562,6 +3574,33 @@ let infer_tests = [
      only as g[t.f * S + k], t a T and k proven below S. *)
   Alcotest.test_case "owned_by: the slot's own elements compile" `Quick
     (expect_ok (owned_by_fixture ^ owned_by_ok));
+  Alcotest.test_case "owned_by: nested places require a live selector" `Quick
+    (fun () ->
+      let operations = {|
+  nested_rows[slot.index].bytes[0] = 7;
+  let address: *u8 = &nested_rows[slot.index].bytes[0];
+  let window = nested_rows[slot.index].bytes[0..<2];
+  let value = nested_rows[slot.index].bytes[0];
+|} in
+      expect_ok (nested_slot_fixture ^ "fn live() { let slot = acquire_nested();" ^
+        operations ^ "release_nested(slot); }") ();
+      expect_ok (nested_slot_fixture ^ "fn borrowed(slot: borrow NestedSlot[0]) {" ^
+        operations ^ "}") ());
+  Alcotest.test_case "owned_by: a consumed selector is rejected in nested places" `Quick
+    (fun () ->
+      let consumed = nested_slot_fixture ^ {|
+fn consumed() -> usize {
+  let slot = acquire_nested();
+  release_nested(slot);
+|} in
+      List.iter (fun access ->
+        expect_type_error "linear value 'slot' was already consumed"
+          (consumed ^ access ^ "}") ())
+        ["return nested_rows[slot.index].bytes[0] as usize;";
+         "nested_rows[slot.index].bytes[0] = 7; return 0;";
+         "let address: *u8 = &nested_rows[slot.index].bytes[0]; return 0;";
+         "let window = nested_rows[slot.index].bytes[0..<2]; return 0;"]);
+
   Alcotest.test_case "owned_by: an index of another shape is refused" `Quick
     (expect_type_error "reach it only as an element `valid[t.index * 4 + k]`"
        (owned_by_fixture ^
@@ -15125,6 +15164,31 @@ let with_embed_fixture contents f =
   close_out oc;
   Fun.protect ~finally:(fun () -> Sys.remove path) (fun () -> f path)
 
+let nested_span_fixture = {|
+linear struct PreemptOff[unit: usize] { private held: usize; }
+linear struct NestedGuard[unit: usize] { private span: PreemptOff[0]; }
+struct NestedFrame { bytes: [u8; 2]; }
+private let mut frames: [NestedFrame; 1];
+extern fn sleep_nested() !{may_block};
+fn blocking_index() -> {0..<1 as usize} { sleep_nested(); return 0; }
+fn short_index() -> {0..<1 as usize} { return 0; }
+fn begin_nested() -> NestedGuard[0] !{lock_guard_30_report} {
+  let mut span: PreemptOff[0] = { 1 };
+  let mut guard: NestedGuard[0] = { span };
+  return guard;
+}
+fn end_span(span: sink PreemptOff[0]) {}
+fn end_nested(guard: sink NestedGuard[0]) { end_span(guard.span); }
+fn release_index(guard: sink NestedGuard[0]) -> {0..<1 as usize} {
+  end_nested(guard);
+  return 0;
+}
+fn release_byte(guard: sink NestedGuard[0]) -> u8 {
+  end_nested(guard);
+  return 0;
+}
+|}
+
 let codegen_tests = [
   (* Replay #722's checker/backend disagreement without changing production
      checking. The scoped initializer context deliberately restores the old
@@ -20813,6 +20877,58 @@ variant Carry1350 { Stay; Go(PreemptOff[0]); }
       expect_type_error "also " two ();
       expect_type_error "calls 'sleep1350' while PreemptOff 'span' is held" two ();
       expect_type_error "(2 rejected span calls in all)" two ());
+
+  Alcotest.test_case "nested selector calls enforce PreemptOff spans" `Quick
+    (expect_type_error "calls 'blocking_index' while PreemptOff 'guard' is held"
+      (nested_span_fixture ^ {|fn entry() {
+  let guard = begin_nested();
+  let value = frames[blocking_index()].bytes[0];
+  end_nested(guard);
+}|}));
+
+  Alcotest.test_case "nested selector calls contribute to effect summaries" `Quick
+    (expect_type_error "calls 'nested_helper' while PreemptOff 'guard' is held"
+      (nested_span_fixture ^ {|fn nested_helper() -> u8 {
+  return frames[blocking_index()].bytes[0];
+}
+fn entry() {
+  let guard = begin_nested();
+  let value = nested_helper();
+  end_nested(guard);
+}|}));
+
+  Alcotest.test_case "indexed place checks follow LLVM evaluation order" `Quick
+    (fun () ->
+      expect_ok (nested_span_fixture ^ {|fn order() {
+  let read_guard = begin_nested();
+  let byte = frames[blocking_index()].bytes[release_index(read_guard)];
+  let write_guard = begin_nested();
+  frames[blocking_index()].bytes[0] = release_byte(write_guard);
+}|}) ();
+      expect_type_error "calls 'blocking_index' while PreemptOff 'guard' is held"
+        (nested_span_fixture ^ {|fn slice_order() {
+  let guard = begin_nested();
+  let window = frames[blocking_index()].bytes[release_index(guard)..<2];
+}|}) ());
+
+  Alcotest.test_case "held guard report includes nested selector calls" `Quick
+    (fun () ->
+      Type_inf.set_held_guard_audit_enabled true;
+      Fun.protect ~finally:(fun () -> Type_inf.set_held_guard_audit_enabled false)
+        (fun () ->
+          expect_ok (nested_span_fixture ^ {|fn entry() {
+  let guard = begin_nested();
+  let value = frames[short_index()].bytes[0];
+  end_nested(guard);
+  let late = frames[blocking_index()].bytes[0];
+}|}) ();
+          let calls = Type_inf.held_guard_sites ()
+            |> List.filter (fun s -> s.Type_inf.held_caller = "entry")
+            |> List.map (fun s -> s.Type_inf.held_callee,
+              List.map (fun g -> g.Type_inf.held_binding) s.held_guards) in
+          Alcotest.(check (list (pair string (list string)))) "nested sites"
+            ["begin_nested", []; "short_index", ["guard"];
+             "end_nested", ["guard"]; "blocking_index", []] calls));
 
   Alcotest.test_case "held guard report follows scope, moves and borrowed parameters" `Quick
     (fun () ->

@@ -45,10 +45,13 @@ relationships described in `SPEC.md`. These checks are path-sensitive within
 the supported control-flow model. They are not a general lifetime or
 separation-logic proof, do not infer arbitrary heap shapes, and do not prove
 that an external resource constructor actually owns the hardware resource it
-claims.
+claims. A slot-owned global's selector needs a live token at each use,
+including inside a larger place. The token mint still establishes that live
+tokens select distinct slots.
 
-Effects constrain control flow. `may_block` propagates through resolved calls;
-interrupt and exception roots reject reachable blocking operations. Function
+Effects constrain control flow. `may_block` propagates through resolved calls,
+including calls evaluated while resolving an indexed place or a slice base.
+Interrupt and exception roots reject reachable blocking operations. Function
 pointer effect rows constrain indirect calls. `unsafe` marks a function that
 contains a local trusted operation, and whole-program unsafe reachability can
 be forbidden. Extern effect declarations are trusted because their bodies are
