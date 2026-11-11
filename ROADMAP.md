@@ -229,6 +229,8 @@ owners are TaskMutex, the spare stack stays masked). #980
 and matched raw ext2 USB root comparison (#1158). The LLVM static frame
 gate now requires stack-size metadata for normal and debug kernel objects
 on both targets, with the 2048 B ordinary ceiling.
+The board-free RPi5 reset and loader controls now distinguish OpenOCD
+commands from checkout paths (#1503).
 The network queue boundary under #1159 is published, preserving nonblocking
 receive and pending IRQ/capability bookkeeping. The approved guard-lifetime and synchronous borrowed-callback
 compiler foundation for #1481 is published with RootHeld, and the real

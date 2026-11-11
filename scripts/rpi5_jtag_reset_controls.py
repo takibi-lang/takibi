@@ -2,6 +2,7 @@
 """Controls for retrying the RPi5 post-reset safety observation."""
 
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -18,7 +19,7 @@ count=0
 if [ -f "$count_file" ]; then count=$(cat "$count_file"); fi
 count=$((count + 1))
 printf '%s\n' "$count" > "$count_file"
-printf '%s\n' "$*" > "$RPI5_FAKE_ARGS.$count"
+printf '%s\000' "$@" > "$RPI5_FAKE_ARGS.$count"
 if [ "$count" -eq 1 ]; then
     printf '%s\n' 'bcm2712.cpu0 halted in AArch64 state, current mode: EL0T'
     printf '%s\n' 'pc (/64): 0x00000000400103c0'
@@ -49,9 +50,29 @@ fi
 '''
 
 
-def run_case(case: str) -> tuple[subprocess.CompletedProcess[str], int, list[str]]:
+def openocd_commands(log: Path) -> list[str]:
+    # Both scripts supply one value per option. Each value ends in NUL so
+    # spaces and newlines inside paths and Tcl commands stay intact.
+    argv = os.fsdecode(log.read_bytes()).split("\0")
+    argv.pop()
+    options = zip(argv[::2], argv[1::2], strict=True)
+    return [value for flag, value in options if flag == "-c"]
+
+
+def copy_into_checkout(source: Path, checkout: Path) -> Path:
+    scripts = checkout / "scripts"
+    scripts.mkdir(parents=True)
+    script = scripts / source.name
+    shutil.copyfile(source, script)
+    return script
+
+
+def run_case(case: str) -> tuple[subprocess.CompletedProcess[str], int, list[list[str]]]:
     with tempfile.TemporaryDirectory() as raw:
         temp = Path(raw)
+        # The absolute -f path contains "resume" and must remain one argument.
+        checkout = temp / "resume checkout"
+        reset = copy_into_checkout(RESET, checkout)
         fake = temp / "openocd"
         fake.write_text(FAKE_OPENOCD, encoding="ascii")
         fake.chmod(0o755)
@@ -73,44 +94,46 @@ def run_case(case: str) -> tuple[subprocess.CompletedProcess[str], int, list[str
             "RPI5_OPENOCD_TIMEOUT": "2",
         })
         result = subprocess.run(
-            ["bash", str(RESET), "--resident-image-unchanged"],
-            cwd=ROOT, env=env, text=True, capture_output=True, check=False)
+            ["bash", str(reset), "--resident-image-unchanged"],
+            cwd=checkout, env=env, text=True, capture_output=True, check=False)
         count = int(count_file.read_text(encoding="ascii"))
-        args = [
-            (temp / f"args.{index}").read_text(encoding="ascii")
+        commands = [
+            openocd_commands(temp / f"args.{index}")
             for index in range(1, count + 1)
         ]
-        return result, count, args
+        return result, count, commands
 
 
 def verify() -> None:
-    result, count, args = run_case("transient_then_safe")
+    result, count, commands = run_case("transient_then_safe")
     if result.returncode != 0:
         raise SystemExit("transient EL1 state was not retried:\n" + result.stderr)
     if count != 5:
         raise SystemExit("safe state was not accepted on the next observation")
-    if "resume" in args[0] or "bp 0x200c80 4 hw" not in args[1] or \
-            "wait_halt 30000" not in args[1]:
+    if ("resume" in commands[0]
+            or "bp 0x200c80 4 hw" not in commands[1]
+            or "wait_halt 30000" not in commands[1]):
         raise SystemExit("EL0 preflight was not caught at the next EL1 IRQ")
-    if "reg cpsr 0x3c5" not in args[2]:
+    if not any("reg cpsr 0x3c5" in command for command in commands[2]):
         raise SystemExit("EL1 preflight did not preserve its exception level")
-    if "resume" not in args[3]:
+    if "resume" not in commands[3]:
         raise SystemExit("transient observation left the CPU halted")
     # GitHub issue #1197: an EL1 kernel with WXN cannot fetch the trampoline
     # written to RESET_ADDR, so the reset must jump to an smc #0 in its text.
-    if "read_memory" not in args[2] or "reg pc $takibi_smc" not in args[2]:
+    if not any("read_memory" in command for command in commands[2]) or not any(
+            "reg pc $takibi_smc" in command for command in commands[2]):
         raise SystemExit("EL1 reset does not jump to the resident kernel's smc")
 
-    result, count, args = run_case("no_smc")
+    result, count, _ = run_case("no_smc")
     if result.returncode == 0 or count != 3 or "smc #0" not in result.stderr:
         raise SystemExit("EL1 reset without an smc #0 was not refused")
 
-    result, count, args = run_case("never_safe")
+    result, count, commands = run_case("never_safe")
     if result.returncode == 0:
         raise SystemExit("unsafe state was accepted")
     if count != 6:
         raise SystemExit("unsafe state did not consume the bounded retries")
-    if not all("resume" in invocation for invocation in args[3:]):
+    if not all("resume" in invocation for invocation in commands[3:]):
         raise SystemExit("an unsafe observation left the CPU halted")
     if "after 3 attempts" not in result.stderr:
         raise SystemExit("bounded failure omitted its attempt count")
@@ -163,12 +186,15 @@ def verify_loader_injection_context() -> None:
 def verify_loader_refuses_high_pc() -> None:
     with tempfile.TemporaryDirectory() as raw:
         temp = Path(raw)
+        # The path alone must not count as an image write.
+        checkout = temp / "load_image checkout"
+        loader = copy_into_checkout(LOADER, checkout)
         elf = temp / "kernel.elf"
         elf.write_bytes(b"ELF")
         executable = temp / "openocd"
         executable.write_text(
             "#!/bin/sh\n"
-            "printf '%s\\n' \"$*\" >> \"$RPI5_FAKE_CALLS\"\n"
+            "printf '%s\\000' \"$@\" >> \"$RPI5_FAKE_CALLS\"\n"
             "printf '%s\\n' "
             "'bcm2712.cpu0 halted in AArch64 state, current mode: EL2H'\n"
             "printf '%s\\n' 'pc (/64): 0xffffd06fcf296448'\n"
@@ -197,11 +223,11 @@ def verify_loader_refuses_high_pc() -> None:
         environment["PATH"] = f"{temp}:{environment['PATH']}"
         environment["RPI5_FAKE_CALLS"] = str(calls)
         result = subprocess.run(
-            ["bash", str(LOADER), str(elf)], cwd=ROOT, env=environment,
+            ["bash", str(loader), str(elf)], cwd=checkout, env=environment,
             text=True, capture_output=True, check=False)
         if result.returncode == 0 or "genuinely running Raspberry Pi OS" not in result.stderr:
             raise SystemExit("loader accepted or misdiagnosed a high-PC VHE kernel")
-        if "load_image" in calls.read_text(encoding="ascii"):
+        if any(command.startswith("load_image ") for command in openocd_commands(calls)):
             raise SystemExit("loader wrote memory after observing a high-PC VHE kernel")
 
 
