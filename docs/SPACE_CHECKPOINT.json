@@ -2,12 +2,11 @@
   "date": "2026-11-11",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "292629c5f67f34c683e0884bbec0db8f580648a3e56e8892a4203a9736c367c5",
-  "workload": "Same-input comparison of standard QEMU and RPi5 normal/debug kernel objects and linked images with LLVM stack size emission disabled and enabled. The RPi5 baseline was replayed with the exact candidate embedded provisioning container. Compare allocated section bytes, every PT_LOAD address and payload, and usable_ram_start.",
+  "source_sha256": "5b91d47fceed32e5a96d03d47fd0f2b5c0d7a2f5039fa7d32875d8732aba4b0d",
+  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 4e04b15a: this branch's review, rebound to the merged sources (upstream's record was 2026-11-11 incremental/measured). The bounded boot pin-sharing fixture, with 32 validated RegionHandles, paired 4096-operation rounds, one pool page, and existing completion/retention; normal and debug linked QEMU and RPi5 images.",
   "evidence": [
-    "HISTORY.md",
-    "docs/BUILD_CHECKS.md"
+    "docs/PIN_SHARING_SET_ONCE_SPACE.md"
   ],
-  "assessment": "Allocated object/ELF sections and all four linked images have identical PT_LOAD bytes, ranges and placement. Usable RAM boundaries match on each target. Normal/debug host ELF files grow by 134360/139968 B on QEMU and 146400/152728 B on RPi5. LLVM static frame records are non-allocating. The 2048 B ordinary ceiling and 3312/2640 B exceptions remain. The comparison measures the linked image boundary.",
-  "next_trigger": "Changed target emission, linked image layout, kernel allocation workload, or the next completed kernel storage or layout milestone."
+  "assessment": "Adopt one SetOnce. The symbol grows by 8 bytes inside existing BSS alignment. Normal QEMU/RPi5 text grows by 936/952 bytes, with no image-reservation change. The setup frame grows to 1632 normal and 1680 debug bytes. The indexed reader loads one 24-byte handle outside the timed loop. Pool capacity and allocation workload are unchanged.",
+  "next_trigger": "Measure when handle count or layout changes, or when the fixture allocation or late-worker retention boundary changes."
 }
