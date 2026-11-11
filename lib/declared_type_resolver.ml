@@ -155,7 +155,7 @@ let rec resolve_expr names expr =
         Per_cpu_registry.mark_rewritten index.loc global;
         Index (base, { index with desc = FieldGet (index, field) })
     | Index (base, index) -> Index (ex base, ex index)
-    | SliceOf (name, lo, hi) -> SliceOf (name, ex lo, ex hi)
+    | SliceOf (base, lo, hi) -> SliceOf (ex base, ex lo, ex hi)
     | Unsafe e -> Unsafe (ex e)
     | SizeOf t -> SizeOf (ty t)
     | AlignOf t -> AlignOf (ty t)
@@ -330,8 +330,8 @@ let validate prog =
         check_expr left; check_expr right
     | Cast (ty, value) -> check_type ty; check_expr value
     | FieldGet (value, _) -> check_expr value
-    | Index (_, index) -> check_expr index
-    | SliceOf (_, lo, hi) -> check_expr lo; check_expr hi
+    | Index (base, index) -> check_expr base; check_expr index
+    | SliceOf (base, lo, hi) -> check_expr base; check_expr lo; check_expr hi
     | SizeOf ty | AlignOf ty | ContainsStableOwner ty -> check_type ty
     | OffsetOf (ty, _) -> check_type ty
   in

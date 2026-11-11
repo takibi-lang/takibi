@@ -4169,6 +4169,16 @@ fn consumed() -> usize {
         ("variant declaration 'BoundaryVariant' remains TypeIndexed",
          "variant BoundaryVariant[n: usize] { None; }
           fn f(v: BoundaryVariant[1]) { }");
+        ("view declaration 'BoundaryView' remains TypeIndexed",
+         "linear view BoundaryView[n: usize];
+          fn f(rows: [[u8; 2]; 4]) -> u8 {
+            return rows[sizeof(BoundaryView[1])][0];
+          }");
+        ("view declaration 'BoundaryView' remains TypeIndexed",
+         "linear view BoundaryView[n: usize];
+          fn f(rows: [[u8; 2]; 4]) {
+            let bytes = rows[sizeof(BoundaryView[1])][0..<2];
+          }");
       ] in
       List.iter (fun (expected, src) ->
         let raw = Monomorphize.run (parse src) in
@@ -11090,6 +11100,82 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
       expect_type_error "has no runtime size or layout"
         "linear view ViewPending8b;
          fn view_size8() -> usize { return sizeof(ViewPending8b); }" ());
+
+  Alcotest.test_case "erased view: sizeof in a direct call argument is rejected" `Quick
+    (expect_type_error "an erased view has no runtime size or layout" {|
+linear view ShapeView[n: usize];
+fn index_of_size(n: usize) -> usize { return n; }
+fn read() -> usize { return index_of_size(sizeof(ShapeView[0])); }
+|});
+
+  Alcotest.test_case "erased view: sizeof in an index base is rejected" `Quick
+    (expect_type_error "an erased view has no runtime size or layout" {|
+linear view ShapeView[n: usize];
+struct ShapeRow { bytes: [u8; 4]; }
+private let mut rows: [ShapeRow; 4];
+fn index_of_size(n: usize) -> usize { return n; }
+fn read() -> u8 { return rows[index_of_size(sizeof(ShapeView[0]))].bytes[0]; }
+|});
+
+  Alcotest.test_case "erased view: sizeof in a slice base is rejected" `Quick
+    (expect_type_error "an erased view has no runtime size or layout" {|
+linear view ShapeView[n: usize];
+struct ShapeRow { bytes: [u8; 4]; }
+private let mut rows: [ShapeRow; 4];
+fn index_of_size(n: usize) -> usize { return n; }
+fn read() -> u8 {
+    let bytes = rows[index_of_size(sizeof(ShapeView[0]))].bytes[0..<2];
+    return bytes[0];
+}
+|});
+
+  Alcotest.test_case "layout syntax works in valid index and slice bases" `Quick
+    (expect_codegen_ok {|
+struct ShapeRow { bytes: [u8; 4]; }
+private let mut rows: [ShapeRow; 4];
+fn index_of_size(n: usize) -> usize { return n; }
+fn read() -> u8 {
+    let indexed = rows[index_of_size(sizeof(u8))].bytes[0];
+    let bytes = rows[index_of_size(sizeof(u8))].bytes[0..<2];
+    return indexed + bytes[0];
+}
+|});
+
+  Alcotest.test_case
+    "erased view: structural predicate is zero in direct and nested expressions"
+    `Quick
+    (fun () ->
+      ignore (gen_codegen {|
+linear view ShapeView[n: usize];
+struct ShapeRow { bytes: [u8; 4]; }
+private let mut rows: [ShapeRow; 4];
+fn index_of_size(n: usize) -> usize { return n; }
+fn direct() -> usize { return contains_stable_owner(ShapeView[0]); }
+fn indexed() -> u8 {
+    return rows[index_of_size(contains_stable_owner(ShapeView[0]))].bytes[0];
+}
+fn sliced() -> u8 {
+    let bytes = rows[index_of_size(contains_stable_owner(ShapeView[0]))].bytes[0..<2];
+    return bytes[0];
+}
+|});
+      let body name =
+        match Hashtbl.find_opt Llvm_gen.functions name with
+        | Some (_, fn) -> Llvm.string_of_llvalue fn
+        | None -> Alcotest.failf "function '%s' not found" name
+      in
+      Alcotest.(check bool) "direct predicate returns zero" true
+        (contains_substring (body "direct") "ret i64 0");
+      List.iter (fun name ->
+        Alcotest.(check bool) (name ^ " selector receives zero") true
+          (contains_substring (body name) "@index_of_size(i64 0)")
+      ) ["indexed"; "sliced"]);
+
+  Alcotest.test_case "erased view: structural predicate validates static arguments" `Quick
+    (expect_type_error "view 'ShapeView' expects 1 static argument(s), got 2" {|
+linear view ShapeView[n: usize];
+fn direct() -> usize { return contains_stable_owner(ShapeView[0, 1]); }
+|});
 
   Alcotest.test_case "erased view: runtime comparison is rejected" `Quick
     (expect_type_error "cannot be operands of runtime operators"

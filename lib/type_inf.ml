@@ -10966,20 +10966,24 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             here too, same as validate_let_type already does for a `let`
             annotation. *)
          validate_nonparam_type ~allow_ref:true e.loc ty; validate_expr_types x
-     | Ast.SizeOf ty | Ast.AlignOf ty | Ast.ContainsStableOwner ty
+     | Ast.SizeOf ty | Ast.AlignOf ty
      | Ast.OffsetOf (ty, _) ->
          if type_mentions_view ty then
            raise (TypeError (e.loc,
              "an erased view has no runtime size or layout"));
          (* Naming a register block's size or layout makes no value. *)
          validate_nonparam_type ~names_only:true e.loc ty
+     | Ast.ContainsStableOwner ty ->
+         (* This structural predicate does not ask for runtime layout. *)
+         validate_nonparam_type ~names_only:true e.loc ty
      | Ast.BinOp (_, a, b) -> validate_expr_types a; validate_expr_types b
      | Ast.Bnot x | Ast.Deref x | Ast.AddrOf x | Ast.FieldGet (x, _)
      | Ast.Unsafe x -> validate_expr_types x
      | Ast.Call (_, xs) | Ast.StructLit xs | Ast.TupleLit xs -> List.iter validate_expr_types xs
      | Ast.VariantCtor (_, _, payload) -> validate_expr_types payload
-     | Ast.Index (_, i) -> validate_expr_types i
-     | Ast.SliceOf (_, lo, hi) -> validate_expr_types lo; validate_expr_types hi
+     | Ast.Index (base, i) -> validate_expr_types base; validate_expr_types i
+     | Ast.SliceOf (base, lo, hi) ->
+         validate_expr_types base; validate_expr_types lo; validate_expr_types hi
      | Ast.ViewLit (name, args) ->
          (match Hashtbl.find_opt view_params name with
           | None -> raise (TypeError (e.loc, Printf.sprintf

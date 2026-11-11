@@ -484,8 +484,10 @@ parameter value, or top-level declaration name.
   zero-initialisation its empty state depends on: the empty state is
   declaration-order tag zero, inherited from a zero-initialized global
   rather than written by anyone, so a `T` placed in recycled storage
-  would read a previous occupant's tag as a live payload. Expression
-  position only. `linux_user/intrusive_pool/intrusive_pool_lib.tkb`'s two allocation entry
+  would read a previous occupant's tag as a live payload. Erased views
+  yield 0 because this structural predicate does not query runtime layout.
+  Expression position only.
+  `linux_user/intrusive_pool/intrusive_pool_lib.tkb`'s two allocation entry
   points are the worked example (GitHub issue #369).
 - `offsetof(StructName, field)` -- compile-time byte offset of `field`
   within `StructName`'s actual layout, type `usize`. Same DataLayout
