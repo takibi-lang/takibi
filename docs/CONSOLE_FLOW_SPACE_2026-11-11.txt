@@ -39,3 +39,51 @@ nested-stack totals and physical interrupt timing are outside the measurement.
 Adopt the bounded static state and code increase for IRQ-safe flow requests,
 retained-work rearm and serialized returning debugger output. Re-measure if
 TX or diagnostic storage, queue capacity, or the allocation workload changes.
+
+Combined-source measurement on the published TCP base
+
+Baseline: fd1c25a83544caf793e4ddacadb99934d45f9cc8
+Measured candidate: 4bf5e07e41809add036919a7f8c1c9e0f60c63d8
+Production fingerprint: 5d48f5e28bca29478c673b6aad9a831850094aac163fd60a3deafaaecab16654
+
+The published baseline's normal and debug ELF/object pairs and QEMU pool
+capture were archived before rebuilding the combined sources. The QEMU
+baseline profile identifies the same published commit.
+
+Target/mode    Text before/after  Data before/after  BSS before/after
+QEMU normal       824112/828112          4608/4616    1314816/1314816
+QEMU debug        900772/905380          4608/4616    1314816/1314816
+RPi5 normal     4211772/4215820          5584/5592    1925120/1921024
+RPi5 debug      4297328/4301968          5584/5592    1843200/1839104
+
+All four pairs show only the two TX state symbol-size changes listed
+above. Normal QEMU stays at 0x40210000, and both RPi5 images stay at
+0x7e0000. QEMU debug moves usable_ram_start from 0x40220000 to
+0x40228000, reserving 32768 additional image bytes before the page pool.
+The 1024 MiB debug boot therefore has 261592 pages, down eight from
+261600. The linked debug image span of 0x228000 is below the maintained
+0x880000 ceiling, leaving 0x658000 bytes to that threshold. The normal
+QEMU boot still has 261616 pages. Both the normal and debug memory-map
+checks accept the linked layouts and derive the allocator expectations.
+The RPi5 BSS section shrinks without a reduction in a BSS symbol or a
+change to the allocator start.
+
+All four objects pass the existing per-function frame gate. On both
+targets the new flow probe uses 256/688 bytes normal/debug and the
+refusal reporter 64/80. The debugger entry stays at 48/48 and the
+UART ISR at 32/48. TCP lock/unlock remain at 32/16 normal and 48/48
+debug on each target. These are static frames of individual functions.
+
+The combined normal QEMU boot and bounded_end samples are byte-identical
+to the archived published baseline's eleven-pool table, including
+capacities and nonfree counts. The TSV SHA256 remains
+51e8ecbaf37e62bc5350f96a4e7db70a50038df72a25276b48c944f3326fc1fd.
+The actual combined termios scenario reports both XOFF/XON and every
+check passing. The image budget change observed among these four profiles
+is the QEMU debug shift described above.
+
+The combined build records 1169 range obligations and 570 initialization
+obligations against 1165 and 566 on the published baseline. Existing
+raw-site counts are unchanged. The measured source-map review surface is
+174 rows against 146; this is model correspondence reviewed at the
+function boundary.

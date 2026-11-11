@@ -3,10 +3,10 @@
   "event": "milestone",
   "decision": "measured",
   "source_sha256": "5d48f5e28bca29478c673b6aad9a831850094aac163fd60a3deafaaecab16654",
-  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto fd1c25a8: this branch's review, rebound to the merged sources (upstream's record was 2026-11-11 incremental/measured). Standard linked QEMU and RPi5 kernels, plus the maintained QEMU bounded boot pool endpoints and termios flow scenario.",
+  "workload": "Actual combined sources on published fd1c25a8. Compare all four normal/debug QEMU and RPi5 linked images and static frames, plus the maintained normal QEMU bounded boot pool endpoints and termios TX scenario.",
   "evidence": [
     "docs/CONSOLE_FLOW_SPACE_2026-11-11.txt"
   ],
-  "assessment": "Text grows 4000 B on QEMU and 4048 B on RPi5. Two static TX symbols grow by 8 B each. Data sections grow 8 B each, usable RAM starts and normal QEMU pool endpoints are unchanged. Adopt the measured bounded cost for IRQ-safe flow requests and debugger return safety.",
+  "assessment": "Normal text grows 4000 B QEMU / 4048 B RPi5, debug 4608/4640 B; data grows 8 B each. QEMU debug image reservation grows 32768 B, leaving 261592 pages in the 1024 MiB profile and 0x658000 B to the 0x880000 image ceiling. Other measured image profiles keep their allocator start. Normal QEMU pool endpoints match the baseline; adopt the measured cost.",
   "next_trigger": "Change to TX or diagnostic storage, queue capacity, or the kernel allocation workload."
 }
