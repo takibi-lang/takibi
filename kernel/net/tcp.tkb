@@ -1499,11 +1499,10 @@ fn tcp_connection_pin_cost(owner: borrow TcpConnectionOwner[p, connection])
 // Current limitations (2026-10-05): this observes the current packed pool
 // ABI, not TCP payload work. Core 0 alone grows/frees this private pool;
 // peers pin immutable handles only after the round's release publication.
-struct PinSharingCell { unused: usize; }
 private let mut pin_sharing_pool: RegionPool(PinSharingCell);
 // GitHub issue #1159: an AtomicWord; core 0 sets it before the cycles.
 private let mut pin_sharing_page: AtomicWord;
-private let mut pin_sharing_handles: [RegionHandle(PinSharingCell); 32];
+private let mut pin_sharing_handles: SetOnce(PinSharingHandles);
 
 must_use variant PinSharingSetupResult { NoMemory; InvalidLayout; Ready; }
 must_use variant PinSharingCleanupResult { Busy; InvalidChunk; Released; }
@@ -1546,7 +1545,11 @@ fn pin_sharing_setup() -> PinSharingSetupResult !{unsafe} {
     let count: usize = (PAGE_SIZE - 48) / (sizeof(PinSharingCell) + 8);
     let first: usize = (base + (3 + count) * 8 + 15) & ~(15 as usize);
     let mut valid: bool = base % 64 == 0;
-    for index: usize in 0..<32 {
+    let mut handles: PinSharingHandles;
+    // The fill can exit early on allocation failure. Only a completed fill
+    // reaches the claim, so none of these initial bytes can be published.
+    zero_fill(&handles);
+    for index: usize in 0..<PIN_SHARING_HANDLES {
         let slot = match region_alloc(guard) {
             RegionPoolAlloc(PinSharingCell)::Exhausted => { pin_sharing_unlock(guard); return PinSharingSetupResult::InvalidLayout; }
             RegionPoolAlloc(PinSharingCell)::Full => {
@@ -1559,11 +1562,16 @@ fn pin_sharing_setup() -> PinSharingSetupResult !{unsafe} {
         if (region_handle_address(handle) != first + index * sizeof(PinSharingCell)) {
             valid = false;
         }
-        pin_sharing_handles[index] = handle;
+        handles.items[index] = handle;
     }
-    valid = valid && region_pool_live_count(guard) == 32;
+    valid = valid && region_pool_live_count(guard) == PIN_SHARING_HANDLES;
     pin_sharing_unlock(guard);
     if (valid == false) { return PinSharingSetupResult::InvalidLayout; }
+    // Post-grow failures retain the pool and its slots.
+    match set_once_claim(&pin_sharing_handles) {
+        SetOnceBegin::Taken => { return PinSharingSetupResult::InvalidLayout; }
+        SetOnceBegin::Claimed(claim) => { set_once_publish(&pin_sharing_handles, claim, handles); }
+    }
     return PinSharingSetupResult::Ready;
 }
 
@@ -1575,8 +1583,11 @@ fn pin_sharing_cycles(cpu: {0..<KERNEL_MAX_CORES as usize}, separate: bool)
     let mut index: usize = 5 + cpu;
     if (separate) { index = 5 + cpu * 8; }
     let chosen: usize = index;
-    if (chosen >= 32) { return TcpPinCostResult::Stale; }
-    let mut handle: RegionHandle(PinSharingCell) = pin_sharing_handles[chosen];
+    if (chosen >= PIN_SHARING_HANDLES) { return TcpPinCostResult::Stale; }
+    let handle = match set_once_pin_sharing_handle(&pin_sharing_handles, chosen) {
+        PinSharingHandleRead::Unpublished => { return TcpPinCostResult::Stale; }
+        PinSharingHandleRead::Ready(value) => { value }
+    };
     let start: i64 = tcp_pin_cost_clock();
     for operation: usize in 0..<4096 {
         let guard = pin_sharing_lock();
@@ -1602,8 +1613,15 @@ fn pin_sharing_cycles(cpu: {0..<KERNEL_MAX_CORES as usize}, separate: bool)
 
 fn pin_sharing_cleanup() -> PinSharingCleanupResult !{unsafe} {
     let guard = pin_sharing_lock();
-    for index: usize in 0..<32 {
-        match region_take(guard, pin_sharing_handles[index]) {
+    for index: usize in 0..<PIN_SHARING_HANDLES {
+        let handle = match set_once_pin_sharing_handle(&pin_sharing_handles, index) {
+            PinSharingHandleRead::Unpublished => {
+                pin_sharing_unlock(guard);
+                return PinSharingCleanupResult::Busy;
+            }
+            PinSharingHandleRead::Ready(value) => { value }
+        };
+        match region_take(guard, handle) {
             RegionTake(PinSharingCell)::Stale => {
                 pin_sharing_unlock(guard);
                 return PinSharingCleanupResult::Busy;

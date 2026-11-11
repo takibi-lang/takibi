@@ -94,7 +94,7 @@ Tried in this order; an array `[T; N]` takes the class of `T`.
 | `boot_once` | `BootOnce(T)`: written under one `BootPhase`, read after by `boot_once_get` |
 | `asid_initializer` (build admission only) | the two exact ASID boot words under the closed source, compiled caller/layout and linked-image checks above; raw tables cannot claim this class |
 | `handle` | an actual compiler-generated `IoHandle(T)` declaration from the region builtins; the maintained boot-attach policy below protects its address word, not the registers' own synchronization |
-| `set_once` | `SetOnce(T)` (kernel/lib/set_once.tkb, #1159): published once with the linear claim `set_once_claim`'s compare-exchange hands out, read by `set_once_get`, at any time and with no lock |
+| `set_once` | `SetOnce(T)` (kernel/lib/set_once.tkb, #1159): published once with the linear claim `set_once_claim`'s compare-exchange hands out, read after an acquire, at any time and with no lock |
 | `stop` | `StopCell(T)` (kernel/lib/occupancy.tkb, #1159): written only by `stop_cell_set`, which takes `borrow MachineStopped[&kernel_world_stop]`; read by `stop_cell_get`, a plain load, by anyone |
 | `per_cpu` | a `struct per_cpu` store |
 | `dma_fixed` | a `struct dma_fixed` record |
@@ -1111,3 +1111,13 @@ retransmit entries; no source view is returned. The obsolete global allowance
 is removed using both fresh compiler tables. This uses existing initialization,
 bounds and borrow rules, without a fixture exemption or classifier change.
 See TCP_PROBE_LOCAL_FRAME_SPACE.md for the active-frame and fixed-image costs.
+
+### Pin-sharing handle publication (2026-11-11)
+
+`pin_sharing_handles` publishes the fixture's 32 validated region handles
+through one `SetOnce(PinSharingHandles)`. Its indexed accessor acquires
+publication and copies one checked handle. The pool guard still governs
+pinning and teardown, and a timed-out round retains the pool for late
+workers. Both production compiler tables classify the cell as `set_once`,
+so its allowance row is removed. See PIN_SHARING_SET_ONCE_SPACE.md for the
+generated read path and the stack and linked-image measurements.

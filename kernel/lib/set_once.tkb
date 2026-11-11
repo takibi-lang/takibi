@@ -14,7 +14,7 @@
 // Current limitations (2026-11-07):
 // - A claim that is never published leaves the cell claimed forever; there
 //   is no cancel (no user needs one).
-// - The value is copied out whole on each get, so T should be small.
+// - The generic get copies the value out whole, so T should be small.
 use "kernel/lib/atomic_word.tkb";
 
 const SET_ONCE_EMPTY: usize = 0;
@@ -59,4 +59,21 @@ fn set_once_get(T: type, cell: &mut SetOnce(T)) -> T {
         set_once_unset_stop();
     }
     return (*cell).value;
+}
+
+// The pin-sharing fixture publishes its validated handles together. Keep
+// this projection beside the private SetOnce value so the array is never
+// copied or exposed by reference on the read path.
+const PIN_SHARING_HANDLES: usize = 32;
+struct PinSharingCell { unused: usize; }
+struct PinSharingHandles {
+    items: [RegionHandle(PinSharingCell); PIN_SHARING_HANDLES];
+}
+
+must_use variant PinSharingHandleRead { Unpublished; Ready(RegionHandle(PinSharingCell)); }
+
+fn set_once_pin_sharing_handle(cell: &mut SetOnce(PinSharingHandles),
+                              index: {0..<PIN_SHARING_HANDLES as usize}) -> PinSharingHandleRead {
+    if (set_once_is_set(cell) == false) { return PinSharingHandleRead::Unpublished; }
+    return PinSharingHandleRead::Ready((*cell).value.items[index]);
 }
