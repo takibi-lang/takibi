@@ -29,8 +29,9 @@
 // - Ordinary retained log lines and terminal output share this lock for
 //   physical admission. Retained records are a separate lock-free stream;
 //   every CPU writes its own line directly rather than through a peer ring.
-// - DDB AND THE CRASH CONSOLE DO NOT TAKE IT. They stand the queue down and
-//   write through uart_debug_putc. The priority-mask stop SGI can interrupt
+// - Complete DDB and the terminal crash console stand the queue down and
+//   write through uart_debug_putc. Busy/Partial DDB refusals try the guard
+//   once and retain diagnostics in the ring if it is busy. The stop SGI can interrupt
 //   a holder, including between its FIFO check and store. A complete-stop DDB
 //   leaves one free slot after its final byte and before releasing peers;
 //   every ordinary checked store is serialized by this guard. A complete

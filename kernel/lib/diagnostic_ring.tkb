@@ -16,8 +16,8 @@
 // - Four CPU rings are statically reserved, matching the largest maintained
 //   target. CPUs outside that range do not record.
 // - Eight records per CPU retain only a short diagnostic tail.
-// - Tracing is disabled by default and currently enabled only by debugger
-//   test configuration. There is no production control surface yet.
+// - DDB stop refusals that cannot use the console are always recorded.
+//   Other events are enabled only by debugger test configuration.
 // - Readers preserve per-CPU order only. They do not invent a global order
 //   between CPUs and do not yet carry timestamps for causal correlation.
 // - A writer must set all six payload fields before publish_commit. Since
@@ -32,6 +32,10 @@ const DIAGNOSTIC_TRACE_SLOTS: usize = 32;
 // 0x0100..0x01ff is the platform/interrupt range. The first concrete event
 // records a UART BREAK before control enters DDB.
 const DiagnosticEventUartBreak: usize = 0x0101;
+// Busy payload: claimed, owner, requested, unused.
+// Partial payload: stopped mask, claimed, owner, requested.
+const DiagnosticEventDdbStopBusy: usize = 0x0102;
+const DiagnosticEventDdbStopPartial: usize = 0x0103;
 // 0x0200..0x02ff is the process/scheduler range. UART wake outcome codes are
 // 0=no current process, 1=no blocked waiter, 2=waiter ownership vanished,
 // 3=byte consumed, 4=read must retry. Payload is byte/current pid/waiter pid.
@@ -84,7 +88,9 @@ private fn diagnostic_trace_slot(cpu: {0..<DIAGNOSTIC_TRACE_CPUS as usize},
 
 fn diagnostic_trace_record(event: usize, a: usize, b: usize,
                            c: usize, d: usize) !{interrupt, unsafe} {
-    if (diagnostic_trace_test_enabled == false) { return; }
+    if (diagnostic_trace_test_enabled == false &&
+        event != DiagnosticEventDdbStopBusy &&
+        event != DiagnosticEventDdbStopPartial) { return; }
     let cpu: usize = cpu_id();
     if (cpu >= DIAGNOSTIC_TRACE_CPUS) { return; }
     let ring_cpu: {0..<DIAGNOSTIC_TRACE_CPUS as usize} = cpu;

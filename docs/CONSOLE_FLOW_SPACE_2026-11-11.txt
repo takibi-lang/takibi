@@ -1,0 +1,41 @@
+Console flow-control and debugger refusal space review
+Date: 2026-11-11
+Baseline: fa39bfffb4fb7ca36f75cbaf0acd2ab9d0340683
+Production fingerprint: 78dcb83377b0e9a8fbdfdc0aa45ad745aca0a5facea3fc8342e00fa6cf28e6bd
+Workload: standard linked QEMU and RPi5 kernels, with the maintained bounded
+boot and UART terminal scenarios for exercised behavior.
+
+                            QEMU base  candidate    RPi5 base  candidate
+llvm-size text                 823144     827144      4210788    4214836
+data including GOT               4608       4616         5584       5592
+BSS including stacks          1314816    1314816      1925120    1921024
+usable_ram_start           0x40210000 0x40210000     0x7e0000   0x7e0000
+
+The standard space_delta.py comparison rebuilt the baseline and candidate
+images. Text grows 4000 bytes on QEMU and 4048 bytes on RPi5. Each image
+adds 8 data-section bytes. The TX state symbol grows from 1056 to 1064 bytes,
+and its pending hint adds an 8-byte symbol. These are the only changed
+data/BSS symbol sizes on either platform. The state and hint are static;
+queue capacity, diagnostic ring storage, and the image reservation boundary
+stay the same. The RPi5 BSS section reports 4096 fewer bytes without a
+smaller BSS symbol or a changed allocator start. The memory-map check and its
+five allocator expectations pass. The BSS difference is no allocator saving.
+
+The baseline and candidate normal QEMU UART captures have identical
+boot and bounded_end tables for all eleven pools. The comparison covers
+object sizes, chunks, capacity, nonfree counts, occupied and free storage,
+and accounting overhead at the two endpoints. The normalized TSV SHA256
+on each side is
+51e8ecbaf37e62bc5350f96a4e7db70a50038df72a25276b48c944f3326fc1fd.
+The same candidate boot executed the maintained termios scenario, which
+observed both XOFF and XON. These pool samples are endpoint observations.
+
+LLVM's static frame records report the same sizes on both targets: the
+pre-IRQ terminal flow probe uses 256 bytes normal and 688 debug, the DDB
+refusal reporter 64 and 80, and the returning debugger entry 48 and 48.
+These are per-function observations, with the existing frame ceiling;
+nested-stack totals and physical interrupt timing are outside the measurement.
+
+Adopt the bounded static state and code increase for IRQ-safe flow requests,
+retained-work rearm and serialized returning debugger output. Re-measure if
+TX or diagnostic storage, queue capacity, or the allocation workload changes.

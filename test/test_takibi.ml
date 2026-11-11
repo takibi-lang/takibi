@@ -29407,15 +29407,16 @@ let infer_production_boot_snapshot code =
     let lexbuf = Lexing.from_string source in
     Lexing.set_filename lexbuf file;
     Parser.program Lexer.read lexbuf in
-  let select file types globals functions =
+  let parse_production file =
     let path = List.find Sys.file_exists ["../" ^ file; file] in
-    let source = In_channel.with_open_bin path In_channel.input_all in
+    parse_at file (In_channel.with_open_bin path In_channel.input_all) in
+  let select file types globals functions =
     let selected = List.filter (function
       | Ast.StructDef (name, _, _, _, _, _)
       | Ast.OwnedStructDef (name, _, _, _, _, _, _, _, _) -> List.mem name types
       | Ast.LetDef (name, _, _, _, _, _, _) -> List.mem name globals
       | Ast.FuncDef f -> List.mem f.name functions
-      | _ -> false) (parse_at file source) in
+      | _ -> false) (parse_production file) in
     Alcotest.(check int) (file ^ ": production declarations present")
       (List.length types + List.length globals + List.length functions)
       (List.length selected);
@@ -29424,6 +29425,9 @@ let infer_production_boot_snapshot code =
       ["boot_phase_ended"] ["boot_phase_mint"; "boot_phase_end"] in
   let mutex = select "kernel/lib/task_mutex.tkb" ["TaskMutex"] []
       ["task_mutex_acquire_boot"; "task_mutex_release"] in
+  (* Parse the real terminal constants before selecting log declarations.
+     The parser needs them even for log functions this slice discards. *)
+  ignore (parse_production "kernel/drivers/serial/terminal.tkb");
   let snapshot = select "kernel/printk/log.tkb" ["KernelLogSnapshotGuard"]
       ["kernel_log_snapshot_lock"]
       ["kernel_log_snapshot_take_boot"; "kernel_log_snapshot_give"] in

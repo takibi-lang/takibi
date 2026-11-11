@@ -873,7 +873,7 @@ real boot API probe, not confused with this model's physical wire sequence.
 | `FlowDrainEcho` | `terminal_echo_read`, `uart_tx_drain_into_fifo_mode` | echo drains after the normal queue and remains paused except for a complete-stop force drain | echo's byte expansion -- irrelevant to `FlowQuiesces`: each pending expansion is more work behind the same atomic pending hint | `3892e0f0aa1c` |
 | `FlowWakeService` | `uart_tx_service` | TX service retires the owed-wake hint, and its caller can run the wake after releasing the console guard | the sleeping-writer scan -- modelled elsewhere: `ConsoleTx.TxWake` | `2766e2a086c9` |
 
-## ConsoleRoom.tla -- FIFO room across a returning complete debugger stop
+## ConsoleRoom.tla -- FIFO room across a returning debugger stop or refusal
 
 A console-guard holder has checked one free FIFO slot and can be stopped
 before its one unchecked DR store. DDB's last polled byte can fill that slot.
@@ -884,19 +884,24 @@ Thus only one stopped checked writer can resume ahead of another guard
 holder. The device can only remove bytes in that interval.
 
 The bounded slice has two slots, initially one occupied, one checked guarded
-writer, one possible legacy unguarded writer and one complete DDB cycle.
+writer, one possible legacy unguarded writer, at most one complete DDB
+cycle, and at most one refusal.
 This is a feasible mid-section snapshot representing one remaining free
 slot, not a claim that the PL011 has only two slots or a core-count shortcut.
-Normal stores in this selected scenario occur after the debugger return.
+Normal stores in this selected scenario occur after a complete return or
+a refusal. A refusal tries the console lock once: a held lock routes the
+report to the diagnostic ring without writing the FIFO, and a free lock
+serializes the polled UART output with ordinary writers. The unguarded
+refusal control can consume the checked slot before the holder stores.
 The two partial fixes each fail `NoFullStore`: omitting the return fence
 invalidates the held observation, while a fence without normal serialization
 lets another unchecked writer consume the slot first. The `old` variant
-omits both repairs and also fails. All four variants use Apalache length 8.
+also omits the refusal guard and fails. All five variants use Apalache length 8.
 The fixed run reports every action; there is no dead-action allowance.
 
-This is bounded safety evidence for the complete, nonterminal return. It
-neither reports observed physical data loss nor covers Busy/Partial refusal
-reporters or other external debugger calls without a complete stop. Returning
+This is bounded safety evidence for the complete, nonterminal return and
+Busy/Partial refusal. It does not model terminal crash reporters, actual
+ring retention, or the stop acquisition protocol. Returning
 from the room poll relies on the same autonomous hardware progress as each
 existing polled debugger byte; no deadline or whole-FIFO-empty condition is
 added. Priority and sticky terminal ownership remain ConsoleOwner's concern.
@@ -907,9 +912,11 @@ added. Priority and sticky terminal ownership remain ConsoleOwner's concern.
 | `RawCheck` | `uart_tx_spin_store` | the fixed scalar writer acquires its existing guard before its FIFO check; the old variant checks without it | prior column bookkeeping -- irrelevant to `NoFullStore`: it has finished before this snapshot and makes no DR store | `1d589cd97455` |
 | `NormalStore` | `uart_tx_store`, `uart_tx_drain_into_fifo_mode`, `uart_tx_spin_store_locked` | the retained checked writer makes one DR store while holding the guard | later guarded bookkeeping and release -- irrelevant to `NoFullStore`: collapsing release earlier only enables another fresh guarded check, and the bookkeeping makes no unchecked write | `b4beb35cd537` |
 | `RawStore` | `uart_tx_spin_store`, `uart_tx_store` | the scalar checked store shares exclusion with the normal writer only in the fixed variant | wire-last accounting -- irrelevant to `NoFullStore`: it happens after the physical store and cannot repair or invalidate that store's room | `6b57d081b982` |
-| `Stop` | `kernel_ddb_enter`, `kernel_log_tx_stand_down_stopped` | the complete stop freezes a console holder and its local checked byte; the held lock prevents the entry flush | incomplete acquisition and refusal reports -- irrelevant to `NoFullStore`: this property concerns the successful complete-stop branch; owner priorities -- modelled elsewhere: `ConsoleOwner.EnterDdb` | `cc51d8722f3e` |
+| `Stop` | `kernel_ddb_enter`, `kernel_log_tx_stand_down_stopped` | the complete stop freezes a console holder and its local checked byte; the held lock prevents the entry flush | incomplete acquisition -- irrelevant to `NoFullStore`: refusal has no authority to stop a checked writer; refusal output -- modelled elsewhere: `ConsoleRoom.RefusalRetain` and `ConsoleRoom.RefusalWrite`; owner priorities -- modelled elsewhere: `ConsoleOwner.EnterDdb` | `021e321add80` |
 | `LastDebugByte` | `ddb_puts`, `uart_debug_putc` | the last debugger byte waits for room before writing, and can consume the final free slot | earlier debugger text -- irrelevant to `NoFullStore`: only occupancy after the final byte determines the returning holder's room | `3fae8acba809` |
-| `Release` | `kernel_log_tx_resume_room`, `kernel_ddb_enter_stopped`, `kernel_process_execution_stop_retire`, `kernel_ddb_enter` | the existing complete-stop borrow keeps peers excluded until the final one-room fence returns; intervening restore/retire operations do not write the UART | queue rearm -- modelled elsewhere: `ConsoleTx.FlowContinue`; terminal ownership -- modelled elsewhere: `ConsoleOwner.Resume` | `0657dd108f35` |
+| `Release` | `kernel_log_tx_resume_room`, `kernel_ddb_enter_stopped`, `kernel_process_execution_stop_retire`, `kernel_ddb_enter` | the existing complete-stop borrow keeps peers excluded until the final one-room fence returns; intervening restore/retire operations do not write the UART | queue rearm -- modelled elsewhere: `ConsoleTx.FlowContinue`; terminal ownership -- modelled elsewhere: `ConsoleOwner.Resume` | `217e45494ce8` |
+| `RefusalRetain` | `ddb_report_stop_refusal`, `console_try_lock`, `diagnostic_trace_record` | a failed try emits no FIFO byte; the IRQ-safe record receives the refusal | ring payload and overwrite -- irrelevant to `NoFullStore`: the ring makes no UART access | `a0e9464e1fc7` |
+| `RefusalWrite` | `ddb_report_stop_refusal`, `console_try_lock`, `ddb_puts`, `uart_debug_putc`, `console_try_unlock` | successful try holds the guard through the polled store and release; the old refusal can write with a checked peer | earlier refusal text and device drains -- irrelevant to `NoFullStore`: ordinary checks are excluded until the last store releases the guard, and the device only removes bytes | `923e3285a7ff` |
 | `DeviceDrain` | `uart_tx_fifo_full`, `uart_init` | autonomous enabled TX removes a FIFO byte without a kernel guard, as observed through TXFF | baud and physical timing -- irrelevant to `NoFullStore`: delaying removal cannot turn a free slot into a full one, while eventual removal is a separate trusted liveness premise | `0111ce8059d1` |
 | `Done` | No kernel operation; a quiescent stutter | both selected checked stores are past their physical write | later ordinary requests -- irrelevant to `NoFullStore`: this bounded slice covers one in-flight pair and one debugger cycle | `e3b0c44298fc` |
 

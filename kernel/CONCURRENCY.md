@@ -837,8 +837,9 @@ metadata before traversing it.
 
 A reporter that can block cannot report the deadlock it is in. The diagnostic
 ring, the crash trace ring, the retained log and the DDB read path are all in
-this class, and all of them use per-CPU storage plus release/acquire
-publication rather than a lock.
+this class. They use per-CPU storage plus release/acquire publication. A
+returning DDB refusal can make one nonblocking try for the console guard
+before printing, then falls back to the diagnostic ring on contention.
 
 This is not local caution. Linux moved printk to a lock-free ringbuffer so
 printing from NMI, panic and kdb contexts cannot deadlock, and keeps
@@ -904,12 +905,15 @@ ring directly from every CPU.
 This tests a finite holder. UART BREAK is IRQ-dependent, but reaches any
 online core. DDB's world stop escalates to the pseudo-NMI SGI above the GIC
 priority mask (GitHub issue #920), so a peer masked in a lock or hung in a
-handler is stopped too, and DDB then takes no lock it could own
-(`debug_stopped`); only a peer with DAIF.I set for good prevents a complete
-stop. DDB refuses shared-state inspection without all required
-acknowledgements. Such
-failures need the existing external SWD or QEMU host diagnostics; an independent
-exception-based entry route is outside the maintained debugger guarantee.
+handler is stopped too. DDB never waits for a lock (`debug_stopped`); a
+peer with DAIF.I set for good can prevent a complete stop. Without all
+required acknowledgements DDB refuses shared-state inspection. Busy/Partial
+refusals print only after a single successful console try-lock. Otherwise
+the existing IRQ-safe diagnostic ring retains the stop words and, for a
+partial stop, its acknowledged mask for a later DDB `events` command or
+external inspection. The fixed per-CPU tail can overwrite old records.
+An independent exception-based entry route is outside the maintained
+debugger guarantee.
 
 Terminal input (GitHub issue #547) goes the other way: the RX interrupt is
 routed to core 0, and the reader may be on another CPU. One lock orders it,

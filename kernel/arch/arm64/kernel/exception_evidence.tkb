@@ -3124,25 +3124,54 @@ fn ddb_render_world_stop_holder() !{interrupt, unsafe} {
     ddb_puts("\n");
 }
 
+// A refused stop cannot substitute for the console guard. Make one attempt;
+// a held console may have observed FIFO room before its next store. Preserve
+// the refusal in the IRQ-safe diagnostic ring when the guard is unavailable.
+private fn ddb_report_stop_refusal(partial: bool, stopped_mask: usize)
+        !{interrupt, unsafe} {
+    match console_try_lock() {
+        ConsoleTry::Busy => {
+            let claimed: usize = world_stop_reporter_word(0);
+            let owner: usize = world_stop_reporter_word(1);
+            let requested: usize = world_stop_reporter_word(2);
+            if (partial) {
+                diagnostic_trace_record(DiagnosticEventDdbStopPartial,
+                                        stopped_mask, claimed, owner, requested);
+            } else {
+                diagnostic_trace_record(DiagnosticEventDdbStopBusy,
+                                        claimed, owner, requested, 0);
+            }
+        }
+        ConsoleTry::Taken(guard) => {
+            if (partial) {
+                ddb_puts("\nddb: world-stop partial mask=");
+                ddb_put_hex(stopped_mask);
+                ddb_puts("; inspection refused\n");
+            } else {
+                ddb_puts("\nddb: world-stop busy; inspection refused\n");
+                ddb_render_world_stop_holder();
+            }
+            console_try_unlock(guard);
+        }
+    }
+}
+
 // Stop every online peer before touching the machine-global snapshot or the
 // page allocator's lock-free diagnostic view. A partial token is deliberately
 // not passed to kernel_ddb_enter_stopped: report the stopped set, resume it,
 // and return without inspecting shared state.
 //
-// GitHub issue #920: the debug stop reaches a masked or hung core, which may
-// own any lock, so this root takes none (debug_stopped).
+// GitHub issue #920: a stopped core may own any lock. The returning debugger
+// never waits for a lock (debug_stopped).
 fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
         !{interrupt, unsafe, debug_stopped} {
     console_ddb_note_entry();
     match world_stop_debug_begin(DDB_WORLD_STOP_SPINS) {
         MachineStopResult::Busy => {
-            ddb_puts("\nddb: world-stop busy; inspection refused\n");
-            ddb_render_world_stop_holder();
+            ddb_report_stop_refusal(false, 0);
         }
         MachineStopResult::Partial(partial) => {
-            ddb_puts("\nddb: world-stop partial mask=");
-            ddb_put_hex(machine_stop_partial_mask(partial));
-            ddb_puts("; inspection refused\n");
+            ddb_report_stop_refusal(true, machine_stop_partial_mask(partial));
             machine_stop_partial_release(partial, &kernel_world_stop);
         }
         MachineStopResult::Complete(stopped_world) => {

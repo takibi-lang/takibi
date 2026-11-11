@@ -216,6 +216,7 @@ check_model ConsoleRoom Safety 8 \
     fixed:CInitFixed:pass:ok \
     nofence:CInitNoFence:NoFullStore:violated \
     noserial:CInitNoSerial:NoFullStore:violated \
+    norefusalguard:CInitNoRefusalGuard:NoFullStore:violated \
     old:CInitOld:NoFullStore:violated
 
 check_model ConsoleOwner Safety 8 \
