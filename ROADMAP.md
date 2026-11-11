@@ -225,10 +225,10 @@ owners are TaskMutex, the spare stack stays masked). #980
 
 ### Territory B: supporting the pillars, by priority
 
-**Priority update, 2026-11-10.** The LLVM frame metadata/bridge choice
-(#1497) waits for a maintainer decision; the current per-frame gate measures
-only its documented prologue window. The Linux cold
-handoff and matched USB-root plan (#1158) waits for a maintainer decision.
+**Priority update, 2026-11-11.** Implement the approved Linux cold handoff
+and matched raw ext2 USB root comparison (#1158). Then implement the
+approved LLVM stack-size metadata bridge (#1497). The current per-frame
+gate measures only its documented prologue window.
 The network queue boundary under #1159 is published, preserving nonblocking
 receive and pending IRQ/capability bookkeeping. The approved guard-lifetime and synchronous borrowed-callback
 compiler foundation for #1481 is published with RootHeld, and the real
