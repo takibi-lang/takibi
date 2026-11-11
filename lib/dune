@@ -7,6 +7,10 @@
   (language c)
   (names llvm_ext_stubs)
   (flags (:standard -I/usr/lib/llvm-19/include)))
+ (foreign_stubs
+  (language cxx)
+  (names llvm_target_stubs)
+  (flags (:standard -std=c++17 -I/usr/lib/llvm-19/include)))
  (instrumentation
   (backend bisect_ppx_ng))
  (preprocess

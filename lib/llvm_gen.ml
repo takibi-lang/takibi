@@ -1096,6 +1096,8 @@ let setup_target ?(triple = "") ?(cpu = "") ?(features = "") () =
   set_target_triple triple !the_module;
   let target  = Llvm_target.Target.by_triple triple in
   let machine = Llvm_target.TargetMachine.create ~triple ~cpu ~features target in
+  (* The maintained AArch64 kernel build checks the final static frame sizes. *)
+  if triple = "aarch64-none-elf" then Llvm_ext.enable_stack_size_section machine;
   let layout  = Llvm_target.TargetMachine.data_layout machine in
   let layout_str = Llvm_target.DataLayout.as_string layout in
   set_data_layout layout_str !the_module;

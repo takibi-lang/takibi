@@ -1,4 +1,4 @@
-(* Narrow project-local bindings for LLVM C APIs absent from LLVM 19's OCaml
+(* Narrow project-local bindings for LLVM APIs absent from LLVM 19's OCaml
    package. Keep this surface caller-driven rather than mirroring Core.h. *)
 
 external build_atomic_cmpxchg :
@@ -17,3 +17,6 @@ external gep_source_element_type : Llvm.llvalue -> Llvm.lltype
 
 external allocated_type : Llvm.llvalue -> Llvm.lltype
   = "takibi_llvm_allocated_type"
+
+external enable_stack_size_section : Llvm_target.TargetMachine.t -> unit
+  = "takibi_llvm_enable_stack_size_section" [@@noalloc]
