@@ -1,5 +1,25 @@
 # takibi Engineering History
 
+## 2026-11-11: LLVM static frame measurements (#1497)
+
+The frame check now uses LLVM 19.1.1's .stack_sizes on normal and debug
+AArch64 kernel objects. The former first-12-instruction scan missed a
+compiled 2096 B late frame and summed mutually exclusive 1536 B allocations
+as 3072 B. The new check rejects the former and accepts the latter. The
+four QEMU/RPi5 objects have 3857/5922 and 4179/6797 covered functions.
+The largest ordinary frame is 1888 B normally and 1952 B with debug info
+on both targets. The existing 2048 B ceiling and 3312/2640 B exceptions
+stay in effect.
+
+With the same inputs, all allocated object and ELF sections and all
+linked PT_LOAD payloads and addresses matched the baseline. The
+usable_ram_start symbols were 0x40210000/0x40220000 on QEMU and
+0x7e0000/0x7e0000 on RPi5. The QEMU comparison used the published
+3342fac0 artifacts. The RPi5 comparison replayed the baseline compiler
+and links with the exact candidate provisioning container, whose archived
+counterpart differed. Normal/debug host ELF sizes grew by 134360/139968 B
+on QEMU and 146400/152728 B on RPi5. The extra sections are non-allocating.
+
 ## 2026-11-09: typed evidence counter records (#1475)
 
 Move-cost, process-test and syscall-test evidence records, followed by the

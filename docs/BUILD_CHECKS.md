@@ -435,8 +435,8 @@ record by relocation to a defined ELF function, and rejects missing records
 (including LLVM's omission of variable-sized frames). Separate handwritten
 assembly objects and the module-level exception and vector labels, which
 are emitted as `STT_NOTYPE` rather than `STT_FUNC`, remain within the
-assembly trust boundary. The bound is per function. It does not cover the
-stack effects of inline assembly, call chains, recursion or interrupt nesting.
+assembly trust boundary. The bound is per function. Inline assembly stack effects, call chains,
+recursion and interrupt nesting remain separate obligations.
 The ceiling is 2048 B, with 3312 B for `kernel_process_scheduler_probe` and
 2640 B for `ext2_update_regular_file`.
 
