@@ -27,6 +27,19 @@ bounded model check to the level of a proof by calling it one.
 
 ## What the compiler checks
 
+Guarded field declarations bind each protected field to a lock identity.
+Direct field operations require the matching guard; aggregate value transfers,
+whole-value stores, typed bulk operations and byte views cannot bypass that
+requirement through enclosing records or arrays. Taking the address of an
+unprotected enclosing record does not itself read its protected payload.
+The guard mint and actual mutual exclusion remain trusted. Static/fresh
+literal initialization is distinct from copying existing protected storage.
+Raw-byte initialization such as `region_slot_zero` is still an explicit
+unsafe boundary: freshness, absence of published aliases and correct ordering
+before publication are assumptions of that API, not consequences of `&mut`
+or a lock-identity SMT query. These rules do not constitute a complete
+memory model or a proof of race freedom.
+
 Refined integers carry a half-open interval and a concrete representation
 type. The checker proves only the interval facts supported by its documented
 flow and arithmetic rules. Proven array and slice indices need no runtime

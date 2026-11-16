@@ -2788,7 +2788,37 @@ let rec no_copy_in_value_ty (senv : senv) t = match repr t with
   | TTuple ts -> List.find_map (no_copy_in_value_ty senv) ts
   | _ -> None
 
+(* Guarded storage is accessed through its field API, never transferred as
+   an aggregate. Follow inline storage only: addresses do not copy pointees.
+   This also covers protected fields inside arrays, tuples and variants. *)
+let rec guarded_storage_in_ast senv seen = function
+  | Ast.TypeNamed name | Ast.TypeIndexed (name, _)
+  | Ast.TypeVariant (name, _, _) ->
+      if List.mem name seen then None else
+      let seen = name :: seen in
+      (match StringMap.find_opt name senv with
+       | Some (fields, _, _) -> List.find_map (fun (field, ty) ->
+           match Guarded_registry.lock_of name field with
+           | Some lock -> Some (name ^ "." ^ field, lock)
+           | None -> guarded_storage_in_ast senv seen ty) fields
+       | None -> Option.bind (Hashtbl.find_opt variant_defs name) (fun cases ->
+           List.find_map (fun (_, payload) ->
+             Option.bind payload (guarded_storage_in_ast senv seen)) cases))
+  | Ast.TypeArray (t, _) | Ast.TypeIo t | Ast.TypeSingleton (t, _)
+  | Ast.TypeExists (_, _, t) | Ast.TypeRefined (_, _, t)
+  | Ast.TypeMultiple (_, t) -> guarded_storage_in_ast senv seen t
+  | Ast.TypeTuple ts -> List.find_map (guarded_storage_in_ast senv seen) ts
+  | _ -> None
+
+let reject_guarded_aggregate senv loc ty =
+  match guarded_storage_in_ast senv [] (to_ast ty) with
+  | None -> ()
+  | Some (field, lock) -> raise (TypeError (loc, Printf.sprintf
+      "aggregate access contains guarded_by storage '%s' (lock %s); use the guarded field API, not a whole-value or bulk access"
+      field lock))
+
 let reject_no_copy_whole_store senv loc ty =
+  reject_guarded_aggregate senv loc ty;
   match no_copy_in_value_ty senv ty with
   | None -> ()
   | Some name -> raise (TypeError (loc, Printf.sprintf
@@ -2796,6 +2826,7 @@ let reject_no_copy_whole_store senv loc ty =
       name))
 
 let reject_no_copy_value senv loc ty =
+  reject_guarded_aggregate senv loc ty;
   match no_copy_in_value_ty senv ty with
   | None -> ()
   | Some name -> raise (TypeError (loc, Printf.sprintf
@@ -6448,6 +6479,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            let ev = fresh () in
            unify_at d.loc dt (TSlice (ev, 0, Ast.SliceWritable));
            unify_at s.loc st (TSlice (ev, 0, Ast.SliceReadonly));
+           reject_guarded_aggregate senv e.loc ev;
            TUsize
        | _ -> raise (TypeError (e.loc,
            "slice_copy expects 2 arguments: slice_copy(dst, src)")))
@@ -6465,6 +6497,10 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                "assume_init asserts that bytes are initialized with no \
                 evidence the checker can see; write it inside `unsafe { ... }`"));
            let dt = infer_expr senv eenv tyenv fenv d in
+           (match fname, repr dt with
+            | "zero_fill", (TSlice (p, _, _) | TPtr p | TAlignedPtr (_, p) | TRefMut p) ->
+                reject_guarded_aggregate senv d.loc p
+            | _ -> ());
            (* GitHub issue #794: zeroes must be a valid pattern of the
               target; there is no `unsafe` escape -- initialize by type. *)
            (match fname, repr dt with
@@ -6503,6 +6539,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            let ev = fresh () in
            unify_at a.loc at (TSlice (ev, 0, Ast.SliceReadonly));
            unify_at b.loc bt (TSlice (ev, 0, Ast.SliceReadonly));
+           reject_guarded_aggregate senv e.loc ev;
            TBool
        | _ -> raise (TypeError (e.loc,
            "slice_eq expects 2 arguments: slice_eq(a, b)")))
@@ -7510,6 +7547,7 @@ and byte_view_cast senv eenv (e : Ast.expr) src_ty tgt el_want want_min want_acc
     | TRef p -> p, true
     | TRefMut p | TPtr p | TAlignedPtr (_, p) -> p, false
     | _ -> assert false in
+  reject_guarded_aggregate senv e.loc pointee;
   (try unify el_want TU8 with _ -> ());
   if repr el_want <> TU8 then
     raise (TypeError (e.loc, Printf.sprintf
@@ -7983,7 +8021,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       let _t = check_expr senv eenv tyenv fenv e ret_ty in
       (tyenv, raw_locals)
   | Expr e ->
-      ignore (infer_expr senv eenv tyenv fenv e);
+      reject_guarded_aggregate senv e.loc (infer_expr senv eenv tyenv fenv e);
       (tyenv, raw_locals)
   | Yield e ->
       (* GitHub issue #184: reached when infer_arm_body (the Match case
@@ -7994,7 +8032,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
          LetMatch's own case (below) does NOT reach here for a `Yield`
          arm -- it special-cases the arm bodies itself to CAPTURE the
          yielded value instead of discarding it (see its own comment). *)
-      ignore (infer_expr senv eenv tyenv fenv e);
+      reject_guarded_aggregate senv e.loc (infer_expr senv eenv tyenv fenv e);
       (tyenv, raw_locals)
   | Let (is_mut, name, ty_opt, expr_opt, align_opt) ->
       value_static_identities := StringMap.remove name !value_static_identities;

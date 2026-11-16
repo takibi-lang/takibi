@@ -2146,6 +2146,18 @@ let n: usize = guarded_ref(guard, ext2_mutation_state.fence_count);
   returned, stored or passed to an owning parameter, it is still refused.
   Two such arguments of one call over the same guarded field, one of them
   writable, are refused (they would alias).
+- A value containing a `guarded_by` field cannot be copied, passed or
+  returned by value, or overwritten as a whole. This follows inline fields,
+  arrays, tuples and variant payloads, but not pointers or references.
+  `zero_fill`, `slice_copy`, `slice_eq` and byte views of that protected
+  storage are rejected too, including readonly byte views and within
+  `unsafe`. Holding a guard does not authorize an implicit aggregate access;
+  use the field API. Addresses of enclosing records remain usable.
+- Static zero initialization and fresh local/global literal initialization
+  remain available. They do not permit copying an existing protected value
+  into fresh storage. A plain `&mut` is not evidence of freshness or exclusive
+  ownership, so it does not exempt `zero_fill`. Initialization through an
+  explicit unsafe raw-byte API remains a trusted boundary.
 - The guard is erased in code generation. Trusted: the guard's mint, as
   for every guarded_by place.
 

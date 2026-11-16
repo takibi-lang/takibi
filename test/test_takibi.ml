@@ -12752,6 +12752,88 @@ linear struct Owner746b[page: usize] {
      with a guard indexed by &L, as a place for one expression. The three
      programs the decision names are rejected: an unguarded access, a guard
      of another lock, a reference that escapes. *)
+  (* Aggregate access must not bypass the guarded field discipline. *)
+  Alcotest.test_case "guarded aggregate: copy" `Quick
+    (expect_type_error "aggregate access contains guarded_by storage"
+       (guarded_ref_base ^ "fn f() { let mut copy = st1159; }"));
+  Alcotest.test_case "guarded aggregate: return" `Quick
+    (expect_type_error "aggregate access contains guarded_by storage"
+       (guarded_ref_base ^ "fn f() -> State1159 { return st1159; }"));
+  Alcotest.test_case "guarded aggregate: argument" `Quick
+    (expect_type_error "aggregate access contains guarded_by storage"
+       (guarded_ref_base ^ "extern fn take(s: State1159); fn f() { take(st1159); }"));
+  Alcotest.test_case "guarded aggregate: overwrite" `Quick
+    (expect_type_error "aggregate access contains guarded_by storage"
+       (guarded_ref_base ^ "let mut second1509: State1159; fn f() { st1159 = second1509; }"));
+  Alcotest.test_case "guarded aggregate: zero_fill" `Quick
+    (expect_type_error "aggregate access contains guarded_by storage"
+       (guarded_ref_base ^ "fn f() { zero_fill(&st1159); }"));
+  Alcotest.test_case "guarded aggregate: reference zero" `Quick
+    (expect_type_error "aggregate access contains guarded_by storage"
+       (guarded_ref_base ^ "fn f(s: &mut State1159) { zero_fill(s); }"));
+  Alcotest.test_case "guarded aggregate: reference copy" `Quick
+    (expect_type_error "aggregate access contains guarded_by storage"
+       (guarded_ref_base ^ "fn f(s: &State1159) { let mut copy = *s; }"));
+  Alcotest.test_case "guarded aggregate: reference store" `Quick
+    (expect_type_error "aggregate access contains guarded_by storage"
+       (guarded_ref_base ^ "fn f(s: &mut State1159) { *s = st1159; }"));
+  Alcotest.test_case "guarded aggregate: discarded read" `Quick
+    (expect_type_error "aggregate access contains guarded_by storage"
+       (guarded_ref_base ^ "fn f() { st1159; }"));
+  Alcotest.test_case "guarded aggregate: nested copy" `Quick
+    (expect_type_error "aggregate access contains guarded_by storage"
+       (guarded_ref_base ^ "struct Outer { inner: State1159; } let mut outer: Outer; fn f() { let mut copy = outer; }"));
+  Alcotest.test_case "guarded aggregate: nested zero" `Quick
+    (expect_type_error "aggregate access contains guarded_by storage"
+       (guarded_ref_base ^ "struct Outer { inner: [State1159; 2]; } let mut outer: Outer; fn f() { zero_fill(&outer); }"));
+  Alcotest.test_case "guarded aggregate: array copy" `Quick
+    (expect_type_error "aggregate access contains guarded_by storage"
+       (guarded_ref_base ^ "let mut slots: [State1159; 2]; fn f() { let mut copy = slots[0]; }"));
+  Alcotest.test_case "guarded aggregate: array store" `Quick
+    (expect_type_error "aggregate access contains guarded_by storage"
+       (guarded_ref_base ^ "let mut slots: [State1159; 2]; fn f() { slots[0] = st1159; }"));
+  Alcotest.test_case "guarded aggregate: slice copy" `Quick
+    (expect_type_error "aggregate access contains guarded_by storage"
+       (guarded_ref_base ^ "fn f(d: []State1159, s: []const State1159) { slice_copy(d,s); }"));
+  Alcotest.test_case "guarded aggregate: slice equal" `Quick
+    (expect_type_error "aggregate access contains guarded_by storage"
+       (guarded_ref_base ^ "fn f(a: []const State1159, b: []const State1159) -> bool { return slice_eq(a,b); }"));
+  Alcotest.test_case "guarded aggregate: byte read" `Quick
+    (expect_type_error "aggregate access contains guarded_by storage"
+       (guarded_ref_base ^ "fn f() { let bytes = &st1159 as []const u8; }"));
+  Alcotest.test_case "guarded aggregate: byte write" `Quick
+    (expect_type_error "aggregate access contains guarded_by storage"
+       (guarded_ref_base ^ "fn f() { let bytes = &st1159 as []u8; }"));
+  Alcotest.test_case "guarded aggregate: generic container" `Quick
+    (expect_type_error "aggregate access contains guarded_by storage"
+       (guarded_ref_base ^ "generic struct Box1509(T: type) { value: T; } let mut box1509: Box1509(State1159); fn f() { zero_fill(&box1509); }"));
+  Alcotest.test_case "guarded aggregate: tuple" `Quick
+    (expect_type_error "aggregate access contains guarded_by storage"
+       (guarded_ref_base ^ "fn f() { let pair = (st1159, 1); }"));
+  Alcotest.test_case "guarded aggregate: variant signature" `Quick
+    (expect_type_error "aggregate access contains guarded_by storage"
+       (guarded_ref_base ^ "variant Wrapped1509 { Value(State1159); } fn f(v: Wrapped1509) {}"));
+  Alcotest.test_case "guarded aggregate: unsafe typed zero" `Quick
+    (expect_type_error "aggregate access contains guarded_by storage"
+       (guarded_ref_base ^ "fn f() !{unsafe} { zero_fill(&st1159); }"));
+  Alcotest.test_case "guarded aggregate: fresh literal and pointer values remain usable" `Quick
+    (expect_codegen_ok "
+      let mut lock1509: usize;
+      struct Protected1509 { private value: usize guarded_by(lock1509); }
+      fn ok1509(address: *Protected1509) {
+        let mut fresh: Protected1509 = {0};
+        let copy = address;
+      }");
+  Alcotest.test_case "guarded aggregate: static storage and ordinary fields remain usable" `Quick
+    (expect_codegen_ok (guarded_ref_base ^ "
+      struct Holder1509 { state: State1159; }
+      let mut holder1509: Holder1509;
+      fn ok1509(g: borrow G1159[&m1159]) -> usize {
+        let state: &mut State1159 = &holder1509.state;
+        state.free = 7;
+        guarded_ref(g, state.count) = 1;
+        return state.free + guarded_ref(g, state.count);
+      }"));
   Alcotest.test_case "guarded_ref reads and writes a guarded field in place" `Quick
     (expect_ok (guarded_ref_base ^ "
       fn ok1159(g: borrow G1159[&m1159], i: {0..<2 as usize}) -> usize {

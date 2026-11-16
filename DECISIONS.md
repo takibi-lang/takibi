@@ -20,6 +20,13 @@ Rules for keeping it current:
 
 Format: `- YYYY-MM-DD <decision>. [active|superseded by YYYY-MM-DD] #issue`
 
+- 2026-11-16 Express field/guard lock identity with existing types at declarations
+  and API boundaries; continue memory-model experiments until a design decision or
+  excessive proof-annotation burden appears. [active] #1508
+- 2026-11-16 Reject implicit aggregate access to guarded storage; retain explicit
+  trusted initialization boundaries and defer a guarded bulk API until needed.
+  [active] #1509
+
 ## How the maintainer decides (worked examples)
 
 These are not a complete statement of principles; they are cases where the

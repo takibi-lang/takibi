@@ -1,5 +1,16 @@
 # takibi Engineering History
 
+## 2026-11-16: guarded aggregate accesses (#1509)
+
+The memory-model pilot found that whole-record reads, stores and zero_fill
+could bypass guarded_by's direct-field checks. The checker now rejects value
+transfers and typed bulk/byte accesses containing guarded inline storage,
+including nested arrays and variant payloads. Existing static and fresh literal
+initialization stays distinct from copying a protected value; raw initialization
+remains an explicit trusted boundary. Lock-identity SMT queries alone would
+have missed these operations because the original extraction enumerated only
+explicit guarded_ref accesses.
+
 ## 2026-11-11: LLVM static frame measurements (#1497)
 
 The frame check now uses LLVM 19.1.1's .stack_sizes on normal and debug
