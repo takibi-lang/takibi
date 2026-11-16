@@ -4577,6 +4577,11 @@ A function may state constraints on its static indices before its body:
 the constraints; a false or unprovable constraint is a compile error, with
 no runtime fallback. `where` is a keyword.
 
+Const-generic arguments in function `where` clauses are substituted for each
+concrete instantiation, including arithmetic expressions. Runtime singleton
+names retain their call-site checking; specialization does not assume that
+the caller satisfies a bound.
+
 Constants, normalized static expressions and constant refinement intervals
 keep their existing fast paths. In the interval path a product of static
 indices, such as `where x * y < 100`, is bounded from its factors'

@@ -1398,6 +1398,18 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
                  which trusts call_targets over the AST's own already-
                  correct Call name, used the wrong target). *)
               let body = List.map (relocate_stmt mangled) body in
+              (* Const-generic bounds in a where clause belong to this
+                 instantiation, just like array lengths and body constants.
+                 Runtime singleton names remain for the type checker. *)
+              let rec static = function
+                | StaticName n as a ->
+                    (match vsubst n with Some n -> StaticInt n | None -> a)
+                | StaticAdd (a, b) -> StaticAdd (static a, static b)
+                | StaticSub (a, b) -> StaticSub (static a, static b)
+                | StaticMul (a, b) -> StaticMul (static a, static b)
+                | (StaticInt _ | StaticEnum _ | StaticGlobal _) as a -> a in
+              let tpl = { tpl with fn_where = List.map
+                (fun (a, cmp, b) -> static a, cmp, static b) tpl.fn_where } in
               Hashtbl.replace raw_fns mangled (name, tpl, params, ret_type, body)
         ) pending;
         expand_pending_fns ()

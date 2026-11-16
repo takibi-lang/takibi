@@ -2,12 +2,12 @@
   "date": "2026-11-16",
   "event": "incremental",
   "decision": "reuse",
-  "source_sha256": "22398e579f5bdef23c9676d18af98414bf25590d06ba81550d49465cb4bbaa5d",
-  "workload": "Reuse the measured guarded-field QEMU/RPi5 linked images and existing bounded workload observations for the no_copy bulk/erasure frontend correction.",
+  "source_sha256": "4f2e2865206fdad902f77385c1c0f581ef5e097b2137f96e48727818a659f241",
+  "workload": "Existing guarded-field kernel workload; frontend correction for const-generic where-clause specialization only.",
   "evidence": [
     "docs/MEMORY_GUARD_SPACE_2026-11-16.txt",
     "docs/CONSOLE_FLOW_SPACE_2026-11-11.txt"
   ],
-  "assessment": "Normal linked text/data/BSS remain identical to the prior recorded candidate. Kernel implementation changes are comments; lowering, layouts and allocations are unchanged. A positive payload-view control emits byte-identical objects on baseline and candidate. Native tests retain output and verify payload zeroing preserves the held lock.",
-  "next_trigger": "Change to protected-container storage, initialization/lifetime layout, or allocation workload."
+  "assessment": "Reuse the recorded allocation/layout workload evidence: this correction substitutes constant arguments in static where constraints and does not change lowering, storage layout, allocator policy or maintained kernel source. This is an incremental compiler defect fix, not completion of the memory-model milestone.",
+  "next_trigger": "Completion of linked-initialization integration, or any change to kernel storage, allocation or emitted code layout."
 }
