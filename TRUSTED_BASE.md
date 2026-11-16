@@ -139,10 +139,13 @@ linux_user/region_table_retire through a test-only flag, not proved; and referen
 cannot see -- symbol names inside inline assembly strings and linker-script
 symbol references -- which the check does not inspect.
 Shared-reference direct stores and writable field-address aliases are rejected,
-including nested and explicitly dereferenced places. Array-to-slice aliases
-do not carry that readonly permission, so readonly behavior through a derived
-slice is outside the current guarantee. Authority lifetime tracking alone does
-not establish readonly permission.
+including nested and explicitly dereferenced places. Slices derived from
+shared-reference array fields retain readonly permission through aliases,
+subslices and calls; a writable receiver or store is rejected. Authority-derived
+array-field slices also retain their authority lifetime. These are separate
+checks: lifetime tracking alone does not establish readonly permission. The
+indexed-reference compiler tests cover both properties, including rejection
+of retaining calls and uses after the authority is consumed.
 This opt-in policy is file confinement, not proof of allocator metadata, physical
 address validity, or mint lifetime claims. Extern and assembly bodies remain
 separate boundaries. The maintained kernel's enabled flags and finite mint list
