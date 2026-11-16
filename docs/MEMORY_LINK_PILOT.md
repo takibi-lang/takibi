@@ -57,10 +57,12 @@ than silently omitting its effects.
 ## Relevance to the kernel
 
 The bootstrap path in `kernel/mm/page.tkb` uses FreelistCore with capacity
-2048. `kernel/lib/slotmap.tkb` and `kernel/lib/refcount_slotmap.tkb` also use
-its insert/remove operations. Those consumers make the shared core a better
-applicability test than the native-only GrowablePool constructor alone.
-Their complete call graphs were not verified. In particular, the bootstrap
+2048, making this shared core relevant to a production kernel path. The
+SlotMap and RefcountSlotMap wrappers also call its insert/remove operations,
+but no production kernel call sites of those wrappers were found in the
+follow-up audit. RefcountSlotMap explicitly documents its native-only current
+consumer. Do not count those wrappers as additional active kernel consumers.
+The complete page-allocation call graph was not verified. In particular, the bootstrap
 consumer's full ascending initialization and its transition to runtime page
 metadata are not covered by the init_empty sequence.
 

@@ -698,9 +698,13 @@ rules globally.
   and the named acquire/release boundary correspondence are build-check
   trust, not a compiler ownership or arbitrary control-flow proof.
 - Definite initialization (SPEC.md, "Definite Initialization") trusts three
-  premises. A `scratch` global's element is reached only by its own CPU, so
-  any index names the same place (`kernel/kernel/syscall.tkb`'s
-  `syscall_scratch`, indexed by a live `SyscallSlot`). A callee
+  premises. Scratch array elements currently share initialization facts across
+  indices. This is a known limit, not a consequence of exclusive ownership:
+  initializing one slot can satisfy a contract for another, including after
+  release and reacquisition. The syscall scratch pool uses leased slots,
+  not a fixed per-CPU element. Slot identity and the authority lifetime are
+  not yet represented in these initialization facts; Z3 coverage over the
+  collapsed facts does not repair that omission. A callee
   handed `&p` through a `&mut T` parameter stores every field of `p`. Each
   `unsafe { assume_init(...) }` states that bytes were written by means the
   checker cannot see. Maintained `assume_init` sites would be listed here,
@@ -713,8 +717,10 @@ rules globally.
   between them and `syscall_execve_current`'s zero fill since GitHub issue
   #974. A `requires` or
   `ensures` clause on a scratch slot, `syscall_scratch[slot.index].f`, rests
-  on the same per-CPU premise; the held `SyscallSlot` is what keeps another
-  holder from reaching the element between the calls. Uninitialized local
+  on the same unverified same-slot premise. A held `SyscallSlot` excludes
+  another holder of that element, but does not make different indices or
+  successive acquisitions interchangeable. Linear use-after-release rejection
+  is separate from the missing initialization-fact invalidation. Uninitialized local
   arrays are not tracked yet.
 - A RegionPool walked with no lock (`region_pool_first_unproven` and
   `region_pool_next_unproven`, GitHub issue #745) trusts that the pool's
