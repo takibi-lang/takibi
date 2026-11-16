@@ -23,3 +23,16 @@ measurement or a whole-kernel memory-safety proof.
 
 Next trigger: a changed protected-container layout, initialization/lifetime
 boundary with storage effects, or a new allocation workload.
+
+Incremental review: 14308d81, no_copy bulk/erasure boundary
+
+The normal linked images after the stricter frontend checks still measure:
+QEMU: text 827792, data 4616, BSS 1314816 bytes.
+RPi5: text 4215484, data 5592, BSS 1921024 bytes.
+These match the prior candidate above. Kernel implementation changes in this
+slice are comments; lowering, payload layouts and allocation workloads are
+unchanged. The native initializer explicitly scopes the same zeroing, and
+the native guarded payload byte-zero control preserves the lock. A positive
+payload-only view program emits byte-identical objects with the published
+compiler and candidate. Reuse the existing workload/occupancy observations
+for this small safety correction; the next measurement trigger is unchanged.

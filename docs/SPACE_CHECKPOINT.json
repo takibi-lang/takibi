@@ -1,13 +1,13 @@
 {
   "date": "2026-11-16",
   "event": "incremental",
-  "decision": "measured",
-  "source_sha256": "2d576e942452125cc9a0ad10dad704f54ff8790945ecc053f2a7349de4e5b423",
-  "workload": "Normal linked QEMU and RPi5 kernels with the existing FD-management workload; compare guarded field migration against 5938a3f3. No allocation or payload layout changes.",
+  "decision": "reuse",
+  "source_sha256": "22398e579f5bdef23c9676d18af98414bf25590d06ba81550d49465cb4bbaa5d",
+  "workload": "Reuse the measured guarded-field QEMU/RPi5 linked images and existing bounded workload observations for the no_copy bulk/erasure frontend correction.",
   "evidence": [
     "docs/MEMORY_GUARD_SPACE_2026-11-16.txt",
     "docs/CONSOLE_FLOW_SPACE_2026-11-11.txt"
   ],
-  "assessment": "QEMU text decreases 320 bytes and RPi5 text 336 bytes. Data, BSS, all data/BSS symbol sizes and usable_ram_start are unchanged. Adopt the stronger field/lock identity and aggregate rejection; reuse existing occupancy evidence because the allocation workload is unchanged.",
+  "assessment": "Normal linked text/data/BSS remain identical to the prior recorded candidate. Kernel implementation changes are comments; lowering, layouts and allocations are unchanged. A positive payload-view control emits byte-identical objects on baseline and candidate. Native tests retain output and verify payload zeroing preserves the held lock.",
   "next_trigger": "Change to protected-container storage, initialization/lifetime layout, or allocation workload."
 }
