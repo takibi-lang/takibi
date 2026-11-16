@@ -790,7 +790,10 @@ type:
 - `LockedCell(T)` (`kernel/lib/locked_cell.tkb`) -- one value beside one lock.
   The value is a private field of a struct declared in that file, so no other
   file can name it; the only accessor needs `borrow LockedCellGuard[id]`, and
-  the pointer it returns dies with the guard.
+  the pointer it returns dies with the guard. The embedded no_copy Mutex
+  also excludes typed bulk operations and byte views of the whole cell.
+  Ordinary payload-only bytes remain usable through the guarded accessor,
+  subject to the payload's type and the guard's lifetime.
 - Private `guarded_by(lock)` fields plus `GuardedFieldGuard[&lock]` -- one
   lock covering fields of every object in a pool. `guarded_ref` checks the
   declared lock identity, including inside the declaring file; a guard from

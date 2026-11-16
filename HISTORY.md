@@ -1,5 +1,15 @@
 # takibi Engineering History
 
+## 2026-11-16: no_copy bulk access boundary (#1510)
+
+The next memory-model control used the maintained LockedCell API: whole-cell
+zero_fill cleared both payload and lock, even with a live guard, and byte
+views bypassed the API. no_copy now also excludes typed bulk operations and
+byte views containing its inline storage. Guard-derived ordinary payload
+bytes remain usable and expire with the guard. The native intrusive-pool
+initializer now states its unpublished-storage premise as an explicit unsafe
+boundary instead of treating any mutable reference as fresh.
+
 ## 2026-11-16: guarded aggregate accesses (#1509)
 
 The memory-model pilot found that whole-record reads, stores and zero_fill

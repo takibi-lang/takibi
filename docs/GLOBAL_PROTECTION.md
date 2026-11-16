@@ -103,10 +103,11 @@ Tried in this order; an array `[T; N]` takes the class of `T`.
 | `none` | anything else: integers, `bool`, arrays of those, structs with one unprotected field, `io` words |
 
 The `lock` classification for `LockedCell` records its typed API discipline,
-not a complete memory-safety proof. Bulk zeroing and byte views of the whole
-cell currently bypass that API; callers must avoid them on live cells.
-Guarded fields, including the descriptor-slot counter, instead carry a
-checked lock identity and reject aggregate/bulk access to protected storage.
+not a complete memory-safety proof. Its embedded no_copy lock also excludes
+bulk zeroing and byte views of the whole cell; ordinary payload-only access
+remains possible through the guarded API. Raw initialization and guard mints
+remain trusted. Guarded fields, including the descriptor-slot counter, carry
+a checked lock identity and reject aggregate/bulk access to protected storage.
 
 A `scratch` global is per-call storage that is still one cell shared by
 every core, so the ratchet counts it with `none`.

@@ -84,6 +84,15 @@ fn locked_record_roundtrip() -> usize {
     let mut source: LockedRecord = { 42, { 11, 13 } };
     locked_cell_store(guard, &record_cell, source);
     let mut value: LockedRecord = locked_cell_load(guard, &record_cell);
+    // The API exposes only the payload, not the lock's representation.
+    let payload = locked_cell_value(guard, &record_cell);
+    let bytes = payload as []u8;
+    zero_fill(bytes);
+    let mut cleared: LockedRecord = locked_cell_load(guard, &record_cell);
+    if (cleared.value != 0 || cleared.words[0] != 0 || cleared.words[1] != 0) {
+        linux_exit(96);
+    }
+    if (locked_cell_is_held(&record_cell) == false) { linux_exit(97); }
     locked_cell_give(&record_cell, guard);
     return value.value + value.words[0] + value.words[1];
 }

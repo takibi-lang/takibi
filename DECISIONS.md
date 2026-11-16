@@ -27,6 +27,10 @@ Format: `- YYYY-MM-DD <decision>. [active|superseded by YYYY-MM-DD] #issue`
   trusted initialization boundaries and defer a guarded bulk API until needed.
   [active] #1509
 
+- 2026-11-16 Extend no_copy to reject whole-container bulk/byte access, even
+  with a guard; preserve ordinary guarded payload access and explicit trusted
+  initialization boundaries. [active] #1510
+
 ## How the maintainer decides (worked examples)
 
 These are not a complete statement of principles; they are cases where the

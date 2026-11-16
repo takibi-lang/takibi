@@ -40,12 +40,18 @@ before publication are assumptions of that API, not consequences of `&mut`
 or a lock-identity SMT query. These rules do not constitute a complete
 memory model or a proof of race freedom.
 
-This protection applies to declared guarded fields, not every private field
-of an opaque API. `LockedCell` still uses module-private fields without a
-`guarded_by` declaration: `zero_fill(&cell)` and byte views of the enclosing
-cell can bypass its typed guard API, including the lock word. `no_copy` does
-not currently reject these operations. Callers avoiding these paths on live
-cells is a remaining assumption; a successful build does not establish it.
+`no_copy` storage also rejects typed bulk operations and whole-container byte
+views, including while a lock guard is held. This prevents a `LockedCell`'s
+private payload and lock word being accessed through the enclosing container.
+A raw-pointer reinterpretation that erases no_copy or guarded_by protection
+requires an explicit unsafe boundary; otherwise a byte-pointer cast could
+silently bypass the typed bulk gate. A guard-derived accessor may still
+expose an ordinary payload's bytes within
+its lifetime; the payload's representation restrictions apply independently.
+The native intrusive-pool initializer explicitly trusts that its input is
+unpublished storage without a live guard or usable alias. Its raw lock-byte
+initialization is confined to that unsafe boundary; no freshness proof is
+inferred from `&mut`. Arbitrary unsafe raw-pointer operations remain trusted.
 
 Refined integers carry a half-open interval and a concrete representation
 type. The checker proves only the interval facts supported by its documented
@@ -141,8 +147,9 @@ exhaustive enum, variant, reference (#772; `raw_claim_reason` and
 `check_raw_claim_needs_unsafe` in lib/type_inf.ml). Under that `unsafe`,
 the author vouches for the claim. The reverse direction is checked too
 (#794): a writable view (`*U`, `[]u8`) of a claim-carrying pointee needs
-`unsafe`, the readonly `[]const u8` view does not, and `zero_fill` refuses a
-target whose all-zero pattern breaks a claim (`zero_invalid_reason`,
+`unsafe`; a readonly `[]const u8` view does not invalidate value claims,
+but both view modes reject protected no_copy/guarded_by storage. `zero_fill`
+refuses a target whose all-zero pattern breaks a claim (`zero_invalid_reason`,
 `byte_view_cast`). The compiler is trusted to compute the view's length from
 the target layout (lib/llvm_gen.ml, checked against the proven minimum).
 Region backing globals (`region let mut g: [T; N];`, SPEC.md built-in

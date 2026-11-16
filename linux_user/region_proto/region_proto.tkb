@@ -392,7 +392,7 @@ fn test_generation_exhaustion() !{unsafe} {
     // three-word pool (statically sized above) and a checked index, then put
     // the last-issued counter one allocation before its 46-bit limit.
     static_assert(sizeof(RegionPool(Node)) == 24, "generation injection needs three words");
-    let metadata: *PoolCounterInjection = (&exhaustion_pool) as *PoolCounterInjection;
+    let metadata: *PoolCounterInjection = unsafe { (&exhaustion_pool) as *PoolCounterInjection };
     metadata.words[2] = 0x3ffffffffffe;
     match region_alloc(guard) {
         RegionPoolAlloc(Node)::Full => {}

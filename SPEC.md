@@ -630,9 +630,23 @@ linear struct Name[n: usize] { field: T; }   // indexed runtime obligation
 - `struct no_copy Name` declares a struct whose storage identity matters, such
   as a lock. Whole-value assignment and copying an existing value through an
   initializer, argument, return, or containing aggregate are compile errors.
-  Fresh storage may be left zero-initialized or initialized with a literal,
-  subject to ordinary field privacy. Address-taking and field operations remain available.
-  Ordinary structs, including private-field value handles, remain copyable.
+  Typed bulk operations (`zero_fill`, `slice_copy`, `slice_eq`) and readonly
+  or writable byte views are also rejected when their target/element contains
+  inline `no_copy` storage. This includes a containing record or array, applies
+  even inside `unsafe` or with a live lock guard, and does not follow pointer
+  or reference fields to their pointees. A guard authorizes its payload API,
+  not the enclosing lock's representation.
+  Reinterpreting a raw pointer or slice element as a different raw pointee
+  requires `unsafe` when it erases `no_copy` or `guarded_by` storage protection.
+  Widening to the same raw pointee preserves that protection and is unchanged.
+  Fresh static zero initialization and new literal initialization remain
+  available, subject to ordinary field privacy. `&mut` does not establish
+  freshness, so it does not exempt a bulk operation. Explicit raw initialization
+  remains a trusted boundary with an unpublished-storage precondition.
+  Address-taking and field operations remain available. An ordinary payload
+  reached through a guard-derived accessor can still have a byte view, subject
+  to its own representation rules and the guard's lifetime. Ordinary structs,
+  including private-field value handles, remain copyable.
 - `let mut s: Name;` -- struct variable (local or global; a struct
   variable is always mutable storage regardless of the `let`/`let mut`
   keyword used to declare it, matching how array variables work).
@@ -3148,9 +3162,11 @@ whatever slice type the cast spells.
 A pointer to a struct or array (`&T`, `&mut T`, `*T`, `*align(N) T`) can be
 viewed as its bytes with `p as []const u8` (GitHub issue #794): the length
 is `sizeof(T)` on the target, and the static minimum is what `sizeof` can
-prove without the target layout (0 otherwise). The readonly view is always
-safe. `p as []u8` needs a mutable source, and `unsafe` when `T` holds a
-field whose type claims more than its bytes (Unsafe Operations).
+prove without the target layout (0 otherwise). Both access modes reject
+inline `no_copy` or `guarded_by` storage. For other storage, reading bytes
+cannot invalidate their type's value claims; initialization and lifetime
+checks still apply. `p as []u8` needs a mutable source, and `unsafe` when `T`
+holds a field whose type claims more than its bytes (Unsafe Operations).
 
 **Creation**:
 - `bs"literal"` -- a readonly bounded byte-slice literal with compile-time minimum
@@ -5610,8 +5626,13 @@ Currently gates these six categories:
 - The reverse direction (GitHub issue #794): a writable view of a source
   pointee that claims more than its bytes -- `*T as *U` or `slice as *U`
   for a different `U` (aligned pointers included), or `p as []u8` -- since
-  raw byte writes through it could break the claim. Reading cannot, so the
-  readonly byte view `p as []const u8` stays free (see Slices).
+  raw byte writes through it could break the claim. Reading cannot break a
+  value claim, but the independent no_copy/guarded_by storage boundary still
+  rejects whole-container byte views in both access modes (see Slices).
+- Reinterpreting a pointer or slice to a different raw pointee when the
+  source contains no_copy or guarded_by storage. This erases the type-level
+  protection used by the bulk-access gate and requires an explicit trust
+  boundary, even when the source's value bits have no restricted pattern.
 
 `unsafe` is **not** currently extended to general pointer
 arithmetic/dereference, or an exhaustive enum's runtime variant check

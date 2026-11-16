@@ -3150,6 +3150,23 @@ let guarded_ref_base = "
   private let mut st1159: State1159;
 "
 
+let no_copy_bulk_base = "
+  struct no_copy Lock1510 { private word: usize; }
+  struct Payload1510 { value: usize; }
+  struct Box1510 { private lock: Lock1510; private payload: Payload1510; }
+  let mut cell1510: Box1510;
+"
+
+let no_copy_guarded_payload_base = no_copy_bulk_base ^ "
+  linear struct G1510[id: addr] { private flag: usize; }
+  fn take1510(c: &mut Box1510 @ id) -> G1510[id] {
+    let mut g: G1510[id] = {0}; return g;
+  }
+  fn give1510(g: sink G1510[id]) {}
+  fn payload1510(g: borrow G1510[id], c: &mut Box1510 @ id)
+      -> *Payload1510 @ id { return &c.payload; }
+"
+
 let issue370_cell_fixture = {|
   linear struct CellOwner[p: addr] { private value: usize; }
   struct BrandCell[p: addr] {
@@ -22123,13 +22140,73 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
         let mut global_lock: Lock557;
         fn init_lock(lock: *Lock557) { lock.word = 0; }
         fn fresh_lock() {
-          let mut local_lock: Lock557;
-          zero_fill(&local_lock);
+          let mut local_lock: Lock557 = {0};
           init_lock(&local_lock);
           let mut literal_lock: Lock557 = {0};
           init_lock(&literal_lock);
         }");
 
+  (* Whole-container bulk access bypasses a private synchronization API. *)
+  Alcotest.test_case "no_copy bulk: zero lock" `Quick
+    (expect_type_error "bulk access contains no_copy storage"
+       (no_copy_bulk_base ^ "let mut lock1510: Lock1510; fn f() { zero_fill(&lock1510); }"));
+  Alcotest.test_case "no_copy bulk: zero container" `Quick
+    (expect_type_error "bulk access contains no_copy storage"
+       (no_copy_bulk_base ^ "fn f() { zero_fill(&cell1510); }"));
+  Alcotest.test_case "no_copy bulk: readonly bytes" `Quick
+    (expect_type_error "bulk access contains no_copy storage"
+       (no_copy_bulk_base ^ "fn f() { let bytes = &cell1510 as []const u8; }"));
+  Alcotest.test_case "no_copy bulk: writable bytes" `Quick
+    (expect_type_error "bulk access contains no_copy storage"
+       (no_copy_bulk_base ^ "fn f() { let bytes = &cell1510 as []u8; }"));
+  Alcotest.test_case "no_copy bulk: unsafe typed zero" `Quick
+    (expect_type_error "bulk access contains no_copy storage"
+       (no_copy_bulk_base ^ "fn f() !{unsafe} { zero_fill(&cell1510); }"));
+  Alcotest.test_case "no_copy bulk: reference zero" `Quick
+    (expect_type_error "bulk access contains no_copy storage"
+       (no_copy_bulk_base ^ "fn f(c: &mut Box1510) { zero_fill(c); }"));
+  Alcotest.test_case "no_copy bulk: array zero" `Quick
+    (expect_type_error "bulk access contains no_copy storage"
+       (no_copy_bulk_base ^ "let mut cells: [Box1510; 2]; fn f() { zero_fill(&cells); }"));
+  Alcotest.test_case "no_copy bulk: slice copy" `Quick
+    (expect_type_error "bulk access contains no_copy storage"
+       (no_copy_bulk_base ^ "fn f(d: []Box1510, s: []const Box1510) { slice_copy(d,s); }"));
+  Alcotest.test_case "no_copy bulk: slice equal" `Quick
+    (expect_type_error "bulk access contains no_copy storage"
+       (no_copy_bulk_base ^ "fn f(a: []const Box1510, b: []const Box1510) -> bool { return slice_eq(a,b); }"));
+  Alcotest.test_case "no_copy bulk: generic holder" `Quick
+    (expect_type_error "bulk access contains no_copy storage"
+       (no_copy_bulk_base ^ "generic struct Holder1510(T: type) { item: T; } let mut h: Holder1510(Box1510); fn f() { zero_fill(&h); }"));
+  Alcotest.test_case "no_copy bulk: guard does not authorize whole container" `Quick
+    (expect_type_error "bulk access contains no_copy storage"
+       (no_copy_guarded_payload_base ^ "fn f() { let g = take1510(&cell1510); zero_fill(&cell1510); give1510(g); }"));
+  Alcotest.test_case "no_copy bulk: raw pointee erasure needs unsafe" `Quick
+    (expect_type_error "erasing protected storage"
+       (no_copy_bulk_base ^ "
+         fn f() { let p: *usize = &cell1510 as *usize; zero_fill(p); }"));
+  Alcotest.test_case "guarded aggregate: raw pointee erasure needs unsafe" `Quick
+    (expect_type_error "erasing protected storage"
+       (guarded_ref_base ^ "
+         fn f() { let p: *usize = &st1159 as *usize; zero_fill(p); }"));
+  Alcotest.test_case "no_copy bulk: slice-to-byte pointer erasure needs unsafe" `Quick
+    (expect_type_error "erasing protected storage"
+       (no_copy_bulk_base ^ "fn f(s: []Box1510) { let bytes = s as *u8; zero_fill(bytes); }"));
+  Alcotest.test_case "guarded aggregate: slice-to-byte pointer erasure needs unsafe" `Quick
+    (expect_type_error "erasing protected storage"
+       (guarded_ref_base ^ "fn f(s: []State1159) { let bytes = s as *u8; zero_fill(bytes); }"));
+  Alcotest.test_case "no_copy bulk: raw initialization is an explicit trust boundary" `Quick
+    (expect_codegen_ok (no_copy_bulk_base ^ "
+      fn initialize(c: &mut Box1510) !{unsafe} {
+        unsafe {
+          let bytes: *u8 = &(*c).lock as *u8;
+          zero_fill(bytes[0..<(sizeof(Lock1510) as isize)]);
+        }
+      }"));
+  Alcotest.test_case "no_copy bulk: payload-only view stays usable with guard" `Quick
+    (expect_codegen_ok (no_copy_guarded_payload_base ^ "fn f() { let g = take1510(&cell1510); let p = payload1510(g, &cell1510); let bytes = p as []u8; zero_fill(bytes); give1510(g); }"));
+  Alcotest.test_case "no_copy bulk: payload-only view expires with guard" `Quick
+    (expect_type_error "cannot be used after"
+       (no_copy_guarded_payload_base ^ "fn f() { let g = take1510(&cell1510); let p = payload1510(g, &cell1510); let bytes = p as []u8; give1510(g); zero_fill(bytes); }"));
   Alcotest.test_case
     "issue #476: a commit requires every scalar payload field on every path"
     `Quick
@@ -30960,7 +31037,7 @@ fn bad1488() -> *u8 {
       (expect_codegen_ok (globals ^ {|
         fn loaded1488() -> *u8 !{unsafe} { let address: usize = atomic_word_load(&words1488[0]); return unsafe { address as *u8 }; }
         fn cell1488() -> *AtomicWord { return &words1488[0]; }
-        fn cell_bytes1488() -> *u8 { return (&words1488[0]) as *u8; }
+        fn cell_bytes1488() -> *u8 !{unsafe} { return unsafe { (&words1488[0]) as *u8 }; }
         fn plain1488() -> *CastPlain1488 { return &rows1488[0]; }
       |}));
     Alcotest.test_case "struct pointers references arrays slices and enums still codegen" `Quick

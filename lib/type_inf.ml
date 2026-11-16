@@ -2817,6 +2817,17 @@ let reject_guarded_aggregate senv loc ty =
       "aggregate access contains guarded_by storage '%s' (lock %s); use the guarded field API, not a whole-value or bulk access"
       field lock))
 
+(* Bulk reads can race too. A guard permits its payload API, not byte access
+   to an enclosing lock's own representation. Fresh raw initialization stays
+   an explicit trusted boundary, rather than an exemption for every &mut. *)
+let reject_bulk_access senv loc ty =
+  reject_guarded_aggregate senv loc ty;
+  match no_copy_in_value_ty senv ty with
+  | None -> ()
+  | Some name -> raise (TypeError (loc, Printf.sprintf
+      "bulk access contains no_copy storage '%s'; use its field API or explicit trusted initialization"
+      name))
+
 let reject_no_copy_whole_store senv loc ty =
   reject_guarded_aggregate senv loc ty;
   match no_copy_in_value_ty senv ty with
@@ -3341,6 +3352,13 @@ let check_raw_claim_needs_unsafe senv eenv loc (src_ty : ty) (tgt : ty) =
       (match src_pointee with
        | None -> ()
        | Some sp ->
+           (* A reinterpretation must not silently erase the protection that
+              the bulk-access gate reads from the pointee's type. *)
+           if no_copy_in_value_ty senv sp <> None
+              || guarded_storage_in_ast senv [] (to_ast sp) <> None then
+             if !unsafe_depth > 0 then note_type_checker_unsafe_use ()
+             else raise (TypeError (loc,
+               "erasing protected storage through a raw-pointer cast requires unsafe; its no_copy or guarded_by boundary would be lost"));
            (match raw_claim_reason senv eenv [] (to_ast sp) with
             | None -> ()
             | Some why ->
@@ -4771,17 +4789,10 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  | TUsize -> tgt
                  | TPtr _ ->
                      check_raw_claim_needs_unsafe senv eenv e.loc src_ty tgt;
-                     (* GitHub issue #325 (still unstarted as of #318): if a
-                        future general raw-pointer unsafe mandate ever adds
-                        an unsafe check to this pointer-to-pointer/pointer-
-                        to-usize branch, it MUST consult is_literal_derived
-                        first and skip the check when it returns true.
-                        StringLit source expressions land here (StringLit
-                        infers straight to TPtr TU8), and is_literal_derived
-                        already recognizes StringLit for exactly this
-                        reason -- see GitHub issue #318's HISTORY.md entry.
-                        Without this, a string literal cast would get swept
-                        in with genuinely calculated pointers. *)
+                     (* This gate checks representation and storage protection.
+                        General raw-pointer arithmetic/dereference has a
+                        separate trusted boundary (SPEC.md, Unsafe Operations).
+                        A string's byte pointee makes no new value claim. *)
                      tgt
                  | TAlignedPtr (n_dst, _) ->
                      (* GitHub issue #102: an explicit cast asserting
@@ -4833,11 +4844,10 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                      (* Explicit bridge from the slice world back into the
                         BYTE-pointer world (`frame as *u8`) -- used where an
                         API still takes pointer+length (checksums,
-                        net_transmit, response building). Free, unconditionally:
-                        a byte pointer's "pointee size" is 1, so any slice
-                        length already proves it, and this is the same
-                        length-erasing operation `[]T as *T` element-typed
-                        casts already are for the general case just below. *)
+                        net_transmit, response building). The size bridge
+                        needs no new length proof, but it must not erase a
+                        protected or claim-carrying element type silently. *)
+                     check_raw_claim_needs_unsafe senv eenv e.loc src_ty tgt;
                      tgt
                  | TPtr pointee when repr pointee = repr elem ->
                      (* GitHub issue #218 follow-up regression (found via
@@ -6479,7 +6489,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            let ev = fresh () in
            unify_at d.loc dt (TSlice (ev, 0, Ast.SliceWritable));
            unify_at s.loc st (TSlice (ev, 0, Ast.SliceReadonly));
-           reject_guarded_aggregate senv e.loc ev;
+           reject_bulk_access senv e.loc ev;
            TUsize
        | _ -> raise (TypeError (e.loc,
            "slice_copy expects 2 arguments: slice_copy(dst, src)")))
@@ -6499,7 +6509,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            let dt = infer_expr senv eenv tyenv fenv d in
            (match fname, repr dt with
             | "zero_fill", (TSlice (p, _, _) | TPtr p | TAlignedPtr (_, p) | TRefMut p) ->
-                reject_guarded_aggregate senv d.loc p
+                reject_bulk_access senv d.loc p
             | _ -> ());
            (* GitHub issue #794: zeroes must be a valid pattern of the
               target; there is no `unsafe` escape -- initialize by type. *)
@@ -6539,7 +6549,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            let ev = fresh () in
            unify_at a.loc at (TSlice (ev, 0, Ast.SliceReadonly));
            unify_at b.loc bt (TSlice (ev, 0, Ast.SliceReadonly));
-           reject_guarded_aggregate senv e.loc ev;
+           reject_bulk_access senv e.loc ev;
            TBool
        | _ -> raise (TypeError (e.loc,
            "slice_eq expects 2 arguments: slice_eq(a, b)")))
@@ -7539,15 +7549,15 @@ and byte_view_source senv eenv tyenv fenv (e : Ast.expr) (src_ty : ty) : bool =
       | _ -> true)
 
 (* GitHub issue #794: the byte view itself. The length is sizeof(pointee).
-   A readonly view (`[]const u8`) is always safe: reads cannot break a
-   claim. A writable one needs a mutable source, and `unsafe` when the
-   pointee claims more than its bytes (raw_claim_reason). *)
+   Readonly bytes do not invalidate value claims, but either access mode
+   must respect the independent no_copy/guarded_by storage boundary.
+   Writable bytes need a mutable source and unsafe for value claims. *)
 and byte_view_cast senv eenv (e : Ast.expr) src_ty tgt el_want want_min want_access : ty =
   let pointee, shared = match repr src_ty with
     | TRef p -> p, true
     | TRefMut p | TPtr p | TAlignedPtr (_, p) -> p, false
     | _ -> assert false in
-  reject_guarded_aggregate senv e.loc pointee;
+  reject_bulk_access senv e.loc pointee;
   (try unify el_want TU8 with _ -> ());
   if repr el_want <> TU8 then
     raise (TypeError (e.loc, Printf.sprintf

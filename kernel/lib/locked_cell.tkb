@@ -60,16 +60,16 @@
 // Current limitations (2026-11-16). Keep this list current as call sites
 // change; a limitation that goes stale here is worse than none, since it
 // invites relying on a guarantee that quietly stopped holding.
-// - BULK ACCESS IS NOT GATED FOR LockedCell. Its fields are private, not
-//   guarded_by: zero_fill(&cell) and byte views of the enclosing cell can
-//   bypass the typed API, including its lock word. Callers must not use them
-//   on live cells. no_copy does not currently exclude those operations.
+// - WHOLE-CONTAINER BULK ACCESS IS REJECTED through the embedded no_copy
+//   Mutex. The API may expose an ordinary payload's bytes under its guard,
+//   but never the enclosing lock word. Explicit unsafe raw accesses remain
+//   trusted; the field API cannot validate arbitrary forged pointers.
 // - IT PROVES THE TYPED API DISCIPLINE, NOT THE ASSIGNMENT. That the value in this
 //   cell is the data this lock is supposed to protect is still a module
 //   obligation -- the same caveat kernel/net/tcp.tkb's retry-state accessors
 //   carries, and SPEC.md states it under "Guard-derived pointers". What
 //   is machine-checked is that the typed accessors require the guard and
-//   that no path forgets to give it back; see the bulk-access limit above.
+//   that no path forgets to give it back; raw access remains trusted.
 // - ONE VALUE, ONE LOCK. Two cells are two locks. A critical section
 //   spanning two cells takes two guards and therefore has an ORDER,
 //   which nothing here checks (issue #466). Prefer one cell holding a
@@ -131,8 +131,7 @@ fn locked_cell_give(T: type, cell: &mut LockedCell(T) @ id,
     mutex_release(&(*cell).lock, g.flags);
 }
 
-// The only way to reach the value. The returned pointer dies with the
-// guard.
+// The typed pointer accessor. The returned pointer dies with the guard.
 fn locked_cell_value(T: type, g: borrow LockedCellGuard[id],
                      cell: &mut LockedCell(T) @ id) -> *T @ id {
     return &(*cell).value;
