@@ -91,14 +91,17 @@ fn locked_record_roundtrip() -> usize {
 // Field operations copy scalars under the caller's guard without exporting
 // a pointer. Two fields may intentionally share one module-assigned lock.
 private let mut field_lock: TaskMutex;
-private let mut field_a: GuardedField(usize);
-private let mut field_b: GuardedField(usize);
+struct GuardedCounts {
+    private a: usize guarded_by(field_lock);
+    private b: usize guarded_by(field_lock);
+}
+private let mut fields: GuardedCounts;
 fn guarded_field_roundtrip() -> usize {
     let guard = guarded_field_take(&field_lock);
-    guarded_usize_store(guard, &field_a, 19);
-    guarded_usize_store(guard, &field_b, 23);
-    let value = guarded_usize_load(guard, &field_a)
-              + guarded_usize_load(guard, &field_b);
+    guarded_ref(guard, fields.a) = 19;
+    guarded_ref(guard, fields.b) = 23;
+    let value = guarded_ref(guard, fields.a)
+              + guarded_ref(guard, fields.b);
     guarded_field_give(guard, &field_lock);
     return value;
 }

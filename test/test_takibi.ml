@@ -3466,6 +3466,8 @@ let infer_tests = [
          struct Empty { }
          generic struct GuardedField(T: type) { private value: T; }
          let mut guarded: GuardedField(usize);
+         struct GuardedCount { private value: usize guarded_by(lock); }
+         let mut counted: GuardedCount;
          let mut plain: usize = 0;
          let mut flag: bool = false;
          let mut word: AtomicWord;
@@ -3495,7 +3497,7 @@ let infer_tests = [
         Alcotest.(check string) name want (protection name))
         [ "plain", "none"; "flag", "none"; "word", "atomic"; "words", "atomic";
           "lock", "composite"; "mixed", "none"; "empty", "none";
-          "guarded", "lock";
+          "guarded", "none"; "counted", "composite";
           "fixed", "absent"; "owned", "slot_owned" ]);
 
   (* GitHub issue #752: an out-of-order Bulk-Only command does not compile. *)

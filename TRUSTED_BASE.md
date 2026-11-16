@@ -40,6 +40,13 @@ before publication are assumptions of that API, not consequences of `&mut`
 or a lock-identity SMT query. These rules do not constitute a complete
 memory model or a proof of race freedom.
 
+This protection applies to declared guarded fields, not every private field
+of an opaque API. `LockedCell` still uses module-private fields without a
+`guarded_by` declaration: `zero_fill(&cell)` and byte views of the enclosing
+cell can bypass its typed guard API, including the lock word. `no_copy` does
+not currently reject these operations. Callers avoiding these paths on live
+cells is a remaining assumption; a successful build does not establish it.
+
 Refined integers carry a half-open interval and a concrete representation
 type. The checker proves only the interval facts supported by its documented
 flow and arithmetic rules. Proven array and slice indices need no runtime

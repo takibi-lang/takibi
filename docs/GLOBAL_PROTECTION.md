@@ -88,7 +88,7 @@ Tried in this order; an array `[T; N]` takes the class of `T`.
 | `region` | a `region let mut` backing, reached only through its claim |
 | `slot_owned` | an `owned_by(T.f, S)` global: each element reached as `g[t.f * S + k]` with a linear slot token `t` (SPEC.md, Slot-Owned Globals) |
 | `atomic` | `AtomicWord` |
-| `lock` | `LockedCell(T)`, `RegionPool(T)`, `InitOnce` as kernel/lib/init_once.tkb defines it (#1418: its private `complete` is written only under its own `TaskMutex`, by that file), `GuardedField(T)` (#1159: its guard proves the guarded-field lock is held, not which cell's; one adopter, fd_table.tkb's `fd_slot_total`) |
+| `lock` | `LockedCell(T)`, `RegionPool(T)`, `InitOnce` as kernel/lib/init_once.tkb defines it (#1418: its private `complete` is written only under its own `TaskMutex`, by that file) |
 | `place` | `Place(T)` |
 | `atomic` (enum) | `Atomic(E)`: one AtomicWord holding a u8 enum's code, through `atomic_enum_store` / `atomic_enum_load` (#1159) |
 | `boot_once` | `BootOnce(T)`: written under one `BootPhase`, read after by `boot_once_get` |
@@ -101,6 +101,12 @@ Tried in this order; an array `[T; N]` takes the class of `T`.
 | `protocol` | a struct a `protocol` declaration generated |
 | `composite` | a plain struct with at least one field, every field protected or declared `guarded_by(L)`: `Mutex` and `TaskMutex` (one `AtomicWord`), the `Place` slot structs, `PeerTally` |
 | `none` | anything else: integers, `bool`, arrays of those, structs with one unprotected field, `io` words |
+
+The `lock` classification for `LockedCell` records its typed API discipline,
+not a complete memory-safety proof. Bulk zeroing and byte views of the whole
+cell currently bypass that API; callers must avoid them on live cells.
+Guarded fields, including the descriptor-slot counter, instead carry a
+checked lock identity and reject aggregate/bulk access to protected storage.
 
 A `scratch` global is per-call storage that is still one cell shared by
 every core, so the ratchet counts it with `none`.

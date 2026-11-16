@@ -650,7 +650,7 @@ Two, and the distinction is which contexts may take them.
 
 Since #966 a pool or field lock that no interrupt handler reaches does not mask
 either: the fd context, fd block and shared-object pools, the object refcount
-(`GuardedField`, a `TaskMutex`), and the TCP frame, retransmit-entry and
+(`GuardedFieldGuard`, a `TaskMutex`), and the TCP frame, retransmit-entry and
 pin-sharing pools. On RPi5 the mask is the GIC priority register, an MMIO
 write each way (about 20 ns per pair, #920), and these sit on every
 fd-using syscall and every TCP segment. Three rules keep that safe, and the
@@ -791,14 +791,16 @@ type:
   The value is a private field of a struct declared in that file, so no other
   file can name it; the only accessor needs `borrow LockedCellGuard[id]`, and
   the pointer it returns dies with the guard.
-- `GuardedUsize` plus `GuardedFieldGuard` -- one lock covering a field of every
-  object in a pool, where a per-object lock word would cost more than the
-  critical section is worth.
+- Private `guarded_by(lock)` fields plus `GuardedFieldGuard[&lock]` -- one
+  lock covering fields of every object in a pool. `guarded_ref` checks the
+  declared lock identity, including inside the declaring file; a guard from
+  another lock is refused. Aggregate copies, typed bulk access and byte views
+  of protected storage are refused too. No lock word is added per object.
 
-`private` is per FILE. A guard type and an accessor written in the same file as
-the data leave the data reachable from the rest of that file, which for a
-2000-line file is where the next unguarded read will be written. The field's
-TYPE has to live elsewhere.
+`private` alone is per FILE. For `LockedCell`, the accessor's module boundary
+is part of its trusted implementation. For `guarded_by`, the field declaration
+is enforced inside that module as well. The mint still has to acquire the
+lock that its guard type names; the type does not prove the lock algorithm.
 
 Counters in these cells store how many values have been HANDED OUT rather than
 which value comes next, so `.bss` zero is already the correct initial state and

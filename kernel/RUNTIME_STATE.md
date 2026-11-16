@@ -258,7 +258,8 @@ object in between leaves the other adding to a recycled slot. Measured
 before the lock: two cores took a refcount from a baseline of 2 to 0, so
 the object was freed while both still held it, and 978 later operations
 found a handle naming nothing. `fd_slot_total` is guarded by the same
-lock: it is a `GuardedField(usize)`, and `fd_block_alloc`/`fd_block_free`
+lock: its `FdSlotCount.total` field is declared
+`guarded_by(object_refcount_lock)`, and `fd_block_alloc`/`fd_block_free`
 take `object_refcount_lock` around the block-pool insert or remove that
 changes it, so the count and the slots it counts move together. The
 per-process block chain carries no lock and does not need one -- each chain

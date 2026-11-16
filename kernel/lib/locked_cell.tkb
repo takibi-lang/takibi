@@ -20,8 +20,8 @@
 // WHAT THIS CHANGES
 //
 // The value moves INSIDE a struct whose field is private to this file, so
-// no other file can name it at all. The only way to obtain a pointer to
-// it is locked_cell_value, which needs a `borrow LockedCellGuard[id]`,
+// no other file can name that field. The typed field API obtains its
+// pointer through locked_cell_value, needing `borrow LockedCellGuard[id]`,
 // and the only way to obtain one of those is locked_cell_take on THAT
 // cell. Three separate compile errors follow, none of which needed a
 // convention:
@@ -57,15 +57,19 @@
 // is finite, and a cell is not a pool. Putting non-pools in it pushed
 // real pool acquires out as "untracked" once already.
 //
-// Current limitations (2026-08-30). Keep this list current as call sites
+// Current limitations (2026-11-16). Keep this list current as call sites
 // change; a limitation that goes stale here is worse than none, since it
 // invites relying on a guarantee that quietly stopped holding.
-// - IT PROVES THE DISCIPLINE, NOT THE ASSIGNMENT. That the value in this
+// - BULK ACCESS IS NOT GATED FOR LockedCell. Its fields are private, not
+//   guarded_by: zero_fill(&cell) and byte views of the enclosing cell can
+//   bypass the typed API, including its lock word. Callers must not use them
+//   on live cells. no_copy does not currently exclude those operations.
+// - IT PROVES THE TYPED API DISCIPLINE, NOT THE ASSIGNMENT. That the value in this
 //   cell is the data this lock is supposed to protect is still a module
 //   obligation -- the same caveat kernel/net/tcp.tkb's retry-state accessors
 //   carries, and SPEC.md states it under "Guard-derived pointers". What
-//   is machine-checked is that nobody reaches the value without holding
-//   the guard, and that no path forgets to give it back.
+//   is machine-checked is that the typed accessors require the guard and
+//   that no path forgets to give it back; see the bulk-access limit above.
 // - ONE VALUE, ONE LOCK. Two cells are two locks. A critical section
 //   spanning two cells takes two guards and therefore has an ORDER,
 //   which nothing here checks (issue #466). Prefer one cell holding a
@@ -90,7 +94,7 @@
 //   hold.
 // - THE GUARD IS 8 STACK BYTES while held, carrying the interrupt state
 //   the release must restore -- issue #451's `flags`, which is where
-//   Linux's `unsigned long flags` lives too. GuardedField below is the
+//   Linux's `unsigned long flags` lives too. GuardedFieldGuard below is the
 //   other class since #966: a TaskMutex, unmasked, so no interrupt
 //   handler may reach it and it may not nest inside a masking lock.
 use "kernel/lib/mutex.tkb";
@@ -179,30 +183,11 @@ fn locked_cell_is_held(T: type, cell: &mut LockedCell(T) @ id)
 // open file to shorten a critical section that is already a compare and an
 // add.
 //
-// Marking the field `private` in its own struct does not do it, because
-// `private` is per FILE: the accessor and every other function in that
-// 2400-line file are the same file, so the field stays reachable from all
-// of them. Checked by trying it -- an unguarded read added to
-// fd_table.tkb compiled. The field's TYPE has to belong to a different
-// file, which is what this one is for.
-//
-// WHAT THIS DOES NOT CARRY, and it is the difference from LockedCell.
-// LockedCell's guard is minted from the cell, so `[cell: addr]` proves the
-// guard is THAT cell's. Here the lock is separate from the data by
-// construction, so a guard proves only that SOME lock was taken. With one
-// adopter and one lock that is vacuous; with two, nothing stops one
-// subsystem's guard opening another's field. If a second adopter appears,
-// that is the moment to give it a lock identity of its own
-// rather than the moment to notice.
-//
-// Generic because the access discipline is independent of the protected
-// value's representation. This remains usable inside a pooled payload:
-// monomorphization resolves the field before sizeof(T) computes the
-// enclosing payload's storage size.
-generic struct GuardedField(T: type) {
-    private value: T;
-}
-
+// Private alone is per file, so it does not exclude an unguarded access in
+// the declaring module. Private guarded_by(lock) declarations bind each field
+// to its lock; guarded_ref checks this guard's identity on access. No pointer
+// to the protected field escapes. The compiler also rejects aggregate copies
+// or typed bulk accesses containing protected fields.
 private linear struct GuardedFieldGuard[lock: addr] {
     private held: usize;
 }
@@ -224,18 +209,6 @@ fn guarded_field_take(m: &mut TaskMutex @ id) -> GuardedFieldGuard[id]
 fn guarded_field_give(g: sink GuardedFieldGuard[id], m: &mut TaskMutex @ id) {
     let held: usize = g.held;
     task_mutex_release(m);
-}
-
-// Value operations keep the field loan at the call boundary. The enclosing
-// module still assigns each field to the correct lock.
-fn guarded_usize_load(g: borrow GuardedFieldGuard[lock],
-                      f: borrow &mut GuardedField(usize)) -> usize {
-    return f.value;
-}
-
-fn guarded_usize_store(g: borrow GuardedFieldGuard[lock],
-                       f: borrow &mut GuardedField(usize), value: usize) {
-    f.value = value;
 }
 
 // The MMU-off window's way in, and the only one. See the limitation above
