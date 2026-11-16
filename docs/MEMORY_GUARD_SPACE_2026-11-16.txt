@@ -1,0 +1,25 @@
+Guarded field migration: incremental linked-image space review
+
+Baseline: 5938a3f36f7f63840af1498ea7ecca7fc8932907
+Candidate: b4abdca2 (includes aggregate-access rejection 256087f2)
+Command: python3 scripts/space_delta.py origin/main
+Boundary: normal linked QEMU/RPi5 images; identical existing kernel workload.
+
+PASS kernel/memory-map: checked rows and 5 allocator expectations match the linked kernels
+base origin/main -> working tree
+| | qemu base | qemu change | rpi5 base | rpi5 change |
+| text | 828112 | 827792 | 4215820 | 4215484 |
+| data | 4616 | 4616 | 5592 | 5592 |
+| bss | 1314816 | 1314816 | 1921024 | 1921024 |
+| usable_ram_start | 0x40210000 | 0x40210000 | 0x7e0000 | 0x7e0000 |
+no data/BSS symbol changed size
+
+Assessment: text falls by 320 bytes on QEMU and 336 bytes on RPi5.
+The removed scalar helper calls and direct guarded fields do not add per-object
+lock storage. Payload layouts, data/BSS symbols and usable_ram_start are
+unchanged. No new allocator or occupancy workload is introduced, so existing
+bounded endpoint observations still apply; this is not a new occupancy
+measurement or a whole-kernel memory-safety proof.
+
+Next trigger: a changed protected-container layout, initialization/lifetime
+boundary with storage effects, or a new allocation workload.

@@ -1,12 +1,13 @@
 {
-  "date": "2026-11-11",
+  "date": "2026-11-16",
   "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "125d3fdfdf47abca553594f6283be32e3323313cf802cd5b0d19c06645d3ace9",
-  "workload": "Reuse the published console-flow normal/debug QEMU and RPi5 image, frame, bounded pool endpoint and termios TX workload observations. This correction visits nested type syntax and consistently accepts the existing structural predicate on erased views.",
+  "decision": "measured",
+  "source_sha256": "2d576e942452125cc9a0ad10dad704f54ff8790945ecc053f2a7349de4e5b423",
+  "workload": "Normal linked QEMU and RPi5 kernels with the existing FD-management workload; compare guarded field migration against 5938a3f3. No allocation or payload layout changes.",
   "evidence": [
+    "docs/MEMORY_GUARD_SPACE_2026-11-16.txt",
     "docs/CONSOLE_FLOW_SPACE_2026-11-11.txt"
   ],
-  "assessment": "Both maintained target builds and native builds pass. The change repairs frontend type validation and declared-type normalization without changing lowering, kernel storage or allocation inputs. The valid nested layout control produces the same object as the baseline, so the existing workload evidence applies to this small correction.",
-  "next_trigger": "Change to TX or diagnostic storage, queue capacity, or the kernel allocation workload."
+  "assessment": "QEMU text decreases 320 bytes and RPi5 text 336 bytes. Data, BSS, all data/BSS symbol sizes and usable_ram_start are unchanged. Adopt the stronger field/lock identity and aggregate rejection; reuse existing occupancy evidence because the allocation workload is unchanged.",
+  "next_trigger": "Change to protected-container storage, initialization/lifetime layout, or allocation workload."
 }
