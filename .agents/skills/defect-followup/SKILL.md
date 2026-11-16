@@ -19,7 +19,9 @@ answer on the diff and the tests actually run.
    rule in AGENTS.md prefers: a type the checker infers or one signature
    carries, an indexed owner or view at an API boundary, a bounded model
    check tied to the code, a build-time check. If a compile-time error is
-   not possible, say why, and consider a build check. Do what is cheap now.
+   not possible, say why, and consider an external check. Classify each
+   prevention using the placement policy below before implementing it;
+   cheap initial implementation alone does not justify a new script.
    File an issue, at the right grain, for what is realistic but larger and
    not already filed.
 5. **Static or moved?** Did the fix exclude the problem statically, or move
@@ -61,6 +63,50 @@ answer on the diff and the tests actually run.
    termination analysis, dynamic invariant detection); that is the evidence
    that reopens the row. Add one comment on #1456 with the defect, the rung
    and the invariant in one line. Record only; do not implement.
+
+## Prevention placement policy
+
+Classify each responsibility, not the defect or the whole tool. First use
+existing types, ownership, effects or API boundaries to make the bad program
+unrepresentable. Keep a faithful regression test even when static prevention
+is adopted; placement and test tier are separate decisions.
+
+Choose by the facts needed and who should enforce the rule:
+
+1. **OCaml, integrated into the Takibi compiler.** The rule judges whether a
+   Takibi program may compile, using its syntax or semantics. Prefer a
+   general type, ownership or effect rule over a relocated per-site table.
+   A kernel-specific policy may instead be an explicit compiler option in
+   a separate module; distinguish that policy from type-system soundness.
+2. **OCaml, a standalone tool.** The check needs Takibi syntax or semantics,
+   but enforces repository conventions or correspondence with external
+   artifacts rather than program acceptance. Reuse the compiler's parser,
+   AST, name resolution or typed facts as needed. Examples are cross-platform
+   implementation comparisons and source-to-model correspondence. Do not
+   create a second lexer, parser or semantic analysis, even for an initially
+   small check. Reuse the narrowest existing interface; do not build a
+   speculative general analysis platform.
+3. **Python, maintained independently of the compiler.** The check acquires
+   or compares external facts without interpreting Takibi syntax or
+   semantics: QEMU/PTY/board orchestration, output verdicts, timing or ELF
+   layout. Reading compiler-emitted facts for a comparison is allowed;
+   rebuilding name resolution or semantic analysis over an exported AST
+   belongs in category 2. External does not mean run-time only.
+
+A prevention can combine these categories. For each new or substantially
+changed check, record its category, the facts it needs, and why that owner
+is appropriate on the defect's issue or in the commit message. For category
+3, name the external fact that needs checking. If an independent check grows
+Takibi-language analysis, reconsider its placement before extending it.
+
+This is not a default language for disposable scripts, a requirement to
+rewrite all existing Python, or authorization for compiler work outside the
+current scope. A larger compiler capability still needs the maintainer's
+design decision. If it cannot be done in the current slice, record the gap
+and agree the interim measure rather than automatically growing a Python
+source scanner. Count maintenance and duplicated analysis in the cost, not
+just the time to write the first check. Preserve the prevention ladder and
+state bounded model evidence at its actual strength.
 
 ## Ask the maintainer
 

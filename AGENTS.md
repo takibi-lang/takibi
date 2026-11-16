@@ -51,10 +51,9 @@ scope rule does not restrict proposing compiler or language changes.
   trusted, and the annotation and migration cost. Discuss realistic options
   with the maintainer before implementing a new capability unless that work
   is already authorized. A proposal is not a commitment to implement it.
-- Not every prevention has to become a compile-time error. Ask what a
-  build-time check under `scripts/` would catch and what it would miss; ship
-  that when it catches the instance that actually occurred, and pursue the
-  language-level version once its misses are themselves observed.
+- Not every prevention has to become a compile-time error. Before adding or
+  extending a checker, use the prevention placement policy in
+  `.agents/skills/defect-followup/SKILL.md`; do not grow a second Takibi parser.
 - Lightweight by design (maintainer, 2026-09-29). Takibi removes whole
   defect classes across the kernel at low cost, not the functional
   correctness of a few modules at high cost. Take the cheapest mechanism

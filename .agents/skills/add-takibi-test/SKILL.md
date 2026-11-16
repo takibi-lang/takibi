@@ -47,6 +47,14 @@ that cannot reproduce its target failure is worse than absent coverage.
 Use the cheapest kernel lane that preserves the required property. QEMU is
 not evidence for physical cache behavior or real timing.
 
+## Placement of a new checker
+
+Before adding or substantially extending a checker or its controls, read the
+"Prevention placement policy" in `../defect-followup/SKILL.md` and classify
+its responsibilities. Test tier and implementation placement are separate:
+a regression test remains necessary when the compiler enforces the rule.
+Do not add a Python Takibi source parser merely to implement a test verdict.
+
 ## Build-level negative controls
 
 A negative test executed through `make` or another build command must prove
