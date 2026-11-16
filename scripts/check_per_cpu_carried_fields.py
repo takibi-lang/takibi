@@ -32,6 +32,7 @@ writer and the borrowed renderer input a reader. Other addresses still fail.
 
 import re
 import sys
+from bisect import bisect_right
 from pathlib import Path
 
 from pass_line import report_pass
@@ -104,25 +105,28 @@ def scan_file(code, path=None):
     # Same length, so positions and line numbers still hold.
     body = GLOBAL.sub(lambda m: " " * len(m.group(0)), code)
     starts = function_starts(body)
+    start_offsets = tuple(start for start, _, _ in starts)
     blocks = blocks_of(body)
     for store, element in stores.items():
         shape = re.compile(
-            r"((?<!&)&\s*)?\b" + store + r"\b(?:\s*\[\s*\w+\s*\]\s*\.\s*(\w+)"
+            # Skip non-candidates before entering the optional address prefix.
+            # Comment masking leaves long runs of spaces in large files.
+            r"(?=[&" + store[0] + r"])((?<!&)&\s*)?\b" + store + r"\b(?:\s*\[\s*\w+\s*\]\s*\.\s*(\w+)"
             r"((?:\s*\.\s*\w+|\s*\[[^\]]*\])*)(\s*(?:[-+*/%|&^]|<<|>>)?=(?!=))?)?")
         for match in shape.finditer(body):
-            line = body.count("\n", 0, match.start()) + 1
             field = match.group(2)
-            function = "<top level>"
-            for start, _, name in starts:
-                if start > match.start():
-                    break
-                function = name
+            # Locate the containing header once, rather than walking every
+            # preceding function for every field use (including controls).
+            index = bisect_right(start_offsets, match.start()) - 1
+            function = starts[index][2] if index >= 0 else "<top level>"
             borrow_mode = borrowed.get((store, function, field)) if match.group(1) else None
             if field is None or (match.group(1) and borrow_mode is None):
+                line = body.count("\n", 0, match.start()) + 1
                 problems.append(f"line {line}: {store} is used other than as "
                                 f"{store}[authority].field")
                 continue
             if (element, field) not in fields:
+                line = body.count("\n", 0, match.start()) + 1
                 problems.append(f"line {line}: {store}.{field} is not a field of {element}")
                 continue
             region = (function, None)
