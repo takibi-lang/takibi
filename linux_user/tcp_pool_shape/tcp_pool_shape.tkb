@@ -81,10 +81,10 @@ private let mut conns: IntrusivePool(TcpConnection);
 private let mut frames: IntrusivePool(NetFrame);
 private let mut retxs: IntrusivePool(RetxEntry);
 
-fn slot_lock(m: *i32 @ address) -> SlotGuard[address] {
+fn slot_lock(m: *i32 @ address) -> SlotGuard[address] borrows(m) {
     return view SlotGuard[address];
 }
-fn slot_unlock(g: sink SlotGuard[address], m: *i32 @ address) {}
+fn slot_unlock(g: sink SlotGuard[address], m: *i32 @ address) borrows(m) {}
 
 // Discharges a link, reporting whether it held anything. The fixture
 // leaks the underlying slots on purpose (as pool_container does): what is

@@ -83,7 +83,7 @@ struct no_copy Mutex { private word: AtomicWord; }
 // -- a hang, not a delay. That ordering is the entire reason an interrupt
 // handler may take one of these at all (GitHub issue #449).
 fn mutex_acquire(m: *Mutex @ id) -> usize
-        !{locks, unsafe, acquires_lock_40_mutex} {
+        !{locks, unsafe, acquires_lock_40_mutex} borrows(m) {
     static_assert(SPIN_LOCK_FREE == 0,
                   "a zeroed global Mutex is only free while SPIN_LOCK_FREE is 0, and every Mutex in this kernel relies on that instead of an init");
     // Every function here reaches the word through `m`, which is the
@@ -99,12 +99,12 @@ fn mutex_acquire(m: *Mutex @ id) -> usize
 // ONLY if this acquire is the one that masked, which is what makes the
 // pair correct inside an interrupt handler (DAIF.I is already set on
 // entry, so the release leaves it set) and correct when two are nested.
-fn mutex_release(m: *Mutex @ id, flags: usize) !{locks, unsafe} {
+fn mutex_release(m: *Mutex @ id, flags: usize) !{locks, unsafe} borrows(m) {
     spin_unlock(&m.word);
     mutex_irq_restore(flags);
 }
 
-fn mutex_is_held(m: *Mutex @ id) -> bool !{unsafe} {
+fn mutex_is_held(m: *Mutex @ id) -> bool !{unsafe} borrows(m) {
     return spin_lock_is_held(&m.word);
 }
 
@@ -116,7 +116,7 @@ must_use variant MutexTry {
     Taken(usize);
 }
 
-fn mutex_try_acquire(m: *Mutex @ id) -> MutexTry !{unsafe} {
+fn mutex_try_acquire(m: *Mutex @ id) -> MutexTry !{unsafe} borrows(m) {
     let flags: usize = mutex_irq_save();
     if (spin_trylock(&m.word)) { return MutexTry::Taken(flags); }
     mutex_irq_restore(flags);
@@ -125,7 +125,7 @@ fn mutex_try_acquire(m: *Mutex @ id) -> MutexTry !{unsafe} {
 
 // The release of a mutex_try_acquire. The same two steps as mutex_release;
 // it waits on nothing, so it does not carry `locks`.
-fn mutex_try_release(m: *Mutex @ id, flags: usize) !{unsafe} {
+fn mutex_try_release(m: *Mutex @ id, flags: usize) !{unsafe} borrows(m) {
     spin_unlock(&m.word);
     mutex_irq_restore(flags);
 }
@@ -136,7 +136,7 @@ fn mutex_try_release(m: *Mutex @ id, flags: usize) !{unsafe} {
 // linear guard still owns the obligation to release flags exactly once.
 struct MutexAcquisition { flags: usize; contended: bool; }
 fn mutex_acquire_measured(m: *Mutex @ id) -> MutexAcquisition
-        !{locks, unsafe, acquires_lock_40_mutex} {
+        !{locks, unsafe, acquires_lock_40_mutex} borrows(m) {
     let flags: usize = mutex_irq_save();
     let contended: bool = spin_trylock(&m.word) == false;
     if (contended) { spin_lock(&m.word); }

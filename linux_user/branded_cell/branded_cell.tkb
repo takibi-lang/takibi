@@ -14,11 +14,11 @@ struct Cell[p: addr] {
 }
 private let mut cells: IntrusivePool(Cell[&connections]);
 linear struct CellGuard[lock: addr] { private flags: usize; }
-fn cell_lock(mutex: *Mutex @ lock) -> CellGuard[lock] {
+fn cell_lock(mutex: *Mutex @ lock) -> CellGuard[lock] borrows(mutex) {
     let mut guard: CellGuard[lock] = { mutex_acquire(mutex) };
     return guard;
 }
-fn cell_unlock(mutex: *Mutex @ lock, guard: sink CellGuard[lock]) {
+fn cell_unlock(mutex: *Mutex @ lock, guard: sink CellGuard[lock]) borrows(mutex) {
     mutex_release(mutex, guard.flags);
 }
 fn cell_exchange(cell: borrow *Cell[p], next: CellLink[p]) -> CellLink[p] {
