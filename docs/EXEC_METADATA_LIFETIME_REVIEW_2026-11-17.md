@@ -25,7 +25,7 @@ retain their separately reviewed boundary; this is not general heap
 provenance, arbitrary integer-address recovery, allocation uniqueness or a
 reclamation/concurrency proof.
 
-The maintained migration adds 40 `borrows` clauses and twelve source `borrow`
+The maintained migration adds 39 `borrows` clauses and thirteen source `borrow`
 qualifiers at function boundaries. There are no new per-call proof statements,
 loop invariants, unsafe blocks, runtime provenance fields or pool capacities.
 Boot's dynamic-image check acquires the existing ExecWindowSlot, uses its
