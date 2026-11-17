@@ -571,6 +571,14 @@ let parser_tests = [
       Alcotest.(check int) "explicit readings compile" 0
         (List.length !Ast.precedence_error_sites));
 
+  Alcotest.test_case "Generic field inference sees through an output borrow" `Quick
+    (expect_codegen_ok
+      "generic struct Inner(N: usize) { bytes: [u8; N]; }
+       generic struct Outer(N: usize) { inner: Inner(N); }
+       fn fill(x: borrow uninit &mut Inner(N)) { for i: usize in 0..<N { x.bytes[i] = 1; } }
+       fn init(x: borrow uninit &mut Outer(N)) { fill(&x.inner); }
+       fn f() -> u8 { let mut x: Outer(4); init(&x); return x.inner.bytes[3]; }");
+
   Alcotest.test_case "Const-generic where bounds specialize at each call" `Quick
     (expect_codegen_ok
       "generic struct Limit(N: usize) { bytes: [u8; N]; }

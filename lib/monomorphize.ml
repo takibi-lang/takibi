@@ -1010,7 +1010,13 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
       | AddrOf { desc = Var name; _ } ->
           Option.map (fun t -> TypePtr t) (local_find local_types name)
       | AddrOf { desc = FieldGet ({ desc = Var name; _ }, fname); _ } ->
-          (match local_find local_types name with
+          (* Borrowing does not change the pointee's generic arguments.
+             Keep permission checking in the type checker; this pass only
+             recovers the declared field type for monomorphization. *)
+          let rec unborrow = function
+            | TypeBorrow t | TypeBorrowMut t -> unborrow t
+            | t -> t in
+          (match Option.map unborrow (local_find local_types name) with
            | Some (TypePtr (TypeGenericInst (sname, args)))
            | Some (TypeRef (TypeGenericInst (sname, args)))
            | Some (TypeRefMut (TypeGenericInst (sname, args)))

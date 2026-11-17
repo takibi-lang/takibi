@@ -1,13 +1,13 @@
 {
-  "date": "2026-11-16",
+  "date": "2026-11-17",
   "event": "incremental",
   "decision": "reuse",
-  "source_sha256": "4f2e2865206fdad902f77385c1c0f581ef5e097b2137f96e48727818a659f241",
-  "workload": "Existing guarded-field kernel workload; frontend correction for const-generic where-clause specialization only.",
+  "source_sha256": "02f7ec10e541b1f4581ce326a25515c7b1e5d9c06ff36e013dbaf84ed73bbf7b",
+  "workload": "Existing guarded-field kernel workload; nested generic field inference through borrowed reference parameters.",
   "evidence": [
     "docs/MEMORY_GUARD_SPACE_2026-11-16.txt",
     "docs/CONSOLE_FLOW_SPACE_2026-11-11.txt"
   ],
-  "assessment": "Reuse the recorded allocation/layout workload evidence: this correction substitutes constant arguments in static where constraints and does not change lowering, storage layout, allocator policy or maintained kernel source. This is an incremental compiler defect fix, not completion of the memory-model milestone.",
+  "assessment": "Reuse existing layout/allocation evidence for this incremental frontend correction. Unwrapping borrow qualifiers during generic argument inference changes neither permissions nor emitted layouts or allocator workloads. The type checker still enforces borrow permissions. This is not completion of the memory-model milestone.",
   "next_trigger": "Completion of linked-initialization integration, or any change to kernel storage, allocation or emitted code layout."
 }
