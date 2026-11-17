@@ -1760,7 +1760,7 @@ fn process_image_prepare_stack(page: borrow PageOwner[page],
                                plan: DistroElfLoadPlan,
                                argv: borrow []const u8,
                                argc: usize)
-        -> ProcessImageStackResult !{unsafe} {
+        -> ProcessImageStackResult !{unsafe} borrows(plan) {
     static_assert((PROCESS_EXEC_ARGC_MAX + PROCESS_STACK_HEAD_WORDS +
                    PROCESS_STACK_AUXV_WORDS_STATIC) * 8 +
                   PROCESS_STACK_RANDOM_BYTES + PROCESS_EXEC_ARGV_BYTES <=
@@ -1872,7 +1872,7 @@ fn process_dynamic_prepare_stack(page: borrow PageOwner[page],
                                  interpreter_bias: usize,
                                  argv: borrow []const u8,
                                  argc: usize)
-        -> ProcessImageStackResult !{unsafe} {
+        -> ProcessImageStackResult !{unsafe} borrows(application) {
     static_assert((PROCESS_EXEC_ARGC_MAX + PROCESS_STACK_HEAD_WORDS +
                    PROCESS_STACK_AUXV_WORDS_STATIC) * 8 +
                   PROCESS_STACK_RANDOM_BYTES + PROCESS_EXEC_ARGV_BYTES <=
@@ -1989,7 +1989,7 @@ private fn process_image_load_page(slot: borrow ProcessImageSlot[0],
                            header: DistroElfSegment,
                            load_bias: usize,
                            l3_index: usize)
-        -> ProcessImagePageLoadResult !{unsafe} {
+        -> ProcessImagePageLoadResult !{unsafe} borrows(plan) {
     match process_image_staging[slot.index].source {
         ProcessImageSourceState::Absent => {}
         ProcessImageSourceState::Ext2(source) => {
@@ -2069,7 +2069,7 @@ private fn process_image_load_page_ext2(slot: borrow ProcessImageSlot[0],
                                 header: DistroElfSegment,
                                 load_bias: usize,
                                 l3_index: usize)
-        -> ProcessImagePageLoadResult !{unsafe} {
+        -> ProcessImagePageLoadResult !{unsafe} borrows(plan) {
     let context: &mut ProcessImageStaging = &process_image_staging[slot.index];
     let source: ProcessImageExt2Source = match context.source {
         ProcessImageSourceState::Absent => {
@@ -2297,7 +2297,7 @@ private fn process_image_map_segments(slot: borrow ProcessImageSlot[0],
                               plan: DistroElfLoadPlan,
                               load_bias: usize,
                               already_mapped: usize)
-        -> ProcessImageSegmentsResult {
+        -> ProcessImageSegmentsResult borrows(plan) {
     if (plan.extent > USER_SPACE_BYTES ||
         load_bias > USER_SPACE_BYTES - plan.extent) {
         process_image_cleanup_root(target);
@@ -2385,7 +2385,7 @@ private fn process_image_pair_probe(slot: borrow ProcessImageSlot[0],
                             interpreter_bias: usize,
                             argv: borrow []const u8,
                             argc: usize)
-        -> ProcessImagePairProbeResult {
+        -> ProcessImagePairProbeResult borrows(primary,interpreter) {
     // GitHub issue #258 step 2: this path's own layout, seeded before any
     // consumer reads it. Its stack floor is higher than the static path's
     // (this image's heap reaches further up) -- that difference used to be
@@ -2584,7 +2584,7 @@ fn process_image_pair_map_ext2_in_root(
         interpreter_bias: usize,
         argv: borrow []const u8,
         argc: usize,
-        target: AddressSpaceRoot) -> ProcessImagePairProbeResult {
+        target: AddressSpaceRoot) -> ProcessImagePairProbeResult borrows(primary,interpreter) {
     let root: usize = root_slot_word(address_space_root_slot(target));
     if (address_space_root_key_valid(root) == false ||
         address_space_is_live(target) == false) {
@@ -2605,7 +2605,7 @@ private fn process_image_map_current(slot: borrow ProcessImageSlot[0],
                              target: AddressSpaceRoot,
                              plan: DistroElfLoadPlan,
                              argv: borrow []const u8,
-                             argc: usize) -> ProcessImageMapResult {
+                             argc: usize) -> ProcessImageMapResult borrows(plan) {
     // GitHub issue #516: the same refusal, through this function's own
     // "cannot map" case.
     let root: usize = match process_image_root_checked(target) {
@@ -2727,7 +2727,7 @@ fn process_image_map_ext2(plan: DistroElfLoadPlan,
                           inode: usize,
                           file_length: usize,
                           argv: borrow []const u8,
-                          argc: usize) -> ProcessImageMapResult {
+                          argc: usize) -> ProcessImageMapResult borrows(plan) {
     let mut target: AddressSpaceRoot = address_space_boot_root();
     let slot: ProcessImageSlot[0] = process_image_slot_acquire();
     process_image_set_source(slot, mount, inode, file_length);
@@ -2742,7 +2742,7 @@ fn process_image_map_ext2_in_root(plan: DistroElfLoadPlan,
                                   file_length: usize,
                                   argv: borrow []const u8,
                                   argc: usize,
-                                  target: AddressSpaceRoot) -> ProcessImageMapResult {
+                                  target: AddressSpaceRoot) -> ProcessImageMapResult borrows(plan) {
     let root: usize = root_slot_word(address_space_root_slot(target));
     if (address_space_root_key_valid(root) == false ||
         address_space_is_live(target) == false) {
@@ -2772,7 +2772,7 @@ private fn process_image_span_bound(first: usize, last: usize) -> usize {
 }
 
 private fn process_image_segments_bound(plan: DistroElfLoadPlan,
-                                        load_bias: usize) -> usize {
+                                        load_bias: usize) -> usize borrows(plan) {
     let mut total: usize = 0;
     if (load_bias % PAGE_SIZE != 0 || load_bias > USER_SPACE_BYTES) {
         return 0;
@@ -2802,7 +2802,7 @@ private fn process_image_heap_bound(extent: usize) -> usize {
         heap_first_page + PROCESS_HEAP_PAGES_DEFAULT);
 }
 
-fn process_image_exec_bound_static(plan: DistroElfLoadPlan) -> usize {
+fn process_image_exec_bound_static(plan: DistroElfLoadPlan) -> usize borrows(plan) {
     return process_image_segments_bound(plan, 0) +
            process_image_heap_bound(plan.extent) +
            process_image_span_bound(process_stack_top_page(),
@@ -2811,7 +2811,7 @@ fn process_image_exec_bound_static(plan: DistroElfLoadPlan) -> usize {
 
 fn process_image_exec_bound_pair(primary: DistroElfLoadPlan,
                                  interpreter: DistroElfLoadPlan,
-                                 interpreter_bias: usize) -> usize {
+                                 interpreter_bias: usize) -> usize borrows(primary, interpreter) {
     if (interpreter_bias > USER_SPACE_BYTES ||
         interpreter.extent > USER_SPACE_BYTES - interpreter_bias) {
         return 0;

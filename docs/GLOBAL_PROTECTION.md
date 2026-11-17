@@ -550,9 +550,9 @@ entries below that date are history, left as written.
   `virtio_blk_base_get`), `rp1_gem.tkb`'s `gem_rx_ring_cpu_address`.
   An unset cell reads as 0, as before. `virtio_net.tkb`'s used-ring
   addresses stay listed: the native TX fixture reads them directly, and a
-  public accessor returning the address is refused by check_frame_api.py. test_driver's `boot_execution` and
-  `boot_exec_windows` stay listed: one is written in two steps, the other is
-  a buffer the loader fills, so neither is a single set.
+  public accessor returning the address is refused by check_frame_api.py. test_driver's `boot_execution` stays listed because it is written in two steps.
+  The boot loader uses the existing slot-owned exec windows; its checked
+  argument/result provenance ends when the slot is released.
 - 2026-11-08 (#1159, the StopCell decision): words written only under the
   workload interval's complete stop move to `StopCell(T)`:
   profile_samples.tkb's `profile_sample_active` and the four

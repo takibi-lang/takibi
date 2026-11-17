@@ -3464,6 +3464,73 @@ Submission grants no initialization facts: an audited output wrapper must
 relate successful results to the actual written ranges. In particular, a
 total byte count does not automatically certify arbitrary overlapping spans.
 
+### Body-checked argument provenance
+
+A function may place one `borrows` clause after its effects and `where`
+clause and before initialization contracts or the body:
+
+```takibi
+fn decode(image: []u8) -> ImageResult borrows(image -> image) { ... }
+fn map(plan: ImagePlan) -> MapResult !{unsafe} borrows(plan) { ... }
+fn pair(a: ImagePlan, b: ImagePlan) -> ImagePair
+    borrows(a, b -> a, b) { ... }
+```
+
+Inputs and result sources are distinct parameter names. Result sources must
+be drawn from the inputs; omitting the arrow declares no retained result.
+These are checked Takibi bodies, not trusted external summaries. A function
+with a `borrows` clause cannot also use an authority-derived `@` return
+contract or be converted to a runtime function value. Function-pointer types
+have no provenance summary, and external declarations cannot carry this clause.
+
+The checker gives each declared input an abstract referent lifetime. It
+checks every return and transfer against that lifetime. Consuming a by-value
+variant wrapper in a match transfers its payload; it does not end the input's
+abstract referent lifetime. The inline storage of a by-value record or array
+is a separate callee-local lifetime: a contract cannot let a slice into that
+copy escape by naming the argument as a result source. At a direct call, the result inherits the union
+of provenance from the declared result-source arguments. Undeclared input
+positions remain potentially retaining. Existing `borrow` pointer/slice
+parameters remain non-retaining boundaries for alias-free pointee data.
+
+Checked `owned_by` element places seed provenance from their selector owner
+when converted to slices, subsliced or directly addressed. Direct references,
+pointer projections, reborrows, casts, local struct copies and variant payloads
+preserve it. Transfers retain the complete dependency set, including ordinary
+stack origins and the separate inline storage of a by-value argument. They
+must not retain only the named contract/owner subset. Copying a wrapper value
+does not add a dependency on that wrapper's own storage. A shadowed outer
+binding recovers its original dependencies when its scope becomes visible
+again. An alias-bearing aggregate or variant conservatively carries a
+union for the whole value; extracting a scalar checks the source and returns
+ordinary copied data. Branches join by union, excluding paths that terminate.
+An independent variant case has no provenance; a join with a dependent case
+still has the union, even when later code reads only a tag.
+
+Using a derived binding after any owner is consumed is rejected. Rebinding
+an owner while dependent locals remain in scope is rejected. A reborrow of
+a referent (`&p.field`, `&p.array[i]`, or `&*p`) keeps the original provenance.
+`&*p` returns the existing address without a load. It cannot turn a raw
+pointer into a safe reference or a shared reference into a mutable one.
+Taking the address of the local slot holding a loan remains rejected because
+writes through that alias would bypass local provenance tracking.
+
+Durable stores, unknown external or indirect transfers, tuple/array loan
+storage and foreach traversal of alias-bearing elements remain unsupported
+and are errors. Owned/contract-input foreach loans and loop-carried loan
+assignment remain unsupported; ordinary local-slice scalar iteration and
+standalone local assignments retain their existing behavior. Compiler builtins are
+synchronous boundaries only where their checked operation cannot retain an
+alias; `slice_copy` requires alias-free source elements. `unsafe` cannot
+erase provenance. Existing `@` driver contracts keep the separate reviewed
+semantics described below; the new aggregate rules apply to checked argument
+and `owned_by` provenance, not arbitrary preexisting region sources.
+
+Provenance and clauses erase before LLVM lowering: they add no runtime
+metadata or layout fields. The selector mint's uniqueness and its physical
+correspondence to the declared storage remain trusted. This is lifetime
+checking, not proof of every pointer's physical validity or bounds.
+
 ### Owner-derived slices
 
 ```
@@ -3509,8 +3576,9 @@ back to DMA.
   mistake the fresh authority for the consumed authority and revive the old
   derived value. Reassigning a mutable derived binding to an unrelated value
   clears the tie; leaving its scope also ends the restriction.
-- **Aggregate storage rejected**: an authority-derived slice or pointer
-  cannot be placed in a tuple, variant payload, or struct literal, including
+- **Aggregate storage rejected outside checked provenance**: a region source
+  outside the checked argument/slot-owner domain above cannot be placed in a
+  tuple, variant payload, or struct literal, including
   through nested aggregate literals. The current taint domain tracks direct
   local bindings, not tuple components or variant cases; rejecting the store
   is sounder than silently losing the tie during destructuring or matching.
@@ -3838,8 +3906,9 @@ fn f() {
 
 - **Minting is unchanged `&expr`.** There is no separate mint syntax:
   `&expr` (`AddrOf`) keeps its existing grammar and restrictions exactly
-  (a bare variable, struct field, or array/slice element -- `&s`,
-  `&s.field`, `&arr[i]`; a local must be mutable to be addressed, globals are always
+  (a bare variable, struct field, array/slice element, or explicit
+  reborrow -- `&s`, `&s.field`, `&arr[i]`, `&*p`; a local must be mutable
+  to be addressed, globals are always
   addressable; linear/indexed-owner/erased-view/variant/singleton targets
   are rejected). Only the *type* `&expr` produces changes, resolved from
   context: a function argument or `let` annotation of type `&T`/`&mut T`

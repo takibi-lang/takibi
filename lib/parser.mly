@@ -259,7 +259,7 @@ let promote_be_field_type = function
 %token GUARDED_BY
 %token OWNED_BY
 %token BORROW_INIT BORROW_UNINIT
-%token FN INLINE NOINLINE WHERE REQUIRES ENSURES RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE PUBLISH NO_COPY DMA_FIXED PER_CPU CPU_AUTHORITY PREEMPT_OFF IO ENUM MATCH ALIGN MULTIPLE SIZEOF ALIGNOF CONTAINS_STABLE_OWNER OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY EXCEPTION_RESTORE EMBED_FILE
+%token FN INLINE NOINLINE WHERE BORROWS REQUIRES ENSURES RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE PUBLISH NO_COPY DMA_FIXED PER_CPU CPU_AUTHORITY PREEMPT_OFF IO ENUM MATCH ALIGN MULTIPLE SIZEOF ALIGNOF CONTAINS_STABLE_OWNER OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY EXCEPTION_RESTORE EMBED_FILE
 %token TYPE GENERIC
 %token DARROW COLONCOLON UNDERSCORE BANG
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT AT
@@ -819,33 +819,42 @@ variant_cases:
     { (name, Some payload) :: rest }
 
 func_def:
-  | p = private_flag FN IDENT LPAREN params RPAREN ret_type_opt effects_opt w = where_opt cs = contracts_opt LBRACE body_stmts = stmts RBRACE
+  | p = private_flag FN IDENT LPAREN params RPAREN ret_type_opt effects_opt w = where_opt bc = borrow_contract_opt cs = contracts_opt LBRACE body_stmts = stmts RBRACE
     {
       Init_state.set_contracts $symbolstartpos cs;
       Init_state.finish_func $symbolstartpos $5;
       Def_extent.record $symbolstartpos $endpos;
       Ast.{ name = $3; params = $5; ret_type = $7; effects = $8;
             body = body_stmts; is_inline = false; is_noinline = false; is_private = p;
-            where_clauses = w; def_loc = $symbolstartpos }
+            where_clauses = w; borrow_contract = bc; def_loc = $symbolstartpos }
     }
-  | p = private_flag INLINE FN IDENT LPAREN params RPAREN ret_type_opt effects_opt w = where_opt cs = contracts_opt LBRACE body_stmts = stmts RBRACE
+  | p = private_flag INLINE FN IDENT LPAREN params RPAREN ret_type_opt effects_opt w = where_opt bc = borrow_contract_opt cs = contracts_opt LBRACE body_stmts = stmts RBRACE
     {
       Init_state.set_contracts $symbolstartpos cs;
       Init_state.finish_func $symbolstartpos $6;
       Def_extent.record $symbolstartpos $endpos;
       Ast.{ name = $4; params = $6; ret_type = $8; effects = $9;
             body = body_stmts; is_inline = true; is_noinline = false; is_private = p;
-            where_clauses = w; def_loc = $symbolstartpos }
+            where_clauses = w; borrow_contract = bc; def_loc = $symbolstartpos }
     }
-  | p = private_flag NOINLINE FN IDENT LPAREN params RPAREN ret_type_opt effects_opt w = where_opt cs = contracts_opt LBRACE body_stmts = stmts RBRACE
+  | p = private_flag NOINLINE FN IDENT LPAREN params RPAREN ret_type_opt effects_opt w = where_opt bc = borrow_contract_opt cs = contracts_opt LBRACE body_stmts = stmts RBRACE
     {
       Init_state.set_contracts $symbolstartpos cs;
       Init_state.finish_func $symbolstartpos $6;
       Def_extent.record $symbolstartpos $endpos;
       Ast.{ name = $4; params = $6; ret_type = $8; effects = $9;
             body = body_stmts; is_inline = false; is_noinline = true; is_private = p;
-            where_clauses = w; def_loc = $symbolstartpos }
+            where_clauses = w; borrow_contract = bc; def_loc = $symbolstartpos }
     }
+
+borrow_contract_opt:
+  | /* empty */ { None }
+  | BORROWS LPAREN inputs = separated_nonempty_list(COMMA, IDENT) outputs = borrow_outputs_opt RPAREN
+    { Some Ast.{ borrow_inputs = inputs; borrow_outputs = outputs } }
+
+borrow_outputs_opt:
+  | /* empty */ { [] }
+  | ARROW outputs = separated_nonempty_list(COMMA, IDENT) { outputs }
 
 (* GitHub issue #954: `requires` / `ensures` initialization contracts.
    Both are keywords: a contextual word would conflict with the arrowless

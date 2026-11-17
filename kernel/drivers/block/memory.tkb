@@ -521,7 +521,7 @@ fn block_run_hit_total() -> usize {
 }
 
 fn block_write(device: KernelBlockDevice, block: usize,
-               source: [u8; KERNEL_BLOCK_SIZE..])
+               source: borrow [u8; KERNEL_BLOCK_SIZE..])
         -> BlockIoResult !{unsafe} {
     if (block >= device.length / KERNEL_BLOCK_SIZE) {
         return BlockIoResult::Invalid;
@@ -561,7 +561,7 @@ private fn block_read_device(slot: borrow BlockSlot[0],
 
 private fn block_write_device(slot: borrow BlockSlot[0],
                               device: KernelBlockDevice, block: usize,
-                              source: [u8; KERNEL_BLOCK_SIZE..])
+                              source: borrow [u8; KERNEL_BLOCK_SIZE..])
         -> BlockIoResult {
     let guard = block_device_take(slot);
     let result: BlockIoResult =
@@ -604,7 +604,7 @@ private fn block_write_device_locked(
         slot: borrow BlockSlot[0],
         guard: borrow BlockDeviceGuard[&block_device_lock],
         device: KernelBlockDevice, block: usize,
-        source: [u8; KERNEL_BLOCK_SIZE..]) -> BlockIoResult !{unsafe} {
+        source: borrow [u8; KERNEL_BLOCK_SIZE..]) -> BlockIoResult !{unsafe} {
     if (block >= device.length / KERNEL_BLOCK_SIZE) {
         return BlockIoResult::Invalid;
     }

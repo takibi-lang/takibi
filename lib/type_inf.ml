@@ -2291,7 +2291,19 @@ type path =
 
 let path_to_string = function
   | PVar (_, n) -> n
+  | PField (_, b, "%provenance_loan") -> b
+  | PField (_, b, "%argument_storage") -> "local storage of " ^ b
   | PField (_, b, f) -> b ^ "." ^ f
+
+(* Taint-only origin tags distinguish checked data loans from legacy region
+   contracts. Resource consumption remains keyed by the real authority. *)
+let loan_origin = function
+  | PVar (id, name) | PField (id, name, _) ->
+      PField (id, name, "%provenance_loan")
+
+let loan_authority = function
+  | PField (id, name, "%provenance_loan") -> PVar (id, name)
+  | path -> path
 
 module ResourceFlow = Takibi_core.Delta.Legacy_flow(struct
   type t = path
@@ -2309,7 +2321,12 @@ type consume_sets = ResourceFlow.t
    name -> the owner or guard paths it was derived from. Checked lazily
    against maybe_consumed at each use, so it shares Legacy_flow's
    union-at-join conservatism with no extra merge logic of its own. *)
-module TaintEnv = Takibi_core.Delta.Region_taint (PathSet)
+module TaintEnv = struct
+  include Takibi_core.Delta.Region_taint (PathSet)
+  let dependents authority taints =
+    List.sort_uniq String.compare
+      (dependents authority taints @ dependents (loan_origin authority) taints)
+end
 
 (* GitHub issue #299: a publish write token is a linear opaque handle
    with no fields of its own, standing in for the record it was minted
@@ -7370,6 +7387,17 @@ and infer_addrof_wrapped senv eenv tyenv fenv (e : Ast.expr) (inner : Ast.expr)
              | `RefMut -> TRefMut ft_ty)
         | None -> raise (TypeError (e.loc,
             Printf.sprintf "no field '%s' in struct '%s'" fname sname)))
+   | Deref pointer ->
+       let pointer_ty = repr (infer_expr senv eenv tyenv fenv pointer) in
+       let referent = match pointer_ty with
+         | TPtr t | TAlignedPtr (_, t) | TRef t | TRefMut t -> t
+         | _ -> raise (TypeError (e.loc, "reborrow requires a pointer or reference")) in
+       (match wrap, pointer_ty with
+        | `Ptr, _ -> check_no_nested_ptr_mint e.loc referent; TPtr referent
+        | `Ref, (TRef _ | TRefMut _) -> TRef referent
+        | `RefMut, TRefMut _ -> TRefMut referent
+        | _ -> raise (TypeError (e.loc,
+            "reborrow cannot mint a safe reference from a raw pointer or make a shared reference mutable")))
    | Index (base, _) ->
        (* GitHub issue #385: an array/slice element is an addressable place,
           not the loaded value returned by Index codegen. Type inference can
@@ -12742,6 +12770,37 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           raise (TypeError (f.def_loc,
             "authority-derived return functions cannot be used as runtime function pointers"))
     | _ -> ()) prog;
+  (* A provenance summary is checked against its Takibi body. Runtime
+     function values cannot erase the summary because TFun has no such row. *)
+  let checked_loans = List.fold_left (fun rows -> function
+    | Ast.FuncDef f ->
+        (match f.borrow_contract with
+         | None -> rows
+         | Some contract ->
+             let inputs = contract.borrow_inputs in
+             let outputs = contract.borrow_outputs in
+             let names = List.map fst f.params in
+             let key = overload_key f.name f.params in
+             let distinct xs = List.length xs = StringSet.cardinal
+                 (StringSet.of_list xs) in
+             if inputs = [] || not (distinct inputs && distinct outputs)
+                || not (List.for_all (fun name -> List.mem name names) inputs)
+                || not (List.for_all (fun name -> List.mem name inputs) outputs)
+                || StringMap.mem key region_return_info
+             then raise (TypeError (f.def_loc,
+               "invalid borrows contract: distinct parameter inputs and result sources drawn from those inputs are required"));
+             if StringMap.exists (fun _ target -> target = key)
+                  !resolved_function_values then
+               raise (TypeError (f.def_loc,
+                 "borrows functions cannot be used as runtime function pointers"));
+             let indices selected = List.filter_map (fun (i, name) ->
+               if List.mem name selected then Some i else None)
+               (List.mapi (fun i name -> i, name) names) in
+             StringMap.add key (indices inputs, indices outputs) rows)
+    | _ -> rows) StringMap.empty prog in
+  let checked_loan_bodies = List.fold_left (fun keys -> function
+    | Ast.FuncDef f -> StringSet.add (overload_key f.name f.params) keys
+    | _ -> keys) StringSet.empty prog in
   (* Lock-order contracts (GitHub issue #466).  Acquisition annotations are
      transitive summaries: a caller acquires the lowest-ranked lock reachable
      from its body.  Guard annotations associate a returned linear type with
@@ -13396,6 +13455,44 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     grow (StringSet.singleton Per_cpu_registry.preempt_token_name)
   in
   let carries_span_token t = type_mentions_any span_token_carriers t in
+  (* Type shape is independent of function-local provenance. *)
+  let type_contains_region_alias ty =
+    let rec visit seen = function
+      | Ast.TypePtr _ | Ast.TypeAlignedPtr _ | Ast.TypeRef _
+      | Ast.TypeRefMut _ | Ast.TypeSlice _ -> true
+      | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
+      | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeSingleton (t, _)
+      | Ast.TypeIo t | Ast.TypeArray (t, _) -> visit seen t
+      | Ast.TypeTuple ts -> List.exists (visit seen) ts
+      | Ast.TypeExists (_, sort, body) -> visit seen sort || visit seen body
+      | Ast.TypeNamed name | Ast.TypeIndexed (name, _) ->
+          if StringSet.mem name seen then false
+          else
+            let seen = StringSet.add name seen in
+            (match StringMap.find_opt name senv with
+             | Some (fields, _, _) ->
+                 List.exists (fun (_, field_ty) -> visit seen field_ty) fields
+             | None ->
+                 (match Hashtbl.find_opt variant_defs name with
+                  | Some cases ->
+                      List.exists (fun (_, payload) ->
+                        Option.fold ~none:false ~some:(visit seen) payload)
+                        cases
+                  | None -> false))
+      | Ast.TypeVariant (name, _, _) ->
+          if StringSet.mem name seen then false
+          else
+            let seen = StringSet.add name seen in
+            (match Hashtbl.find_opt variant_defs name with
+             | Some cases ->
+                 List.exists (fun (_, payload) ->
+                   Option.fold ~none:false ~some:(visit seen) payload)
+                   cases
+             | None -> false)
+      | _ -> false
+    in
+    visit StringSet.empty (strip_borrow ty)
+  in
   let check_affine_func fdef =
     let finfo = StringMap.find (overload_key fdef.Ast.name fdef.params) functions in
     let binding_resolution = finfo.bindings in
@@ -13517,7 +13614,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                      | Some fty when is_affine_type fty -> Some fty
                      | _ -> None)))
     in
-    let path_kind = function
+    let path_kind path = match loan_authority path with
       | PVar (id, name) ->
           let ty = binding_type id name in
           if is_linear_type ty || is_must_use_type ty then Some Ast.KindLinear
@@ -13530,13 +13627,37 @@ let infer_program (prog : Ast.toplevel list) : program_types =
            | None -> None)
     in
     let is_tracked_path p = path_kind p <> None in
-    let is_stack_origin = function
+    let is_stack_origin path = match loan_authority path with
       | (PVar (_, name) as path) -> is_stack_local name && not (is_tracked_path path)
+      | PField (_, _, "%argument_storage") -> true
       | PField (id, name, _) ->
           is_stack_local name && not (is_tracked_path (PVar (id, name)))
     in
+    let loan_inputs, loan_outputs =
+      Option.value ~default:([], []) (StringMap.find_opt
+        (overload_key fdef.name fdef.params) checked_loans) in
+    let loan_paths indices = List.fold_left (fun paths i ->
+      let path = pvar (fst (List.nth fdef.params i)) in
+      PathSet.add (loan_origin path) (PathSet.add path paths))
+      PathSet.empty indices in
+    let loan_input_paths = loan_paths loan_inputs in
+    let loan_output_paths = loan_paths loan_outputs in
+    let is_loan_origin path =
+      PathSet.mem path loan_input_paths || match path with
+      | PField (_, _, "%provenance_loan") -> true
+      | _ -> false in
+    let has_loan_origin paths = PathSet.exists is_loan_origin paths in
+    (* Permission classification never filters propagated dependencies. *)
+    let loan_only paths = PathSet.for_all is_loan_origin paths in
+    let owned_index_origin index =
+        let sites = Option.value ~default:[]
+          (Hashtbl.find_opt owned_sites (Owned_by_registry.loc_key index.Ast.loc)) in
+        List.fold_left (fun paths site ->
+          if site.owned_index == index && site.owned_checked
+          then PathSet.add (loan_origin (pvar site.owned_selector)) paths
+          else paths) PathSet.empty sites in
     let is_linear_path p = path_kind p = Some Ast.KindLinear in
-    let is_must_use_path = function
+    let is_must_use_path path = match loan_authority path with
       | PVar (id, name) ->
           let ty = binding_type id name in
           is_must_use_type ty && not (is_linear_type ty)
@@ -13827,8 +13948,21 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | _ -> None
     in
     let rec expr_ast_type (e : Ast.expr) = match e.desc with
-      | Ast.Var n -> StringMap.find_opt n !var_types
+      | Ast.Var n ->
+          let local = match pvar_expr e n with
+            | PVar (id, _) -> Types.IntMap.find_opt id finfo.binding_types
+            | PField _ -> None in
+          (match local with
+           | Some _ as ty -> ty
+           | None ->
+               (match StringMap.find_opt n !var_types with
+                | Some _ as ty -> ty
+                | None -> List.find_map (function
+                    | Ast.LetDef (name, ty, _, _, _, _, _) when name = n -> ty
+                    | _ -> None) prog))
       | Ast.Cast (target, _) -> Some target
+      | Ast.Call (name, _) ->
+          StringMap.find_opt (checked_call_target e name) call_returns
       | Ast.Unsafe x -> expr_ast_type x
       | Ast.Deref x ->
           (match Option.bind (expr_ast_type x) (fun ty -> Some (strip_borrow ty)) with
@@ -13861,43 +13995,6 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     let expr_has_region_result e =
       Option.bind (expr_ast_type e) ast_region_kind <> None
     in
-    let type_contains_region_alias ty =
-      let rec visit seen = function
-        | Ast.TypePtr _ | Ast.TypeAlignedPtr _ | Ast.TypeRef _
-        | Ast.TypeRefMut _ | Ast.TypeSlice _ -> true
-        | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
-        | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeSingleton (t, _)
-        | Ast.TypeIo t | Ast.TypeArray (t, _) -> visit seen t
-        | Ast.TypeTuple ts -> List.exists (visit seen) ts
-        | Ast.TypeExists (_, sort, body) -> visit seen sort || visit seen body
-        | Ast.TypeNamed name | Ast.TypeIndexed (name, _) ->
-            if StringSet.mem name seen then false
-            else
-              let seen = StringSet.add name seen in
-              (match StringMap.find_opt name senv with
-               | Some (fields, _, _) ->
-                   List.exists (fun (_, field_ty) -> visit seen field_ty) fields
-               | None ->
-                   (match Hashtbl.find_opt variant_defs name with
-                    | Some cases ->
-                        List.exists (fun (_, payload) ->
-                          Option.fold ~none:false ~some:(visit seen) payload)
-                          cases
-                    | None -> false))
-        | Ast.TypeVariant (name, _, _) ->
-            if StringSet.mem name seen then false
-            else
-              let seen = StringSet.add name seen in
-              (match Hashtbl.find_opt variant_defs name with
-               | Some cases ->
-                   List.exists (fun (_, payload) ->
-                     Option.fold ~none:false ~some:(visit seen) payload)
-                     cases
-               | None -> false)
-        | _ -> false
-      in
-      visit StringSet.empty (strip_borrow ty)
-    in
     let expr_copies_region_aggregate e =
       match expr_ast_type e with
       | Some ty -> ast_region_kind ty = None && type_contains_region_alias ty
@@ -13915,21 +14012,31 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     let rec expr_taint taints (e : Ast.expr) = match e.desc with
       | Ast.Call (name, [source]) when Io_span.constructor name <> None ->
           base_taint taints source
-      | Ast.AddrOf place when returns_indexed_reference ->
+      | Ast.AddrOf place ->
           let rec address_origin place = match place.Ast.desc with
-            | Ast.Var name when StringMap.mem name !var_types ->
+            | Ast.Var name when returns_indexed_reference
+                                  && StringMap.mem name !var_types ->
                 PathSet.singleton (pvar_expr place name)
+            | Ast.Var name ->
+                let path = pvar_expr place name in
+                if PathSet.mem path loan_input_paths then base_taint taints place
+                else
+                  let sources = TaintEnv.get name taints in
+                  if has_loan_origin sources then sources else PathSet.empty
             | Ast.FieldGet (base, _) ->
                 (match expr_ast_type base with
                  | Some (Ast.TypePtr _ | Ast.TypeAlignedPtr _ | Ast.TypeRef _ | Ast.TypeRefMut _) ->
                      expr_taint taints base
                  | _ -> address_origin base)
-            | Ast.Index (base, _) -> base_taint taints base
+            | Ast.Index _ -> base_taint taints place
             | Ast.Deref pointer -> expr_taint taints pointer
+            | Ast.Unsafe inner -> address_origin inner
             | _ -> PathSet.empty in
-          address_origin place
+          let origins = address_origin place in
+          if returns_indexed_reference || has_loan_origin origins
+          then origins else PathSet.empty
       | Ast.Var n ->
-          (match StringMap.find_opt n !var_types with
+          (match expr_ast_type e with
            | Some (Ast.TypeArray _) -> PathSet.empty
            | _ -> TaintEnv.get n taints)
       | Ast.SliceOf (base, _, _) ->
@@ -13945,6 +14052,18 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Cast (Ast.TypeSlice _, base) ->
           base_taint taints base
       | Ast.Cast (_, x) | Ast.Bnot x | Ast.Unsafe x -> expr_taint taints x
+      | Ast.StructLit values ->
+          let paths = List.fold_left (fun paths value ->
+            PathSet.union paths (expr_taint taints value)) PathSet.empty values in
+          paths
+      | Ast.VariantCtor (_, _, payload) -> expr_taint taints payload
+      | Ast.FieldGet (base, _) when expr_copies_region_aggregate e ->
+          (* Copy aliases from the value, not the storage of its wrapper.
+             Keep every dependency, including callee-local array storage. *)
+          expr_taint taints base
+      | Ast.FieldGet (base, _) when
+          (match expr_ast_type e with Some (Ast.TypeArray _) -> true | _ -> false) ->
+          base_taint taints base
       | Ast.Deref x | Ast.FieldGet (x, _) when expr_has_region_result e ->
           expr_taint taints x
       | Ast.Index (base, _) when expr_has_region_result e ->
@@ -13981,7 +14100,17 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           let target = Option.value
             (StringMap.find_opt (loc_key e.loc) !resolved_call_targets)
             ~default:name in
-          (match StringMap.find_opt target region_return_info with
+          (match StringMap.find_opt target checked_loans with
+           | Some (_, indices) ->
+               List.fold_left (fun paths i ->
+                 let arg = List.nth args i in
+                 let sources = match authority_argument_path arg with
+                   | Some path when is_tracked_path path ->
+                       PathSet.singleton (loan_origin path)
+                   | _ -> expr_taint taints arg in
+                 PathSet.union paths sources) PathSet.empty indices
+           | None ->
+          match StringMap.find_opt target region_return_info with
            | Some (indices, kind) ->
                List.fold_left (fun paths i ->
                  match List.nth_opt args i with
@@ -14011,12 +14140,36 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           (* A by-value record, including a parameter, is callee-owned
              storage. Borrowing an inline array field must retain that
              place even though reading the record by value is a copy. *)
-          (match Option.map strip_borrow (StringMap.find_opt n !var_types) with
+          let ty = match pvar_expr base n with
+            | PVar (id, _) -> Types.IntMap.find_opt id finfo.binding_types
+            | PField _ -> None in
+          let ty = match ty with Some _ -> ty | None -> StringMap.find_opt n !var_types in
+          let place = pvar_expr base n in
+          let own_storage = match place with
+            | PVar (id, name) when PathSet.mem place loan_input_paths ->
+                PField (id, name, "%argument_storage")
+            | _ -> place in
+          (match ty with
+           | Some (Ast.TypeArray _) when PathSet.mem place loan_input_paths ->
+               PathSet.add own_storage inherited
            | Some (Ast.TypeNamed name) when StringMap.mem name senv ->
-               PathSet.add (pvar_expr base n) inherited
-           | _ -> inherited)
-      | Ast.FieldGet (parent, _) | Ast.Index (parent, _) | Ast.Deref parent ->
-          base_taint taints parent
+               PathSet.add own_storage inherited
+           | Some (Ast.TypeIndexed (name, _))
+             when PathSet.mem place loan_input_paths && StringMap.mem name senv ->
+               PathSet.add own_storage inherited
+           | Some ty ->
+               (match strip_borrow ty with
+                | Ast.TypeNamed name when StringMap.mem name senv ->
+                    PathSet.add place inherited
+                | _ -> inherited)
+           | None -> inherited)
+      | Ast.Index (parent, index) ->
+          PathSet.union (owned_index_origin index) (base_taint taints parent)
+      | Ast.FieldGet (parent, _) | Ast.Deref parent ->
+          if expr_has_region_result base then
+            let paths = expr_taint taints base in
+            if not (PathSet.is_empty paths) then paths else base_taint taints parent
+          else base_taint taints parent
       | Ast.Unsafe inner -> base_taint taints inner
       | _ -> expr_taint taints base
     in
@@ -14052,8 +14205,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Call (name, _) -> Printf.sprintf "result of '%s'" name
       | _ -> "<value>"
     in
-    let require_no_region_aggregate_load loc e taint =
-      if expr_copies_region_aggregate e && not (PathSet.is_empty taint) then
+    let require_no_region_aggregate_load ?(projection = false) loc e taint =
+      if expr_copies_region_aggregate e && not (PathSet.is_empty taint)
+         && not (projection && loan_only taint) then
         raise (TypeError (loc,
           "an aggregate containing a pointer or slice cannot be copied from \
            authority-derived storage; aggregate region tracking is not \
@@ -14077,8 +14231,26 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         | Ast.Unsafe x -> first_tainted_aggregate_value taints x
         | _ -> None
     in
+    let rec supported_aggregate_source taints (e : Ast.expr) =
+      if not (has_loan_origin (expr_taint taints e)) then true
+      else match e.desc with
+        | Ast.StructLit values ->
+            List.for_all (supported_aggregate_source taints) values
+        | Ast.VariantCtor (_, _, payload) | Ast.Unsafe payload ->
+            supported_aggregate_source taints payload
+        | Ast.SliceOf _ -> true
+        | _ ->
+            Option.fold ~none:false ~some:(fun ty ->
+              type_contains_region_alias ty || ast_region_kind ty <> None)
+              (expr_ast_type e) in
     let require_no_taint_aggregate loc taints aggregate values =
-      match List.find_map (first_tainted_aggregate_value taints) values with
+      let forbidden value =
+        match first_tainted_aggregate_value taints value with
+        | Some e when aggregate <> "tuple" &&
+            loan_only (expr_taint taints e)
+            && supported_aggregate_source taints e -> None
+        | other -> other in
+      match List.find_map forbidden values with
       | None -> ()
       | Some source ->
           let source_taint = expr_taint taints source in
@@ -14105,8 +14277,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        (union at branch joins) gives the same conservative "possibly
        consumed" treatment affine double-use already has. *)
     let require_region_live loc taints moved name =
-      PathSet.iter (fun p ->
-        if ResourceFlow.may_be_consumed p moved then
+      PathSet.iter (fun origin ->
+        let p = loan_authority origin in
+        (* A contract input names the caller's referent lifetime, not the
+           callee's by-value wrapper. Matching that wrapper transfers its
+           payload without ending the abstract input lifetime. *)
+        if ResourceFlow.may_be_consumed p moved
+           && not (PathSet.mem p loan_input_paths) then
           let value_kind = Option.value
             (Option.map region_kind_word
                (Option.bind (StringMap.find_opt name !var_types) ast_region_kind))
@@ -14137,6 +14314,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             (path_to_string authority) dependent)))
         (TaintEnv.dependents authority taints)
     in
+    let require_no_loan_shadow loc taints name =
+      if Hashtbl.mem visible_bindings name
+         && has_loan_origin (TaintEnv.get name taints) then
+        raise (TypeError (loc, "provenance loan cannot be shadowed")) in
     let require_no_authority_rebind loc declared taints name =
       if StringMap.mem name scoped_callbacks then
         raise (TypeError (loc, "cannot rebind a scoped callback parameter"));
@@ -14181,7 +14362,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         | p -> p) t in
       let borrowed_return = escape = `Return
         && not (PathSet.is_empty t_holders)
-        && PathSet.subset t_holders borrowed_region_return_authorities in
+        && PathSet.subset t_holders
+             (PathSet.union loan_output_paths borrowed_region_return_authorities)
+        && (not (has_loan_origin t)
+            || Option.fold ~none:false ~some:(fun ty ->
+                 type_contains_region_alias ty
+                 || ast_region_kind ty <> None) fdef.ret_type) in
       if not transferred && not borrowed_return && not (PathSet.is_empty t)
          && not (PathSet.subset t handoff_authorities) then
         let owner = path_to_string (PathSet.choose t) in
@@ -14238,7 +14424,36 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     let pending_guard_arguments = ref [] in
     let pending_region_arguments = ref [] in
     let pending_witness_arguments = ref [] in
+    let rec alias_free_slice (e : Ast.expr) =
+      match e.desc with
+      | Ast.SliceOf (base, _, _) -> alias_free_slice base
+      | Ast.Unsafe inner -> alias_free_slice inner
+      | _ ->
+          (match Option.map strip_borrow (expr_ast_type e) with
+           | Some (Ast.TypeSlice (inner, _, _) | Ast.TypeArray (inner, _)) ->
+               not (type_contains_region_alias inner)
+           | _ -> false) in
+    let loan_builtin name args =
+      match name, args with
+      | "slice_copy", [_; source] -> alias_free_slice source
+      | _ -> List.mem name ["slice_eq"; "zero_fill"; "min"; "max"] in
+    let loan_borrow = function
+      | Some (Ast.TypeBorrow (Ast.TypeSlice (inner, _, _)
+                | Ast.TypePtr inner | Ast.TypeAlignedPtr (_, inner)
+                | Ast.TypeRef inner | Ast.TypeRefMut inner)) ->
+          not (type_contains_region_alias inner)
+      | _ -> false in
     let rec check_expr ?(as_place = false) taints moved consume (e : Ast.expr) =
+      (match e.desc with
+       | Ast.Call (name, args) ->
+           let target = checked_call_target e name in
+           if List.exists (fun arg -> has_loan_origin (expr_taint taints arg)) args
+              && (opaque_indirect_call e ||
+                  (not (StringSet.mem target checked_loan_bodies)
+                   && not (loan_builtin target args))) then
+             raise (TypeError (e.loc,
+               "provenance loan cannot be passed to an opaque or indirect call"))
+       | _ -> ());
       match e.desc with
       | Ast.ViewLit (name, _) ->
           if Hashtbl.find_opt view_kinds name = Some Ast.KindLinear
@@ -14274,14 +14489,23 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               "cannot move borrowed value '%s'; borrow permits non-consuming access only"
               name));
           if consume && is_tracked_path p then begin
-            if List.exists (fun sources -> PathSet.mem p sources) !pending_guard_arguments then
+            if List.exists (fun sources ->
+                 PathSet.exists (fun origin -> loan_authority origin = p) sources)
+                 !pending_guard_arguments then
               raise (TypeError (e.loc,
                 "cannot consume an authority while its derived guard is another argument of the same call"));
+            if List.exists (fun (_, paths) ->
+                 has_loan_origin paths &&
+                 PathSet.exists (fun origin -> loan_authority origin = p) paths)
+                 !pending_region_arguments then
+              raise (TypeError (e.loc,
+                "cannot consume a provenance loan owner during argument evaluation"));
             mv_consume p moved
           end else moved
       | Ast.FieldGet (base_expr, fname) ->
           if not as_place then
-            require_no_region_aggregate_load e.loc e (expr_taint taints base_expr);
+            require_no_region_aggregate_load ~projection:true e.loc e
+              (expr_taint taints base_expr);
           (match base_expr.desc with
            | Ast.Var base_name when
                (match pvar_expr base_expr base_name with
@@ -14653,10 +14877,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                     visible_name guard_name))
               | _ -> ()) guard_bindings
           end;
+          let loan_parameters =
+            if opaque_indirect_call e then []
+            else Option.value ~default:([], [])
+              (StringMap.find_opt target checked_loans) |> fst in
           let params = match StringMap.find_opt name scoped_callbacks with
             | Some params -> params
             | None -> Option.value (StringMap.find_opt target call_params) ~default:[] in
-          let rec check_args moved args params = match args with
+          let rec check_args index moved args params = match args with
             | [] -> moved
             | arg :: rest ->
             let param = match params with p :: _ -> p | [] -> None in
@@ -14689,7 +14917,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             let arg_taint = expr_taint taints arg in
             if not (PathSet.is_empty arg_taint)
                && not (Language_words.is_reserved_function_name target)
-               && not (accepts_region_borrow param)
+               && not (accepts_region_borrow param
+                       && (not (has_loan_origin arg_taint)
+                           || loan_borrow param))
+               && not (List.mem index loan_parameters)
                && not (PathSet.subset arg_taint handoff_authorities) then begin
               let value_kind = Option.value
                 (Option.map region_kind_word (expr_region_kind arg))
@@ -14742,7 +14973,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                 pending_guard_arguments := saved_guards;
                 pending_region_arguments := saved_arguments;
                 pending_witness_arguments := saved_witnesses)
-              (fun () -> check_args moved rest
+              (fun () -> check_args (index + 1) moved rest
                 (match params with _ :: ps -> ps | [] -> []))
           in
           (* A destructive call cannot overlap a lexical or argument-temporary
@@ -14774,6 +15005,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                 | Ast.StaticInt a :: _, Ast.StaticInt b :: _ -> a <> b
                 | _ -> false in
               let check_loan dependent sources =
+                let sources = PathSet.map loan_authority sources in
                 PathSet.iter (fun source ->
                   if not (ResourceFlow.may_be_consumed source moved) then
                   let conflict = match source with
@@ -14812,7 +15044,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             if opaque_indirect_call e
             then "<indirect call>" else target in
           let moved = invalidate_handles e.loc name invalidation_target
-            (check_args moved args params) in
+            (check_args 0 moved args params) in
           StringMap.iter (fun kind targets ->
             if StringSet.mem target targets then begin
               let reject binding ty = if contains_witness kind ty then
@@ -14828,14 +15060,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                 !pending_witness_arguments;
               List.iter (fun (binding, sources) -> PathSet.iter (function
                 | PVar (id, source) -> reject binding (binding_type id source)
-                | _ -> ()) sources) !pending_region_arguments;
+                | _ -> ()) (PathSet.map loan_authority sources)) !pending_region_arguments;
               (* Consuming a witness at this call does not end a lexical
                  loan's scope. Check its original authority even when the
                  argument move has consumed that authority. Unrelated owners
                  remain valid: changing a stop context is not reclamation. *)
               let reject_loan binding sources = PathSet.iter (function
                 | PVar (id, source) -> reject binding (binding_type id source)
-                | PField _ -> ()) sources in
+                | PField _ -> ()) (PathSet.map loan_authority sources) in
               PathSet.iter (function
                 | PVar (_, binding) as path
                   when not (ResourceFlow.may_be_consumed path moved) ->
@@ -14885,8 +15117,19 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.BinOp (_, a, b) ->
           check_expr taints (check_expr taints moved false a) false b
       | Ast.AddrOf a ->
-          require_no_taint_address e.loc taints a;
-          check_expr taints moved false a
+          (* Reborrow the referent, never the local slot holding a loan.
+             Pointer-to-slot aliases would let a write bypass local taints. *)
+          let rec check_slot (place : Ast.expr) = match place.desc with
+            | Ast.Deref _ -> ()
+            | Ast.FieldGet (base, _) | Ast.Index (base, _) ->
+                (match Option.map strip_borrow (expr_ast_type base) with
+                 | Some (Ast.TypePtr _ | Ast.TypeAlignedPtr _ | Ast.TypeRef _
+                         | Ast.TypeRefMut _ | Ast.TypeSlice _) -> ()
+                 | _ -> check_slot base)
+            | Ast.Unsafe inner -> check_slot inner
+            | _ -> require_no_taint_address e.loc taints place in
+          check_slot a;
+          check_expr ~as_place:true taints moved false a
       | Ast.Deref a ->
           if not as_place then
             require_no_region_aggregate_load e.loc e (expr_taint taints a);
@@ -14953,6 +15196,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              (non-tracked) FieldGet target never touched declared/taints
              in the old code either -- those are handled fully here,
              identically to check_stmt's own case. *)
+          if not (PathSet.is_empty (expr_taint taints rhs)) then
+            raise (TypeError (e.loc, "provenance loan requires a standalone assignment"));
           (match lhs.desc with
            | Ast.Var name when is_tracked_path (pvar_expr e name) ->
                raise (TypeError (e.loc, Printf.sprintf
@@ -15034,6 +15279,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       active_declared := declared;
       let initial_declared = declared in
       let initial_var_types = !var_types in
+      let initial_taints = taints in
       let initial_visible_bindings = Hashtbl.copy visible_bindings in
       let (moved, declared, taints) =
         List.fold_left (fun (moved, declared, taints) s ->
@@ -15066,6 +15312,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       (* var_types remains a source-name view for diagnostics and field-type
          lookup. Resource paths use binding IDs; restore both views at the
          lexical scope boundary. *)
+      (* A shadow is a distinct binding. Restore its outer value's full
+         dependencies, while assignments to the same binding still escape. *)
+      let taints = Hashtbl.fold (fun name old_id restored ->
+        match Hashtbl.find_opt visible_bindings name with
+        | Some new_id when new_id <> old_id ->
+            TaintEnv.set name (TaintEnv.get name initial_taints) restored
+        | _ -> restored) initial_visible_bindings taints in
       var_types := initial_var_types;
       Hashtbl.reset visible_bindings;
       Hashtbl.iter (Hashtbl.add visible_bindings) initial_visible_bindings;
@@ -15136,6 +15389,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   propagation, or clearing on any other RHS), mirroring how
                   reassignment clears consumed status. *)
                let is_local_target = StringMap.mem name !var_types in
+               if !loop_exits <> [] && has_loan_origin (expr_taint taints rhs) then
+                 raise (TypeError (loc, "provenance loan assignment across loop iterations is unsupported"));
                if not is_local_target then
                  require_no_taint_escape loc taints `Store rhs;
                let moved = check_expr taints moved (is_tracked_path p) rhs in
@@ -15213,6 +15468,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   Otherwise bind the result and match Place::Full")))
       | Ast.Expr e -> (check_expr taints moved false e, declared, taints)
       | Ast.Let (_, name, ty_opt, init, _) ->
+          require_no_loan_shadow s.loc taints name;
           Option.iter (fun ty ->
             var_types := StringMap.add name ty !var_types)
             ty_opt;
@@ -15265,18 +15521,27 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                 | _ -> ())
            | _ -> ());
           let taints = TaintEnv.set name
-            (match StringMap.find_opt name !var_types, init with
+            (match (match p with
+               | PVar (id, _) -> Some (binding_type id name)
+               | PField _ -> StringMap.find_opt name !var_types), init with
              (* A local array is stack storage. Its value expression decays
                 to a pointer, and SliceOf builds a fat pointer into the same
                 storage, so seed the backing array itself as a region origin.
                 Globals deliberately never pass through this Let branch. *)
-             | Some (Ast.TypeArray _), _ -> PathSet.singleton (pvar name)
+             | Some (Ast.TypeArray _), _ ->
+                 if Option.fold ~none:false ~some:(fun e ->
+                      not (PathSet.is_empty (expr_taint taints e))) init then
+                   raise (TypeError (s.loc, "array storage of provenance loans is unsupported"));
+                 PathSet.singleton (pvar name)
              | _, Some e -> expr_taint taints e
              | _, None -> PathSet.empty)
             taints
           in
           (mv_clear p moved, PathSet.add p declared, taints)
       | Ast.LetTuple (names, rhs) ->
+          if not (PathSet.is_empty (expr_taint taints rhs)) then
+            raise (TypeError (s.loc, "tuple destructuring of provenance loans is unsupported"));
+          List.iter (require_no_loan_shadow s.loc taints) names;
           List.iter
             (require_no_authority_rebind s.loc declared taints) names;
           List.iter2 (fun n id -> Hashtbl.replace visible_bindings n id)
@@ -15326,6 +15591,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             ignore (check_loop_stmts carried declared taints body)) in
           (moved, declared, TaintEnv.join_branches taints body_taints)
       | Ast.For (name, _, lo, hi, body) ->
+          require_no_loan_shadow s.loc taints name;
           require_no_authority_rebind s.loc declared taints name;
           let moved = check_expr taints (check_expr taints moved false lo) false hi in
           let old_binding = Hashtbl.find_opt visible_bindings name in
@@ -15349,6 +15615,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
            | None -> Hashtbl.remove visible_bindings name);
           (moved, declared, TaintEnv.join_branches taints body_taints)
       | Ast.ForEach (name, collection, body) ->
+          require_no_loan_shadow s.loc taints name;
+          let sources = expr_taint taints collection in
+          if has_loan_origin sources ||
+             (not (PathSet.is_empty sources) && not (alias_free_slice collection)) then
+            raise (TypeError (s.loc, "foreach over provenance loans is unsupported"));
           require_no_authority_rebind s.loc declared taints name;
           let moved = check_expr taints moved false collection in
           let old_binding = Hashtbl.find_opt visible_bindings name in
@@ -15415,6 +15686,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               | None | Some Ast.PayloadIgnore -> None
             in
             Option.iter (function Ast.PayloadBind (name, _) ->
+                require_no_loan_shadow s.loc taints name;
                 require_no_authority_rebind s.loc declared taints name
               | Ast.PayloadIgnore -> ())
               binding;
@@ -15435,11 +15707,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   set_decl_loc p s.loc;
                   (mv_clear p moved, PathSet.add p declared, Some p)
             in
-            (* A payload binder is a fresh value, never a region slice --
-               clear any stale same-named taint for the arm body. *)
+            (* Each alias-bearing payload conservatively inherits its
+               checked argument/owner provenance union. *)
             let arm_taints = match binding with
               | Some (Ast.PayloadBind (name, _)) ->
-                  TaintEnv.set name PathSet.empty taints
+                  let paths = match binding_ty with
+                    | Some ty when type_contains_region_alias ty ->
+                        expr_taint taints e
+                    | _ -> PathSet.empty in
+                  TaintEnv.set name paths taints
               | None | Some Ast.PayloadIgnore -> taints
             in
             let (out, _, out_taints) =
@@ -15472,6 +15748,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              | Some (Ast.PayloadBind (name, _)), None ->
                  Hashtbl.remove visible_bindings name
              | (None | Some Ast.PayloadIgnore), _ -> ());
+            let out_taints = match binding with
+              | Some (Ast.PayloadBind (name, _)) ->
+                  TaintEnv.set name (TaintEnv.get name taints) out_taints
+              | _ -> out_taints in
             (always_terminates ~loop_exit:true body, out, out_taints)
           ) arms in
           (* Same reasoning as `If` above: a terminating arm never reaches
@@ -15539,6 +15819,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           Option.iter (fun ty ->
             var_types := StringMap.add name ty !var_types)
             ty_expr;
+          require_no_loan_shadow s.loc taints name;
           require_no_authority_rebind s.loc declared taints name;
           Hashtbl.replace visible_bindings name
             (List.hd (Local_bindings.ids_for_stmt binding_resolution s));
@@ -15566,7 +15847,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         (match Option.map strip_borrow ty_opt with
          | Some (Ast.TypeRef _ | Ast.TypeRefMut _) -> true
          | _ -> false) in
-      if accepts_region_borrow ty_opt || reference_parameter then
+      if accepts_region_borrow ty_opt || reference_parameter
+         || PathSet.mem (pvar name) loan_input_paths then
         TaintEnv.set name (PathSet.singleton (pvar name)) taints
       else taints)
       TaintEnv.empty fdef.params

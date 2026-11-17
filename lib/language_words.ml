@@ -56,6 +56,7 @@ let classified_hard_keywords = [
   "must_use", Ownership;
   "exists", Core;
   "borrow", Ownership;
+  "borrows", Ownership;
   "sink", Ownership;
   "private", Core;
   "packed", Layout;

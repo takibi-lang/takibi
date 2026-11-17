@@ -178,7 +178,7 @@ private fn distro_elf_load_accept(item: KernelElf64ProgramHeader,
 // judged by distro_elf_load_accept. Slots at or past program_count are
 // NotLoad.
 fn distro_elf_plan_segment(plan: DistroElfLoadPlan,
-                           index: usize) -> DistroElfPlanSegment {
+                           index: usize) -> DistroElfPlanSegment borrows(plan) {
     if (index >= plan.program_count || index >= 16) {
         return DistroElfPlanSegment::NotLoad;
     }
@@ -208,7 +208,7 @@ fn distro_elf_plan_segment(plan: DistroElfLoadPlan,
 // segments overlap is refused here instead, while execve can still answer
 // ENOEXEC. GitHub issue #1081: decided over the segments
 // distro_elf_plan_segment yields, the same ones the mapper maps.
-private fn distro_elf_load_pages_disjoint(plan: DistroElfLoadPlan) -> bool {
+private fn distro_elf_load_pages_disjoint(plan: DistroElfLoadPlan) -> bool borrows(plan) {
     for i: usize in 0..<16 {
         match distro_elf_plan_segment(plan, i) {
             DistroElfPlanSegment::Refused => { return false; }
@@ -236,12 +236,12 @@ private fn distro_elf_load_pages_disjoint(plan: DistroElfLoadPlan) -> bool {
     return true;
 }
 
-// The slice parameter is intentionally retaining rather than `borrow`:
-// a successful plan carries this exact checked metadata view to the mapper.
-// Stack- or owner-derived slices therefore cannot enter this API, while the
-// kernel's persistent global metadata windows can safely outlive the plan.
+// A successful plan retains this exact metadata view through its result.
+// The checked summary ties that result to the caller's source lifetime.
+// Stack- and owner-derived inputs are allowed only while their storage is
+// live; the mapper borrows the plan without retaining its metadata.
 fn distro_elf_validate_with_length(image: []u8,
-                                   logical_length: usize) -> DistroElfResult {
+                                   logical_length: usize) -> DistroElfResult borrows(image -> image) {
     let header_end: usize = sizeof(KernelElf64Header);
     if (header_end <= image.len) {
         // `image` contains the ELF header and program table. A streaming

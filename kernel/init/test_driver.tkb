@@ -119,12 +119,8 @@ private fn exec_window_slot_release(slot: sink ExecWindowSlot[0]) {
     atomic_word_store(&exec_window_words[slot.index], 0);
 }
 
-// The boot-time loader check's windows: it runs once, on the boot CPU,
-// before any exec.
-private let mut boot_exec_windows: [u8; EXEC_WINDOWS_SIZE];
-
 fn exec_metadata_prefix(metadata: [u8; EXEC_METADATA_SIZE..],
-                        length: usize) -> []u8 {
+                        length: usize) -> []u8 borrows(metadata -> metadata) {
     if (length < EXEC_METADATA_SIZE + 1) {
         let bounded: {0..<EXEC_METADATA_SIZE + 1 as usize} = length;
         return metadata[0..<bounded];
@@ -211,7 +207,7 @@ must_use variant DynamicExecResolveResult {
 // (#1040).
 fn kernel_exec_resolve_ext2_name_at(mount: Ext2Mount, name: borrow []const u8,
                                     metadata: [u8; EXEC_METADATA_SIZE..])
-        -> ExecResolveResult !{unsafe} {
+        -> ExecResolveResult !{unsafe} borrows(metadata -> metadata) {
     match ext2_lookup_path(mount, name) {
         Ext2LookupResult::Invalid => { return ExecResolveResult::NotFound; }
         Ext2LookupResult::NotFound => { return ExecResolveResult::NotFound; }
@@ -224,7 +220,7 @@ fn kernel_exec_resolve_ext2_name_at(mount: Ext2Mount, name: borrow []const u8,
 // The same resolution from an inode execve already looked up (#591).
 fn kernel_exec_resolve_ext2_inode_at(mount: Ext2Mount, inode: usize,
                                      metadata: [u8; EXEC_METADATA_SIZE..])
-        -> ExecResolveResult !{unsafe} {
+        -> ExecResolveResult !{unsafe} borrows(metadata -> metadata) {
     let file_length: usize =
         ext2_regular_file_size(mount, inode);
     if (file_length == 0 ||
@@ -258,7 +254,7 @@ fn kernel_exec_resolve_ext2_inode_at(mount: Ext2Mount, inode: usize,
 // string, NUL included, is what a musl-linked Alpine binary carries.
 const EXEC_MUSL_INTERPRETER_LENGTH: usize = 26;
 
-fn kernel_exec_interpreter_is_musl(plan: DistroElfLoadPlan) -> bool {
+fn kernel_exec_interpreter_is_musl(plan: DistroElfLoadPlan) -> bool borrows(plan) {
     if (plan.interpreter_length != EXEC_MUSL_INTERPRETER_LENGTH) {
         return false;
     }
@@ -280,7 +276,7 @@ fn kernel_exec_interpreter_is_musl(plan: DistroElfLoadPlan) -> bool {
 
 fn kernel_exec_resolve_musl_pair(primary: Ext2ExecImage, mount: Ext2Mount,
                                  windows: [u8; EXEC_WINDOWS_SIZE..])
-        -> DynamicExecResolveResult !{unsafe} {
+        -> DynamicExecResolveResult !{unsafe} borrows(primary,windows -> primary,windows) {
     if (kernel_exec_interpreter_is_musl(primary.plan) == false) {
         return DynamicExecResolveResult::Invalid;
     }
@@ -306,7 +302,7 @@ fn kernel_exec_resolve_musl_pair(primary: Ext2ExecImage, mount: Ext2Mount,
 // The boot-time loader check: the resident HTTPd's pair, by name.
 fn kernel_exec_resolve_dynamic_ext2_images(mount: Ext2Mount,
                                            windows: [u8; EXEC_WINDOWS_SIZE..])
-        -> DynamicExecResolveResult !{unsafe} {
+        -> DynamicExecResolveResult !{unsafe} borrows(windows -> windows) {
     match kernel_exec_resolve_ext2_name_at(
             mount, bs"bin/busybox-extras",
             windows[EXEC_WINDOW_PRIMARY..<
@@ -339,7 +335,7 @@ must_use variant ExecImageResolveResult {
 }
 fn kernel_exec_resolve_ext2_exec(mount: Ext2Mount,
                                  windows: [u8; EXEC_WINDOWS_SIZE..])
-        -> ExecImageResolveResult !{unsafe} {
+        -> ExecImageResolveResult !{unsafe} borrows(windows -> windows) {
     let inode: usize = syscall_exec_inode_number(kernel_syscall_exec_inode());
     // Zero only when execve ran before the root was mounted, and the
     // prepare has no mount then either.
@@ -392,7 +388,7 @@ fn kernel_exec_primary_is_busybox_extras(inode: usize) -> bool !{unsafe} {
 // Where the interpreter goes: past the primary's extent, on the 64 KiB
 // boundary both images' PT_LOAD alignment asks for. busybox-extras'
 // extent 0x304b8 gives the 0x40000 the boot check measures.
-fn kernel_exec_interpreter_bias(primary: DistroElfLoadPlan) -> usize {
+fn kernel_exec_interpreter_bias(primary: DistroElfLoadPlan) -> usize borrows(primary) {
     return (primary.extent + 0xFFFF) & ~0xFFFF;
 }
 
@@ -933,7 +929,7 @@ fn kernel_process_child_exec_prepare(current_authority: borrow ProcessCurrent[cu
 
 private fn kernel_process_child_exec_prepare_with(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], argv: borrow []u8,
         windows: [u8; EXEC_WINDOWS_SIZE..])
-        -> KernelChildExecPrepareResult {
+        -> KernelChildExecPrepareResult borrows(windows) {
     kernel_process_trace_exec_prepare();
     if (kernel_syscall_persistent_shell_active()) {
         kernel_syscall_persistent_shell_checkpoint_exec_prepare(
@@ -983,7 +979,7 @@ private fn kernel_process_child_exec_prepare_with(current_authority: borrow Proc
 private fn kernel_process_child_exec_reserved(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], argv: borrow []u8,
         mount: Ext2Mount, child_space: AddressSpaceRoot, bound: usize,
         resolved: ExecImageResolveResult)
-        -> KernelChildExecPrepareResult {
+        -> KernelChildExecPrepareResult borrows(resolved) {
     match page_reserve(bound) {
         PageReserveResult::Refused => {
             match resolved {
@@ -1016,7 +1012,7 @@ private let mut kernel_exec_reserve_undercount: AtomicWord;
 private fn kernel_process_child_exec_commit(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], argv: borrow []u8,
         mount: Ext2Mount, child_space: AddressSpaceRoot,
         resolved: ExecImageResolveResult)
-        -> KernelChildExecPrepareResult {
+        -> KernelChildExecPrepareResult borrows(resolved) {
     let child_root: usize = root_slot_word(address_space_root_slot(child_space));
     // Which VM this exec replaces depends on how the process got the one it
     // has. A forked child is still running on the clone of its parent's, so
@@ -1205,7 +1201,7 @@ must_use variant HttpdImageMapCheckResult { Invalid; Verified; }
 
 fn httpd_image_mapping_check(mount: Ext2Mount, httpd: Ext2ExecImage,
                              musl: Ext2ExecImage)
-        -> HttpdImageMapCheckResult {
+        -> HttpdImageMapCheckResult borrows(httpd,musl) {
     match process_image_map_ext2(
             httpd.plan, mount, httpd.inode, httpd.file_length,
             bs"check\0", 1) {
@@ -1661,8 +1657,10 @@ irq_uart_rx_unmask();
     match boot_execution.mount {
         BootMountState::Unconfigured => {}
         BootMountState::Mounted(mount) => {
+            // The returned plans borrow this slot until their final map use.
+            let boot_exec_slot = exec_window_slot_acquire();
             match kernel_exec_resolve_dynamic_ext2_images(
-                    mount, boot_exec_windows as []u8) {
+                    mount, exec_windows[boot_exec_slot.index].bytes as []u8) {
                 DynamicExecResolveResult::NotRequested => {}
                 DynamicExecResolveResult::Invalid => {
                     kernel_boot_log("httpd images: invalid ext2 pair\n");
@@ -1717,6 +1715,7 @@ irq_uart_rx_unmask();
                     }
                 }
             }
+            exec_window_slot_release(boot_exec_slot);
         }
     }
 

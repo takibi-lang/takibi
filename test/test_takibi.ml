@@ -3620,6 +3620,269 @@ fn consumed() -> usize {
          "let address: *u8 = &nested_rows[slot.index].bytes[0]; return 0;";
          "let window = nested_rows[slot.index].bytes[0..<2]; return 0;"]);
 
+  (* Body-checked provenance covers real ELF shapes without runtime metadata. *)
+  Alcotest.test_case "borrows: legacy field addresses and owned data have separate origins" `Quick
+    (fun () ->
+      let api = {|
+linear struct OriginSlot[u: usize] { private index: {0..<1 as usize}; }
+struct OriginLock { value: usize; }
+struct OriginRow { lock: OriginLock; bytes: [u8; 2]; }
+private let mut origin_rows: [OriginRow; 1] owned_by(OriginSlot.index, 1);
+fn acquire_origin() -> OriginSlot[0] {
+  let mut slot: OriginSlot[0] = {0}; return slot;
+}
+fn release_origin(slot: sink OriginSlot[0]) {}
+fn legacy_origin(slot: borrow OriginSlot[u]) -> &mut OriginRow @ u {
+  return &origin_rows[slot.index];
+}
+fn retain_origin(lock: &mut OriginLock) {}
+|} in
+      let body source = api ^ {|
+fn use_origin() {
+  let slot = acquire_origin();
+  let row = |} ^ source ^ {|;
+  retain_origin(&row.lock);
+  release_origin(slot);
+}
+|} in
+      expect_codegen_ok (body "legacy_origin(slot)") ();
+      expect_type_error "retaining parameter" (body "&origin_rows[slot.index]") ());
+  Alcotest.test_case "borrows: slice and aggregate results retain their owner" `Quick
+    (fun () ->
+      let api = nested_slot_fixture ^ {|
+struct LoanPlan { image: []u8; }
+variant LoanResult { Invalid; Valid(LoanPlan); }
+fn resolve(image: []u8) -> LoanResult borrows(image -> image) {
+  let mut plan: LoanPlan = { image };
+  return LoanResult::Valid(plan);
+}
+fn read(plan: LoanPlan) -> usize borrows(plan) { return plan.image.len; }
+|} in
+      let body released = {|
+fn loan_use() -> usize {
+  let slot = acquire_nested();
+  let result = resolve(nested_rows[slot.index].bytes as []u8);
+|} ^ (if released then "release_nested(slot);" else "") ^ {|
+  let count: usize = match result {
+    LoanResult::Invalid => { 0 }
+    LoanResult::Valid(plan) => { read(plan) }
+  };
+|} ^ (if released then "" else "release_nested(slot);") ^ "return count; }" in
+      expect_ok (api ^ body false) ();
+      expect_type_error "after 'slot' is consumed" (api ^ body true) ());
+  Alcotest.test_case "borrows: owned direct addresses and projections keep provenance" `Quick
+    (fun () ->
+      List.iter (fun reborrow ->
+        let body released = nested_slot_fixture ^ {|
+fn pointer_use() -> u8 {
+  let slot = acquire_nested();
+  let row: &mut NestedRow = &nested_rows[slot.index];
+|} ^ reborrow ^ (if released then "release_nested(slot);" else "") ^ {|
+  let copied: u8 = *byte;
+|} ^ (if released then "" else "release_nested(slot);") ^ "return copied; }" in
+        expect_ok (body false) ();
+        expect_type_error "after 'slot' is consumed" (body true) ())
+        ["let byte: *u8 = &row.bytes[0];";
+         "let original: *u8 = &row.bytes[0]; let byte: *u8 = &*original;"]);
+  Alcotest.test_case "borrows: direct reference result is body checked" `Quick
+    (fun () ->
+      let api = nested_slot_fixture ^ {|
+fn project(row: &mut NestedRow) -> *u8 borrows(row -> row) {
+  return &row.bytes[0];
+}
+|} in
+      expect_type_error "after 'slot' is consumed" (api ^ {|
+fn loan_use() -> u8 {
+  let slot = acquire_nested();
+  let byte = project(&nested_rows[slot.index]);
+  release_nested(slot);
+  return *byte;
+}
+|}) ());
+  Alcotest.test_case "borrows: undeclared retention and function values are refused" `Quick
+    (fun () ->
+      expect_type_error "cannot be returned" {|
+fn escape(image: []u8) -> []u8 borrows(image) { return image; }
+|} ();
+      expect_type_error "runtime function pointers" {|
+fn prefix(image: []u8) -> []u8 borrows(image -> image) { return image; }
+fn loan_use() { let f: fn([]u8) -> []u8 = prefix; }
+|} ());
+  Alcotest.test_case "borrows: opaque transfer and pointer-to-slot aliases are refused" `Quick
+    (fun () ->
+      expect_type_error "opaque or indirect" (nested_slot_fixture ^ {|
+extern fn foreign_sink(image: []u8);
+fn loan_use() {
+  let slot = acquire_nested();
+  foreign_sink(nested_rows[slot.index].bytes as []u8);
+  release_nested(slot);
+}
+|}) ();
+      expect_type_error "cannot take the address" (nested_slot_fixture ^ {|
+struct PointerLoan { image: []u8; }
+fn loan_use() {
+  let slot = acquire_nested();
+  let image = nested_rows[slot.index].bytes as []u8;
+  let mut plan: PointerLoan = { image };
+  let hidden: *PointerLoan = &plan;
+  release_nested(slot);
+}
+|}) ());
+  Alcotest.test_case "slice field len loads the fat value from nested places" `Quick
+    (expect_ok {|
+struct SliceRecord { image: []u8; }
+let mut slice_records: [SliceRecord; 2];
+fn field_length(plan: SliceRecord) -> usize { return plan.image.len; }
+fn indexed_length() -> usize { return slice_records[0].image.len; }
+fn reference_length(plan: &SliceRecord) -> usize { return plan.image.len; }
+|});
+  Alcotest.test_case "borrows: reborrow preserves safe reference permissions" `Quick
+    (fun () ->
+      expect_ok (nested_slot_fixture ^ {|
+fn reborrow(row: &NestedRow) borrows(row) {
+  let alias: &NestedRow = &*row;
+  let copied = alias.bytes[0];
+}
+|}) ();
+      expect_type_error "reborrow cannot mint" (nested_slot_fixture ^ {|
+fn forge(raw: *NestedRow) { let alias: &NestedRow = &*raw; }
+|}) ();
+      expect_type_error "cannot write through a shared reference" (nested_slot_fixture ^ {|
+fn upgrade(row: &NestedRow) { let mutable: &mut NestedRow = &*row; }
+|}) ());
+  Alcotest.test_case "borrows: referent provenance cannot extend a by-value array's storage" `Quick
+    (fun () ->
+      expect_type_error "cannot be returned" (nested_slot_fixture ^ {|
+fn dangling(row: NestedRow) -> []u8 borrows(row -> row) {
+  let image = row.bytes as []u8;
+  return image;
+}
+|}) ();
+      expect_ok (nested_slot_fixture ^ {|
+fn borrowed_bytes(row: &mut NestedRow) -> []u8 borrows(row -> row) {
+  return row.bytes as []u8;
+}
+|}) ());
+  Alcotest.test_case "borrows: disjoint same-name array and slice bindings keep their own types" `Quick
+    (fun () ->
+      let body finish = nested_slot_fixture ^ {|
+fn separate_bindings(flag: bool) -> usize {
+  if (flag) {
+    let slot = acquire_nested();
+    let image = nested_rows[slot.index].bytes as []u8;
+|} ^ finish ^ {|
+  } else {
+    let mut image: [u8; 2];
+    return 0;
+  }
+}
+|} in
+      expect_ok (body {|
+    let count = image.len;
+    release_nested(slot);
+    return count;
+|}) ();
+      expect_type_error "after 'slot' is consumed" (body {|
+    release_nested(slot);
+    return image.len;
+|}) ());
+  Alcotest.test_case "borrows: variant summaries retain all local storage dependencies" `Quick
+    (fun () ->
+      let api = {|
+struct Row { bytes: [u8; 2]; }
+variant Choice { Full([]u8); }
+fn wrap(image: []u8) -> Choice borrows(image -> image) {
+  return Choice::Full(image);
+}
+|} in
+      let unpack = {|
+  let image: []u8 = match result { Choice::Full(value) => { value } };
+|} in
+      List.iter (fun header -> expect_type_error "cannot be returned"
+        (api ^ header ^ {|
+  let result: Choice = wrap(row.bytes as []u8);
+|} ^ unpack ^ "return image; }") ())
+        ["fn bad(row: Row) -> []u8 borrows(row -> row) {";
+         "fn plain(row: Row) -> []u8 {"];
+      expect_type_error "cannot be returned" (api ^ {|
+fn local_array() -> []u8 {
+  let mut bytes: [u8; 2];
+  zero_fill(bytes as []u8);
+  let result = wrap(bytes as []u8);
+|} ^ unpack ^ "return image; }") ();
+      expect_ok (api ^ {|
+fn borrowed(row: &mut Row) -> []u8 borrows(row -> row) {
+  let result = wrap(row.bytes as []u8);
+|} ^ unpack ^ "return image; }") ();
+      expect_ok (api ^ {|
+fn live(row: Row) -> usize borrows(row) {
+  let result = wrap(row.bytes as []u8);
+|} ^ unpack ^ "return image.len; }") ();
+      expect_ok (api ^ {|
+fn live_local() -> usize {
+  let mut bytes: [u8; 2];
+  zero_fill(bytes as []u8);
+  let result = wrap(bytes as []u8);
+|} ^ unpack ^ "return image.len; }") ();
+      expect_type_error "cannot be returned" (api ^ {|
+fn reborrow_local(row: Row, fallback: *u8) -> *u8 borrows(row -> row) {
+  let result = wrap(row.bytes as []u8);
+|} ^ unpack ^ {|
+  if (image.len > 0) { return &image[0]; }
+  return fallback;
+}
+|}) ());
+  Alcotest.test_case "borrows: aggregate copies keep referents without inventing wrapper storage" `Quick
+    (expect_ok {|
+struct Row { bytes: [u8; 2]; }
+variant Choice { Full([]u8); }
+struct Container { choice: Choice; }
+fn box_image(image: []u8) -> Container borrows(image -> image) {
+  let mut value: Container = { Choice::Full(image) };
+  return value;
+}
+fn borrowed(row: &mut Row) -> []u8 borrows(row -> row) {
+  let mut value: Container = box_image(row.bytes as []u8);
+  let result = value.choice;
+  let selected: []u8 = match result { Choice::Full(payload) => { payload } };
+  return selected;
+}
+|});
+  Alcotest.test_case "borrows: unsupported representations cannot discard plain storage origins" `Quick
+    (fun () ->
+      expect_type_error "cannot be returned" {|
+struct Row { bytes: [u8; 2]; }
+variant Choice { Full([]u8); }
+let mut stable: [u8; 2];
+fn wrap(image: []u8) -> Choice borrows(image -> image) {
+  return Choice::Full(image);
+}
+fn plain(row: Row) -> []u8 {
+  let result = wrap(row.bytes as []u8);
+  { let result = Choice::Full(stable as []u8); }
+  let selected: []u8 = match result { Choice::Full(payload) => { payload } };
+  return selected;
+}
+|} ());
+  Alcotest.test_case "borrows: ordinary local slices keep scalar iteration and assignments" `Quick
+    (expect_ok {|
+fn read(image: borrow []u8) -> usize { return image.len; }
+fn ordinary() -> usize {
+  let mut bytes: [u8; 2];
+  bytes[0] = 1; bytes[1] = 2;
+  let mut image: []u8 = bytes as []u8;
+  for i: usize in 0..<2 { image = bytes as []u8; }
+  let mut count: usize = 0;
+  for byte in image { count = count + (byte as usize); }
+  return count + read(image);
+}
+|});
+  Alcotest.test_case "borrows: duplicate or foreign result sources are refused" `Quick
+    (fun () ->
+      List.iter (fun clause -> expect_type_error "invalid borrows contract"
+        ("fn f(a: []u8, b: []u8) borrows(" ^ clause ^ ") {}") ())
+        ["a, a"; "a -> b"; "missing"; "a -> a, a"]);
+
   Alcotest.test_case "owned_by: an index of another shape is refused" `Quick
     (expect_type_error "reach it only as an element `valid[t.index * 4 + k]`"
        (owned_by_fixture ^

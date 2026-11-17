@@ -3575,6 +3575,9 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
             | FieldValue _ ->
                 raise (Error (Printf.sprintf
                   "BUG: field '.%s' has no addressable place" fname)))
+       | Deref pointer ->
+           (* &*p reborrows the existing address; it does not load p's value. *)
+           gen_expr locals pointer
        | Index (base, idx) ->
            let (elem_ty, place, _) = gen_index_place locals base idx inner.loc in
            (TypePtr elem_ty, place_ptr place)
@@ -6058,16 +6061,29 @@ and gen_field_access locals (base_expr : Ast.expr) (fname : string)
   let (base_ty, base_v, inherited_volatile) = match base_expr.desc with
     | Deref inner ->
         let (ty, value) = gen_expr locals inner in
-        (ty, value, match ty with TypePtr (TypeIo _) -> true | _ -> false)
+        (match ty with
+         | TypePtr (TypeSlice _ as slice_ty)
+         | TypeRef (TypeSlice _ as slice_ty)
+         | TypeRefMut (TypeSlice _ as slice_ty) ->
+             let fat = load_place ~name:"slice_field" slice_ty (Place value) false in
+             (slice_ty, value_ll fat, false)
+         | _ -> (ty, value, match ty with TypePtr (TypeIo _) -> true | _ -> false))
     | FieldGet (parent, parent_field) ->
         (match gen_field_access locals parent parent_field with
+         | FieldPlace ((TypeSlice _ as ty), place, is_volatile) ->
+             let fat = load_place ~name:parent_field ty place is_volatile in
+             (ty, value_ll fat, is_volatile)
          | FieldPlace (ty, place, is_volatile) ->
              (ty, place_ptr place, is_volatile)
          | FieldValue (ty, value) -> (ty, value_ll value, false))
     | Index (indexed_base, index) ->
         let (ty, place, is_volatile) =
           gen_index_place locals indexed_base index base_expr.loc in
-        (ty, place_ptr place, is_volatile)
+        (match ty with
+         | TypeSlice _ ->
+             let fat = load_place ~name:"indexed_slice" ty place is_volatile in
+             (ty, value_ll fat, is_volatile)
+         | _ -> (ty, place_ptr place, is_volatile))
     | Var name ->
         (match local_find_opt locals name with
          | Some (Mut (((TypeNamed _ | TypeIndexed _) as ty), ptr)) ->

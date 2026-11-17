@@ -133,7 +133,9 @@ let item (top : Ast.toplevel) : item =
    | Ast.FuncDef f ->
        plain f.name; list param f.params; opt ty f.ret_type;
        opt (list plain) f.effects; list stmt f.body;
-       list where_clause f.where_clauses
+       list where_clause f.where_clauses;
+       opt (fun c -> list plain c.Ast.borrow_inputs;
+                     list plain c.Ast.borrow_outputs) f.borrow_contract
    | Ast.ConstDef (id, t, e, _) -> comma id; ty t; expr e
    | Ast.LetDef (id, t, eo, _, _, _, _) -> comma id; opt ty t; opt expr eo
    | Ast.ExternFuncDef (id, ps, r, effs, _) ->

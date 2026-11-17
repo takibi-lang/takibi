@@ -4,7 +4,7 @@
 
 The complete inventory of source words the compiler gives a meaning, generated from `lib/language_words.ml`. SPEC.md "Compiler-Owned Words and Names" defines the classes.
 
-## Hard keywords (76)
+## Hard keywords (77)
 
 | Keyword | Class |
 | --- | --- |
@@ -42,6 +42,7 @@ The complete inventory of source words the compiler gives a meaning, generated f
 | `must_use` | ownership / permission |
 | `exists` | core |
 | `borrow` | ownership / permission |
+| `borrows` | ownership / permission |
 | `sink` | ownership / permission |
 | `private` | core |
 | `packed` | layout |

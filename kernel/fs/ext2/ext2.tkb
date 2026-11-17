@@ -1435,7 +1435,7 @@ fn ext2_is_fenced() -> bool { return atomic_word_load(&ext2_fenced) != 0; }
 // them -- create, unlink, mkdir and rename included, which report their
 // ordinary failure. Repair uses the raw block_write.
 private fn ext2_block_write(mount: Ext2Mount, block: usize,
-                            source: [u8; KERNEL_BLOCK_SIZE..])
+                            source: borrow [u8; KERNEL_BLOCK_SIZE..])
         -> BlockIoResult !{unsafe} {
     if (atomic_word_load(&ext2_fenced) != 0) { return BlockIoResult::Invalid; }
     return block_write(mount.device, block, source);

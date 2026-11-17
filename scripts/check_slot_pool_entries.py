@@ -183,7 +183,9 @@ def problems_in(text, acquire, token, rule="leaf", sleepers=frozenset()):
                     "point that acquires its own slot; pass the caller's "
                     "slot to the internal version instead")
         signature, body = fns[holder]
-        for callee in sorted(references(body)):
+        held = (references(body) if re.search(r"\b" + token + r"\b", signature)
+                else acquired_references(body, acquire))
+        for callee in sorted(held):
             if callee in sleepers or SLEEP.match(callee):
                 problems.append(
                     f"{holder} holds a {token} and calls {callee}, which "
@@ -442,6 +444,18 @@ def function_value_problems(files):
 
 
 def controls():
+    # Match the global nesting check's same-block held interval, including
+    # a boot entry that sleeps before acquiring and after releasing a slot.
+    before_after = ("fn boot() { kernel_process_block_wait(); "
+                    "let s = exec_window_slot_acquire(); touch(); "
+                    "exec_window_slot_release(s); kernel_process_block_wait(); }")
+    _, errors = problems_in(before_after, "exec_window_slot_acquire", "ExecWindowSlot")
+    if errors:
+        raise AssertionError("released boot slot reported as held: " + str(errors))
+    during = before_after.replace("touch();", "kernel_process_block_wait();")
+    _, errors = problems_in(during, "exec_window_slot_acquire", "ExecWindowSlot")
+    if not errors:
+        raise AssertionError("sleep while the boot slot is held was accepted")
     """The check must see the shapes it exists to catch."""
     for _, acquire, token, _ in POOLS:
         base = (f"private fn {acquire}() -> {token}[0] {{ }}\n"
@@ -568,7 +582,7 @@ def main():
                 "a slot, no slot holder reaches another entry point or any of "
                 f"{len(sleepers)} functions that reach a scheduler sleep, and "
                 "no slot is returned or protected function captured as a "
-                f"value ({len(files)} files scanned, fourteen "
+                f"value ({len(files)} files scanned, sixteen "
                 "controls)",
                 entries=total, files=len(files), sleepers=len(sleepers))
 

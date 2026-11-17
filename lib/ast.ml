@@ -581,6 +581,13 @@ type where_cmp = WhereLt | WhereLe
 type where_clause = static_arg * where_cmp * static_arg
 [@@deriving show]
 
+(* Body-checked argument provenance; result sources are a subset of inputs. *)
+type borrow_contract = {
+  borrow_inputs : ident list;
+  borrow_outputs : ident list;
+}
+[@@deriving show]
+
 type func = {
   name : ident;
   params: (ident * type_expr option) list;
@@ -594,6 +601,7 @@ type func = {
   is_noinline : bool;
   is_private : bool;
   where_clauses : where_clause list;
+  borrow_contract : borrow_contract option;
   (* GitHub issue #269: `private fn` restricts every direct call/function-
      pointer reference to the same source file the function was declared
      in, mirroring `private let`'s existing cross-file check (issue #108) --

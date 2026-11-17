@@ -702,6 +702,15 @@ rules globally.
   tail; borrowed holders keep the whole-body rule. The source recognizer
   and the named acquire/release boundary correspondence are build-check
   trust, not a compiler ownership or arbitrary control-flow proof.
+- Body-checked `borrows` contracts and owner provenance carry the lifetime
+  of slot-owned exec metadata through ELF plans, aggregate copies, variant
+  payloads, direct references, projections and reborrows. The compiler checks
+  retention/return summaries and rejects unknown external or indirect
+  transfer. Whole-value union is conservative; there is no new runtime loan
+  representation. The existing slot mint's unique index and correspondence
+  to its physical storage remain trusted, as do ordinary raw pointer validity
+  and the separate reviewed `@` driver return contracts. Boot mapping uses
+  the existing exec window pool and releases its slot after the last plan use.
 - Definite initialization (SPEC.md, "Definite Initialization") still trusts
   raw initialization assertions and compiler extraction. Scratch array facts
   now name the selected slot/owner binding. Different selectors do not share
