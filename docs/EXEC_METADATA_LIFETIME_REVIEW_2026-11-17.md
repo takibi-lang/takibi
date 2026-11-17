@@ -25,7 +25,7 @@ retain their separately reviewed boundary; this is not general heap
 provenance, arbitrary integer-address recovery, allocation uniqueness or a
 reclamation/concurrency proof.
 
-The maintained migration adds 39 `borrows` clauses and thirteen source `borrow`
+The maintained migration adds 49 `borrows` clauses and thirteen source `borrow`
 qualifiers at function boundaries. There are no new per-call proof statements,
 loop invariants, unsafe blocks, runtime provenance fields or pool capacities.
 Boot's dynamic-image check acquires the existing ExecWindowSlot, uses its
@@ -164,3 +164,9 @@ conditions rather than bypassing them.
 After the address and signature repairs, all four normal/debug object and ELF
 hashes match the measured candidate above. The repairs change static checking
 and boundary declarations without changing those linked runtime images.
+
+The complete population build additionally exposed two native pool fixtures
+whose cell/slot lock helpers lacked non-retention summaries. Their shared
+Mutex layer and four fixture helpers now state synchronous non-retention,
+with unchanged bodies and existing native execution coverage. These ten
+additional clauses are included in the final annotation count above.
