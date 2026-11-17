@@ -147,3 +147,10 @@ the dormant source behind a reference alias. Legacy reference-field addresses
 use the referenced object, not the local reference wrapper's storage. The
 native pointer-decay defect and these local storage cases are excluded
 statically; they were not moved to an unsafe or new trusted boundary.
+
+Seventeen controls import the real ELF validator and segment API. All six
+positives and eleven negatives match, including a new unannotated validation
+wrapper and rejection when that wrapper returns a caller-local byte array.
+The final transfer mutant accepts both dangling-call results while retaining
+the direct-alias and actual-retention rejections; live indexing still compiles
+in both compilers. This isolates the deliberately dropped call-result origin.
