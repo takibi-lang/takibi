@@ -3646,7 +3646,157 @@ fn use_origin() {
 }
 |} in
       expect_codegen_ok (body "legacy_origin(slot)") ();
-      expect_type_error "retaining parameter" (body "&origin_rows[slot.index]") ());
+      expect_type_error "retaining parameter" (body "&origin_rows[slot.index]") ();
+      expect_type_error "cannot consume a provenance loan owner" (api ^ {|
+fn checked_origin(lock: &mut OriginLock, value: usize) borrows(lock) {}
+fn finish_origin(slot: sink OriginSlot[0]) -> usize {
+  release_origin(slot); return 0;
+}
+fn end_during_call() {
+  let slot = acquire_origin();
+  let row = legacy_origin(slot);
+  checked_origin(&row.lock, finish_origin(slot));
+}
+|}) ();
+      List.iter (fun call -> expect_type_error "after 'slot' is consumed" (api ^ {|
+fn checked_pointer(lock: *OriginLock) borrows(lock) {}
+fn borrowed_pointer(lock: borrow *OriginLock) {}
+fn late_origin() {
+  let slot = acquire_origin();
+  let row = legacy_origin(slot);
+  let lock: *OriginLock = &row.lock;
+  release_origin(slot);
+|} ^ call ^ "}") ()) ["checked_pointer(lock);"; "borrowed_pointer(lock);"]);
+
+  Alcotest.test_case "borrows: checked calls retain fresh local address origins" `Quick
+    (fun () ->
+      let api = {|
+struct AddressRow { bytes: [u8; 2]; }
+struct AddressOuter { inner: AddressRow; }
+fn address_project(row: &mut AddressRow) -> *u8 borrows(row -> row) {
+  return &row.bytes[0];
+}
+fn address_view(row: &mut AddressRow) -> []u8 borrows(row -> row) {
+  return row.bytes as []u8;
+}
+|} in
+      List.iter (fun body -> expect_type_error "cannot be returned"
+        (api ^ "fn dangling_address() -> *u8 {" ^ body ^ "}") ())
+        [ "let mut row: AddressRow; zero_fill(&row); return address_project(&row);";
+          "let mut row: AddressRow; zero_fill(&row); let alias: &mut AddressRow = &row; return address_project(alias);";
+          "let mut outer: AddressOuter; zero_fill(&outer); return address_project(&outer.inner);" ];
+      expect_type_error "cannot be returned" (api ^ {|
+fn dangling_slice() -> []u8 {
+  let mut row: AddressRow; zero_fill(&row);
+  let alias: &mut AddressRow = &row;
+  return address_view(alias);
+}
+|}) ();
+      expect_type_error "cannot be returned" (api ^ {|
+fn mixed_address(row: &mut AddressRow, choose_local: bool)
+    -> []u8 borrows(row -> row) {
+  let mut local: AddressRow; zero_fill(&local);
+  let mut alias: &mut AddressRow = row;
+  if (choose_local) { alias = &local; }
+  return address_view(alias);
+}
+|}) ();
+      expect_codegen_ok (api ^ {|
+fn borrowed_choice(a: &mut AddressRow, b: &mut AddressRow, second: bool)
+    -> []u8 borrows(a, b -> a, b) {
+  let mut alias: &mut AddressRow = a;
+  if (second) { alias = b; }
+  return address_view(alias);
+}
+fn live_address() -> usize {
+  let mut row: AddressRow; zero_fill(&row);
+  let alias: &mut AddressRow = &row;
+  let bytes = address_view(alias);
+  return bytes.len;
+}
+fn borrowed_address(row: &mut AddressRow) -> []u8 borrows(row -> row) {
+  return address_view(row);
+}
+fn legacy_address(row: &mut AddressRow) {}
+fn ordinary_address() {
+  let mut row: AddressRow; zero_fill(&row);
+  let alias: &mut AddressRow = &row;
+  legacy_address(alias);
+}
+|}) ());
+  Alcotest.test_case "borrow field addresses cannot escape their non-retaining input" `Quick
+    (fun () ->
+      let api = {|
+struct BorrowAddressRow { bytes: [u8; 2]; }
+struct BorrowAddressOuter { inner: BorrowAddressRow; }
+|} in
+      expect_type_error "cannot be returned" (api ^ {|
+fn escape(row: borrow &mut BorrowAddressRow) -> *u8 {
+  return &row.bytes[0];
+}
+|}) ();
+      expect_type_error "cannot be stored" (api ^ {|
+let mut saved_address: *u8;
+fn escape(row: borrow &mut BorrowAddressRow) {
+  saved_address = &row.bytes[0];
+}
+|}) ();
+      expect_type_error "retaining parameter" (api ^ {|
+fn keep(address: *u8) {}
+fn escape(row: borrow &mut BorrowAddressRow) { keep(&row.bytes[0]); }
+|}) ();
+      expect_codegen_ok (api ^ {|
+fn inspect(row: borrow &mut BorrowAddressRow) -> usize { return (row.bytes as []const u8).len; }
+fn nested(row: borrow &mut BorrowAddressOuter) -> usize {
+  let part: &mut BorrowAddressRow = &row.inner;
+  return inspect(part);
+}
+|}) ());
+  Alcotest.test_case "borrows: consumed authority differs from a consumed result wrapper" `Quick
+    (fun () ->
+      let api = nested_slot_fixture ^ {|
+fn finish_nested(slot: sink NestedSlot[0]) borrows(slot) {}
+|} in
+      expect_type_error "after 'slot' is consumed" (api ^ {|
+fn invalid_owner(slot: NestedSlot[0]) -> usize borrows(slot) {
+  let bytes = nested_rows[slot.index].bytes as []u8;
+  finish_nested(slot);
+  return bytes[0] as usize;
+}
+|}) ();
+      expect_codegen_ok (api ^ {|
+fn valid_owner(slot: NestedSlot[0]) -> usize borrows(slot) {
+  let bytes = nested_rows[slot.index].bytes as []u8;
+  let value = bytes[0] as usize;
+  finish_nested(slot);
+  return value;
+}
+|}) ());
+  Alcotest.test_case "borrows: atomic cells borrow the address without retaining scalar operands" `Quick
+    (fun () ->
+      let api = nested_slot_fixture ^ {|
+struct no_copy AtomicWord { private value: usize; }
+struct WordOriginRow { cell: AtomicWord; }
+private let mut word_origin_rows: [WordOriginRow; 1] owned_by(NestedSlot.index, 1);
+|} in
+      expect_codegen_ok (api ^ {|
+fn write_word(slot: borrow NestedSlot[0]) -> usize {
+  atomic_word_store(&word_origin_rows[slot.index].cell, 7);
+  return atomic_word_load(&word_origin_rows[slot.index].cell);
+}
+|}) ();
+      expect_type_error "atomic scalar operands" (api ^ {|
+fn retain_word(slot: borrow NestedSlot[0]) {
+  atomic_word_store(&word_origin_rows[slot.index].cell,
+                    &nested_rows[slot.index].bytes[0] as usize);
+}
+|}) ();
+      expect_type_error "atomic scalar operands" {|
+struct BorrowWordRow { bytes: [u8; 2]; }
+fn retain_raw(row: borrow &mut BorrowWordRow, destination: usize) !{unsafe} {
+  unsafe { atomic_store_release(destination, &row.bytes[0] as usize); }
+}
+|} ());
   Alcotest.test_case "borrows: slice and aggregate results retain their owner" `Quick
     (fun () ->
       let api = nested_slot_fixture ^ {|
@@ -30369,7 +30519,7 @@ let stopped_diagnostic_tests =
         let stopped = mint(&machine); let ptr = diagnostic_loan(stopped);
         reclaim(guard); let value = ptr.value; release(stopped, &machine); return value;
       }|};
-    bad "borrowed diagnostic loan cannot resume" "contains a live Stopped witness" {|
+    bad "borrowed diagnostic loan cannot resume" "cannot consume a provenance loan owner during argument evaluation" {|
       fn read(ptr: borrow *Record, stopped: sink Stopped[s], controller: *Stop @ s) -> usize {
         release(stopped, controller); return ptr.value;
       }
@@ -30392,8 +30542,8 @@ let infer_production_boot_snapshot code =
   let primitives = parse {|
     const KERNEL_MAX_CORES: usize = 4;
     struct no_copy AtomicWord { private value: usize; }
-    fn spin_lock(word: *AtomicWord) !{locks, unsafe} {}
-    fn spin_unlock(word: *AtomicWord) !{locks, unsafe} {}
+    fn spin_lock(word: borrow *AtomicWord) !{locks, unsafe} {}
+    fn spin_unlock(word: borrow *AtomicWord) !{locks, unsafe} {}
   |} in
   let parse_at file source =
     let lexbuf = Lexing.from_string source in

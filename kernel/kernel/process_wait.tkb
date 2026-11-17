@@ -69,7 +69,7 @@ must_use variant ProcessWaitKeep {
     Refused;
 }
 
-fn process_state_kind(cell: &ProcessStateCell) -> ProcessSlotState {
+fn process_state_kind(cell: borrow &ProcessStateCell) -> ProcessSlotState {
     match (*cell).value {
         ProcessRecordState::Free => { return ProcessSlotState::Free; }
         ProcessRecordState::Ready => { return ProcessSlotState::Ready; }
@@ -85,7 +85,7 @@ fn process_state_kind(cell: &ProcessStateCell) -> ProcessSlotState {
     }
 }
 
-fn process_wait_reason(cell: &ProcessStateCell) -> ProcessWaitReason {
+fn process_wait_reason(cell: borrow &ProcessStateCell) -> ProcessWaitReason {
     match (*cell).value {
         ProcessRecordState::Blocked(reason) => { return reason; }
         ProcessRecordState::ReadyWait4(_) => {
@@ -190,7 +190,7 @@ fn process_state_wake_keeping_wait4(cell: &mut ProcessStateCell, child: usize) {
 // A pending wait4 continuation is consumed: a Ready parent stays Ready and a
 // started one is plainly Running. A Blocked wait loses its reason, as a wake
 // is about to end it.
-fn process_state_settle(cell: &mut ProcessStateCell) {
+fn process_state_settle(cell: borrow &mut ProcessStateCell) {
     match (*cell).value {
         ProcessRecordState::ReadyWait4(_) => {
             (*cell).value = ProcessRecordState::Ready;

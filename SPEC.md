@@ -3486,12 +3486,19 @@ have no provenance summary, and external declarations cannot carry this clause.
 The checker gives each declared input an abstract referent lifetime. It
 checks every return and transfer against that lifetime. Consuming a by-value
 variant wrapper in a match transfers its payload; it does not end the input's
-abstract referent lifetime. The inline storage of a by-value record or array
+abstract referent lifetime. This exception does not keep a resource authority
+alive after it is consumed. The inline storage of a by-value record or array
 is a separate callee-local lifetime: a contract cannot let a slice into that
 copy escape by naming the argument as a result source. At a direct call, the result inherits the union
 of provenance from the declared result-source arguments. Undeclared input
 positions remain potentially retaining. Existing `borrow` pointer/slice
 parameters remain non-retaining boundaries for alias-free pointee data.
+
+A checked call also retains the caller-local storage dependency of a fresh
+address, including a local reference alias or field projection. A named
+`borrow` data parameter remains non-retaining for field/element addresses as
+well as the parameter value itself. Activating a checked or non-retaining
+data boundary checks that its known authority is still live before the call.
 
 Checked `owned_by` element places seed provenance from their selector owner
 when converted to slices, subsliced or directly addressed. Direct references,
@@ -3521,7 +3528,11 @@ and are errors. Owned/contract-input foreach loans and loop-carried loan
 assignment remain unsupported; ordinary local-slice scalar iteration and
 standalone local assignments retain their existing behavior. Compiler builtins are
 synchronous boundaries only where their checked operation cannot retain an
-alias; `slice_copy` requires alias-free source elements. `unsafe` cannot
+alias; `slice_copy` requires alias-free source elements. AtomicWord cell
+operations synchronously borrow their cell address, but scalar operands of
+cell operations or raw atomic intrinsics cannot carry borrowed-address
+provenance, including after a pointer/integer conversion. This conservative
+scalar-operand boundary does not prove atomic protocol ordering. `unsafe` cannot
 erase provenance. Existing `@` driver contracts keep the separate reviewed
 semantics described below; the new aggregate rules apply to checked argument
 and `owned_by` provenance, not arbitrary preexisting region sources.

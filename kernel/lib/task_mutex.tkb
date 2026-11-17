@@ -63,7 +63,7 @@ use "kernel/lib/boot_once.tkb";
 struct no_copy TaskMutex { private word: AtomicWord; }
 
 // Free. Call once, before it is reachable by anything else.
-fn task_mutex_init(m: *TaskMutex @ id) {
+fn task_mutex_init(m: *TaskMutex @ id)  borrows(m) {
     static_assert(offsetof(TaskMutex, word) == 0,
                   "TaskMutex.word must be first: a lock address names its word");
     atomic_word_store(&m.word, 0);
@@ -83,7 +83,7 @@ fn task_mutex_init(m: *TaskMutex @ id) {
 // the annotation would do, and declined it there because a pool lock IS
 // safe from a handler. This is the case it declined it FOR.
 fn task_mutex_acquire(m: *TaskMutex @ id)
-        !{locks, may_block, unsafe, acquires_lock_30_connection} {
+        !{locks, may_block, unsafe, acquires_lock_30_connection} borrows(m) {
     spin_lock(&m.word);
 }
 
@@ -91,7 +91,7 @@ fn task_mutex_acquire(m: *TaskMutex @ id)
 // to this acquisition. It never parks and never inspects scheduler context.
 // The enclosing typed guard factory must tie its returned guard to phase.
 fn task_mutex_acquire_boot(m: *TaskMutex @ id, phase: borrow BootPhase[boot])
-        !{locks, no_handler_lock, unsafe, acquires_lock_30_connection} {
+        !{locks, no_handler_lock, unsafe, acquires_lock_30_connection} borrows(m) {
     spin_lock(&m.word);
 }
 
@@ -99,21 +99,21 @@ fn task_mutex_acquire_boot(m: *TaskMutex @ id, phase: borrow BootPhase[boot])
 // count and reaches no wait, so a waiter never waits for this core. A handler
 // still must not take it.
 fn task_mutex_acquire_short(m: *TaskMutex @ id)
-        !{locks, no_handler_lock, unsafe, acquires_lock_30_connection} {
+        !{locks, no_handler_lock, unsafe, acquires_lock_30_connection} borrows(m) {
     spin_lock(&m.word);
 }
 
-fn task_mutex_release(m: *TaskMutex @ id) !{locks, unsafe} {
+fn task_mutex_release(m: *TaskMutex @ id) !{locks, unsafe} borrows(m) {
     spin_unlock(&m.word);
 }
 
 // One attempt. For a caller with something else to do rather than wait,
 // and the only way to observe the exclusion with one thread.
 fn task_mutex_trylock(m: *TaskMutex @ id) -> bool
-        !{locks, unsafe, acquires_lock_30_connection} {
+        !{locks, unsafe, acquires_lock_30_connection} borrows(m) {
     return spin_trylock(&m.word);
 }
 
-fn task_mutex_is_held(m: *TaskMutex @ id) -> bool !{unsafe} {
+fn task_mutex_is_held(m: *TaskMutex @ id) -> bool !{unsafe} borrows(m) {
     return spin_lock_is_held(&m.word);
 }

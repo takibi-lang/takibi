@@ -273,7 +273,7 @@ fn freelist_core_set_next_generation_for_test(core: &mut FreelistCore(N),
 // Returns how many entries were unlinked, so the caller can check its own
 // arithmetic against the list's answer rather than trusting the scan that
 // chose the range.
-fn freelist_core_unlink_range(core: &mut FreelistCore(N), first: usize,
+fn freelist_core_unlink_range(core: borrow &mut FreelistCore(N), first: usize,
                               count: usize) -> usize {
     let mut unlinked: usize = 0;
     // Entries at the HEAD first, so the walk below always has a real

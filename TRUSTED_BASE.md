@@ -707,7 +707,12 @@ rules globally.
   payloads, direct references, projections and reborrows. The compiler checks
   retention/return summaries and rejects unknown external or indirect
   transfer. Whole-value union is conservative; there is no new runtime loan
-  representation. The existing slot mint's unique index and correspondence
+  representation. Fresh local addresses and their aliases retain storage
+  dependencies at checked boundaries; explicit data borrows cannot return or
+  retain field addresses. The closed AtomicWord cell registry describes
+  synchronous address use, while atomic scalar operands reject retained
+  borrowed-address provenance. Ordering and physical lock/guard pairing are
+  still separate reviewed premises. The existing slot mint's unique index and correspondence
   to its physical storage remain trusted, as do ordinary raw pointer validity
   and the separate reviewed `@` driver return contracts. Boot mapping uses
   the existing exec window pool and releases its slot after the last plan use.

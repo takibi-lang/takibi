@@ -740,7 +740,7 @@ private fn tcp_frame_pool_return_empty(
 
 
 fn tcp_frame_lock(m: *TaskMutex @ address) -> FrameGuard[address]
-        !{no_handler_lock, acquires_lock_30_frame, lock_guard_30_frame} {
+        !{no_handler_lock, acquires_lock_30_frame, lock_guard_30_frame} borrows(m) {
     let span = preempt_span_begin();
     task_mutex_acquire_short(m);
     let mut guard: FrameGuard[address] = { span };
@@ -748,7 +748,7 @@ fn tcp_frame_lock(m: *TaskMutex @ address) -> FrameGuard[address]
 }
 
 fn tcp_frame_unlock(guard: sink FrameGuard[address],
-                    m: *TaskMutex @ address) {
+                    m: *TaskMutex @ address)  borrows(m) {
     let span = guard.span;
     task_mutex_release(m);
     preempt_span_end(span);
@@ -1891,14 +1891,14 @@ fn kernel_tcp_inject_drop_next_fin() !{unsafe} {
 }
 
 fn retx_lock(m: *TaskMutex @ address) -> RetxGuard[address]
-        !{may_block, acquires_lock_30_retx, lock_guard_30_retx} {
+        !{may_block, acquires_lock_30_retx, lock_guard_30_retx} borrows(m) {
     task_mutex_acquire(m);
     let mut guard: RetxGuard[address] = { 1 };
     return guard;
 }
 
 fn retx_unlock(guard: sink RetxGuard[address],
-                    m: *TaskMutex @ address) {
+                    m: *TaskMutex @ address)  borrows(m) {
     let held: usize = guard.held;
     task_mutex_release(m);
 }
