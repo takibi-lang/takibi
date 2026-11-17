@@ -2,11 +2,11 @@
   "date": "2026-11-17",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "d5c5860de5f779c77767f7383a3d97c77102b6c82af744e9cc6218e00f9dd151",
-  "workload": "Checked initialization integration on the ordinary QEMU and RPi5 linked kernels. Measure fixed image text/data/BSS and the usable RAM boundary against e971bc2f; no new production allocation workload or owner-storage field is introduced.",
+  "source_sha256": "8938f341e6e3f8a72ec9edc5d90d46ebb51855606fddb5f03a1bf9917bcb4e2a",
+  "workload": "Boot dynamic HTTPd/musl metadata validation and mapping, then ordinary exec/teardown using the existing four ExecWindowSlot windows. Compare normal/debug linked kernels and LLVM static frames with published da32b328; distinguish payload, section padding, reserved boundary and fixed pool capacity.",
   "evidence": [
-    "docs/MEMORY_INTEGRATION_SPACE_2026-11-17.txt"
+    "docs/EXEC_METADATA_LIFETIME_REVIEW_2026-11-17.md"
   ],
-  "assessment": "Accept text growth of 8 bytes on QEMU and 5464 bytes on RPi5. No data/BSS symbol changes size, usable RAM starts are unchanged, and the memory-map gate passes. The RPi5 aggregate BSS decrease is image layout, not a claimed allocator saving. Rebase preserves the measured production source tree. Native report buffering and the approved alignment-test clear are outside these kernel images.",
-  "next_trigger": "Changed kernel pool/owner representation, retained capacity, allocation/lifetime workload, or the next completed kernel feature."
+  "assessment": "Accept text growth of 80/96 bytes normal and 128/64 debug (QEMU/RPi5), with only the boot driver frame growing by 64-80 bytes inside its existing ceiling. Remove the 2048-byte boot_exec_windows payload; no other named data/BSS symbol changes size. The existing 8192-byte pool and metadata stay fixed. Normal reservation starts stay unchanged; QEMU debug crosses a stack-alignment boundary and reserves 32768 fewer bytes. No occupancy, allocator or isolated timing benefit is claimed.",
+  "next_trigger": "A changed kernel allocation/reclamation path, pool/owner representation or retained-capacity workload, or completion of the next memory-safety consumer."
 }
