@@ -2,12 +2,12 @@
   "date": "2026-11-17",
   "event": "incremental",
   "decision": "reuse",
-  "source_sha256": "02f7ec10e541b1f4581ce326a25515c7b1e5d9c06ff36e013dbaf84ed73bbf7b",
-  "workload": "Existing guarded-field kernel workload; nested generic field inference through borrowed reference parameters.",
+  "source_sha256": "7be85c2b66a35e117b61351f67123e6c150a4d8c75de16b6965366dce3ddeb84",
+  "workload": "Existing kernel workload; an isolated erased linked-initialization certificate domain and finite host tests.",
   "evidence": [
     "docs/MEMORY_GUARD_SPACE_2026-11-16.txt",
     "docs/CONSOLE_FLOW_SPACE_2026-11-11.txt"
   ],
-  "assessment": "Reuse existing layout/allocation evidence for this incremental frontend correction. Unwrapping borrow qualifiers during generic argument inference changes neither permissions nor emitted layouts or allocator workloads. The type checker still enforces borrow permissions. This is not completion of the memory-model milestone.",
-  "next_trigger": "Completion of linked-initialization integration, or any change to kernel storage, allocation or emitted code layout."
+  "assessment": "Reuse existing kernel layout and allocation evidence. This OCaml domain is not yet connected to production type checking or code generation in this commit. It changes no accepted Takibi program, runtime representation, storage layout or allocator workload. Its finite heap oracle is bounded transfer evidence, not completion of the memory-model integration milestone.",
+  "next_trigger": "Integration of linked initialization into production checking, or any change to kernel storage, allocation or emitted code layout."
 }

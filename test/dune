@@ -1,5 +1,6 @@
 (test
  (name test_takibi)
+ (modules test_takibi)
  (deps %{exe:../bin/main.exe} ../kernel/lib/occupancy.tkb ../kernel/platform/qemu/init.tkb
        ../kernel/platform/rpi5/init.tkb ../kernel/kernel/process.tkb
        ../kernel/fs/elf64.tkb ../kernel/lib/peer_tick_window.tkb
@@ -7,3 +8,8 @@
        ../kernel/drivers/serial/terminal.tkb
        ../kernel/drivers/net/virtio_net.tkb ../kernel/drivers/net/rp1_gem.tkb)
  (libraries takibi alcotest unix))
+
+(test
+ (name test_init_link)
+ (modules test_init_link)
+ (libraries takibi alcotest))
