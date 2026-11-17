@@ -1,13 +1,12 @@
 {
   "date": "2026-11-17",
-  "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "7be85c2b66a35e117b61351f67123e6c150a4d8c75de16b6965366dce3ddeb84",
-  "workload": "Existing kernel workload; native fake-page accessor uses a checked typed-array slice.",
+  "event": "milestone",
+  "decision": "measured",
+  "source_sha256": "d5c5860de5f779c77767f7383a3d97c77102b6c82af744e9cc6218e00f9dd151",
+  "workload": "Checked initialization integration on the ordinary QEMU and RPi5 linked kernels. Measure fixed image text/data/BSS and the usable RAM boundary against e971bc2f; no new production allocation workload or owner-storage field is introduced.",
   "evidence": [
-    "docs/MEMORY_GUARD_SPACE_2026-11-16.txt",
-    "docs/CONSOLE_FLOW_SPACE_2026-11-11.txt"
+    "docs/MEMORY_INTEGRATION_SPACE_2026-11-17.txt"
   ],
-  "assessment": "Reuse existing production kernel layout and allocation evidence. The change is limited to linux_user/growable_pool/fake_page_provider.tkb: a raw pointer round-trip becomes a statically bounded array slice. The backing array size, owner layout and allocation workload are unchanged. Production kernel and compiler sources are unchanged; this is not completion of the memory-model integration milestone.",
-  "next_trigger": "Integration of linked initialization into production checking, or any change to kernel storage, allocation or emitted code layout."
+  "assessment": "Accept text growth of 8 bytes on QEMU and 5464 bytes on RPi5. No data/BSS symbol changes size, usable RAM starts are unchanged, and the memory-map gate passes. The RPi5 aggregate BSS decrease is image layout, not a claimed allocator saving. Rebase preserves the measured production source tree. Native report buffering and the approved alignment-test clear are outside these kernel images.",
+  "next_trigger": "Changed kernel pool/owner representation, retained capacity, allocation/lifetime workload, or the next completed kernel feature."
 }

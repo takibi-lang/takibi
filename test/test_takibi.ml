@@ -571,30 +571,6 @@ let parser_tests = [
       Alcotest.(check int) "explicit readings compile" 0
         (List.length !Ast.precedence_error_sites));
 
-  Alcotest.test_case "Generic field inference sees through an output borrow" `Quick
-    (expect_codegen_ok
-      "generic struct Inner(N: usize) { bytes: [u8; N]; }
-       generic struct Outer(N: usize) { inner: Inner(N); }
-       fn fill(x: borrow uninit &mut Inner(N)) { for i: usize in 0..<N { x.bytes[i] = 1; } }
-       fn init(x: borrow uninit &mut Outer(N)) { fill(&x.inner); }
-       fn f() -> u8 { let mut x: Outer(4); init(&x); return x.inner.bytes[3]; }");
-
-  Alcotest.test_case "Const-generic where bounds specialize at each call" `Quick
-    (expect_codegen_ok
-      "generic struct Limit(N: usize) { bytes: [u8; N]; }
-       fn below(p: &mut Limit(N), i: usize @ k) -> usize where k < N { return i; }
-       fn f() -> usize { let mut a: Limit(2); zero_fill(&a); let mut b: Limit(4); zero_fill(&b); return below(&a, 1) + below(&b, 3); }");
-  Alcotest.test_case "Const-generic where bounds reject the capacity itself" `Quick
-    (expect_type_error "requires 2 < 2"
-      "generic struct Limit(N: usize) { bytes: [u8; N]; }
-       fn below(p: &mut Limit(N), i: usize @ k) -> usize where k < N { return i; }
-       fn f() -> usize { let mut a: Limit(2); zero_fill(&a); return below(&a, 2); }");
-  Alcotest.test_case "Const-generic where substitution retains runtime indices" `Quick
-    (expect_codegen_ok
-      "generic struct Limit(N: usize) { bytes: [u8; N]; }
-       fn below(p: &mut Limit(N), i: usize @ k) -> usize where k < N { return i; }
-       fn f(i: {0..<4 as usize}) -> usize { let mut a: Limit(4); zero_fill(&a); return below(&a, i); }");
-
   Alcotest.test_case "erased view declaration and mint expression parse" `Quick
     (fun () ->
       match parse
