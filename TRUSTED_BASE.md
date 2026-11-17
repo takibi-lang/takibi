@@ -707,7 +707,12 @@ rules globally.
   payloads, direct references, projections and reborrows. The compiler checks
   retention/return summaries and rejects unknown external or indirect
   transfer. Whole-value union is conservative; there is no new runtime loan
-  representation. Fresh local addresses and their aliases retain storage
+  representation. Ordinary reference/slice and non-resource pointer helpers
+  may receive inferred non-retention and result-dependency proposals, checked
+  by the same body rules before acceptance. The finite monotone worklist is
+  independent of Z3. Unknown calls and legacy return relations remain
+  conservative boundaries; this adds no proof of general heap separation or
+  of the inference/checker implementation itself. Fresh local addresses and their aliases retain storage
   dependencies at checked boundaries; explicit data borrows cannot return or
   retain field addresses. The closed AtomicWord cell registry describes
   synchronous address use, while atomic scalar operands reject retained

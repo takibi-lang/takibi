@@ -3476,6 +3476,39 @@ fn pair(a: ImagePlan, b: ImagePlan) -> ImagePair
     borrows(a, b -> a, b) { ... }
 ```
 
+For supported ordinary reference, slice and non-resource pointer parameters,
+the compiler also infers non-retention and direct-call result dependencies
+from Takibi bodies. A function need not spell `borrows` to preserve a local
+referent through such a helper. Explicit clauses remain checked contracts;
+the inferred proposal is independently checked by the same provenance rules.
+
+Inference uses finite sets of parameter dependencies for local bindings,
+returned values and possibly retained arguments. Branches and loop updates
+join dependencies conservatively. A worklist revisits a caller only after a
+callee summary changes; recursion is solved by the same monotone process,
+not by executing or unfolding the program. Unknown external or indirect
+calls may retain their arguments. Failure to establish non-retention does
+not mean an empty lifetime dependency: checked local reference arguments
+cannot enter the potentially retaining boundary.
+
+Legacy `@` returns retain their separately reviewed authority relation;
+inference does not invent a new relation between a guard and raw backing.
+Returned dependencies at that boundary are treated as potentially escaping
+for automatic non-retention. Separately owned resource results do not become
+ordinary borrowed data. Pointer-derived integer results remain conservative:
+inference does not erase address provenance or prove integer-address recovery.
+Function values cannot erase an inferred result dependency. A function whose
+inferred result has no such dependency may still be a function value, but an
+indirect call gains no non-retention summary from knowing that implementation.
+
+The inference is a conservative proposal, not general heap alias inference.
+Unsupported storage and transfer shapes remain errors. In an inferred
+non-resource referent, reassigning or shadowing the local reference wrapper
+does not end the original referent lifetime; aliases retain their origins.
+Scalar element iteration of an alias-free inferred input copies values and
+retains no element alias. These facts do not relax owner consumption or the
+explicit-contract loop/storage restrictions below.
+
 Inputs and result sources are distinct parameter names. Result sources must
 be drawn from the inputs; omitting the arrow declares no retained result.
 These are checked Takibi bodies, not trusted external summaries. A function

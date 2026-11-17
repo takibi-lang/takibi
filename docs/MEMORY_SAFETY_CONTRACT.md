@@ -176,3 +176,8 @@ The scoped exec-metadata lifetime migration and its address/authority controls
 are reviewed in [the measured lifetime report](EXEC_METADATA_LIFETIME_REVIEW_2026-11-17.md).
 It extends the lifetime row above; it does not discharge the other rows or
 turn the source-pinned initialization/export inventory into a universal proof.
+
+Ordinary direct-helper lifetime inference and its termination, transfer and
+cost controls are reviewed in [the inference report](INFERRED_REFERENCE_LIFETIMES_2026-11-17.md).
+This closes the demonstrated unannotated reference-to-slice helper gap; it
+does not establish general heap inference or discharge the remaining rows.

@@ -3320,6 +3320,256 @@ let region_inspection_tests =
   ]
 
 let infer_tests = [
+  Alcotest.test_case "inferred loans: reference helper cannot return caller storage" `Quick
+    (expect_type_error "stack-derived" {|
+      struct InferredRow { bytes: [u8; 2]; }
+      fn project(row: &mut InferredRow) -> []u8 { return row.bytes as []u8; }
+      fn escape() -> []u8 {
+        let mut row: InferredRow; zero_fill(&row); return project(&row);
+      }
+    |});
+  Alcotest.test_case "inferred loans: live slice supports checked codegen indexing" `Quick
+    (expect_codegen_ok {|
+      struct InferredRow { bytes: [u8; 2]; }
+      fn project(row: &mut InferredRow) -> [u8; 2..] { return row.bytes as [u8; 2..]; }
+      fn read() -> u8 {
+        let mut row: InferredRow; zero_fill(&row); let bytes = project(&row);
+        bytes[1] = 7; return bytes[1];
+      }
+    |});
+  Alcotest.test_case "inferred loans: recursive helper preserves the referent" `Quick
+    (expect_type_error "stack-derived" {|
+      struct InferredRow { bytes: [u8; 2]; }
+      fn project(row: &mut InferredRow, depth: usize) -> []u8 {
+        if (depth == 0) { return row.bytes as []u8; }
+        return project(row, depth - 1);
+      }
+      fn escape() -> []u8 {
+        let mut row: InferredRow; zero_fill(&row); return project(&row, 3);
+      }
+    |});
+  Alcotest.test_case "inferred loans: mutually recursive helpers preserve the referent" `Quick
+    (expect_type_error "stack-derived" {|
+      struct InferredRow { bytes: [u8; 2]; }
+      fn first(row: &mut InferredRow, depth: usize) -> []u8 {
+        if (depth == 0) { return row.bytes as []u8; }
+        return second(row, depth - 1);
+      }
+      fn second(row: &mut InferredRow, depth: usize) -> []u8 { return first(row, depth); }
+      fn escape() -> []u8 {
+        let mut row: InferredRow; zero_fill(&row); return second(&row, 3);
+      }
+    |});
+  Alcotest.test_case "inferred loans: independent global result does not retain argument" `Quick
+    (expect_codegen_ok {|
+      struct InferredRow { bytes: [u8; 2]; }
+      let mut permanent: [u8; 2];
+      fn project(row: &mut InferredRow) -> [u8; 2..] {
+        let copied = row.bytes[0]; return permanent as [u8; 2..];
+      }
+      fn read() -> u8 {
+        let mut row: InferredRow; zero_fill(&row);
+        let bytes = project(&row); return bytes[0];
+      }
+    |});
+  Alcotest.test_case "inferred loans: an empty helper is non-retaining without annotation" `Quick
+    (expect_codegen_ok {|
+      struct InferredRow { bytes: [u8; 2]; }
+      fn inspect(row: &mut InferredRow) {}
+      fn inspect_bytes(bytes: []u8) {}
+      fn use_inferred() {
+        let mut row: InferredRow; zero_fill(&row);
+        inspect(&row); inspect_bytes(row.bytes as []u8);
+      }
+    |});
+  Alcotest.test_case "inferred loans: actual reference retention remains rejected" `Quick
+    (expect_type_error "retaining parameter" {|
+      struct InferredRow { bytes: [u8; 2]; }
+      let mut saved: *InferredRow;
+      fn keep(row: &mut InferredRow) { saved = row as *InferredRow; }
+      fn escape() { let mut row: InferredRow; zero_fill(&row); keep(&row); }
+    |});
+  Alcotest.test_case "inferred loans: later-defined helper and live index codegen" `Quick
+    (expect_codegen_ok {|
+      struct InferredRow { bytes: [u8; 2]; }
+      fn first(row: &mut InferredRow) -> [u8; 2..] { return later(row); }
+      fn later(row: &mut InferredRow) -> [u8; 2..] { return row.bytes as [u8; 2..]; }
+      fn read() -> u8 { let mut row: InferredRow; zero_fill(&row);
+        let bytes = first(&row); return bytes[1]; }
+    |});
+  Alcotest.test_case "inferred loans: branch union retains both arguments" `Quick
+    (expect_type_error "stack-derived" {|
+      struct InferredRow { bytes: [u8; 2]; }
+      fn choose(a: &mut InferredRow, b: &mut InferredRow, side: bool) -> []u8 {
+        if (side) { return a.bytes as []u8; } return b.bytes as []u8;
+      }
+      fn escape(outer: &mut InferredRow, side: bool) -> []u8 {
+        let mut local: InferredRow; zero_fill(&local); return choose(outer, &local, side);
+      }
+    |});
+  Alcotest.test_case "inferred loans: later retention propagates to callers" `Quick
+    (expect_type_error "retaining parameter" {|
+      struct InferredRow { bytes: [u8; 2]; }
+      let mut retained: *InferredRow;
+      fn forward(row: &mut InferredRow) { later(row); }
+      fn later(row: &mut InferredRow) { retained = row as *InferredRow; }
+      fn escape() { let mut local: InferredRow; zero_fill(&local); forward(&local); }
+    |});
+  Alcotest.test_case "inferred loans: unknown external call does not infer non-retention" `Quick
+    (expect_type_error "retaining parameter" {|
+      struct InferredRow { bytes: [u8; 2]; }
+      extern fn retain_unknown(row: &mut InferredRow);
+      fn escape() { let mut local: InferredRow; zero_fill(&local); retain_unknown(&local); }
+    |});
+  Alcotest.test_case "inferred loans: 1024 forward definitions converge without global rescans" `Quick
+    (fun () ->
+      List.iter (fun cyclic ->
+        let count = 1024 in
+        let source = Buffer.create 100000 in
+        for i = 0 to count - 1 do
+          let result = if i = count - 1 then "row.bytes as [u8; 2..]"
+            else Printf.sprintf "chain%d(row)" (i + 1) in
+          Buffer.add_string source (Printf.sprintf
+            "fn chain%d(row: &mut InferredChainRow) -> [u8; 2..] { %s return %s; }\n"
+            i (if cyclic && i = count - 1 then
+              "if (false) { return chain0(row); }" else "") result)
+        done;
+        let prog = parse (Buffer.contents source) in
+        let functions = List.fold_left (fun rows -> function
+          | Ast.FuncDef f ->
+              let bindings = Local_bindings.resolve_func f in
+              let binding_types = List.fold_left2 (fun types id (_, ty) ->
+                Types.IntMap.add id (Option.get ty) types)
+                Types.IntMap.empty bindings.param_ids f.params in
+              let fi : Types.func_info = {
+                ret_type = Option.get f.ret_type;
+                param_types = List.map (fun (name, ty) -> name, Option.get ty) f.params;
+                local_types = Types.StringMap.empty; bindings; binding_types; effects = [] } in
+              Loan_inference.Names.add f.name fi rows
+          | _ -> rows) Loan_inference.Names.empty prog in
+        let summaries, visits = Loan_inference.infer
+          ~key:(fun f -> f.Ast.name) ~target:(fun _ name -> name)
+          ~info:(fun name -> Loan_inference.Names.find name functions)
+          ~field_type:(fun _ field -> if field = "bytes"
+            then Some (Ast.TypeArray (Ast.TypeU8, 2)) else None)
+          ~call_type:(fun name -> Option.map (fun fi -> fi.Types.ret_type)
+            (Loan_inference.Names.find_opt name functions))
+          ~alias_type:(function Ast.TypeU8 -> false | _ -> true)
+          ~explicit:(fun _ -> None) ~legacy_return:(fun _ -> false) prog in
+        Loan_inference.Names.iter (fun name summary ->
+          Alcotest.(check (list int)) (name ^ " result dependency") [0]
+            (Loan_inference.Bits.elements summary.Loan_inference.returned);
+          Alcotest.(check (list int)) (name ^ " retained dependency") []
+            (Loan_inference.Bits.elements summary.Loan_inference.retained)) summaries;
+        Alcotest.(check bool) "callee updates revisit callers within a linear bound"
+          true (visits <= 3 * count)) [false; true]);
+  Alcotest.test_case "inferred loans: array-field pointer decay preserves address dependencies" `Quick
+    (fun () ->
+      expect_codegen_ok {|
+        struct DecayRow { bytes: [u8; 2]; }
+        fn raw_address(row: *DecayRow) -> usize {
+          let bytes: *u8 = row.bytes; return bytes as usize;
+        }
+      |} ();
+      expect_type_error "retaining parameter" {|
+        struct DecayRow { bytes: [u8; 2]; }
+        fn address(row: &mut DecayRow) -> usize {
+          let bytes: *u8 = row.bytes; return bytes as usize;
+        }
+        fn escape() -> usize {
+          let mut row: DecayRow; zero_fill(&row); return address(&row);
+        }
+      |} ());
+  Alcotest.test_case "inferred loans: local reference alias cannot return a slice" `Quick
+    (expect_type_error "stack-derived" {|
+      struct AliasRow { bytes: [u8; 2]; }
+      fn escape() -> []u8 { let mut row: AliasRow; zero_fill(&row);
+        let alias: &mut AliasRow = &row; return alias.bytes as []u8; }
+    |});
+  Alcotest.test_case "inferred loans: parameter shadow cannot hide local storage" `Quick
+    (expect_type_error "stack-derived" {|
+      struct AliasRow { bytes: [u8; 2]; }
+      fn escape(row: &mut AliasRow) -> []u8 {
+        let mut local: AliasRow; zero_fill(&local);
+        let row: &mut AliasRow = &local; return row.bytes as []u8;
+      }
+    |});
+  Alcotest.test_case "borrows: local address return must not evade the declared source" `Quick
+    (expect_type_error "stack-derived" {|
+      struct AliasRow { bytes: [u8; 2]; }
+      fn escape(row: &mut AliasRow) -> *u8 borrows(row -> row) {
+        let mut local: AliasRow; zero_fill(&local); return &local.bytes[0];
+      }
+    |});
+  Alcotest.test_case "inferred loans: local reference cannot escape inside a result record" `Quick
+    (expect_type_error "stack-derived" {|
+      struct AliasRow { bytes: [u8; 2]; }
+      struct AliasView { bytes: []u8; }
+      fn escape() -> AliasView { let mut row: AliasRow; zero_fill(&row);
+        let alias: &mut AliasRow = &row;
+        let mut result: AliasView = { alias.bytes as []u8 }; return result; }
+    |});
+  Alcotest.test_case "inferred loans: local reference cannot escape inside a linear result" `Quick
+    (expect_type_error "stack-derived" {|
+      struct AliasRow { bytes: [u8; 2]; }
+      linear struct AliasView[k: usize] { private bytes: []u8; }
+      fn escape() -> AliasView[0] { let mut row: AliasRow; zero_fill(&row);
+        let alias: &mut AliasRow = &row;
+        let mut result: AliasView[0] = { alias.bytes as []u8 }; return result; }
+    |});
+  Alcotest.test_case "inferred loans: local reference cannot store a slice globally" `Quick
+    (expect_type_error "cannot be stored" {|
+      struct AliasRow { bytes: [u8; 2]; }
+      let mut retained_alias: []u8;
+      fn escape() { let mut row: AliasRow; zero_fill(&row);
+        let alias: &mut AliasRow = &row; retained_alias = alias.bytes as []u8; }
+    |});
+  Alcotest.test_case "inferred loans: local reference slice scalar iteration codegens" `Quick
+    (expect_codegen_ok {|
+      struct AliasRow { bytes: [u8; 2]; }
+      fn read() -> usize { let mut row: AliasRow; zero_fill(&row);
+        let alias: &mut AliasRow = &row;
+        let bytes: []u8 = alias.bytes as []u8;
+        let mut total: usize = 0; for byte in bytes { total = total + (byte as usize); }
+        return total; }
+    |});
+  Alcotest.test_case "inferred loans: nested result copies retain a live local referent" `Quick
+    (expect_codegen_ok {|
+      struct NestedRow { bytes: [u8; 2]; }
+      struct NestedView { bytes: [u8; 2..]; }
+      struct NestedResult { inner: NestedView; }
+      fn project(row: &mut NestedRow) -> NestedResult {
+        let mut result: NestedResult = { { row.bytes as [u8; 2..] } }; return result;
+      }
+      fn read() -> u8 { let mut row: NestedRow; zero_fill(&row);
+        let mut result: NestedResult = project(&row);
+        let mut copied: NestedView = result.inner; return copied.bytes[1]; }
+    |});
+  Alcotest.test_case "inferred loans: nested result copies cannot escape a local referent" `Quick
+    (expect_type_error "stack-derived" {|
+      struct NestedRow { bytes: [u8; 2]; }
+      struct NestedView { bytes: [u8; 2..]; }
+      struct NestedResult { inner: NestedView; }
+      fn project(row: &mut NestedRow) -> NestedResult {
+        let mut result: NestedResult = { { row.bytes as [u8; 2..] } }; return result;
+      }
+      fn escape() -> NestedResult { let mut row: NestedRow; zero_fill(&row);
+        return project(&row); }
+    |});
+  Alcotest.test_case "inferred loans: a legacy reference field retains its referent not its wrapper" `Quick
+    (expect_codegen_ok {|
+      linear view LegacyViewGuard[i: usize];
+      struct LegacyRow { bytes: [u8; 2]; }
+      struct LegacyOuter { row: LegacyRow; }
+      let mut permanent_outer: LegacyOuter;
+      fn outer_at(g: borrow LegacyViewGuard[i]) -> &mut LegacyOuter @ i {
+        return &permanent_outer;
+      }
+      fn bytes(row: &mut LegacyRow) -> *u8 { return &row.bytes[0]; }
+      fn view_at(g: borrow LegacyViewGuard[i]) -> *u8 @ i {
+        let outer = outer_at(g); return bytes(&outer.row);
+      }
+    |});
   Alcotest.test_case "effect matrix contains every checker rule exactly once" `Quick
     (fun () ->
       let matrix = Effect_rules.markdown () in
@@ -3635,7 +3885,8 @@ fn release_origin(slot: sink OriginSlot[0]) {}
 fn legacy_origin(slot: borrow OriginSlot[u]) -> &mut OriginRow @ u {
   return &origin_rows[slot.index];
 }
-fn retain_origin(lock: &mut OriginLock) {}
+let mut retained_origin: *OriginLock;
+fn retain_origin(lock: *OriginLock) { retained_origin = lock; }
 |} in
       let body source = api ^ {|
 fn use_origin() {
@@ -3742,7 +3993,8 @@ fn escape(row: borrow &mut BorrowAddressRow) {
 }
 |}) ();
       expect_type_error "retaining parameter" (api ^ {|
-fn keep(address: *u8) {}
+let mut kept_address: *u8;
+fn keep(address: *u8) { kept_address = address; }
 fn escape(row: borrow &mut BorrowAddressRow) { keep(&row.bytes[0]); }
 |}) ();
       expect_codegen_ok (api ^ {|
@@ -5988,7 +6240,8 @@ fn stored_release(holder: sink StoredHolder[k]) { stored_drop(holder.token); }
     `Quick
     (expect_type_error "retaining parameter"
       (owner_derived_fixture ^
-       "fn keep(p: *Conn) -> usize { return p.n; }
+       "let mut retained_connection: *Conn;
+        fn keep(p: *Conn) -> usize { retained_connection = p; return p.n; }
         fn bad(owner: borrow Owner[c]) -> usize {
           return keep(conn_of(owner));
         }"));
@@ -6872,7 +7125,8 @@ fn entry() !{locks, unsafe} { run(safe); run(conflict); }|});
     `Quick
     (expect_type_error
       "slice 'buf' is stack-derived and cannot be passed to retaining parameter of 'stack_slice_retain'"
-      "fn stack_slice_retain(s: []u8) {}
+      "let mut retained_stack_slice: []u8;
+       fn stack_slice_retain(s: []u8) { retained_stack_slice = s; }
        fn stack_slice_call_bad() {
          let mut buf: [u8; 4] = { 1, 2, 3, 4 };
          stack_slice_retain(buf as []u8);
@@ -6998,7 +7252,8 @@ fn entry() !{locks, unsafe} { run(safe); run(conflict); }|});
     (expect_type_error
       "slice 'f' is authority-derived and cannot be passed to retaining parameter of 'reg_retain'"
       (region_fixture ^
-        "fn reg_retain(f: []u8) {}
+        "let mut retained_region_slice: []u8;
+         fn reg_retain(f: []u8) { retained_region_slice = f; }
          fn reg_retaining_call_bad() {
            let idx: {0..<4 as usize} = 0;
            let o = reg_make(idx);
@@ -15597,7 +15852,8 @@ linear struct Owner746b[page: usize] {
        "struct no_copy TaskMutex { private word: usize; }
         struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
         private let mut dma_fixed596: DmaFixed596 align(64);
-        fn retain(bytes: []u8) {}
+        let mut retained_dma_bytes: []u8;
+        fn retain(bytes: []u8) { retained_dma_bytes = bytes; }
         fn bad(cpu: sink *DmaFixed596Cpu) -> *DmaFixed596Cpu {
           let bytes = dma_cpu_slice(cpu, DmaFixed596);
           retain(bytes);
@@ -30026,7 +30282,8 @@ let indexed_reference_tests = [
   Alcotest.test_case "borrowed reference cannot forward to a retaining parameter" `Quick
     (expect_type_error "retaining" {|
       struct Record { value: usize; }
-      fn keep(record: &mut Record) {}
+      let mut retained_record: *Record;
+      fn keep(record: &mut Record) { retained_record = record as *Record; }
       fn leak(record: borrow &mut Record) { keep(record); }|});
 
   Alcotest.test_case "field codegen prefers local pointer over same-named global" `Quick
