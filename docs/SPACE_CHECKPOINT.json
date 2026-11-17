@@ -3,11 +3,11 @@
   "event": "incremental",
   "decision": "reuse",
   "source_sha256": "7be85c2b66a35e117b61351f67123e6c150a4d8c75de16b6965366dce3ddeb84",
-  "workload": "Existing kernel workload; an isolated erased linked-initialization certificate domain and finite host tests.",
+  "workload": "Existing kernel workload; native fake-page accessor uses a checked typed-array slice.",
   "evidence": [
     "docs/MEMORY_GUARD_SPACE_2026-11-16.txt",
     "docs/CONSOLE_FLOW_SPACE_2026-11-11.txt"
   ],
-  "assessment": "Reuse existing kernel layout and allocation evidence. This OCaml domain is not yet connected to production type checking or code generation in this commit. It changes no accepted Takibi program, runtime representation, storage layout or allocator workload. Its finite heap oracle is bounded transfer evidence, not completion of the memory-model integration milestone.",
+  "assessment": "Reuse existing production kernel layout and allocation evidence. The change is limited to linux_user/growable_pool/fake_page_provider.tkb: a raw pointer round-trip becomes a statically bounded array slice. The backing array size, owner layout and allocation workload are unchanged. Production kernel and compiler sources are unchanged; this is not completion of the memory-model integration milestone.",
   "next_trigger": "Integration of linked initialization into production checking, or any change to kernel storage, allocation or emitted code layout."
 }
