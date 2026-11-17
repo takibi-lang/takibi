@@ -108,6 +108,26 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
 
 ### Territory A: the trunk, in this order
 
+**Highest priority, maintainer update 2026-11-17: memory-safety contract
+after the Z3 pilot (#1513).** Take this before the existing trunk queue,
+including the remaining preemption review and flip. The published #1508
+integration is the baseline. First re-run the original #1511/#1512
+acceptance controls and reconcile their issue states; define the supported
+safe subset and a property/premise matrix covering bounds, initialization,
+padding, aliasing/provenance, lifetime/reuse and concurrency. Audit
+user-visible byte paths under #203. Then take the smallest concrete kernel
+consumer exposing a missing guarantee and close its dependency chain through
+the existing owners (#637, #954, #986, #132 and #638), following #1513's
+acceptance criteria. Compiler work required by this chain belongs to A;
+coordinate overlapping verification changes with B rather than duplicating
+its queue. Prefer inferred rules and API-boundary owners/contracts; measure
+annotation, unsafe, compile/solver and runtime costs. New design decisions,
+runtime fallbacks or broader trust premises return to the maintainer. Keep
+Z3 arithmetic re-checking, bounded protocol evidence and audited external
+boundaries distinct, and complete the scoped Rust comparison before claiming
+equivalence. A red allcheck retains its always-on precedence. Resume the
+older trunk order after this work, or at an explicit maintainer decision.
+
 **Priority update, 2026-11-10.** ExecutionState uses existing per_cpu/CpuHere
 authority; its runtime and four-core RPi5 cost review are complete. RootHeld
 activation-entry protection now retains actual current or same-generation
