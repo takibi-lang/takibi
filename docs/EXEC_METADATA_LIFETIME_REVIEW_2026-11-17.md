@@ -1,6 +1,7 @@
 # Checked exec-metadata lifetime review
 
-Source implementation: d5572f74, based on published da32b328. Review date:
+Source implementation: 94618a09, including the checked exec-metadata migration
+and lifetime regressions, based on published da32b328. Review date:
 2026-11-17. This completes the scoped boot exec scratch migration, not the
 whole globals or memory-safety contract. SPEC.md defines the accepted syntax
 and transfer rules; TRUSTED_BASE.md states the remaining premises.
@@ -24,7 +25,7 @@ retain their separately reviewed boundary; this is not general heap
 provenance, arbitrary integer-address recovery, allocation uniqueness or a
 reclamation/concurrency proof.
 
-The maintained migration adds 29 `borrows` clauses and four source `borrow`
+The maintained migration adds 40 `borrows` clauses and twelve source `borrow`
 qualifiers at function boundaries. There are no new per-call proof statements,
 loop invariants, unsafe blocks, runtime provenance fields or pool capacities.
 Boot's dynamic-image check acquires the existing ExecWindowSlot, uses its
@@ -90,15 +91,16 @@ The published baseline allocates 742891639 OCaml words, nearly the entire
 743000000 ceiling. The candidate initially measured 756077880. A brief
 completed-type-shape cache experiment saved only 112011 words and did not
 resolve the ceiling; the mutable cache was discarded. Sharing the pure
-shape helper leaves a final measurement of 756052271 (+1.77%). Following
+shape helper left 756052271 words. The subsequent address and non-retention
+repairs measure 757779032 (+2.00% against the baseline). Following
 the existing measured-headroom policy, the ceiling becomes 946000000,
 about 25% above the measurement. Lane counts, solver budgets, static rules
 and accepted fallbacks do not change. Historical measurements within the
 new ceiling are positive budget controls; one-word-over and malformed/unknown
 inputs remain negative controls.
 
-`make allbuild` passed before the source commit. Both debug target builds
-passed, as did the 1279-case type_inf group. Fifteen compile-only controls
+`make allbuild` passed before the initial source commit. Both debug target builds
+passed, as did the 1283-case type_inf group. Fifteen compile-only controls
 import the real ELF validator/segment API: five live/helper/wrapper/referent
 positives and ten release/reuse/retention/summary/storage negatives. Invalid
 objects were never executed. Generic maintained unit regressions cover the
@@ -129,3 +131,36 @@ they are attributed to that integration, not silently counted as new trust
 or additional proof of the lifetime rules. The lifetime rules add no solver
 proof of aliasing or execution. The broader contract and Rust comparison
 remain obligations in MEMORY_SAFETY_CONTRACT.md.
+
+
+## Address and authority review
+
+Follow-up compile controls exposed three additional transfer mistakes before
+publication. A fresh local record address lost its local-storage dependency
+when passed to a checked helper. A field address derived from an explicit
+borrowed pointer lost the existing non-retention guarantee. Finally, the
+variant-wrapper transfer exception also exempted consumed resource owners.
+Dormant address origins now survive local aliases and become active at checked
+or non-retaining data boundaries; borrowed data projections retain their
+input origin; only variant wrappers receive the transfer exception. Argument
+activation checks liveness before the call, including previously saved
+addresses and argument evaluation that consumes an owner.
+
+The maintained regression pairs local-address escapes with live local uses,
+borrowed referents, mixed branch origins, late argument activation and consumed
+owner controls. Field-address return, store and retaining-call cases are
+rejected under an explicit data borrow. Atomic cell-address use remains
+synchronous, while scalar operands reject retained borrowed addresses for
+both cell operations and raw intrinsics. This is a conservative scalar rule,
+not a concurrency proof. Existing mutex, spinlock, process-state and freelist
+signatures state their non-retaining use; their runtime bodies do not change.
+
+The full unit suite also catches drift in its production-snapshot stubs:
+spin primitives use the production borrowed signature. The stopped-diagnostic
+negative now expects the earlier argument-consumption rejection. Its unsafe
+program remains rejected. These fixture updates preserve the real rejection
+conditions rather than bypassing them.
+
+After the address and signature repairs, all four normal/debug object and ELF
+hashes match the measured candidate above. The repairs change static checking
+and boundary declarations without changing those linked runtime images.

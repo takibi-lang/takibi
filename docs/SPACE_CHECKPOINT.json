@@ -2,7 +2,7 @@
   "date": "2026-11-17",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "8938f341e6e3f8a72ec9edc5d90d46ebb51855606fddb5f03a1bf9917bcb4e2a",
+  "source_sha256": "4cf5037b90e488149fd53a61e506b5d5dedaacee46b0c1799ebd60d8f6e59b15",
   "workload": "Boot dynamic HTTPd/musl metadata validation and mapping, then ordinary exec/teardown using the existing four ExecWindowSlot windows. Compare normal/debug linked kernels and LLVM static frames with published da32b328; distinguish payload, section padding, reserved boundary and fixed pool capacity.",
   "evidence": [
     "docs/EXEC_METADATA_LIFETIME_REVIEW_2026-11-17.md"
