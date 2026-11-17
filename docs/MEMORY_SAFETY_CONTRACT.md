@@ -62,7 +62,7 @@ coverage. Existing source tests are in test/test_takibi.ml unless named.
 | Selected storage: fill slot A, consume slot B; release and reacquire | Selector/authority-sensitive facts; `slot facts: different live owners stay distinct`, same-owner and explicit refill controls | Token mint uniqueness/exclusivity; no inference that two selectors are distinct allocations | #203, #637 |
 | Representation/alignment: reinterpret arbitrary bytes as a reference or constrained value | Cast/type restrictions, zero_fill representation gate, checked typed API boundaries | Arbitrary raw/integer conversions, backend placement and FFI representation need audit; no universal provenance claim | #637, #986 |
 | Aliasing/frame: modify a certified link through another parameter or global | Body-derived footprints and inferred separation; direct callers discharge separation; init-link concrete-heap oracle | Unknown aliases invalidate supported facts; general stored aliases, indirect calls and integer round trips need consumer controls | #637, #954, #132 |
-| Lifetime: free/move authority while a derived view remains usable | Owner/guard-derived views and held-span checks; matching live-owner positive controls | Legacy @ contracts have caller-side ties, not general callee provenance proof; aggregate/direct-result scratch tracking remains separate work | #637, #132, #1159 |
+| Lifetime: free/move authority while a derived view remains usable | Owner/guard-derived views, held spans and body-checked borrows summaries; real exec-metadata result/copy/match/release/reuse controls | Legacy @ contracts retain their separately reviewed boundary; general heap provenance, reclamation and physical owner/storage correspondence remain premises | #637, #132, #1159 |
 | Reuse/freshness: old view reaches a removed/reinserted slot | Linear consumption and generation-indexed API rules | Allocator freshness, failed/partial construction, teardown and shared backing require real-consumer coverage | #637, #638, #132 |
 | Concurrency: use wrong guard or expose guarded payload through bytes | guarded_by identity, no_copy and typed bulk gates; matching-guard access | Physical mutual exclusion, guard mints, interrupt/preemption transitions, publication/reclamation and raw paths remain distinct obligations | #638, #1159, #986 |
 | Devices: CPU reads before DMA completion or reuses an in-flight buffer | Typed device/protocol owners and cache/DMA APIs; bounded models and selected instruction ties | Physical coherence, actual completion, hardware ordering and storage lifetime; QEMU is not hardware evidence | #637, #986 |
@@ -171,3 +171,8 @@ final scoped claim, complete each matrix row's source-backed controls,
 export inventory, compiler/external trust justification, measured migration
 costs and property-by-property Rust comparison. Any required new language
 rule, runtime fallback or broader trust premise returns for a decision.
+
+The scoped exec-metadata lifetime migration and its address/authority controls
+are reviewed in [the measured lifetime report](EXEC_METADATA_LIFETIME_REVIEW_2026-11-17.md).
+It extends the lifetime row above; it does not discharge the other rows or
+turn the source-pinned initialization/export inventory into a universal proof.
