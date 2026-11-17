@@ -36,7 +36,7 @@ def problems(probe, watcher, syscall):
         errors.append('probe must declare and issue its reported syscall')
     if value is None or watched is None or value[1] != watched[1]:
         errors.append('probe and GDB watcher disagree on the dispatched syscall')
-    if 'affinity_cpu(cpu_bytes as []u8) != 1' not in code:
+    if 'affinity_cpu() != 1' not in code:
         errors.append('probe must check its CPU after the reported syscall')
     if 'HANDLER = "*kernel_process_uart_record_parent_progress"' not in watcher:
         errors.append('GDB must watch the actual parent-progress handler')

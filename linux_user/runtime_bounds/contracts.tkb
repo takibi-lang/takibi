@@ -1,5 +1,18 @@
 // Shared scalar, slice and Region order contracts. Runtime span minting is
 // deliberately absent: the fixture starts with declared, initialized arrays.
+generic struct ArithmeticSlots(S: usize, M: usize, N: usize) {
+    values: [usize; N];
+}
+
+fn bounds_fill_chunk(a: &mut ArithmeticSlots(S, M, N), chunk: usize @ k)
+        where k < M {
+    let base: usize = chunk * S;
+    for offset: usize in 0..<S {
+        let index: usize = base + offset;
+        a.values[index] = index + 1;
+    }
+}
+
 struct BoundsPageMeta {
     state: usize;
     generation: usize;

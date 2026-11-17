@@ -80,7 +80,8 @@ const TCP_FLAG_PSH: u8 = 0x08;
 const TCP_FLAG_ACK: u8 = 0x10;
 const PROTO_TCP: u8 = 6;
 
-fn write_u16be(bytes: borrow [u8; 2..], value: i32) {
+fn write_u16be(bytes: borrow uninit [u8; 2..], value: i32)
+        ensures init(bytes[0..<2]) {
     bytes[0] = (value >> 8) as u8;
     bytes[1] = value as u8;
 }

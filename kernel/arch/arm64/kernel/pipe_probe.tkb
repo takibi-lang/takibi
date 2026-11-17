@@ -1,3 +1,6 @@
+use "kernel/arch/arm64/kernel/el0_read.tkb";
+use "kernel/arch/arm64/kernel/el0_getcpu.tkb";
+
 /* pipe2(2) from EL0 (GitHub issue #1042): two static-PIE programs linked
  * from this one object, kept free of writable globals and compiled with
  * the trap-site rejection, run from the shared ash transcript.
@@ -83,13 +86,11 @@ private fn pipe_probe_byte(at: usize) -> u8 {
     return ((at * 7 + (at >> 8)) & 0xFF) as u8;
 }
 
-private fn pipe_probe_cpu() -> u8 {
-    let mut cpu_bytes: [u8; 4];
-    cpu_bytes[0] = 99;
-    if (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize, 0, 0, 0, 0) != 0) {
-        return 99;
+private fn pipe_probe_cpu() -> u8  {
+    match el0_getcpu() {
+        El0CpuResult::Ready(cpu) => { return cpu as u8; }
+        El0CpuResult::Failed(code) => { return 99; }
     }
-    return cpu_bytes[0];
 }
 
 // Pin to one CPU and wait until this process is running there.
@@ -276,17 +277,20 @@ private fn pipe_probe_stream() {
     let mut reading: bool = true;
     let mut ordered: bool = true;
     while (reading) {
-        let got: usize = svc5(READ_SYSCALL, read_end, buffer as *u8 as usize,
-                              PIPE_PROBE_READ, 0, 0);
-        if (got == 0 || got > PIPE_PROBE_READ) {
-            reading = false;
-        } else {
-            for index: usize in 0..<PIPE_PROBE_READ {
-                if (index < got && buffer[index] != pipe_probe_byte(received + index)) {
-                    ordered = false;
+        match el0_read(read_end, buffer as []u8) {
+            El0ReadResult::Failed(code) => { reading = false; }
+            El0ReadResult::Read(got) => {
+                if (got == 0 || got > PIPE_PROBE_READ) {
+                    reading = false;
+                } else {
+                    for index: usize in 0..<PIPE_PROBE_READ {
+                        if (index < got && buffer[index] != pipe_probe_byte(received + index)) {
+                            ordered = false;
+                        }
+                    }
+                    received = received + got;
                 }
             }
-            received = received + got;
         }
     }
     pipe_probe_close(read_end);

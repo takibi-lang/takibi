@@ -959,7 +959,8 @@ fn intrusive_pool_set_next_generation_for_test(T: type,
     return true;
 }
 
-fn intrusive_pool_init(T: type, pool: &mut IntrusivePool(T) @ pool_id) !{unsafe} {
+fn intrusive_pool_init(T: type, pool: borrow uninit &mut IntrusivePool(T) @ pool_id) !{unsafe}
+        ensures init_fields(pool) {
     intrusive_pool_init_retaining(pool, 1);
 }
 
@@ -976,8 +977,9 @@ fn intrusive_pool_init(T: type, pool: &mut IntrusivePool(T) @ pool_id) !{unsafe}
 // number back in a caller's type signature, which is what #344's whole
 // design fought to remove. It costs the pool struct 8 bytes, which is the
 // per-POOL axis and the cheap one -- see this file's header.
-fn intrusive_pool_init_retaining(T: type, pool: &mut IntrusivePool(T) @ pool_id,
-                                 retained_chunks: usize) !{unsafe} {
+fn intrusive_pool_init_retaining(T: type, pool: borrow uninit &mut IntrusivePool(T) @ pool_id,
+                                 retained_chunks: usize) !{unsafe}
+        ensures init_fields(pool) {
     pool.pool_tag = intrusive_pool_mix_tag(intrusive_pool_mint_tag());
     // Trusted initialization: the caller supplies unpublished pool storage,
     // with no live guard or alias that can access the lock. A zeroed Mutex
@@ -987,6 +989,8 @@ fn intrusive_pool_init_retaining(T: type, pool: &mut IntrusivePool(T) @ pool_id,
     unsafe {
         let lock_bytes: *u8 = &(*pool).lock as *u8;
         zero_fill(lock_bytes[0..<(sizeof(Mutex) as isize)]);
+        // The exact raw span above writes this lock, including its padding.
+        assume_init(&(*pool).lock);
     }
     pool.chunk_head = 0;
     pool.partial_head = 0;

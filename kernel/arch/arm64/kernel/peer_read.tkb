@@ -1,3 +1,7 @@
+use "kernel/arch/arm64/kernel/el0_read.tkb";
+use "kernel/arch/arm64/kernel/el0_termios.tkb";
+use "kernel/arch/arm64/kernel/el0_getcpu.tkb";
+
 /* GitHub issue #533: a bounded read-only filesystem workload admitted to
  * the secondary CPU. This is a standalone static-PIE EL0 program, kept free
  * of writable globals and compiled with trap sites rejected.
@@ -65,18 +69,14 @@ const PEER_IDENT_ITIMER_BYTES: usize = 32;
 const PEER_IDENT_SIGACTION_BYTES: usize = 32;
 const PEER_IDENT_SIGACTION_SIGNUM: usize = 15;
 
-private fn peer_read_cpu(cpu_bytes: borrow [u8; 4..]) -> usize {
-    if (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize, 0, 0, 0, 0) != 0) {
-        return 99;
+private fn peer_read_cpu() -> usize  {
+    match el0_getcpu() {
+        El0CpuResult::Ready(cpu) => { return cpu; }
+        El0CpuResult::Failed(code) => { return 99; }
     }
-    return cpu_bytes[0] as usize |
-           ((cpu_bytes[1] as usize) << 8) |
-           ((cpu_bytes[2] as usize) << 16) |
-           ((cpu_bytes[3] as usize) << 24);
 }
 
 fn peer_read() {
-    let mut cpu_bytes: [u8; 4];
     let mut buffer: [u8; PEER_READ_CHUNK];
 
     // The busy-pair replacement enters only after peer exit. Registration
@@ -93,7 +93,7 @@ fn peer_read() {
     // own mask rather than a rule that had to know its pid.
     if (peer_pin(peer_cpu) == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }
     // Do not spend the bounded read attempts before the handoff lands.
-    while (peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {}
+    while (peer_read_cpu() != peer_cpu) {}
 
     // The competing reader pins to core 0 before either side begins its
     // block reads. Both report arrival only after their own affinity handoff
@@ -117,7 +117,7 @@ fn peer_read() {
     if (peers_ready == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }
 
     for attempt: usize in 0..<PEER_READ_ATTEMPTS {
-        let mut valid: bool = peer_read_cpu(cpu_bytes as []u8) == peer_cpu;
+        let mut valid: bool = peer_read_cpu() == peer_cpu;
         let mut bytes: usize = 0;
         let mut checksum: usize = 0;
         if (valid) {
@@ -126,21 +126,23 @@ fn peer_read() {
                                   0, 0, 0);
             for chunk: usize in 0..<PEER_READ_CHUNKS {
                 if (valid) {
-                    if (peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {
+                    if (peer_read_cpu() != peer_cpu) {
                         valid = false;
                     } else {
-                        let got: usize = svc5(READ_SYSCALL, fd,
-                                              buffer as *u8 as usize,
-                                              PEER_READ_CHUNK, 0, 0);
-                        if (got != PEER_READ_CHUNK ||
-                            peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {
-                            valid = false;
-                        } else {
-                            for index: usize in 0..<PEER_READ_CHUNK {
-                                if (buffer[index] != 90) { valid = false; }
-                                checksum = checksum + 90;
+                        match el0_read(fd, buffer as []u8) {
+                            El0ReadResult::Failed(code) => { valid = false; }
+                            El0ReadResult::Read(got) => {
+                            if (got != PEER_READ_CHUNK ||
+                                peer_read_cpu() != peer_cpu) {
+                                valid = false;
+                            } else {
+                                for index: usize in 0..<PEER_READ_CHUNK {
+                                    if (buffer[index] != 90) { valid = false; }
+                                    checksum = checksum + 90;
+                                }
+                                bytes = bytes + got;
                             }
-                            bytes = bytes + got;
+                            }
                         }
                     }
                 }
@@ -159,13 +161,12 @@ fn peer_read() {
 }
 
 fn core_read() {
-    let mut cpu_bytes: [u8; 4];
     let mut buffer: [u8; PEER_READ_CHUNK];
     // The competing reader is the core-0 half of the evidence. With an unset
     // affinity mask now admitting every online CPU, ask for core 0 instead
     // of waiting on a CPU identity that scheduling does not promise.
     if (peer_pin(0) == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }
-    while (peer_read_cpu(cpu_bytes as []u8) != 0) {}
+    while (peer_read_cpu() != 0) {}
     let mut nap: [u8; 16];
     for index: usize in 0..<16 { nap[index] = 0; }
     // tv_sec = 0, tv_nsec = 1000000 (0x000F4240).
@@ -187,8 +188,10 @@ fn core_read() {
                               "/peer-read.bin" as *u8 as usize,
                               0, 0, 0);
         for chunk: usize in 0..<PEER_READ_CHUNKS {
-            svc5(READ_SYSCALL, fd, buffer as *u8 as usize,
-                 PEER_READ_CHUNK, 0, 0);
+            match el0_read(fd, buffer as []u8) {
+                El0ReadResult::Read(count) => {}
+                El0ReadResult::Failed(code) => {}
+            }
         }
         svc5(CLOSE_SYSCALL, fd, 0, 0, 0, 0);
     }
@@ -235,7 +238,7 @@ private fn peer_console_refused(first: usize) !{unsafe} {
     let mut number: [u8; 8];
     for index: usize in 0..<8 {
         let digit: usize = (first >> ((7 - index) * 4)) & 15;
-        if (digit < 16) { number[index] = digits[digit]; }
+        number[index] = digits[digit];
     }
     svc5(WRITE_SYSCALL, 1, number as *u8 as usize, 8, 0, 0);
     svc5(WRITE_SYSCALL, 1, (unsafe { bs"\n" as *u8 }) as usize, 1, 0, 0);
@@ -249,17 +252,16 @@ private fn peer_console_refused(first: usize) !{unsafe} {
 // that has a defined place in the stream rather than data silently dropped.
 // A report is accepted only after a complete real write bracketed by getcpu.
 private fn peer_console_order_write(bytes: borrow []const u8, cpu: usize,
-        step: usize, cpu_bytes: borrow [u8; 4..]) -> bool !{unsafe} {
-    if (peer_read_cpu(cpu_bytes) != cpu) { return false; }
+        step: usize) -> bool !{unsafe} {
+    if (peer_read_cpu() != cpu) { return false; }
     if (svc5(WRITE_SYSCALL, 1, (unsafe { bytes as *u8 }) as usize, bytes.len, 0, 0) != bytes.len) {
         return false;
     }
-    return peer_read_cpu(cpu_bytes) == cpu &&
+    return peer_read_cpu() == cpu &&
         svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG, 0x663, step, 0, 0) == step;
 }
 
 fn peer_console() !{unsafe} {
-    let mut cpu_bytes: [u8; 4];
     let output = bs"peer user console: record=01/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=02/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=03/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=04/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=05/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=06/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=07/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=08/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=09/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=10/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=11/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=12/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=13/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=14/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=15/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=16/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=17/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n";
     // The kernel answers 0 while it is not this writer's turn: init starts
     // it long before the filesystem reader's verdict. Wait by SLEEPING
@@ -292,24 +294,21 @@ fn peer_console() !{unsafe} {
         peer_console_say(bs"peer console: the filesystem reader failed, so this writer's turn never came\n");
     }
     if (peer_pin(peer_cpu) == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }
-    while (peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {}
+    while (peer_read_cpu() != peer_cpu) {}
 
     // The legacy peer ring stays held through these writes. A regression
     // to that route puts core 0's second line before the first peer line.
-    if (peer_console_order_write(bs"console order: 1 migrating peer\n", peer_cpu, 1,
-                                 cpu_bytes as [u8; 4..]) == false) { peer_console_refused(0); }
+    if (peer_console_order_write(bs"console order: 1 migrating peer\n", peer_cpu, 1) == false) { peer_console_refused(0); }
     if (peer_pin(0) == false) { peer_console_refused(0); }
-    while (peer_read_cpu(cpu_bytes as []u8) != 0) {}
-    if (peer_console_order_write(bs"console order: 2 migrating core0\n", 0, 2,
-                                 cpu_bytes as [u8; 4..]) == false) { peer_console_refused(0); }
+    while (peer_read_cpu() != 0) {}
+    if (peer_console_order_write(bs"console order: 2 migrating core0\n", 0, 2) == false) { peer_console_refused(0); }
     if (peer_pin(peer_cpu) == false) { peer_console_refused(0); }
-    while (peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {}
-    if (peer_console_order_write(bs"console order: 3 migrating peer\n", peer_cpu, 3,
-                                 cpu_bytes as [u8; 4..]) == false) { peer_console_refused(0); }
+    while (peer_read_cpu() != peer_cpu) {}
+    if (peer_console_order_write(bs"console order: 3 migrating peer\n", peer_cpu, 3) == false) { peer_console_refused(0); }
     let child: usize = svc5(220, 17, 0, 0, 0, 0);
     if (child == 0) {
         if (peer_pin(0) == false) { peer_console_refused(0); }
-        while (peer_read_cpu(cpu_bytes as []u8) != 0) {}
+        while (peer_read_cpu() != 0) {}
         // GitHub issue #843: bounded. The parent writes step 4 right after
         // the fork; if it was refused it has left, this child is no longer
         // its child, and the step would never move.
@@ -321,20 +320,17 @@ fn peer_console() !{unsafe} {
             }
             svc5(NANOSLEEP_SYSCALL, nap as *u8 as usize, 0, 0, 0, 0);
         }
-        if (peer_console_order_write(bs"console order: 5 child core0\n", 0, 5,
-                                     cpu_bytes as [u8; 4..]) == false) { peer_console_refused(0); }
+        if (peer_console_order_write(bs"console order: 5 child core0\n", 0, 5) == false) { peer_console_refused(0); }
         svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
     }
-    if (peer_console_order_write(bs"console order: 4 parent peer\n", peer_cpu, 4,
-                                 cpu_bytes as [u8; 4..]) == false) { peer_console_refused(0); }
+    if (peer_console_order_write(bs"console order: 4 parent peer\n", peer_cpu, 4) == false) { peer_console_refused(0); }
     let mut status: [u8; 4];
     for index: usize in 0..<4 { status[index] = 255; }
     if (svc5(260, child, status as *u8 as usize, 0, 0, 0) != child ||
         status[0] != 0 || status[1] != 0 || status[2] != 0 || status[3] != 0) {
         peer_console_refused(0);
     }
-    if (peer_console_order_write(bs"console order: 6 parent peer\n", peer_cpu, 6,
-                                 cpu_bytes as [u8; 4..]) == false) { peer_console_refused(0); }
+    if (peer_console_order_write(bs"console order: 6 parent peer\n", peer_cpu, 6) == false) { peer_console_refused(0); }
 
     let first: usize = svc5(WRITE_SYSCALL, 1,
                               (unsafe { output as *u8 }) as usize, output.len, 0, 0);
@@ -398,7 +394,7 @@ fn peer_console() !{unsafe} {
 //
 // Returns the position-weighted sum of `machine`, or 0 for any failure, so
 // one number carries the whole verdict to the kernel.
-private fn peer_identity(cpu_bytes: borrow [u8; 4..], peer_cpu: usize)
+private fn peer_identity(peer_cpu: usize)
         -> usize {
     let mut uts: [u8; PEER_IDENT_UTSNAME_BYTES];
     let mut info: [u8; PEER_IDENT_SYSINFO_BYTES];
@@ -407,11 +403,11 @@ private fn peer_identity(cpu_bytes: borrow [u8; 4..], peer_cpu: usize)
     if (svc5(UNAME_SYSCALL, uts as *u8 as usize, 0, 0, 0, 0) != 0) {
         return 0;
     }
-    if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
+    if (peer_read_cpu() != peer_cpu) { return 0; }
     if (svc5(SYSINFO_SYSCALL, info as *u8 as usize, 0, 0, 0, 0) != 0) {
         return 0;
     }
-    if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
+    if (peer_read_cpu() != peer_cpu) { return 0; }
     let mut tail_clean: bool = true;
     for index: usize in 0..<PEER_IDENT_SYSINFO_BYTES {
         if (index >= PEER_IDENT_SYSINFO_UPTIME_BYTES && info[index] != 0) {
@@ -432,14 +428,14 @@ private fn peer_identity(cpu_bytes: borrow [u8; 4..], peer_cpu: usize)
         return 0;
     }
     if (cwd[0] != 0x2F || cwd[1] != 0) { return 0; }
-    if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
+    if (peer_read_cpu() != peer_cpu) { return 0; }
     // set_tid_address answers the current pid, so getpid -- which the table
     // has admitted all along -- is what says whether it answered about this
     // process. A peer reading another CPU's current would show up here.
     let pid: usize = svc5(GETPID_SYSCALL, 0, 0, 0, 0, 0);
     if (pid == 0) { return 0; }
     if (svc5(SET_TID_ADDRESS_SYSCALL, 0, 0, 0, 0, 0) != pid) { return 0; }
-    if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
+    if (peer_read_cpu() != peer_cpu) { return 0; }
     // prlimit64 as a pure read: new_limit null, old_limit written. The soft
     // limit must be a real number and must not exceed the hard one, which is
     // the invariant the fd context carries; a buffer left untouched would
@@ -460,7 +456,7 @@ private fn peer_identity(cpu_bytes: borrow [u8; 4..], peer_cpu: usize)
         }
     }
     if (soft == 0 || soft > hard) { return 0; }
-    if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
+    if (peer_read_cpu() != peer_cpu) { return 0; }
     // The same prlimit64, now as a WRITE. Change the soft limit by one, read
     // it back, then restore the original pair. A same-value write would take
     // this arm but still pass if its store silently became a no-op; the
@@ -482,7 +478,7 @@ private fn peer_identity(cpu_bytes: borrow [u8; 4..], peer_cpu: usize)
     for index: usize in 0..<PEER_IDENT_RLIMIT_BYTES {
         if (readback[index] != rlimit[index]) { return 0; }
     }
-    if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
+    if (peer_read_cpu() != peer_cpu) { return 0; }
     for index: usize in 0..<PEER_IDENT_RLIMIT_BYTES { readback[index] = 0xFF; }
     if (svc5(PRLIMIT64_SYSCALL, 0, PEER_IDENT_RLIMIT_NOFILE, 0,
              readback as *u8 as usize, 0) != 0) {
@@ -494,19 +490,19 @@ private fn peer_identity(cpu_bytes: borrow [u8; 4..], peer_cpu: usize)
     for index: usize in 8..<PEER_IDENT_RLIMIT_BYTES {
         if (readback[index] != rlimit[index]) { return 0; }
     }
-    if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
+    if (peer_read_cpu() != peer_cpu) { return 0; }
     if (svc5(PRLIMIT64_SYSCALL, 0, PEER_IDENT_RLIMIT_NOFILE,
              rlimit as *u8 as usize, 0, 0) != 0) {
         return 0;
     }
-    if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
+    if (peer_read_cpu() != peer_cpu) { return 0; }
     // chdir to the one directory this kernel has. It stores nothing, so the
     // answer is the whole evidence: 0 for `/`, and ENOENT is a negative
     // number, which this returns as a large unsigned value.
     if (svc5(CHDIR_SYSCALL, "/" as *u8 as usize, 0, 0, 0, 0) != 0) {
         return 0;
     }
-    if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
+    if (peer_read_cpu() != peer_cpu) { return 0; }
     // setitimer and rt_sigaction both answer by zero-filling a struct in the
     // caller's own memory. A buffer that comes back still holding 0xFF is a
     // call that answered without writing.
@@ -520,7 +516,7 @@ private fn peer_identity(cpu_bytes: borrow [u8; 4..], peer_cpu: usize)
         if (itimer[index] != 0) { itimer_clean = false; }
     }
     if (itimer_clean == false) { return 0; }
-    if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
+    if (peer_read_cpu() != peer_cpu) { return 0; }
     let mut sigaction: [u8; PEER_IDENT_SIGACTION_BYTES];
     for index: usize in 0..<PEER_IDENT_SIGACTION_BYTES {
         sigaction[index] = 0xFF;
@@ -534,7 +530,7 @@ private fn peer_identity(cpu_bytes: borrow [u8; 4..], peer_cpu: usize)
         if (sigaction[index] != 0) { sigaction_clean = false; }
     }
     if (sigaction_clean == false) { return 0; }
-    if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
+    if (peer_read_cpu() != peer_cpu) { return 0; }
     // Walk the buffer's own length and filter, rather than index it at
     // offset + i: the bound the compiler can see is the array's.
     let mut digest: usize = 0;
@@ -559,10 +555,14 @@ fn peer_tty() !{unsafe} {
     // of the persistent shell's now-supported canonical termios settings.
     let mut saved_terminal: [u8; 36];
     let mut raw_terminal: [u8; 36];
-    if (svc5(29, 0, 0x5401, saved_terminal as *u8 as usize, 0, 0) != 0) {
+    match el0_tcgets(0, saved_terminal as []u8) {
+        El0TermiosResult::Ready => {}
+        El0TermiosResult::Failed(code) => {
         let error = bs"peer tty: terminal settings failed\n";
         svc5(WRITE_SYSCALL, 1, (unsafe { error as *u8 }) as usize, error.len, 0, 0);
         svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+            return;
+        }
     }
     for index: usize in 0..<36 { raw_terminal[index] = saved_terminal[index]; }
     for index: usize in 0..<4 { raw_terminal[index] = 0; raw_terminal[12 + index] = 0; }
@@ -573,7 +573,6 @@ fn peer_tty() !{unsafe} {
         svc5(WRITE_SYSCALL, 1, (unsafe { error as *u8 }) as usize, error.len, 0, 0);
         svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
     }
-    let mut cpu_bytes: [u8; 4];
     let mut byte: [u8; 1];
     let peer_cpu: usize = svc5(
         WORKLOAD_PROGRESS_SYSCALL, PEER_TTY_TAG, 0, 0, 0, 0);
@@ -586,12 +585,12 @@ fn peer_tty() !{unsafe} {
     // verdict, so its registration succeeds first try and names the CPU to
     // pin to (GitHub issue #9).
     if (peer_pin(peer_cpu) == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }
-    while (peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {}
+    while (peer_read_cpu() != peer_cpu) {}
     // The identity reads go out on the same call that used to announce
     // reading with two zeros: this process is already pinned to the peer and
     // nothing else is measuring here, so the two calls cost no sequencing of
     // their own.
-    let identity: usize = peer_identity(cpu_bytes as []u8, peer_cpu);
+    let identity: usize = peer_identity(peer_cpu);
     if (identity == 0) {
         let error = bs"peer tty: identity or CPU placement failed\n";
         svc5(WRITE_SYSCALL, 1, (unsafe { error as *u8 }) as usize, error.len, 0, 0);
@@ -604,16 +603,19 @@ fn peer_tty() !{unsafe} {
     let mut reading: bool = true;
     for position: usize in 0..<PEER_TTY_LINE_MAX {
         if (reading) {
-            let got: usize = svc5(READ_SYSCALL, 0, byte as *u8 as usize,
-                                  1, 0, 0);
-            if (got != 1 || peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {
-                sum = 0;
-                reading = false;
-            } else {
-                let value: usize = byte[0] as usize;
-                count = count + 1;
-                sum = sum + value * (position + 1);
-                if (value == 10) { reading = false; }
+            match el0_read(0, byte as []u8) {
+                El0ReadResult::Failed(code) => { sum = 0; reading = false; }
+                El0ReadResult::Read(got) => {
+                    if (got != 1 || peer_read_cpu() != peer_cpu) {
+                        sum = 0;
+                        reading = false;
+                    } else {
+                        let value: usize = byte[0] as usize;
+                        count = count + 1;
+                        sum = sum + value * (position + 1);
+                        if (value == 10) { reading = false; }
+                    }
+                }
             }
         }
     }

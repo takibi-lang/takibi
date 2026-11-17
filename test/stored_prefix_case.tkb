@@ -1,0 +1,24 @@
+// Check that a valid payload store preserves the next ensure precondition.
+use "linux_user/growable_pool/growable_pool_lib.tkb";
+extern fn linux_exit(code: i32);
+fn main() !{unsafe} {
+    page_allocator_init();
+    let mut pool: GrowablePool(usize, 2, 3, 6);
+    growable_pool_init(&pool);
+    match growable_pool_ensure(&pool, 1) {
+        GrowablePoolEnsureResult::Ok => {}
+        GrowablePoolEnsureResult::IndexOutOfRange => { linux_exit(2); return; }
+        GrowablePoolEnsureResult::ChunkLimitReached => { linux_exit(3); return; }
+        GrowablePoolEnsureResult::OutOfMemory => { linux_exit(4); return; }
+    }
+    *growable_pool_ref_at(&pool, 0) = 7;
+    match growable_pool_ensure(&pool, 1) {
+        GrowablePoolEnsureResult::Ok => {}
+        GrowablePoolEnsureResult::IndexOutOfRange => { linux_exit(2); return; }
+        GrowablePoolEnsureResult::ChunkLimitReached => { linux_exit(3); return; }
+        GrowablePoolEnsureResult::OutOfMemory => { linux_exit(4); return; }
+    }
+    let address: usize = growable_pool_ref_at(&pool, 0) as usize;
+    if (address != 0) { linux_exit(0); }
+    linux_exit(1);
+}

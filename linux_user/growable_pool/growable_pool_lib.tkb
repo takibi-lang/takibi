@@ -138,12 +138,11 @@
 // in this compiler (see kernel/kernel/syscall.tkb's own comment on its
 // Utsname buffer for precedent), so SLOTS_PER_CHUNK (normally
 // 4096 / sizeof(T)) has to be computed and hardcoded by the caller anyway;
-// requiring N == SLOTS_PER_CHUNK * MAX_CHUNKS as a caller-enforced (not
-// compiler-proven) invariant keeps every array size below a bare literal
-// or const, the same manual-consistency idiom already used elsewhere in
-// this codebase.
+// each array size remains a literal or const. Activation now checks its
+// computed indices against N after specialization; no unsafe index bypass
+// remains there. Exact equality is still the library's capacity convention.
 //
-// Current limitations (2026-08-08). Keep this list current as call sites
+// Current limitations (2026-11-16). Keep this list current as call sites
 // change; a limitation that goes stale here is worse than none, since it
 // invites relying on a guarantee that quietly stopped holding.
 // - NOT SYNCHRONIZED, same caveat as kernel/lib/freelist.tkb/slotmap.tkb:
@@ -157,8 +156,9 @@
 //   page allocator is instead sized from the usable RAM described by the
 //   boot DTB, so this pool's configured chunk bound may be reached before
 //   or after global physical-memory exhaustion.
-// - N == SLOTS_PER_CHUNK * MAX_CHUNKS is a precondition the caller must
-//   maintain by hand; nothing here checks it.
+// - Exact N == SLOTS_PER_CHUNK * MAX_CHUNKS remains a capacity convention.
+//   The compiler rejects insufficient N at activation's indexed writes,
+//   rather than assuming that equality as an unchecked safety premise.
 // - A freshly acquired chunk's page is zeroed once, at grow time
 //   (growable_pool_grow_one_chunk), assuming page.tkb's PAGE_SIZE (a
 //   `use`d name, not hardcoded here) is exactly one page per chunk --
@@ -198,23 +198,24 @@ must_use variant GrowablePoolInsertResult {
     Allocated(exists allocation: usize. FreelistOwner[allocation]);
 }
 
-// GitHub issue #295: growable_pool_grow_one_chunk's two failure causes are
-// unrelated in scope -- ChunkLimitReached is this one pool's own configured
-// MAX_CHUNKS ceiling, while OutOfMemory is kernel/mm/page.tkb's single
-// GLOBAL physical page allocator having nothing left for ANY subsystem.
-// Callers that only ever saw a bare `bool` (growable_pool_
-// ensure, before this issue) could not tell "this pool's own bound" from
-// "the whole kernel is out of memory," which is exactly the kind of
-// resource-exhaustion ambiguity issue #295 was filed to remove.
-must_use variant GrowablePoolGrowResult { ChunkLimitReached; OutOfMemory; Grown; }
+// Callers check the configured chunk ceiling before entering the page
+// allocation helper. Its only failure is physical backing-page exhaustion;
+// externally-indexed callers still distinguish these two resource limits.
+must_use variant GrowablePoolGrowResult { OutOfMemory; Grown; }
 
 // Starts genuinely empty: no chunk is activated and no backing page has
 // been requested yet (contrast kernel/lib/slotmap.tkb's slotmap_init,
 // which eagerly links the whole N-sized chain via freelist_core_init).
-fn growable_pool_init(T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N)) {
-    let core: &mut FreelistCore(N) = &pool.core;
-    core.free_head = N;
-    core.next_generation = 1;
+fn growable_pool_init(T: type, pool: borrow uninit &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N))
+        ensures init_links(pool.core.next_free, pool.core.free_head)
+        ensures init(pool.core.next_generation)
+        ensures init(pool.occupant_generation)
+        ensures init(pool.chunk_data_base)
+        ensures init(pool.chunk_page_index)
+        ensures init(pool.double_remove_count)
+        ensures init(pool.active_chunks) {
+    pool.core.free_head = N;
+    pool.core.next_generation = 1;
     // GitHub issue #217 (2026-08-15): checked indexing directly through
     // pool -- no more manual `let`/raw-pointer-arithmetic workaround
     // (issue #15) needed.
@@ -235,28 +236,26 @@ fn growable_pool_init(T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX_C
 // primitive; freelist_core_insert/_remove themselves are called completely
 // unmodified everywhere else in this file.
 fn growable_pool_activate_chunk(
-        T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N), chunk: usize) !{unsafe} {
-    let core: &mut FreelistCore(N) = &pool.core;
+        T: type, pool: borrow uninit &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
+        chunk: usize @ k) where k < MAX_CHUNKS
+        requires init_links(pool.core.next_free, pool.core.free_head)
+        ensures init_links(pool.core.next_free, pool.core.free_head) {
     let base_index: usize = chunk * SLOTS_PER_CHUNK;
-    // GitHub issue #217: core.next_free[slot] is now a real checked index,
-    // but `slot < N` depends on `N == SLOTS_PER_CHUNK * MAX_CHUNKS` and
-    // `chunk < MAX_CHUNKS` -- both caller-maintained-by-hand preconditions
-    // (see this file's own "Current limitations" section), not something
-    // provable inside this function from `chunk: usize` alone. Same class
-    // of cross-function-boundary gap as issue #216's owner.index; unsafe
-    // makes this genuinely unchecked slot arithmetic grep-visible instead
-    // of silently invisible to the checker the way the old *usize-decay
-    // pointer arithmetic left it.
+    // The checked input bound and counted-loop range prove each index after
+    // const-generic specialization, including arithmetic non-overflow.
     for offset: usize in 0..<SLOTS_PER_CHUNK {
         let slot: usize = base_index + offset;
-        unsafe { core.next_free[slot] = core.free_head };
-        core.free_head = slot;
+        pool.core.next_free[slot] = pool.core.free_head;
+        pool.core.free_head = slot;
     }
 }
 
-fn growable_pool_finish_insert(T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
+fn growable_pool_finish_insert(T: type, pool: borrow uninit &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
                                owner: FreelistOwner[allocation])
-        -> GrowablePoolInsertResult {
+        -> GrowablePoolInsertResult
+        requires init(pool.occupant_generation)
+        requires init_links(pool.core.next_free, pool.core.free_head)
+        ensures init_links(pool.core.next_free, pool.core.free_head) {
     let index: usize = freelist_owner_index(owner);
     if (index < N) {  // GitHub issue #217: checked indexing
         pool.occupant_generation[index] = freelist_owner_generation(owner);
@@ -269,11 +268,15 @@ fn growable_pool_finish_insert(T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHU
 // free chain (see growable_pool_activate_chunk for that, called only by
 // the self-directed-allocation mode) -- growable_pool_ensure never uses
 // the free chain at all, so linking new slots into it here would be
-// wasted work for that mode. Returns false if this pool's own MAX_CHUNKS
-// ceiling is reached or page.tkb is out of memory.
+// wasted work for that mode. The caller supplies a statically bounded chunk;
+// OutOfMemory means that the backing-page provider is exhausted.
 fn growable_pool_grow_one_chunk(
-        T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N))
-        -> GrowablePoolGrowResult {
+        T: type, pool: borrow uninit &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
+        chunk: usize @ k) -> GrowablePoolGrowResult where k < MAX_CHUNKS
+        requires init(pool.chunk_data_base)
+        requires init(pool.chunk_page_index)
+        requires init_links(pool.core.next_free, pool.core.free_head)
+        ensures init_links(pool.core.next_free, pool.core.free_head) {
     // GitHub issue #373: a chunk is one page, so a payload larger than a
     // page cannot be handed out. Checked rather than documented, and
     // checked HERE so it is per instantiation: the violating T is named
@@ -287,9 +290,6 @@ fn growable_pool_grow_one_chunk(
     // this stand-in, which mirrors it deliberately (#366).
     static_assert(sizeof(T) * SLOTS_PER_CHUNK <= PAGE_SIZE,
                   "GrowablePool(T, SLOTS_PER_CHUNK, ...): one chunk's payload does not fit in a page");
-    if (pool.active_chunks >= MAX_CHUNKS) {
-        return GrowablePoolGrowResult::ChunkLimitReached;
-    }
     match page_alloc(PageOwnerTag::PoolChunk) {
         PageAllocResult::OutOfMemory => {
             return GrowablePoolGrowResult::OutOfMemory;
@@ -303,19 +303,23 @@ fn growable_pool_grow_one_chunk(
             let base: usize = page_physical_address(page_owner);
             let page_index: usize =
                 page_owner_transfer_index(page_owner) as usize;
-            let chunk: usize = pool.active_chunks;
-            if (chunk < MAX_CHUNKS) {  // GitHub issue #217: checked indexing
-                pool.chunk_data_base[chunk] = base;
-                pool.chunk_page_index[chunk] = page_index;
-            }
+            pool.chunk_data_base[chunk] = base;
+            pool.chunk_page_index[chunk] = page_index;
             pool.active_chunks = chunk + 1;
             return GrowablePoolGrowResult::Grown;
         }
     }
 }
 
-fn growable_pool_insert(T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N))
-        -> GrowablePoolInsertResult {
+fn growable_pool_insert(T: type, pool: borrow uninit &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N))
+        -> GrowablePoolInsertResult
+        requires init(pool.core.next_generation)
+        requires init(pool.occupant_generation)
+        requires init(pool.active_chunks)
+        requires init(pool.chunk_data_base)
+        requires init(pool.chunk_page_index)
+        requires init_links(pool.core.next_free, pool.core.free_head)
+        ensures init_links(pool.core.next_free, pool.core.free_head) {
     match freelist_core_insert(&pool.core) {
         FreelistPopResult::Popped(owner) => {
             return growable_pool_finish_insert(pool, owner);
@@ -326,10 +330,8 @@ fn growable_pool_insert(T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX
         }
         FreelistPopResult::Empty => {
             let chunk: usize = pool.active_chunks;
-            match growable_pool_grow_one_chunk(pool) {
-                GrowablePoolGrowResult::ChunkLimitReached => {
-                    return GrowablePoolInsertResult::OutOfMemory;
-                }
+            if (chunk >= MAX_CHUNKS) { return GrowablePoolInsertResult::OutOfMemory; }
+            match growable_pool_grow_one_chunk(pool, chunk) {
                 GrowablePoolGrowResult::OutOfMemory => {
                     return GrowablePoolInsertResult::OutOfMemory;
                 }
@@ -376,14 +378,18 @@ must_use variant GrowablePoolEnsureResult {
     Ok;
 }
 
-fn growable_pool_ensure(T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
-                        index: usize) -> GrowablePoolEnsureResult {
+fn growable_pool_ensure(T: type, pool: borrow uninit &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
+                        index: usize) -> GrowablePoolEnsureResult
+        requires init(pool.active_chunks)
+        requires init(pool.chunk_data_base)
+        requires init(pool.chunk_page_index)
+        requires init_links(pool.core.next_free, pool.core.free_head)
+        ensures init_links(pool.core.next_free, pool.core.free_head) {
     if (index >= N) { return GrowablePoolEnsureResult::IndexOutOfRange; }
     while (index >= pool.active_chunks * SLOTS_PER_CHUNK) {
-        match growable_pool_grow_one_chunk(pool) {
-            GrowablePoolGrowResult::ChunkLimitReached => {
-                return GrowablePoolEnsureResult::ChunkLimitReached;
-            }
+        let chunk: usize = pool.active_chunks;
+        if (chunk >= MAX_CHUNKS) { return GrowablePoolEnsureResult::ChunkLimitReached; }
+        match growable_pool_grow_one_chunk(pool, chunk) {
             GrowablePoolGrowResult::OutOfMemory => {
                 return GrowablePoolEnsureResult::OutOfMemory;
             }
@@ -397,8 +403,12 @@ fn growable_pool_ensure(T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX
 // kernel/lib/slotmap.tkb's slotmap_remove for why this counts the event at
 // its source instead of silently corrupting the chain a second time. Pages
 // are never returned to page.tkb (see this file's header).
-fn growable_pool_remove(T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
-                        owner: sink FreelistOwner[allocation]) {
+fn growable_pool_remove(T: type, pool: borrow uninit &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
+                        owner: sink FreelistOwner[allocation])
+        requires init(pool.occupant_generation)
+        requires init(pool.double_remove_count)
+        requires init_links(pool.core.next_free, pool.core.free_head)
+        ensures init_links(pool.core.next_free, pool.core.free_head) {
     let index: usize = freelist_owner_index(owner);
     // GitHub issue #217/#296: index is narrowed to {0..<N} for the rest of
     // this function by the early-return guard just below (issue #296
@@ -418,19 +428,22 @@ fn growable_pool_remove(T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX
 }
 
 fn growable_pool_double_remove_count(
-        T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N)) -> usize {
+        T: type, pool: borrow uninit &GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N)) -> usize
+        requires init(pool.double_remove_count) {
     return pool.double_remove_count;
 }
 
 fn growable_pool_active_chunks(
-        T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N)) -> usize {
+        T: type, pool: borrow uninit &GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N)) -> usize
+        requires init(pool.active_chunks) {
     return pool.active_chunks;
 }
 
 // Same capability kernel/lib/slotmap.tkb's slotmap_matches provides: does
 // `index` currently hold `generation`? No ownership proof required.
-fn growable_pool_matches(T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
-                         index: usize, generation: usize) -> bool {
+fn growable_pool_matches(T: type, pool: borrow uninit &GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
+                         index: usize, generation: usize) -> bool
+        requires init(pool.occupant_generation) {
     if (index >= N || generation == 0) { return false; }
     return pool.occupant_generation[index] == generation;  // GitHub issue #217/#296
 }
@@ -444,8 +457,9 @@ fn growable_pool_matches(T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MA
 // chunk 0's base is the documented fallback for this provably-
 // unreachable branch (mirrors kernel/mm/page.tkb's page_bytes's own
 // accepted-fallback style).
-fn growable_pool_ptr_for_index(T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
-                               index: usize) -> *T !{unsafe} {
+fn growable_pool_ptr_for_index(T: type, pool: borrow uninit &GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
+                               index: usize) -> *T !{unsafe}
+        requires init(pool.chunk_data_base) {
     let chunk: usize = index / SLOTS_PER_CHUNK;
     let local: usize = index % SLOTS_PER_CHUNK;
     // GitHub issue #217: checked indexing (chunk narrowed to {0..<MAX_CHUNKS}).
@@ -461,8 +475,9 @@ fn growable_pool_ptr_for_index(T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHU
 
 // Self-directed-allocation mode: `owner` must have come from this pool's
 // own growable_pool_insert.
-fn growable_pool_ref(T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
-                     owner: borrow FreelistOwner[allocation]) -> *T {
+fn growable_pool_ref(T: type, pool: borrow uninit &GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
+                     owner: borrow FreelistOwner[allocation]) -> *T
+        requires init(pool.chunk_data_base) {
     return growable_pool_ptr_for_index(pool, freelist_owner_index(owner));
 }
 
@@ -472,8 +487,9 @@ fn growable_pool_ref(T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX_CH
 // this is the caller's responsibility, same as kernel/mm/page.tkb's own
 // raw-physical-address entry points (e.g. page_transferred_release_physical)
 // trust their caller rather than re-deriving a proof.
-fn growable_pool_ref_at(T: type, pool: &mut GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
-                        index: usize) -> *T {
+fn growable_pool_ref_at(T: type, pool: borrow uninit &GrowablePool(T, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
+                        index: usize) -> *T
+        requires init(pool.chunk_data_base) {
     return growable_pool_ptr_for_index(pool, index);
 }
 

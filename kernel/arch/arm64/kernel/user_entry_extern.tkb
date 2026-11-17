@@ -12,7 +12,17 @@ extern fn el0_context_resume(frame: sink FrameRef[process, level]) !{noreturn};
 // run saves what the eret would lose, enters el0_context_resume, and returns
 // here from el1_resume_probe_landing, the PC the frame names, with what the
 // landing saw in `results`.
-extern fn el1_resume_probe_run(frame_address: usize, results: *usize);
+extern fn el1_resume_probe_run(frame_address: usize, results: borrow *usize);
+// Audited output boundary: el1_resume_probe_landing stores five register
+// pairs at byte offsets 0, 16, 32, 48 and 64 before restoring the caller.
+fn el1_resume_probe_checked(frame_address: usize,
+        results: borrow uninit [usize; 10..]) !{unsafe}
+        ensures init(results[0..<10]) {
+    let raw: *usize = unsafe { results as *usize };
+    el1_resume_probe_run(frame_address, raw);
+    unsafe { assume_init(results[0..<10]); }
+}
+
 extern fn el1_resume_probe_landing_address() -> usize;
 // GitHub issue #638 stage 8: the spin a real EL1 preemption interrupts; 1 when
 // its registers survived.
@@ -61,14 +71,20 @@ extern fn crash_snapshot_read_sp_el0() -> usize;
 extern fn kernel_stack_read_sp_el1() -> usize;
 extern fn crash_snapshot_read_tpidr_el0() -> usize;
 extern fn crash_snapshot_read_ttbr0_el1() -> usize;
-extern fn crash_snapshot_copy_saved_frame(frame: borrow FrameRef[process, level], output: *usize);
+extern fn crash_snapshot_copy_saved_frame(frame: borrow FrameRef[process, level], output: borrow *usize);
 
 // GitHub issue #992: the same two for a frame whose level was read at entry.
-fn crash_snapshot_copy_leveled_frame(frame: sink LeveledFrame[process], output: *usize) {
+// Audited output boundary: crash_snapshot_copy_saved_frame writes four
+// usize values at byte offsets 0, 8, 16 and 24 on its only return path.
+fn crash_snapshot_copy_leveled_frame(frame: sink LeveledFrame[process],
+        output: borrow uninit [usize; 4..]) !{unsafe}
+        ensures init(output[0..<4]) {
+    let raw: *usize = unsafe { output as *usize };
     match frame {
-        LeveledFrame::El0(user_frame) => { crash_snapshot_copy_saved_frame(user_frame, output); }
-        LeveledFrame::El1(kernel_frame) => { crash_snapshot_copy_saved_frame(kernel_frame, output); }
+        LeveledFrame::El0(user_frame) => { crash_snapshot_copy_saved_frame(user_frame, raw); }
+        LeveledFrame::El1(kernel_frame) => { crash_snapshot_copy_saved_frame(kernel_frame, raw); }
     }
+    unsafe { assume_init(output[0..<4]); }
 }
 
 fn kernel_current_sync_fail_stop_leveled(frame: sink LeveledFrame[process]) {

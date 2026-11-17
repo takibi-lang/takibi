@@ -1,3 +1,7 @@
+use "kernel/arch/arm64/kernel/el0_getcpu.tkb";
+use "kernel/arch/arm64/kernel/el0_clock.tkb";
+use "kernel/arch/arm64/kernel/el0_affinity.tkb";
+
 /* EL0 signal-frame and anonymous-memory boundary fixture. Each destructive
  * signal case runs in a child; the parent checks the exact wait4 status.
  * No writable globals: all state belongs to the calling process's stack.
@@ -6,7 +10,7 @@ extern fn signal_boundary_run(mode: usize) -> usize;
 extern symbol signal_boundary_handler;
 extern symbol signal_boundary_restorer;
 extern fn signal_interrupt_svc(number: usize, a0: usize, a1: usize, a2: usize,
-                               a3: usize, ran: usize) -> usize;
+                               a3: usize, ran: borrow *usize) -> usize;
 extern symbol signal_interrupt_handler;
 extern fn signal_spin_run() -> usize;
 extern fn signal_spin_stray(pid: usize, signum: usize) -> usize;
@@ -15,11 +19,12 @@ extern fn signal_spin_forever(set: usize, bad_sp: usize) -> usize;
 extern symbol signal_exit_handler;
 extern symbol signal_terminal_handler;
 
-private fn boundary_fail(line: borrow []const u8) !{unsafe} {
+private fn boundary_fail(line: borrow []const u8) !{unsafe, noreturn} {
     // Raw ABI input only: these syscalls read the readonly bytes.
     // The bridge exposes no writable slice or checked mutation.
     svc5(64, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0);
     svc5(93, 1, 0, 0, 0, 0);
+    while (true) { }
 }
 
 private fn boundary_line(line: borrow []const u8) !{unsafe} {
@@ -145,9 +150,9 @@ private fn interrupt_reap(child: usize) -> bool !{unsafe} {
 }
 
 private fn interrupt_seconds() -> usize !{unsafe} {
-    let mut now: [usize; 2];
-    svc5(113, 1, now as *usize as usize, 0, 0, 0);
-    return now[0];
+    let mut now: [u64; 2];
+    interrupt_clock(now as []u64);
+    return now[0] as usize;
 }
 
 // GitHub issue #726: a caught signal ends a sleeping syscall, as on Linux.
@@ -183,8 +188,8 @@ private fn boundary_interrupts() !{unsafe} {
     left[1] = 0;
     let started: usize = interrupt_seconds();
     let sender: usize = interrupt_sender(me, 12, 100, 0);
-    let slept: usize = signal_interrupt_svc(101, request as *usize as usize,
-        left as *usize as usize, 0, 0, ran as *usize as usize);
+    let slept: usize = interrupt_svc_output(101, request as *usize as usize,
+        left as *usize as usize, 0, 0, ran as []usize);
     let elapsed: usize = interrupt_seconds() - started;
     if (slept != INTERRUPT_EINTR || ran[0] != 1 || elapsed > 2 ||
         left[0] > 3 || (left[0] == 0 && left[1] == 0) ||
@@ -201,24 +206,24 @@ private fn boundary_interrupts() !{unsafe} {
     left[0] = 99;
     left[1] = 0;
     let relative_sender: usize = interrupt_sender(me, 12, 100, 0);
-    let relative: usize = signal_interrupt_svc(115, 1, 0,
+    let relative: usize = interrupt_svc_output(115, 1, 0,
         request as *usize as usize, left as *usize as usize,
-        ran as *usize as usize);
+        ran as []usize);
     if (relative != INTERRUPT_EINTR || ran[0] != 1 || left[0] > 3 ||
         (left[0] == 0 && left[1] == 0) ||
         interrupt_reap(relative_sender) == false) {
         boundary_fail(bs"boundary: FAIL clock_nanosleep not interrupted\n");
         return;
     }
-    let mut deadline: [usize; 2];
-    svc5(113, 1, deadline as *usize as usize, 0, 0, 0);
+    let mut deadline: [u64; 2];
+    interrupt_clock(deadline as []u64);
     deadline[0] = deadline[0] + 4;
     left[0] = 99;
     left[1] = 7;
     let absolute_sender: usize = interrupt_sender(me, 12, 100, 0);
-    let absolute: usize = signal_interrupt_svc(115, 1, 1,
-        deadline as *usize as usize, left as *usize as usize,
-        ran as *usize as usize);
+    let absolute: usize = interrupt_svc_output(115, 1, 1,
+        deadline as *u64 as usize, left as *usize as usize,
+        ran as []usize);
     if (absolute != INTERRUPT_EINTR || ran[0] != 1 || left[0] != 99 ||
         left[1] != 7 || interrupt_reap(absolute_sender) == false) {
         boundary_fail(bs"boundary: FAIL absolute clock_nanosleep not interrupted\n");
@@ -230,8 +235,8 @@ private fn boundary_interrupts() !{unsafe} {
     let waited: usize = interrupt_sender(me, 10, 100, 300);
     let mut status: [u8; 4];
     for index: usize in 0..<4 { status[index] = 0xFF; }
-    let first: usize = signal_interrupt_svc(260, waited, status as *u8 as usize,
-        0, 0, ran as *usize as usize);
+    let first: usize = interrupt_svc_output(260, waited, status as *u8 as usize,
+        0, 0, ran as []usize);
     if (first != INTERRUPT_EINTR || ran[0] != 1 ||
         interrupt_reap(waited) == false) {
         boundary_fail(bs"boundary: FAIL wait4 not interrupted\n");
@@ -242,8 +247,8 @@ private fn boundary_interrupts() !{unsafe} {
     // wait4 under SA_RESTART: the handler runs, then the wait goes on.
     let restarted: usize = interrupt_sender(me, 12, 100, 300);
     for index: usize in 0..<4 { status[index] = 0xFF; }
-    let reaped: usize = signal_interrupt_svc(260, restarted, status as *u8 as usize,
-        0, 0, ran as *usize as usize);
+    let reaped: usize = interrupt_svc_output(260, restarted, status as *u8 as usize,
+        0, 0, ran as []usize);
     if (reaped != restarted || ran[0] != 1 || status[0] != 0) {
         boundary_fail(bs"boundary: FAIL wait4 not restarted\n");
         return;
@@ -255,8 +260,8 @@ private fn boundary_interrupts() !{unsafe} {
     let mut wait_set: [usize; 1];
     wait_set[0] = 1;
     let poker: usize = interrupt_sender(me, 12, 100, 0);
-    let waited_signal: usize = signal_interrupt_svc(137, wait_set as *usize as usize,
-        0, 0, 8, ran as *usize as usize);
+    let waited_signal: usize = interrupt_svc_output(137, wait_set as *usize as usize,
+        0, 0, 8, ran as []usize);
     if (waited_signal != INTERRUPT_EINTR || ran[0] != 1 ||
         interrupt_reap(poker) == false) {
         boundary_fail(bs"boundary: FAIL rt_sigtimedwait not interrupted\n");
@@ -269,8 +274,8 @@ private fn boundary_interrupts() !{unsafe} {
     // UART line instead, which this fixture cannot exclude.
     let poll_started: usize = interrupt_seconds();
     let poller: usize = interrupt_sender(me, 12, 100, 0);
-    let polled: usize = signal_interrupt_svc(73, 0, 0, request as *usize as usize,
-        0, ran as *usize as usize);
+    let polled: usize = interrupt_svc_output(73, 0, 0, request as *usize as usize,
+        0, ran as []usize);
     let poll_elapsed: usize = interrupt_seconds() - poll_started;
     if (polled != INTERRUPT_EINTR || ran[0] != 1 || poll_elapsed > 2 ||
         interrupt_reap(poller) == false) {
@@ -303,9 +308,10 @@ private fn spin_pin(cpu: {0..<2 as usize}) -> bool !{unsafe} {
     for index: usize in 0..<8 { mask[index] = 0; }
     mask[0] = (1 << cpu) as u8;
     if (svc5(122, 0, 8, mask as *u8 as usize, 0, 0) != 0) { return false; }
-    let mut placed: [u8; 4];
-    return svc5(168, placed as *u8 as usize, 0, 0, 0, 0) == 0 &&
-           placed[0] == cpu as u8;
+    match el0_getcpu() {
+        El0CpuResult::Ready(actual) => { return actual == cpu; }
+        El0CpuResult::Failed(code) => { return false; }
+    }
 }
 
 // A child on CPU 0 that sleeps 100 ms, sends `signum` to `target` (none
@@ -345,9 +351,11 @@ private fn boundary_spin() !{unsafe} {
         return;
     }
     let mut everywhere: [u8; 8];
-    if (svc5(123, 0, 8, everywhere as *u8 as usize, 0, 0) != 8) {
-        boundary_fail(bs"boundary: FAIL spin getaffinity\n");
-        return;
+    match el0_getaffinity(0, everywhere as []u8) {
+        El0AffinityResult::Ready => {}
+        El0AffinityResult::Failed(code) => {
+            boundary_fail(bs"boundary: FAIL spin getaffinity\n");
+        }
     }
     let me: usize = svc5(172, 0, 0, 0, 0, 0);
     // GitHub issue #950: the handler, run at a syscall return outside the
@@ -420,9 +428,11 @@ private fn spin_end_status(child: usize) -> usize !{unsafe} {
 // that exits 3 instead, and the case is tried again.
 private fn boundary_spin_end() !{unsafe} {
     let mut everywhere: [u8; 8];
-    if (svc5(123, 0, 8, everywhere as *u8 as usize, 0, 0) != 8) {
-        boundary_fail(bs"boundary: FAIL spin-end getaffinity\n");
-        return;
+    match el0_getaffinity(0, everywhere as []u8) {
+        El0AffinityResult::Ready => {}
+        El0AffinityResult::Failed(code) => {
+            boundary_fail(bs"boundary: FAIL spin-end getaffinity\n");
+        }
     }
     let mut term_set: [usize; 1];
     term_set[0] = 1 << 14;
@@ -602,8 +612,8 @@ fn signal_terminal_probe() !{unsafe} {
 
     // Without SA_RESTART: EINTR, nothing read.
     let interrupter: usize = interrupt_sender(me, 10, 100, 0);
-    let first: usize = signal_interrupt_svc(63, 0, byte as *u8 as usize, 1, 0,
-        ran as *usize as usize);
+    let first: usize = interrupt_svc_output(63, 0, byte as *u8 as usize, 1, 0,
+        ran as []usize);
     if (first != INTERRUPT_EINTR || ran[0] != 1 ||
         interrupt_reap(interrupter) == false) {
         boundary_fail(bs"signal-terminal: FAIL read not interrupted\n");
@@ -627,8 +637,8 @@ fn signal_terminal_probe() !{unsafe} {
         boundary_fail(bs"signal-terminal: FAIL fork\n");
         return;
     }
-    let second: usize = signal_interrupt_svc(63, 0, byte as *u8 as usize, 1, 0,
-        ran as *usize as usize);
+    let second: usize = interrupt_svc_output(63, 0, byte as *u8 as usize, 1, 0,
+        ran as []usize);
     if (second != 1 || byte[0] != 0x0A || ran[0] != 1 ||
         interrupt_reap(restarter) == false) {
         boundary_fail(bs"signal-terminal: FAIL read not restarted\n");
@@ -641,4 +651,24 @@ fn signal_terminal_probe() !{unsafe} {
 fn signal_terminal_skip() !{unsafe} {
     boundary_line(bs"signal-terminal: rows not run on the board: a stray byte on its UART line would end the read\n");
     svc5(93, 0, 0, 0, 0, 0);
+}
+
+private fn interrupt_clock(output: borrow uninit [u64; 2..])
+        ensures init(output[0..<2]) {
+    match el0_clock_gettime(1, output) {
+        El0ClockResult::Ready => {}
+        El0ClockResult::Failed(code) => { boundary_fail(bs"boundary: FAIL clock_gettime\n"); }
+    }
+}
+
+// Audited existing assembly: signal_interrupt_svc saves the output address,
+// always stores x21 to it after svc, and restores its stack before returning.
+// The scalar result is unrelated to whether the handler-count word was stored.
+private fn interrupt_svc_output(number: usize, a0: usize, a1: usize, a2: usize,
+        a3: usize, ran: borrow uninit [usize; 1..]) -> usize !{unsafe}
+        ensures init(ran[0..<1]) {
+    let raw: *usize = unsafe { ran as *usize };
+    let result: usize = signal_interrupt_svc(number, a0, a1, a2, a3, raw);
+    unsafe { assume_init(ran[0..<1]); }
+    return result;
 }

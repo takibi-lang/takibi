@@ -7379,7 +7379,7 @@ fn entry() !{locks, unsafe} { run(safe); run(conflict); }|});
     (expect_ok "fn f() { let mut buf: [u8; 8]; }");
 
   Alcotest.test_case "array write via pointer arith type-checks" `Quick
-    (expect_ok "fn f() { let mut buf: [u8; 8]; *(buf + 0) = 'A'; }");
+    (expect_ok "fn f() { let mut buf: [u8; 8] = {0, 0, 0, 0, 0, 0, 0, 0}; *(buf + 0) = 'A'; }");
 
   Alcotest.test_case "pointer minus isize returns a pointer" `Quick
     (expect_ok "fn f(p: *u8, offset: isize) *u8 { return p - offset; }");
@@ -7403,11 +7403,11 @@ fn entry() !{locks, unsafe} { run(safe); run(conflict); }|});
        "fn distance(a: *u8, b: *u32) isize { return b - a; }");
 
   Alcotest.test_case "array read via indexing type-checks" `Quick
-    (expect_ok "fn putc(c: u8) {} fn f() { let mut buf: [u8; 4]; putc(buf[0]); }");
+    (expect_ok "fn putc(c: u8) {} fn f() { let mut buf: [u8; 4] = {0, 0, 0, 0}; putc(buf[0]); }");
 
   Alcotest.test_case "array decays to *u8 when passed to pointer param" `Quick
     (expect_ok "fn fill(p: *u8, n: i32) {}
-                fn f() { let mut buf: [u8; 4]; fill(buf, 4); }");
+                fn f() { let mut buf: [u8; 4] = {0, 0, 0, 0}; fill(buf, 4); }");
 
   Alcotest.test_case "array write arr[i]=v type-checks" `Quick
     (expect_ok "fn f(arr: *u8) { arr[0] = 'A'; }");
@@ -8485,7 +8485,7 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
   (* -- Compile-time bounds check for constant indices --------------- *)
 
   Alcotest.test_case "constant in-bounds read type-checks" `Quick
-    (expect_ok "fn f() i32 { let mut arr: [i32; 4]; return arr[3]; }");
+    (expect_ok "fn f() i32 { let mut arr: [i32; 4] = {0, 0, 0, 0}; return arr[3]; }");
 
   Alcotest.test_case "constant in-bounds write type-checks" `Quick
     (expect_ok "fn f() { let mut arr: [i32; 4]; arr[3] = 1; }");
@@ -8507,11 +8507,11 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
        "fn f() i32 { let mut arr: [i32; 4]; return arr[100]; }");
 
   Alcotest.test_case "dynamic index on array still type-checks (usize)" `Quick
-    (expect_ok "fn f(i: usize) i32 { let mut arr: [i32; 4]; return arr[i]; }");
+    (expect_ok "fn f(i: usize) i32 { let mut arr: [i32; 4] = {0, 0, 0, 0}; return arr[i]; }");
 
   Alcotest.test_case "dynamic i32 index on array is a compile error (must be usize)" `Quick
     (expect_type_error "must be usize"
-       "fn f(i: i32) i32 { let mut arr: [i32; 4]; return arr[i]; }");
+       "fn f(i: i32) i32 { let mut arr: [i32; 4] = {0, 0, 0, 0}; return arr[i]; }");
 
   Alcotest.test_case "dynamic i32 array assignment index is a compile error" `Quick
     (expect_type_error "must be usize"
@@ -8565,7 +8565,7 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
   (* -- Bounds check for size-1 arrays ------------------------------- *)
 
   Alcotest.test_case "size-1 array: index 0 is in-bounds" `Quick
-    (expect_ok "fn f() i32 { let mut arr: [i32; 1]; return arr[0]; }");
+    (expect_ok "fn f() i32 { let mut arr: [i32; 1] = {0}; return arr[0]; }");
 
   Alcotest.test_case "size-1 array: index 1 is a compile error" `Quick
     (expect_type_error "out of bounds"
@@ -14126,9 +14126,189 @@ linear struct Owner746b[page: usize] {
         extern fn stop_frame706(frame: borrow StopFrame706[0]) !{noreturn};
         fn bad706(frame: borrow StopFrame706[1]) { stop_frame706(frame); }");
 
-  Alcotest.test_case "Exception: Takibi body cannot claim noreturn" `Quick
-    (expect_type_error "restricted to trusted extern function declarations"
+  Alcotest.test_case "Short-read contract cannot justify a whole-buffer comparison" `Quick
+    (expect_type_error "initialized"
+      "fn read_prefix(b: borrow uninit [u8; 64..]) -> usize ensures init(b[0..<result]) { b[0] = 1; return 1; }
+       fn f() -> usize { let mut b: [u8; 64]; let n = read_prefix(b as []u8); let mut sum: usize = 0; for i: usize in 0..<64 { sum = sum + (b[i] as usize); } return sum; }");
+  Alcotest.test_case "Short-read comparison stays inside the returned prefix" `Quick
+    (expect_codegen_ok
+      "fn read_prefix(b: borrow uninit [u8; 64..]) -> usize ensures init(b[0..<result]) { b[0] = 1; return 1; }
+       fn f() -> usize { let mut b: [u8; 64]; let n = read_prefix(b as []u8); let mut sum: usize = 0; for i: usize in 0..<64 { if (i < n) { sum = sum + (b[i] as usize); } } return sum; }");
+
+  Alcotest.test_case "Refined count and minimum slice length prove prefix writes" `Quick
+    (expect_trap_sites 0
+      "fn fill(p: borrow uninit [u8; 5..], n: {0..<6 as usize}) ensures init(p[0..<n]) { for i: usize in 0..<n { p[i] = 1; } } fn f() -> u8 { let mut a: [u8; 5]; fill(a as []u8, 5); return a[4]; }");
+  Alcotest.test_case "Refined prefix write does not initialize its suffix" `Quick
+    (expect_type_error "not shown initialized"
+      "fn fill(p: borrow uninit [u8; 5..], n: {0..<6 as usize}) ensures init(p[0..<n]) { for i: usize in 0..<n { p[i] = 1; } } fn f() -> u8 { let mut a: [u8; 5]; fill(a as []u8, 4); return a[4]; }");
+
+  Alcotest.test_case "Global byte array copy retains its exact source length" `Quick
+    (expect_trap_sites 0
+      "let mut source: [u8; 4]; fn f() -> u8 { let mut dst: [u8; 4]; slice_copy(dst as []u8, source as []const u8); return dst[3]; }");
+  Alcotest.test_case "Global byte array copy does not initialize a longer destination" `Quick
+    (expect_type_error "not shown initialized"
+      "let mut source: [u8; 4]; fn f() -> u8 { let mut dst: [u8; 5]; slice_copy(dst as []u8, source as []const u8); return dst[4]; }");
+
+  Alcotest.test_case "Partial-record output contracts retain unwritten fields" `Quick
+    (expect_codegen_ok
+      "struct Inner { links: [usize; 4]; head: usize; } struct Pool { core: Inner; flags: [u8; 4]; }
+       fn init(p: borrow uninit &mut Pool) ensures init(p.core.head) ensures init(p.flags) { p.core.head = 4; for i: usize in 0..<4 { p.flags[i] = 0; } }
+       fn f() -> usize { let mut p: Pool; init(&p); return p.core.head + (p.flags[3] as usize); }");
+  Alcotest.test_case "Partial-record contracts do not initialize omitted fields" `Quick
+    (expect_type_error "uninitialized"
+      "struct P { links: [usize; 4]; head: usize; } fn init(p: borrow uninit &mut P) ensures init(p.head) { p.head = 4; } fn f() -> usize { let mut p: P; init(&p); return p.links[0]; }");
+  Alcotest.test_case "Partial-record field postconditions check their stores" `Quick
+    (expect_type_error "initialized"
+      "struct P { head: usize; } fn init(p: borrow uninit &mut P) ensures init(p.head) { }");
+  Alcotest.test_case "Partial-record field contracts reject unknown fields" `Quick
+    (expect_type_error "inline tracked field"
+      "struct P { head: usize; } fn init(p: borrow uninit &mut P) ensures init(p.missing) { p.head = 0; }");
+  Alcotest.test_case "Partial-record field ranges reject scalar fields" `Quick
+    (expect_type_error "inline fixed array"
+      "struct P { head: usize; } fn init(p: borrow uninit &mut P) ensures init(p.head[0..<1]) { p.head = 0; }");
+  Alcotest.test_case "Partial-record field ranges do not initialize slice descriptors" `Quick
+    (expect_type_error "inline fixed array"
+      "struct P { bytes: []u8; } fn init(p: borrow uninit &mut P) ensures init(p.bytes[0..<1]) { }");
+
+  Alcotest.test_case "Partial-record output cannot become an ordinary whole borrow" `Quick
+    (expect_type_error "uninitialized"
+      "struct P { links: [usize; 4]; head: usize; } fn init(p: borrow uninit &mut P) ensures init(p.head) { p.head = 4; } fn read(p: &mut P) -> usize { return p.head; } fn f() -> usize { let mut p: P; init(&p); return read(&p); }");
+  Alcotest.test_case "Nested-record byte initialization still requires padding" `Quick
+    (expect_type_error "initialized"
+      "struct I { a: u8; b: usize; } struct P { inner: I; } fn init(p: borrow uninit &mut P) ensures init(p.inner) { p.inner.a = 1; p.inner.b = 2; }");
+  Alcotest.test_case "Field-range initialization crosses API boundaries" `Quick
+    (expect_codegen_ok
+      "struct P { links: [usize; 4]; } fn put(p: borrow uninit &mut P, i: {0..<4 as usize}) ensures init(p.links[i..<i+1]) { p.links[i] = 3; } fn get(p: borrow uninit &mut P, i: {0..<4 as usize}) -> usize requires init(p.links[i..<i+1]) { return p.links[i]; } fn f() -> usize { let mut p: P; put(&p, 2); return get(&p, 2); }");
+  Alcotest.test_case "Field-range initialization does not transfer to another index" `Quick
+    (expect_type_error "initialized"
+      "struct P { links: [usize; 4]; } fn put(p: borrow uninit &mut P, i: {0..<4 as usize}) ensures init(p.links[i..<i+1]) { p.links[i] = 3; } fn get(p: borrow uninit &mut P, i: {0..<4 as usize}) -> usize requires init(p.links[i..<i+1]) { return p.links[i]; } fn f() -> usize { let mut p: P; put(&p, 2); return get(&p, 1); }");
+
+  Alcotest.test_case "Generic field inference sees through an output borrow" `Quick
+    (expect_codegen_ok
+      "generic struct Inner(N: usize) { bytes: [u8; N]; }
+       generic struct Outer(N: usize) { inner: Inner(N); }
+       fn fill(x: borrow uninit &mut Inner(N)) { for i: usize in 0..<N { x.bytes[i] = 1; } }
+       fn init(x: borrow uninit &mut Outer(N)) { fill(&x.inner); }
+       fn f() -> u8 { let mut x: Outer(4); init(&x); return x.inner.bytes[3]; }");
+
+  Alcotest.test_case "Const-generic where bounds specialize at each call" `Quick
+    (expect_codegen_ok
+      "generic struct Limit(N: usize) { bytes: [u8; N]; }
+       fn below(p: &mut Limit(N), i: usize @ k) -> usize where k < N { return i; }
+       fn f() -> usize { let mut a: Limit(2); zero_fill(&a); let mut b: Limit(4); zero_fill(&b); return below(&a, 1) + below(&b, 3); }");
+  Alcotest.test_case "Const-generic where bounds reject the capacity itself" `Quick
+    (expect_type_error "requires 2 < 2"
+      "generic struct Limit(N: usize) { bytes: [u8; N]; }
+       fn below(p: &mut Limit(N), i: usize @ k) -> usize where k < N { return i; }
+       fn f() -> usize { let mut a: Limit(2); zero_fill(&a); return below(&a, 2); }");
+  Alcotest.test_case "Const-generic where substitution retains runtime indices" `Quick
+    (expect_codegen_ok
+      "generic struct Limit(N: usize) { bytes: [u8; N]; }
+       fn below(p: &mut Limit(N), i: usize @ k) -> usize where k < N { return i; }
+       fn f(i: {0..<4 as usize}) -> usize { let mut a: Limit(4); zero_fill(&a); return below(&a, i); }");
+
+  Alcotest.test_case "Where arithmetic proves fixed-array read write and address" `Quick
+    (expect_trap_sites 0
+      "struct A { data: [usize; 6]; }
+       fn f(a: &mut A, chunk: usize @ k) -> usize where k < 3 {
+         for offset: usize in 0..<2 { let slot: usize = chunk * 2 + offset; a.data[slot] = 1; }
+         let slot: usize = chunk * 2 + 1; let p = &a.data[slot]; return a.data[slot]; }");
+  Alcotest.test_case "Where arithmetic diagnostic explains the bound and static assertion option" `Quick
+    (expect_single_trap_reason "static_assert"
+      "struct A { data: [usize; 5]; }
+       fn f(a: &mut A, chunk: usize @ k) where k < 3 {
+         for offset: usize in 0..<2 { let slot: usize = chunk * 2 + offset; a.data[slot] = 1; } }");
+  Alcotest.test_case "Where arithmetic cannot expose a singleton parameter address" `Quick
+    (expect_type_error "cannot take the address of singleton value"
+      "struct A { data: [usize; 4]; }
+       extern fn touch(p: borrow *usize);
+       fn f(a: &mut A, chunk: usize @ k) -> usize where k < 4 { touch(&chunk); return a.data[chunk]; }");
+  Alcotest.test_case "Where arithmetic refuses a short fixed array" `Quick
+    (expect_trap_sites 1
+      "struct A { data: [usize; 5]; }
+       fn f(a: &mut A, chunk: usize @ k) where k < 3 {
+         for offset: usize in 0..<2 { let slot: usize = chunk * 2 + offset; a.data[slot] = 1; } }");
+  Alcotest.test_case "Where arithmetic cannot prove unrelated indices" `Quick
+    (expect_trap_sites 1
+      "struct A { data: [usize; 4]; }
+       fn f(a: &mut A, chunk: usize @ k, index: usize) -> usize where k < 4 { return a.data[index]; }");
+  Alcotest.test_case "Where arithmetic refuses machine overflow" `Quick
+    (expect_trap_sites 1
+      "struct A { data: [usize; 4]; }
+       fn f(a: &mut A, chunk: usize @ k) -> usize where k < 4 { let index: usize = chunk + 0xFFFFFFFFFFFFFFFF; return a.data[index]; }");
+  Alcotest.test_case "Where arithmetic forgets a reassigned index" `Quick
+    (expect_trap_sites 1
+      "struct A { data: [usize; 4]; }
+       fn f(a: &mut A, chunk: usize @ k, other: usize) -> usize where k < 4 { let mut index: usize = chunk; index = other; return a.data[index]; }");
+  Alcotest.test_case "Where arithmetic proof stays with its generic instance" `Quick
+    (expect_trap_sites 1
+      "generic struct A(N: usize) { data: [usize; N]; }
+       fn put(a: &mut A(N), chunk: usize @ k) where k < 3 { for offset: usize in 0..<2 { let slot: usize = chunk * 2 + offset; a.data[slot] = 1; } }
+       fn f() { let mut a: A(6); zero_fill(&a); let mut b: A(5); zero_fill(&b); put(&a, 2); put(&b, 2); }");
+
+  Alcotest.test_case "I/O spans keep length independent of the buffer loan" `Quick
+    (expect_codegen_ok "fn n(s: borrow IoReadSpan[0]) -> usize { return io_span_length(s); } fn f() -> usize { let mut a: [u8; 8]; let s = io_read_span(a as []u8); let n = n(s); io_span_end(s); return n; }");
+  Alcotest.test_case "I/O read spans do not initialize output" `Quick
+    (expect_type_error "initialized"
+      "fn f() -> u8 { let mut a: [u8; 8]; let s = io_read_span(a as []u8); io_span_end(s); return a[0]; }");
+  Alcotest.test_case "I/O write spans require initialized bytes" `Quick
+    (expect_type_error "initialized"
+      "fn f() { let mut a: [u8; 8]; let s = io_write_span(a as []u8); io_span_end(s); }");
+  Alcotest.test_case "I/O read spans reject readonly storage" `Quick
+    (expect_type_error "writable"
+      "fn f() { let s = io_read_span(bs\"abc\"); io_span_end(s); }");
+  Alcotest.test_case "I/O descriptors cannot be forged" `Quick
+    (expect_type_error "private"
+      "fn f() { let mut s: IoReadSpan[0] = { 0, 8 }; io_span_end(s); }");
+  Alcotest.test_case "I/O descriptor address cannot escape through field projection" `Quick
+    (expect_type_error "private"
+      "fn f(s: borrow IoReadSpan[0]) -> usize { return s.address; }");
+  Alcotest.test_case "I/O spans reject stack escape" `Quick
+    (expect_type_error "cannot be returned"
+      "fn f() -> IoReadSpan[0] { let mut a: [u8; 8]; let s = io_read_span(a as []u8); return s; }");
+  Alcotest.test_case "I/O spans reject use after end" `Quick
+    (expect_type_error "consumed"
+      "fn f() -> usize { let mut a: [u8; 8]; let s = io_read_span(a as []u8); io_span_end(s); return io_span_length(s); }");
+  Alcotest.test_case "I/O spans reject double end" `Quick
+    (expect_type_error "consumed"
+      "fn f() { let mut a: [u8; 8]; let s = io_read_span(a as []u8); io_span_end(s); io_span_end(s); }");
+  Alcotest.test_case "I/O spans must end on every branch" `Quick
+    (expect_type_error "live"
+      "fn f(ok: bool) { let mut a: [u8; 8]; let s = io_read_span(a as []u8); if (ok) { io_span_end(s); } }");
+  Alcotest.test_case "I/O spans cannot be silently discarded" `Quick
+    (expect_type_error "discarded"
+      "fn f() { let mut a: [u8; 8]; io_read_span(a as []u8); }");
+  Alcotest.test_case "I/O write span cannot become a read destination" `Quick
+    (expect_type_error "IoReadSpan"
+      "fn f(fd: usize) -> usize !{unsafe} { let s = io_write_span(bs\"abc\"); let n = unsafe { io_readv(fd, s) }; io_span_end(s); return n; }");
+  Alcotest.test_case "I/O readv emits a fixed three-segment syscall" `Quick
+    (expect_codegen_ok "fn f(fd: usize) -> usize !{unsafe} { let mut a: [u8; 8]; let x = io_read_span(a[0..<3]); let y = io_read_span(a[3..<3]); let z = io_read_span(a[3..<8]); let n = unsafe { io_readv(fd, x, y, z) }; io_span_end(z); io_span_end(y); io_span_end(x); return n; }");
+  Alcotest.test_case "I/O spans cannot hide source-owner release through a slice alias" `Quick
+    (expect_type_error "live"
+      "linear struct Owner[n: usize] { idx: usize @ n; } let mut backing: [u8; 8]; fn data(o: borrow Owner[n]) -> [u8; 8..] @ n { return backing as []u8; } fn release(o: sink Owner[n]) {} fn f(o: Owner[0]) { let alias = data(o); let s = io_read_span(alias); release(o); io_span_end(s); }");
+
+  Alcotest.test_case "Checked noreturn rejects a returning Takibi body" `Quick
+    (expect_type_error "reachable return or fallthrough"
        "fn false_noreturn29l() !{noreturn} {}");
+
+  Alcotest.test_case "Checked noreturn accepts an infinite loop and checked forwarding" `Quick
+    (expect_codegen_ok "fn stop1456() !{noreturn} { while (true) {} } fn forward1456() !{noreturn} { stop1456(); }");
+  Alcotest.test_case "Checked noreturn rejects a return inside an infinite loop" `Quick
+    (expect_type_error "reachable return or fallthrough"
+      "fn bad1456(ok: bool) !{noreturn} { while (true) { if (ok) { return; } } }");
+  Alcotest.test_case "Checked noreturn rejects a reachable outer break" `Quick
+    (expect_type_error "reachable return or fallthrough"
+      "fn bad1456(ok: bool) !{noreturn} { while (true) { if (ok) { break; } } }");
+  Alcotest.test_case "Checked noreturn keeps nested loop breaks local" `Quick
+    (expect_codegen_ok "fn stop1456() !{noreturn} { while (true) { for i: usize in 0..<4 { break; } } }");
+  Alcotest.test_case "Checked noreturn uses the resolved overload" `Quick
+    (expect_type_error "reachable return or fallthrough"
+      "fn stop1456(x: usize) !{noreturn} { while (true) {} } fn stop1456(x: bool) {} fn bad1456() !{noreturn} { stop1456(false); }");
+  Alcotest.test_case "Checked noreturn closes only the failing output path" `Quick
+    (expect_codegen_ok "fn stop1456() !{noreturn} { while (true) {} } fn fill1456(out: borrow uninit []u8, ok: bool) ensures init(out) { if (ok) { zero_fill(out); } else { stop1456(); } } fn f() -> u8 { let mut a: [u8; 4]; fill1456(a as []u8, true); return a[0]; }");
+  Alcotest.test_case "A returning failure helper cannot certify output" `Quick
+    (expect_type_error "ensures clause"
+      "fn stop1456() {} fn fill1456(out: borrow uninit []u8, ok: bool) ensures init(out) { if (ok) { zero_fill(out); } else { stop1456(); } }");
 
   Alcotest.test_case "Slice 5: a cast cannot invent a non-blocking contract" `Quick
     (expect_type_error "cannot cast through an explicit function-pointer effect contract"
@@ -16000,6 +16180,17 @@ let codegen_tests = [
       Alcotest.(check bool) "noreturn attribute" true
         (contains_substring ir "noreturn"));
 
+  Alcotest.test_case "Checked noreturn body and call reach LLVM" `Quick
+    (fun () ->
+      ignore (gen_codegen
+        "fn cg_checked_stop1456() !{noreturn} { while (true) {} }
+         fn cg_checked_call1456() { cg_checked_stop1456(); }");
+      let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+      Alcotest.(check bool) "noreturn attribute" true
+        (contains_substring ir "noreturn");
+      Alcotest.(check bool) "unreachable continuation" true
+        (contains_substring ir "unreachable"));
+
   (* Moved from the historical examples/inline_check, which checked the
      object code. The pipeline's always-inline pass acts on this attribute;
      a plain fn must not receive it. *)
@@ -17326,7 +17517,7 @@ let codegen_tests = [
      sync)" `Quick
     (expect_trap_sites 0
        "fn f296a(idx: usize) -> usize {
-          let mut buf: [usize; 6];
+          let mut buf: [usize; 6] = {0, 0, 0, 0, 0, 0};
           if (idx >= 6) { return 0; }
           return buf[idx];
         }");
@@ -17362,7 +17553,7 @@ let codegen_tests = [
      AssignIndex (write) consumer too (issue #296 codegen sync)" `Quick
     (expect_trap_sites 0
        "fn f296c(idx: usize) {
-          let mut buf: [usize; 6];
+          let mut buf: [usize; 6] = {0, 0, 0, 0, 0, 0};
           if (idx >= 6) { return; }
           buf[idx] = 1;
         }");
@@ -17388,7 +17579,7 @@ let codegen_tests = [
      the Index bounds check (issue #311 sync coverage)" `Quick
     (expect_trap_sites 0
        "fn f311_if(idx: usize) -> usize {
-          let mut buf: [usize; 6];
+          let mut buf: [usize; 6] = {0, 0, 0, 0, 0, 0};
           if (idx < 6) { return buf[idx]; } else { return 0; }
         }");
 
@@ -17397,7 +17588,7 @@ let codegen_tests = [
      bounds check (issue #311 sync coverage)" `Quick
     (expect_trap_sites 0
        "fn f311_for() -> usize {
-          let mut buf: [usize; 6];
+          let mut buf: [usize; 6] = {0, 0, 0, 0, 0, 0};
           let mut total: usize = 0;
           for i: usize in 0..<6 {
             total = total + buf[i];
@@ -17416,7 +17607,7 @@ let codegen_tests = [
      upper bound, elides the Index bounds check (issue #312)" `Quick
     (expect_trap_sites 0
        "fn f312_for(limit: {0..<6 as usize}) -> usize {
-          let mut buf: [usize; 6];
+          let mut buf: [usize; 6] = {0, 0, 0, 0, 0, 0};
           let mut total: usize = 0;
           for i: usize in 0..<limit {
             total = total + buf[i];
@@ -17435,7 +17626,7 @@ let codegen_tests = [
      the Index bounds check (issue #313)" `Quick
     (expect_trap_sites 0
        "fn f313_while(v: usize) -> i32 {
-          let mut buf: [i32; 4];
+          let mut buf: [i32; 4] = {0, 0, 0, 0};
           while (v < 4) {
             return buf[v];
           }
@@ -17454,7 +17645,7 @@ let codegen_tests = [
      increment (issue #770)" `Quick
     (expect_trap_sites 0
        "fn f770_count() -> i32 {
-          let mut buf: [i32; 4];
+          let mut buf: [i32; 4] = {0, 0, 0, 0};
           let mut total: i32 = 0;
           let mut i: usize = 0;
           while (i < 4) {
@@ -17493,7 +17684,7 @@ let codegen_tests = [
      (issue #770 negative control)" `Quick
     (expect_trap_sites 1
        "fn f770_write_first(v: usize) -> i32 {
-          let mut buf: [i32; 4];
+          let mut buf: [i32; 4] = {0, 0, 0, 0};
           let mut i: usize = v;
           let mut total: i32 = 0;
           while (i < 4) {
@@ -17508,7 +17699,7 @@ let codegen_tests = [
      earlier statement (issue #770 negative control)" `Quick
     (expect_trap_sites 1
        "fn f770_nested_write(v: usize, c: bool) -> i32 {
-          let mut buf: [i32; 4];
+          let mut buf: [i32; 4] = {0, 0, 0, 0};
           let mut i: usize = v;
           let mut total: i32 = 0;
           while (i < 4) {
@@ -17524,7 +17715,7 @@ let codegen_tests = [
      negative control)" `Quick
     (expect_trap_sites 1
        "fn f770_after(v: usize) -> i32 {
-          let mut buf: [i32; 4];
+          let mut buf: [i32; 4] = {0, 0, 0, 0};
           let mut i: usize = v;
           while (i < 4) {
             break;
@@ -17537,7 +17728,7 @@ let codegen_tests = [
      control)" `Quick
     (expect_trap_sites 1
        "fn f770_or(v: usize, c: bool) -> i32 {
-          let mut buf: [i32; 4];
+          let mut buf: [i32; 4] = {0, 0, 0, 0};
           let mut i: usize = v;
           while (i < 4 || c) {
             return buf[i];
@@ -17818,7 +18009,7 @@ let codegen_tests = [
     (expect_single_trap_reason
        "fact on `i` was dropped at the body statement on line 5"
        "fn f797_why_array(v: usize) -> i32 {
-          let mut buf: [i32; 4];
+          let mut buf: [i32; 4] = {0, 0, 0, 0};
           let mut i: usize = v;
           while (i < 4) {
             i = i + 1;
@@ -22700,7 +22891,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
         fn issue347_give(T: type, p: &mut Issue347Pool(T) @ pool,
                          o: sink Issue347Owner[pool, allocation]) {}
         fn codegen_issue347_ok() {
-          let mut pool_a: Issue347Pool(usize);
+          let mut pool_a: Issue347Pool(usize) = { 0 };
           let oa = issue347_take(&pool_a);
           issue347_give(&pool_a, oa);
         }");
@@ -22727,8 +22918,8 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
         fn issue347_give(T: type, p: &mut Issue347Pool(T) @ pool,
                          o: sink Issue347Owner[pool, allocation]) {}
         fn codegen_issue347_wrong() {
-          let mut pool_a: Issue347Pool(usize);
-          let mut pool_b: Issue347Pool(usize);
+          let mut pool_a: Issue347Pool(usize) = { 0 };
+          let mut pool_b: Issue347Pool(usize) = { 0 };
           let oa = issue347_take(&pool_a);
           issue347_give(&pool_b, oa);
         }");
@@ -23634,7 +23825,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
      covered, not just the block form" `Quick
     (expect_unnecessary_unsafe 1
        "fn funsafe315_lint_expr_form(proven: {0..<4 as usize}) -> u8 !{unsafe} {
-          let mut arr: [u8; 4];
+          let mut arr: [u8; 4] = {0, 0, 0, 0};
           return unsafe { arr[proven] };
         }");
 
@@ -24962,7 +25153,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
        "affine view LeOuterToken;
         fn le_outer_take(t: sink LeOuterToken) {}
         fn le_outer_loop(n: usize) {
-            let mut values: [usize; 2];
+            let mut values: [usize; 2] = {0, 0};
             let t: LeOuterToken = view LeOuterToken;
             for item in (values as []usize) {
                 if (n > 1) { le_outer_take(t); break; }
@@ -24976,7 +25167,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
        "affine view LeOuterToken;
         fn le_outer_take(t: sink LeOuterToken) {}
         fn le_outer_loop(n: usize) {
-            let mut values: [usize; 2];
+            let mut values: [usize; 2] = {0, 0};
             let t: LeOuterToken = view LeOuterToken;
             for item in (values as []usize) {
                 if (n > 1) { le_outer_take(t); continue; }
@@ -26083,7 +26274,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
     (expect_trap_sites 0
        "let mut ring_head: io {0..<128 as usize};
         fn refnum79_ring_read() -> u8 {
-          let mut buf: [u8; 128];
+          let mut buf: [u8; 128]; zero_fill(buf as []u8);
           let head: usize = ring_head;
           return buf[head];
         }");
@@ -26114,7 +26305,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
      usize}` had been spelled out by hand" `Quick
     (expect_trap_sites 0
        "fn refnum72_narrow_bridge(v: i32, c: u8) {
-          let mut buf: [u8; 8];
+          let mut buf: [u8; 8] = {0, 0, 0, 0, 0, 0, 0, 0};
           if (v >= 0 && v < 8) {
             buf[v as usize] = c;
           }
@@ -26156,7 +26347,7 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
      cast can skip restating, it never invents a proof from nothing" `Quick
     (expect_trap_sites 1
        "fn refnum72_unproven(v: i32) -> u8 {
-          let mut buf: [u8; 8];
+          let mut buf: [u8; 8] = {0, 0, 0, 0, 0, 0, 0, 0};
           buf[v as usize] = 1;
           return buf[0];
         }");
@@ -28172,6 +28363,263 @@ let array_record_loan_fixture = {|
    paths, padding, scratch globals and borrow init/uninit parameters. *)
 (* GitHub issue #954: requires/ensures initialization contracts and the
    interval predicate (SPEC.md "Initialization contracts"). *)
+(* Whole-byte and field-only contracts must keep padding distinct. *)
+let init_record_contract_tests =
+  let t name f = Alcotest.test_case name `Quick f in
+  let record = "struct P1511 { a: u8; b: usize; }\n" in
+  let fields = record ^ "fn fill(p: borrow uninit &mut P1511) ensures init_fields(p) { p.a = 1; p.b = 2; }\n" in
+  let bytes = "fn read() -> u8 { let mut p: P1511; fill(&p); let bytes: []const u8 = &p as []const u8; if (bytes.len > 1) { return bytes[1]; } return 0; }" in
+  let conditional = record ^ "variant R1511 { Ready; Busy; }\n"
+    ^ "fn fill(p: borrow uninit &mut P1511, ok: bool) -> R1511 ensures match result { R1511::Ready => init_fields(p), R1511::Busy => true } { if (ok) { p.a = 1; p.b = 2; return R1511::Ready; } return R1511::Busy; }\n" in
+  [
+    t "raw output slice address does not initialize storage"
+      (expect_type_error "ensures clause"
+        "extern fn write_words(p: borrow *usize); fn fill(p: borrow uninit [usize; 4..]) !{unsafe} ensures init(p[0..<4]) { let raw: *usize = unsafe { p as *usize }; write_words(raw); }");
+    t "raw output slice assertion transfers only the audited prefix"
+      (expect_codegen_ok
+        "extern fn write_words(p: borrow *usize); fn fill(p: borrow uninit [usize; 4..]) !{unsafe} ensures init(p[0..<4]) { let raw: *usize = unsafe { p as *usize }; write_words(raw); unsafe { assume_init(p[0..<4]); } } fn f() -> usize !{unsafe} { let mut a: [usize; 8]; fill(a as []usize); return a[3]; }");
+    t "raw output slice assertion does not fill the caller tail"
+      (expect_type_error "not shown initialized"
+        "extern fn write_words(p: borrow *usize); fn fill(p: borrow uninit [usize; 4..]) !{unsafe} ensures init(p[0..<4]) { let raw: *usize = unsafe { p as *usize }; write_words(raw); unsafe { assume_init(p[0..<4]); } } fn f() -> usize !{unsafe} { let mut a: [usize; 8]; fill(a as []usize); return a[4]; }");
+    t "raw output address export consumes its unsafe justification"
+      (expect_unnecessary_unsafe 0
+        "extern fn write_words(p: borrow *usize); fn fill(p: borrow uninit [usize; 4..]) !{unsafe} ensures init(p[0..<4]) { let raw: *usize = unsafe { p as *usize }; write_words(raw); unsafe { assume_init(p[0..<4]); } }");
+    t "raw output slice export still requires unsafe"
+      (expect_type_error "uninitialized"
+        "extern fn write_words(p: borrow *usize); fn fill(p: borrow uninit [usize; 4..]) ensures init(p[0..<4]) { let raw: *usize = p as *usize; write_words(raw); }");
+    t "record array typed fields can be initialized without padding"
+      (expect_codegen_ok (record ^ "fn fill(p: borrow uninit [P1511; 2..]) ensures init_fields(p[0..<1]) { let mut v: P1511 = {1, 2}; p[0] = v; } fn f() -> usize { let mut a: [P1511; 2]; fill(a as []P1511); return a[0].b; }"));
+    t "record array typed copy cannot certify whole bytes"
+      (expect_type_error "ensures clause" (record ^ "fn fill(p: borrow uninit [P1511; 2..]) ensures init(p[0..<1]) { let mut v: P1511 = {1, 2}; p[0] = v; }"));
+    t "record array padding cannot be viewed as bytes"
+      (expect_type_error "padding" (record ^ "fn f() -> usize { let mut a: [P1511; 1]; let mut v: P1511 = {1, 2}; a[0] = v; let raw = &a as []const u8; if (raw.len > 1) { return raw[1] as usize; } return 0; }"));
+    t "record array zero fill covers padding"
+      (expect_codegen_ok (record ^ "fn f() -> usize { let mut a: [P1511; 1]; zero_fill(&a); let raw = &a as []const u8; if (raw.len > 1) { return raw[1] as usize; } return 0; }"));
+    t "record array store cannot preserve destination padding proof"
+      (expect_type_error "padding" (record ^ "fn f() -> usize { let mut a: [P1511; 1]; zero_fill(&a); let mut v: P1511 = {1, 2}; a[0] = v; return (&a as []const u8).len; }"));
+    t "record array call invalidates pre-call padding"
+      (expect_type_error "padding" (record ^ "fn fill(p: borrow uninit [P1511; 1..]) ensures init_fields(p[0..<1]) { let mut v: P1511 = {1, 2}; p[0] = v; } fn f() -> usize { let mut a: [P1511; 1]; zero_fill(&a); fill(a as []P1511); return (&a as []const u8).len; }"));
+    t "whole-byte array contract restores padding"
+      (expect_codegen_ok (record ^ "fn fill(p: borrow uninit [P1511; 1..]) ensures init(p[0..<1]) { zero_fill(p); } fn f() -> usize { let mut a: [P1511; 1]; fill(a as []P1511); return (&a as []const u8).len; }"));
+    t "readonly record call preserves padding"
+      (expect_codegen_ok (record ^ "fn read(p: borrow &P1511) -> usize { return p.b; } fn f() -> usize { let mut p: P1511; zero_fill(&p); let b = read(&p); return (&p as []const u8).len; }"));
+    t "record array field-only prefix does not fill a second element"
+      (expect_type_error "not shown initialized" (record ^ "fn fill(p: borrow uninit [P1511; 2..]) ensures init_fields(p[0..<1]) { let mut v: P1511 = {1, 2}; p[0] = v; } fn f() -> usize { let mut a: [P1511; 2]; fill(a as []P1511); return a[1].b; }"));
+    t "raw output mint requires a post-write initialization assertion"
+      (expect_type_error "ensures clause"
+        "struct no_copy Lock1511 { word: usize; } struct Out1511 { lock: Lock1511; } fn fill(p: borrow uninit &mut Out1511) !{unsafe} ensures init_fields(p) { unsafe { let bytes: *u8 = &p.lock as *u8; zero_fill(bytes[0..<(sizeof(Lock1511) as isize)]); } }");
+    t "raw output mint with an explicit assertion can initialize a lock"
+      (expect_codegen_ok
+        "struct no_copy Lock1511 { word: usize; } struct Out1511 { lock: Lock1511; } fn fill(p: borrow uninit &mut Out1511) !{unsafe} ensures init_fields(p) { unsafe { let bytes: *u8 = &p.lock as *u8; zero_fill(bytes[0..<(sizeof(Lock1511) as isize)]); assume_init(&p.lock); } }");
+    t "raw output mint cannot traverse an uninitialized pointer"
+      (expect_type_error "uninitialized"
+        "struct Lock1511 { word: usize; } fn mint() !{unsafe} { let mut p: *Lock1511; unsafe { let bytes: *u8 = &(*p).word as *u8; zero_fill(bytes[0..<8]); } }");
+    t "unsafe does not permit a checked byte view of uninitialized output"
+      (expect_type_error "uninitialized"
+        "struct Out1511 { word: usize; } fn mint(p: borrow uninit &mut Out1511) !{unsafe} { unsafe { let bytes: []u8 = p as []u8; zero_fill(bytes); } }");
+    t "address-indexed output contract preserves the brand"
+      (expect_codegen_ok
+        "struct Out1511 { word: usize; } fn fill(p: borrow uninit &mut Out1511 @ id) ensures init_fields(p) { p.word = 7; } fn read() -> usize { let mut out: Out1511; fill(&out); return out.word; }");
+    t "plain reference postcondition cannot invent padding"
+      (expect_type_error "not `borrow uninit`"
+        (record ^ "fn fill(p: &mut P1511) ensures init(p) {}"));
+    t "whole init rejects unwritten padding" (expect_type_error "including padding"
+      (record ^ "fn fill(p: borrow uninit &mut P1511) ensures init(p) { p.a = 1; p.b = 2; }"));
+    t "field contract permits typed field read" (expect_codegen_ok
+      (fields ^ "fn read() -> usize { let mut p: P1511; fill(&p); return p.b; }"));
+    t "field contract does not permit byte view" (expect_type_error "padding" (fields ^ bytes));
+    t "whole init permits byte read after actual zeroing" (expect_codegen_ok
+      (record ^ "fn fill(p: borrow uninit &mut P1511) ensures init(p) { zero_fill(p); p.a = 1; p.b = 2; }" ^ bytes));
+    t "field contract does not preserve pre-call padding" (expect_type_error "padding"
+      (fields ^ "fn read() -> u8 { let mut p: P1511; zero_fill(&p); fill(&p); let bytes: []const u8 = &p as []const u8; if (bytes.len > 1) { return bytes[1]; } return 0; }"));
+    t "field requires accepts fields without padding" (expect_codegen_ok
+      (record ^ "fn read(p: borrow uninit &mut P1511) -> usize requires init_fields(p) { return p.b; } fn consume() -> usize { let mut p: P1511 = { 1, 2 }; return read(&p); }"));
+    t "whole requires needs padding at the caller" (expect_type_error "including padding"
+      (record ^ "fn read(p: borrow uninit &mut P1511) -> usize requires init(p) { return p.b; } fn consume() -> usize { let mut p: P1511 = { 1, 2 }; return read(&p); }"));
+    t "field contract rejects partial record write" (expect_type_error "ensures clause"
+      (record ^ "fn fill(p: borrow uninit &mut P1511) ensures init_fields(p) { p.a = 1; }"));
+    t "field contract checks read before write" (expect_type_error "uninitialized"
+      (record ^ "fn fill(p: borrow uninit &mut P1511) ensures init_fields(p) { p.a = p.a; p.b = 2; }"));
+    t "field contract requires whole record parameter" (expect_type_error "whole mutable-reference record parameter"
+      "fn fill(p: borrow uninit []u8) ensures init_fields(p) { zero_fill(p); }");
+    t "field contract rejects by-value output" (expect_type_error "whole mutable-reference record parameter"
+      (record ^ "fn fill(p: P1511) ensures init_fields(p) {}"));
+    t "field requires needs an uninit-qualified parameter" (expect_type_error "not `borrow uninit`"
+      (record ^ "fn read(p: &mut P1511) requires init_fields(p) {}"));
+    t "ordinary mutable reference does not invent initialization" (expect_type_error "uninitialized"
+      (record ^ "fn empty(p: &mut P1511) {} fn read() -> usize { let mut p: P1511; empty(&p); return p.b; }"));
+    t "conditional fields contract follows the success arm" (expect_codegen_ok
+      (conditional ^ "fn read(ok: bool) -> usize { let mut p: P1511; let r = fill(&p, ok); match r { R1511::Ready => { return p.b; } R1511::Busy => { return 0; } } }"));
+    t "conditional fields contract does not initialize failure" (expect_type_error "uninitialized"
+      (conditional ^ "fn read(ok: bool) -> usize { let mut p: P1511; let r = fill(&p, ok); match r { R1511::Ready => { return p.b; } R1511::Busy => { return p.b; } } }"));
+    t "conditional fields contract checks every success return" (expect_type_error "ensures clause"
+      (record ^ "variant R1511 { Ready; Busy; } fn fill(p: borrow uninit &mut P1511) -> R1511 ensures match result { R1511::Ready => init_fields(p), R1511::Busy => true } { return R1511::Ready; }"));
+  ]
+
+let init_publish_output_tests =
+  let t name f = Alcotest.test_case name `Quick f in
+  let base = "struct publish InitPublished { sequence: usize; value: usize; } let mut source: [InitPublished; 1]; " in
+  [
+    t "publish copy: only nonzero result initializes the record"
+      (expect_codegen_ok (base ^ "fn f(dst: borrow uninit [InitPublished; 1..]) -> usize ensures init_fields(dst[0..<result]) { let taken = publish_copy(&source[0], &dst[0]); if (taken > 0) { return 1; } return 0; }"));
+    t "publish copy: failure result does not initialize the record"
+      (expect_type_error "uninitialized" (base ^ "fn f(dst: borrow uninit [InitPublished; 1..]) -> usize ensures init_fields(dst[0..<result]) { let taken = publish_copy(&source[0], &dst[0]); if (taken == 0) { return 1; } return 0; }"));
+    t "publish copy: ignoring the result gives no output guarantee"
+      (expect_type_error "uninitialized" (base ^ "fn f(dst: borrow uninit [InitPublished; 1..]) ensures init_fields(dst[0..<1]) { publish_copy(&source[0], &dst[0]); }"));
+  ]
+
+let init_result_field_tests =
+  let t name f = Alcotest.test_case name `Quick f in
+  let header = {|struct InitCounts { written: {0..<5 as usize}; }
+variant InitResult { Done(InitCounts); Empty; }
+|} in
+  let fill body = header ^ {|fn fill(dst: borrow uninit [u8; 4..]) -> InitResult
+    ensures match result { InitResult::Done(c) => init(dst[0..<c.written]), _ => true } {
+|} ^ body ^ "}" in
+  let good = fill "dst[0] = 7; let mut c: InitCounts = {1}; return InitResult::Done(c);" in
+  [
+    t "direct record result exports its count field" (expect_codegen_ok
+      {|struct DirectCount { count: usize; }
+fn fill(dst: borrow uninit [u8; 4..]) -> DirectCount ensures init(dst[0..<result.count]) {
+  dst[0] = 7; let mut result: DirectCount = {1}; return result;
+}
+fn f() -> usize { let mut a: [u8; 4]; let mut copied = fill(a as []u8);
+  if (copied.count > 0 && copied.count <= 4) { let n = copied.count; return a[n - 1] as usize; }
+  return 0;
+}|});
+    t "result record: exact write footprint" (expect_codegen_ok good);
+    t "result record: overreported footprint rejects" (expect_type_error "not shown initialized"
+      (fill "dst[0] = 7; let mut c: InitCounts = {2}; return InitResult::Done(c);"));
+    t "result record: missing store rejects" (expect_type_error "uninitialized"
+      (fill "let mut c: InitCounts = {1}; return InitResult::Done(c);"));
+    t "result record: caller obtains field-bounded prefix" (expect_codegen_ok
+      (good ^ {|fn consume(bytes: borrow init []const u8) -> usize { return bytes.len; }
+fn caller() -> usize {
+  let mut bytes: [u8; 4];
+  match fill(bytes as []u8) {
+    InitResult::Done(c) => { return consume(bytes[0..<c.written]); }
+    InitResult::Empty => { return 0; }
+  }
+}|}));
+    t "result record: returning a bound call preserves projections" (expect_codegen_ok
+      (good ^ {|fn forward(dst: borrow uninit [u8; 4..]) -> InitResult
+  ensures match result { InitResult::Done(c) => init(dst[0..<c.written]), _ => true } {
+  let answer = fill(dst); return answer;
+}|}));
+    t "result record: field mutation cannot reuse construction value" (expect_type_error "not expressible"
+      (fill "dst[0] = 7; let mut c: InitCounts = {1}; c.written = 2; return InitResult::Done(c);"));
+    t "result record: unknown projection rejects" (expect_type_error "bound must be"
+      (header ^ {|fn f(dst: borrow uninit [u8; 4..]) -> InitResult
+  ensures match result { InitResult::Done(c) => init(dst[0..<c.missing]), _ => true } {
+  return InitResult::Empty;
+}|}));
+  ]
+
+let init_slot_identity_tests =
+  let t name f = Alcotest.test_case name `Quick f in
+  let base = {|linear struct Lease1512[u: usize] { index: {0..<2 as usize}; }
+struct Data1512 { bytes: [u8; 8]; }
+scratch let mut slots1512: [Data1512; 2];
+fn fill1512(s: borrow Lease1512[0]) ensures init(slots1512[s.index].bytes) {
+  zero_fill(slots1512[s.index].bytes as []u8);
+}
+fn read1512(s: borrow Lease1512[0]) -> u8 requires init(slots1512[s.index].bytes) {
+  return slots1512[s.index].bytes[3];
+}
+fn release1512(s: sink Lease1512[0]) {}
+|} in
+  [
+    t "slot facts: different live owners stay distinct" (expect_type_error "uninitialized"
+      (base ^ "fn f() -> u8 { let mut a: Lease1512[0] = {0}; let mut b: Lease1512[0] = {1}; fill1512(a); let v = read1512(b); release1512(a); release1512(b); return v; }"));
+    t "slot facts: same owner crosses helper calls" (expect_codegen_ok
+      (base ^ "fn f() -> u8 { let mut a: Lease1512[0] = {0}; fill1512(a); let v = read1512(a); release1512(a); return v; }"));
+    t "slot facts: only one branch writes" (expect_type_error "uninitialized"
+      (base ^ "fn f(ok: bool) -> u8 { let mut a: Lease1512[0] = {0}; if (ok) { fill1512(a); } let v = read1512(a); release1512(a); return v; }"));
+    t "slot facts: both branches write" (expect_codegen_ok
+      (base ^ "fn f(ok: bool) -> u8 { let mut a: Lease1512[0] = {0}; if (ok) { fill1512(a); } else { fill1512(a); } let v = read1512(a); release1512(a); return v; }"));
+    t "slot facts: reinitialized owner loses old proof" (expect_type_error "uninitialized"
+      (base ^ "fn f() -> u8 { let mut a: Lease1512[0] = {0}; fill1512(a); release1512(a); let mut b: Lease1512[0] = {1}; let v = read1512(b); release1512(b); return v; }"));
+    t "slot facts: writing owner index loses old proof" (expect_type_error "uninitialized"
+      (base ^ "fn f() -> u8 { let mut a: Lease1512[0] = {0}; fill1512(a); a.index = 1; let v = read1512(a); release1512(a); return v; }"));
+    t "slot facts: new slot explicitly initialized" (expect_codegen_ok
+      (base ^ "fn f() -> u8 { let mut a: Lease1512[0] = {0}; fill1512(a); release1512(a); let mut b: Lease1512[0] = {1}; fill1512(b); let v = read1512(b); release1512(b); return v; }"));
+    t "slot facts: loop trial cannot invent an entry fact" (expect_type_error "uninitialized"
+      (base ^ "fn f(n: usize) { let mut a: Lease1512[0] = {0}; let mut i: usize = 0; while (i < n) { let v = read1512(a); fill1512(a); i = i + 1; } release1512(a); }"));
+    t "local array: a skipped cursor store does not cover its hole" (expect_type_error "uninitialized"
+      "fn f(ok: bool) -> u8 { let mut bytes: [u8; 4]; let mut i: usize = 0; while (i < 4) { if (ok) { bytes[i] = 7; } i = i + 1; } return bytes[3]; }");
+    t "local array: different branch widths preserve the written prefix" (expect_codegen_ok
+      "fn f(dst: borrow uninit [u8; 4..], wide: bool) -> usize ensures init(dst[0..<result]) { let mut n: usize = 0; if (wide) { dst[0] = 7; n = 1; } let at = n; if (at < 4) { dst[at] = 8; n = n + 1; } return n; }");
+    t "nested chunk output: inferred prefixes compose" (expect_codegen_ok {|fn f(output: borrow uninit [usize; 192..]) ensures init(output[0..<192]) {
+ let mut written: {0..<193 as usize} = 0;
+ for item: usize in 0..<16 {
+  for slot: usize in 0..<32 {
+   let destination: usize = written;
+   if (destination <= 180) {
+    let part = output[destination..<destination + 12];
+    for word: usize in 0..<12 { part[word] = 1; }
+    written = destination + 12;
+   }
+  }
+ }
+ let tail: usize = written;
+ zero_fill(output[tail..<192]);
+}
+|});
+    t "nested chunk output: missing last word rejects" (expect_type_error "not shown initialized" {|fn f(output: borrow uninit [usize; 192..]) ensures init(output[0..<192]) {
+ let mut written: {0..<193 as usize} = 0;
+ for item: usize in 0..<16 {
+  for slot: usize in 0..<32 {
+   let destination: usize = written;
+   if (destination <= 180) {
+    let part = output[destination..<destination + 12];
+    for word: usize in 0..<11 { part[word] = 1; }
+    written = destination + 12;
+   }
+  }
+ }
+ let tail: usize = written;
+ zero_fill(output[tail..<192]);
+}
+|});
+    t "slice copy: exact subranges initialize the destination" (expect_codegen_ok
+      "fn f(src: borrow [const u8; 4..]) -> u8 { let mut bytes: [u8; 4]; slice_copy(bytes[0..<4], src[0..<4]); return bytes[3]; }");
+    t "slice copy: shorter source leaves a tail uninitialized" (expect_type_error "not shown initialized"
+      "fn f(src: borrow [const u8; 4..]) -> u8 { let mut bytes: [u8; 4]; slice_copy(bytes[0..<4], src[0..<3]); return bytes[3]; }");
+    t "slice copy: immutable layout offsets retain exact lengths" (expect_codegen_ok
+      "struct packed LayoutCopy { a: [u8; 2]; b: [u8; 2]; } let OFFSET: usize = offsetof(LayoutCopy, b); fn f(src: borrow [const u8; 4..]) -> u8 { let mut bytes: [u8; 2]; slice_copy(bytes[0..<2], src[OFFSET..<4]); return bytes[1]; }");
+    t "slice copy: mutable globals are not singleton length proofs" (expect_type_error "uninitialized"
+      "let mut offset: usize = 0; fn f(src: borrow [const u8; 4..]) -> u8 { let mut bytes: [u8; 4]; if (offset < 4) { slice_copy(bytes[0..<4], src[offset..<4]); } return bytes[3]; }");
+    t "global address does not disable a local cursor proof" (expect_codegen_ok
+      "struct CursorGlobal { value: usize; } let mut global: CursorGlobal; fn read(p: borrow &mut CursorGlobal) {} fn f() -> u8 { read(&global); let mut bytes: [u8; 4]; let mut i: usize = 0; while (i < 4) { bytes[i] = 7; i = i + 1; } return bytes[3]; }");
+    t "local array: an unwritten element rejects" (expect_type_error "uninitialized"
+      "fn f() -> u8 { let mut bytes: [u8; 4]; return bytes[0]; }");
+    t "local array: a sparse write does not fill neighbors" (expect_type_error "not shown initialized"
+      "fn f() -> u8 { let mut bytes: [u8; 4]; bytes[1] = 7; return bytes[0]; }");
+    t "local array: sparse written element reads" (expect_codegen_ok
+      "fn f() -> u8 { let mut bytes: [u8; 4]; bytes[1] = 7; return bytes[1]; }");
+    t "local array: complete counted fill reads" (expect_codegen_ok
+      "fn f() -> u8 { let mut bytes: [u8; 4]; for i: usize in 0..<4 { bytes[i] = 7; } return bytes[3]; }");
+    t "counted fill: conditional missing store rejects" (expect_type_error "uninitialized"
+      "fn f(ok: bool) -> u8 { let mut bytes: [u8; 4]; for i: usize in 0..<4 { if (ok) { bytes[i] = 7; } } return bytes[3]; }");
+    t "counted fill: failing path returns before completion" (expect_codegen_ok
+      "fn f(ok: bool) -> u8 { let mut bytes: [u8; 4]; for i: usize in 0..<4 { if (ok) { bytes[i] = 7; } else { return 0; } } return bytes[3]; }");
+    t "counted fill: break does not prove full coverage" (expect_type_error "uninitialized"
+      "fn f() -> u8 { let mut bytes: [u8; 4]; for i: usize in 0..<4 { bytes[i] = 7; break; } return bytes[3]; }");
+    t "counted fill: continue can skip the store" (expect_type_error "uninitialized"
+      "fn f(ok: bool) -> u8 { let mut bytes: [u8; 4]; for i: usize in 0..<4 { if (ok) { continue; } bytes[i] = 7; } return bytes[3]; }");
+    t "counted fill: an iteration-local moving view is not a stable prefix"
+      (expect_type_error "uninitialized"
+        "fn f() -> u8 { let mut a: [u8; 8]; for i: usize in 0..<4 { let dst = a[i..<8]; dst[i] = 1; } return a[1]; }");
+    t "counted fill: current element is not a previous write" (expect_type_error "not shown initialized"
+      "fn f() -> u8 { let mut bytes: [u8; 4]; for i: usize in 0..<4 { let b = bytes[i]; bytes[i] = b; } return bytes[3]; }");
+    t "counted fill: previous prefix can be read" (expect_codegen_ok
+      "fn f() -> u8 { let mut bytes: [u8; 4]; for i: usize in 0..<4 { if (i > 0) { let b = bytes[i - 1]; } bytes[i] = 7; } return bytes[3]; }");
+    t "counted fill: offset prefix cannot initialize earlier elements" (expect_type_error "not shown initialized"
+      "fn f() -> u8 { let mut bytes: [u8; 8]; let tail = bytes[4..<8]; for i: usize in 0..<4 { tail[i] = 7; } return bytes[0]; }");
+    t "counted fill: offset prefix preserves previous writes" (expect_codegen_ok
+      "fn f() -> u8 { let mut bytes: [u8; 8]; let tail = bytes[4..<8]; for i: usize in 0..<4 { if (i > 0) { let b = tail[i - 1]; } tail[i] = 7; } return bytes[7]; }");
+  ]
+
 let init_contract_tests =
   let t name f = Alcotest.test_case name `Quick f in
   let store8 = "fn store8(field: borrow uninit [u8; 8..], v: u8)
@@ -28319,7 +28767,7 @@ fn peek(s: borrow Slot954[0]) -> u8 requires init(ss[s.index].buf) {
          fn entry(s: borrow Slot954[0]) -> u8 {
              zero_fill(ss[s.index].buf as []u8); return step(s); }"));
     t "issue #974: a staging entry without the fill is rejected"
-      (expect_type_error "'ss[_].buf' is required initialized by 'step' here"
+      (expect_type_error "is required initialized by 'step' here"
          (slot ^ "fn step(s: borrow Slot954[0]) -> u8 requires init(ss[s.index].buf) {
              return peek(s); }
          fn probe(s: borrow Slot954[0]) -> u8 { return step(s); }"));
@@ -28605,6 +29053,35 @@ scratch let mut sb: S975;
            (contains_substring text "(assert (>= (+ x_x (- 16)) 0))");
          Alcotest.(check bool) "min defined" true
            (contains_substring text "(assert (= x_s (ite (<= x_x 28) x_x 28)))"));
+    t "coverage fast rejection preserves diagnostic-search acceptance"
+      (fun () ->
+         let open Init_pred in
+         let z = const 0 and one = const 1 and two = const 2 in
+         let x = atom "x" and y = atom "y" in
+         let intervals = [z,z; z,one; one,two; z,x; x,add x one; x,y; y,add y one] in
+         let contexts = [[],no_facts; ["x",two],no_facts;
+           [],{ge=[sub y x; sub x one]; mins=[]};
+           [],{ge=[sub x two]; mins=["y",x,two]}] in
+         List.iter (fun (eqs, facts) ->
+           List.iter (fun left -> List.iter (fun right ->
+             List.iter (fun goal ->
+               let slow = uncovered ~eqs ~facts [left;right] goal = None in
+               let fast = uncovered ~need_gap:false ~eqs ~facts [left;right] goal = None in
+               if slow <> fast then Alcotest.fail "coverage acceptance changed")
+               intervals) intervals) intervals) contexts);
+    t "init certificates retain transitive premises and omit disconnected ones"
+      (fun () ->
+        let open Init_pred in
+        let text = obligation ~claim:"dependency closure"
+          ~facts:{ ge = [sub (atom "z") (const 4); atom "unrelated"]; mins = [] }
+          [("x", atom "y"); ("y", atom "z")]
+          [(const 0, atom "x")] (const 0, const 4) in
+        Alcotest.(check bool) "transitive equality" true
+          (contains_substring text "(assert (= x_y x_z))");
+        Alcotest.(check bool) "transitive bound" true
+          (contains_substring text "(assert (>= (+ x_z (- 4)) 0))");
+        Alcotest.(check bool) "disconnected premise removed" false
+          (contains_substring text "unrelated"));
     t "issue #1372: atoms that differ only in punctuation stay distinct z3 constants"
       (fun () ->
          let names = ["v3@1"; "v3_1"; "ret:call"; "ret_call"; "arm:b"; "arm_b"] in
@@ -28823,12 +29300,15 @@ let definite_init_tests =
          (padded ^ "fn f() -> usize { let mut w: Pad203 = {1, 2};
             return &w as usize; }"));
     t "issue #203: a scratch global is uninit at function entry"
-      (expect_type_error "'sc[_].a' is uninitialized"
+      (expect_type_error "'sc[literal:1].a' is uninitialized"
          (padded ^ "scratch let mut sc: [Pad203; 2];
             fn f() -> u8 { return sc[1].a; }"));
-    t "issue #203: a scratch global written in the same function is readable"
-      (expect_ok (padded ^ "scratch let mut sc: [Pad203; 2];
+    t "issue #1512: another scratch element is not initialized by a store"
+      (expect_type_error "uninitialized" (padded ^ "scratch let mut sc: [Pad203; 2];
          fn f() -> u8 { sc[0].a = 3; return sc[1].a; }"));
+    t "issue #1512: the written scratch element stays readable"
+      (expect_ok (padded ^ "scratch let mut sc: [Pad203; 2];
+         fn f() -> u8 { sc[0].a = 3; return sc[0].a; }"));
     t "issue #203: a scratch byte buffer must be filled before a copy-out"
       (expect_type_error "'sb.buf' is uninitialized"
          "struct S203 { buf: [u8; 16]; }
@@ -28919,8 +29399,10 @@ let definite_init_tests =
       (bad "for i: usize in 0..<LEN888 { r.buf[i] = 0; if (c) { break; } }");
     t "issue #888: a continue before the store is rejected"
       (bad "for i: usize in 0..<LEN888 { if (c) { continue; } r.buf[i] = 0; }");
-    t "issue #888: a return in the loop is rejected"
-      (bad "for i: usize in 0..<LEN888 { if (c) { return 0; } r.buf[i] = 0; }");
+    t "counted fill: a return cannot reach the post-loop read"
+      (expect_codegen_ok (rec888 ^ "fn f(c: bool) -> u8 { let mut r: Rec888; r.n = 1;
+        for i: usize in 0..<LEN888 { if (c) { return 0; } r.buf[i] = 0; }
+        return r.buf[3]; }"));
     t "issue #888: a store at another index is rejected"
       (bad "for i: usize in 0..<LEN888 { r.buf[0] = 0; }");
     t "issue #888: a shadowed counter is rejected"
@@ -28930,8 +29412,8 @@ let definite_init_tests =
          (rec888 ^ "fn f() -> u8 { let mut r: Rec888; r.n = 1;
             for i: usize in 0..<LEN888 { i = 0; r.buf[i] = 0; }
             return r.buf[1]; }"));
-    t "issue #888: a while loop is not an initializing loop"
-      (bad "let mut i: usize = 0; while (i < LEN888) { r.buf[i] = 0; i = i + 1; }");
+    t "inferred cursor prefix proves a complete while fill"
+      (ok "let mut i: usize = 0; while (i < LEN888) { r.buf[i] = 0; i = i + 1; }");
     t "issue #888: a store inside a nested loop is rejected"
       (bad "for i: usize in 0..<LEN888 { for j: usize in 0..<1 { r.buf[i] = 0; } }");
     t "issue #954: reading the element just stored inside the loop is accepted"
@@ -31306,6 +31788,7 @@ let immutable_global_array_tests =
         fn good1489() -> usize {
           let mut local: [u8; 4];
           let copied = slice_copy(local as []u8, bytes1489 as []u8);
+          if (copied != 4) { return 0; }
           local[0] = 9;
           mutable1489[0] = 8;
           let s = mutable1489 as []u8;
@@ -33292,7 +33775,411 @@ let function_value_effect_tests =
          fn probe1493() { let alias = wrapper1493; use1493(alias); }");
   ]
 
+(* Finite concrete heap oracle for the erased structural transfer rules.
+   This bounded control does not prove arbitrary capacities or alias handling. *)
+let separation_fixture =
+  "struct Links { next: [usize; 3]; head: usize; }
+   struct Pair { left: Links; right: Links; }
+   fn empty(p: borrow uninit &mut Links) ensures init_links(p.next, p.head) { p.head = 3; }
+   fn change(p: borrow uninit &mut Links, q: borrow uninit &mut Links)
+     requires init_links(p.next, p.head) ensures init_links(p.next, p.head)
+     ensures init(q.head) { q.head = 0; } "
+
+let origin_fixture =
+  "struct Links { next: [usize; 3]; head: usize; }
+   let mut arena: [u8; 8];
+   fn page() -> [u8; 4..] { return arena[0..<4]; }
+   fn empty(p: borrow uninit &mut Links) ensures init_links(p.next, p.head) { p.head = 3; }
+   fn accept(p: borrow uninit &mut Links) requires init_links(p.next, p.head) {} "
+
+let init_link_tests = [
+  Alcotest.test_case "Scratch selectors are not independent named global objects" `Quick
+    (expect_type_error "init_links cannot prove"
+      "struct Links { next: [usize; 3]; head: usize; }
+       scratch let mut rows: [Links; 2];
+       fn empty(p: borrow uninit &mut Links) ensures init_links(p.next, p.head) { p.head = 3; }
+       fn change(p: borrow uninit &mut Links) ensures init(p.head) { p.head = 0; }
+       fn accept(p: borrow uninit &mut Links) requires init_links(p.next, p.head) {}
+       fn alias(i: {0..<2 as usize}, j: {0..<2 as usize}) {
+           empty(&rows[i]); change(&rows[j]); accept(&rows[i]);
+       }
+       fn main() { alias(0, 0); }");
+
+  Alcotest.test_case "Named linked terminal uses the checked usize constant path" `Quick
+    (expect_codegen_ok
+      "const END: usize = 5;
+       struct Links { next: [usize; 3]; head: usize; }
+       fn empty(p: borrow uninit &mut Links) ensures init_links(p.next, p.head) { p.head = END; }");
+  Alcotest.test_case "Out-of-domain named terminal cannot manufacture a linked fact" `Quick
+    (expect_type_error "init_links cannot prove"
+      "const END: usize = 0xffffffffffffffff;
+       struct Links { next: [usize; 3]; head: usize; }
+       fn empty(p: borrow uninit &mut Links) ensures init_links(p.next, p.head) { p.head = END; }");
+
+  Alcotest.test_case "Returned global slice writes preserve independent link storage" `Quick
+    (expect_codegen_ok (origin_fixture ^
+      "fn fill() { let bytes = page(); for i: usize in 0..<4 { bytes[i] = 0; } }
+       fn keep(p: borrow uninit &mut Links) requires init_links(p.next, p.head)
+         ensures init_links(p.next, p.head) { fill(); }
+       fn wrapper() { let mut p: Links; empty(&p); keep(&p); }"));
+  Alcotest.test_case "Direct writes through a returned global slice retain frame requirements" `Quick
+    (expect_codegen_ok (origin_fixture ^
+      "fn keep(p: borrow uninit &mut Links) requires init_links(p.next, p.head)
+         ensures init_links(p.next, p.head) { let bytes = page(); bytes[0] = 1; }
+       fn wrapper() { let mut p: Links; empty(&p); keep(&p); }"));
+  Alcotest.test_case "Returned slice helpers compose global origin" `Quick
+    (expect_codegen_ok (origin_fixture ^
+      "fn relay() -> [u8; 4..] { let bytes = page(); return bytes; }
+       fn wrapper() { let mut p: Links; empty(&p); let bytes = relay(); bytes[0] = 1; accept(&p); }"));
+  Alcotest.test_case "Different return origins remain unknown" `Quick
+    (expect_type_error "init_links cannot prove" (origin_fixture ^
+      "let mut other: [u8; 8];
+       fn choose(b: bool) -> [u8; 4..] { if (b) { return arena[0..<4]; } return other[0..<4]; }
+       fn wrapper(b: bool) { let mut p: Links; empty(&p); let bytes = choose(b); bytes[0] = 1; accept(&p); }"));
+  Alcotest.test_case "Rebound slices cannot keep an earlier global origin" `Quick
+    (expect_type_error "init_links cannot prove" (origin_fixture ^
+      "fn wrapper(other: [u8; 4..]) { let mut p: Links; empty(&p);
+         let mut bytes = page(); bytes = other; bytes[0] = 1; accept(&p); }"));
+  Alcotest.test_case "Opaque external calls still invalidate linked frames" `Quick
+    (expect_type_error "init_links cannot prove" (origin_fixture ^
+      "extern fn foreign_touch();
+       fn wrapper() { let mut p: Links; empty(&p); foreign_touch(); accept(&p); }"));
+
+  Alcotest.test_case "Separation discharges distinct inline fields" `Quick
+    (expect_codegen_ok (separation_fixture ^
+      "fn wrapper() { let mut pair: Pair; empty(&pair.left); change(&pair.left, &pair.right); }"));
+  Alcotest.test_case "Immutable aliases retain their underlying storage identity" `Quick
+    (expect_type_error "arguments overlap" (separation_fixture ^
+      "fn wrapper() { let mut p: Links; empty(&p); let alias: &mut Links = &p; change(alias, &p); }"));
+  Alcotest.test_case "Separating calls is checked even without a caller postcondition" `Quick
+    (expect_type_error "arguments overlap" (separation_fixture ^
+      "fn wrapper() { let mut p: Links; empty(&p); change(&p, &p); }"));
+  Alcotest.test_case "Recursive callers propagate entry requirements to external ancestors" `Quick
+    (expect_type_error "arguments overlap" (separation_fixture ^
+      "fn relay(p: borrow uninit &mut Links, q: borrow uninit &mut Links, n: usize)
+       requires init_links(p.next, p.head) { if (n == 0) { change(p, q); } else { relay(p, q, n - 1); } }
+       fn wrapper() { let mut p: Links; empty(&p); relay(&p, &p, 1); }"));
+
+  Alcotest.test_case "Inferred separation permits a fresh-local public wrapper" `Quick
+    (fun () ->
+      let src = "struct Links { next: [usize; 3]; head: usize; }
+        let mut counter: usize = 0;
+        fn touch() { counter = counter + 1; }
+        fn keep(p: borrow uninit &mut Links) requires init_links(p.next, p.head)
+          ensures init_links(p.next, p.head) { touch(); }
+        fn relay(p: borrow uninit &mut Links) requires init_links(p.next, p.head)
+          ensures init_links(p.next, p.head) { keep(p); }
+        fn empty(p: borrow uninit &mut Links) ensures init_links(p.next, p.head) { p.head = 3; }
+        fn wrapper() { let mut p: Links; empty(&p); relay(&p); }" in
+      ignore (gen_codegen src);
+      let linkage name = Llvm.linkage (Option.get (Llvm.lookup_function name !Llvm_gen.the_module)) in
+      Alcotest.(check bool) "helper is internal" true (linkage "keep" = Llvm.Linkage.Internal);
+      Alcotest.(check bool) "propagated requirement is internal" true (linkage "relay" = Llvm.Linkage.Internal);
+      Alcotest.(check bool) "wrapper remains external" true (linkage "wrapper" = Llvm.Linkage.External));
+  Alcotest.test_case "Function values cannot erase inferred separation" `Quick
+    (expect_type_error "would erase inferred separation"
+      "struct Links { next: [usize; 3]; head: usize; }
+       let mut counter: usize = 0;
+       fn touch() { counter = counter + 1; }
+       fn keep(p: borrow uninit &mut Links) requires init_links(p.next, p.head)
+         ensures init_links(p.next, p.head) { touch(); }
+       fn expose() { let cb = keep; }");
+  Alcotest.test_case "Explicit external entry cannot erase inferred separation" `Quick
+    (fun () ->
+      Llvm_gen.set_external_entries ["keep"];
+      Fun.protect ~finally:(fun () -> Llvm_gen.set_external_entries []) (fun () ->
+        try ignore (gen_codegen
+          "struct Links { next: [usize; 3]; head: usize; }
+           let mut counter: usize = 0;
+           fn touch() { counter = counter + 1; }
+           fn keep(p: borrow uninit &mut Links) requires init_links(p.next, p.head)
+             ensures init_links(p.next, p.head) { touch(); }");
+          Alcotest.fail "external entry accepted"
+        with Types.TypeError (_, msg) ->
+          Alcotest.(check bool) "actionable boundary diagnostic" true
+            (contains_substring msg "--external-entry" && contains_substring msg "global counter")));
+
+  Alcotest.test_case "Different reference parameter names do not prove disjoint storage" `Quick
+    (expect_type_error "init_links cannot prove"
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn change(p: borrow uninit &mut Links, q: borrow uninit &mut Links)
+         requires init_links(p.next, p.head) requires init(q.head)
+         ensures init_links(p.next, p.head) ensures init(q.head) { q.head = 0; }
+       fn expose(p: borrow uninit &mut Links) requires init_links(p.next, p.head)
+         ensures init_links(p.next, p.head) { change(p, p); }");
+  Alcotest.test_case "Replacing a parent record invalidates a nested head certificate" `Quick
+    (expect_type_error "init_links cannot prove"
+      "struct Header { head: usize; }
+       struct Links { next: [usize; 3]; header: Header; }
+       fn bad(p: borrow uninit &mut Links) requires init_links(p.next, p.header.head)
+         ensures init_links(p.next, p.header.head) {
+           let mut header: Header = { 0 }; p.header = header;
+         }");
+  Alcotest.test_case "Calls with scalar arguments may still mutate reachable storage" `Quick
+    (expect_type_error "init_links cannot prove"
+      "struct Links { next: [usize; 3]; head: usize; }
+       scratch let mut shared: Links;
+       fn global_write() { shared.head = 0; }
+       fn bad(p: borrow uninit &mut Links) requires init_links(p.next, p.head)
+         ensures init_links(p.next, p.head) { global_write(); }
+       fn empty(p: borrow uninit &mut Links) ensures init_links(p.next, p.head) { p.head = 3; }
+       fn expose() { empty(&shared); bad(&shared); }");
+  Alcotest.test_case "Write footprints follow immutable field reference aliases" `Quick
+    (expect_codegen_ok
+      "struct Links { next: [usize; 3]; head: usize; count: usize; }
+       fn metadata(p: borrow uninit &mut Links) requires init(p.count) {
+         let alias = &p.count; *alias = 1;
+       }
+       fn keep(p: borrow uninit &mut Links) requires init_links(p.next, p.head)
+         requires init(p.count) ensures init_links(p.next, p.head) { metadata(p); }");
+  Alcotest.test_case "Alias writes to a linked head invalidate its certificate" `Quick
+    (expect_type_error "init_links cannot prove"
+      "struct Links { next: [usize; 3]; head: usize; count: usize; }
+       fn change(p: borrow uninit &mut Links) requires init(p.head) {
+         let alias = &p.head; *alias = 0;
+       }
+       fn bad(p: borrow uninit &mut Links) requires init_links(p.next, p.head)
+         ensures init_links(p.next, p.head) { change(p); }");
+  Alcotest.test_case "Rebound reference aliases cannot retain an earlier write destination" `Quick
+    (expect_type_error "init_links cannot prove"
+      "struct Links { next: [usize; 3]; head: usize; count: usize; }
+       fn change(p: borrow uninit &mut Links) requires init(p.head) requires init(p.count) {
+         let mut alias = &p.count; alias = &p.head; *alias = 0;
+       }
+       fn bad(p: borrow uninit &mut Links) requires init_links(p.next, p.head)
+         requires init(p.count) ensures init_links(p.next, p.head) { change(p); }");
+  Alcotest.test_case "Inferred field writes preserve an unrelated linked array" `Quick
+    (expect_codegen_ok
+      "struct Links { next: [usize; 3]; head: usize; count: usize; }
+       fn metadata(p: borrow uninit &mut Links) ensures init(p.count) { p.count = 1; }
+       fn keep(p: borrow uninit &mut Links) requires init_links(p.next, p.head)
+         ensures init_links(p.next, p.head) { metadata(p); }");
+  Alcotest.test_case "Inferred field writes compose through nested reference arguments" `Quick
+    (expect_codegen_ok
+      "struct Links { next: [usize; 3]; head: usize; count: usize; }
+       struct Outer { links: Links; }
+       fn metadata(p: borrow uninit &mut Links) ensures init(p.count) { p.count = 1; }
+       fn relay(p: borrow uninit &mut Outer) ensures init(p.links.count) { metadata(&p.links); }
+       fn keep(p: borrow uninit &mut Outer) requires init_links(p.links.next, p.links.head)
+         ensures init_links(p.links.next, p.links.head) { relay(p); }");
+  Alcotest.test_case "Inferred writes invalidate a changed head value" `Quick
+    (expect_type_error "init_links cannot prove"
+      "struct Links { next: [usize; 3]; head: usize; count: usize; }
+       fn change(p: borrow uninit &mut Links) ensures init(p.head) { p.head = 0; }
+       fn bad(p: borrow uninit &mut Links) requires init_links(p.next, p.head)
+         ensures init_links(p.next, p.head) { change(p); }");
+  Alcotest.test_case "Inferred writes invalidate a modified link array" `Quick
+    (expect_type_error "init_links cannot prove"
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn change(p: borrow uninit &mut Links) ensures init(p.next[0..<1]) { p.next[0] = 0; }
+       fn bad(p: borrow uninit &mut Links) requires init_links(p.next, p.head)
+         ensures init_links(p.next, p.head) { change(p); }");
+  Alcotest.test_case "Write footprints include writes from either branch" `Quick
+    (expect_type_error "init_links cannot prove"
+      "struct Links { next: [usize; 3]; head: usize; count: usize; }
+       fn change(p: borrow uninit &mut Links, flag: bool)
+         requires init(p.head) requires init(p.count) {
+           if (flag) { p.count = 1; } else { p.head = 0; }
+         }
+       fn bad(p: borrow uninit &mut Links, flag: bool)
+         requires init_links(p.next, p.head) requires init(p.count)
+         ensures init_links(p.next, p.head) { change(p, flag); }");
+  Alcotest.test_case "Linked contracts do not permit partial storage address erasure" `Quick
+    (expect_type_error "uninitialized"
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn overwrite(address: usize) !{unsafe} { let p: *usize = unsafe { address as *usize }; *p = 0; }
+       fn bad(p: borrow uninit &mut Links) !{unsafe}
+         requires init_links(p.next, p.head) ensures init_links(p.next, p.head) {
+           let raw: *Links = unsafe { p as *Links }; overwrite((raw as usize) + 8);
+         }");
+  Alcotest.test_case "Partial bulk clear cannot retain a linked successor guarantee" `Quick
+    (expect_type_error "init_links cannot prove"
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn bad(p: borrow uninit &mut Links) requires init_links(p.next, p.head)
+         ensures init_links(p.next, p.head) { zero_fill(p.next[1..<2]); }");
+  Alcotest.test_case "Readonly metadata calls preserve a linked storage certificate" `Quick
+    (expect_codegen_ok
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn head(p: borrow uninit &Links) -> usize requires init(p.head) { return p.head; }
+       fn keep(p: borrow uninit &mut Links) requires init_links(p.next, p.head)
+         ensures init_links(p.next, p.head) { let n: usize = head(p); }");
+  Alcotest.test_case "Linked terminal reasoning cannot evaluate an increment twice" `Quick
+    (expect_type_error "uninitialized"
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn bad(p: borrow uninit &mut Links) -> usize requires init_links(p.next, p.head)
+         { let mut cursor: usize = 1; cursor = cursor + 1;
+           if (cursor < 3) { return p.next[cursor]; } return 3; }");
+  Alcotest.test_case "Linked loop infers preservation of the published head" `Quick
+    (expect_codegen_ok
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn add(p: borrow uninit &mut Links) requires init_links(p.next, p.head)
+         ensures init_links(p.next, p.head)
+         { for i: usize in 0..<3 { p.next[i] = p.head; p.head = i; } }");
+  Alcotest.test_case "Linked traversal loop carries a certified mutable cursor" `Quick
+    (expect_codegen_ok
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn walk(p: borrow uninit &mut Links) requires init_links(p.next, p.head)
+         { let mut cursor: usize = p.head; let mut steps: usize = 0;
+           while (cursor < 3 && steps < 3) { cursor = p.next[cursor]; steps = steps + 1; } }");
+  Alcotest.test_case "Linked loop rejects a certificate lost on the backedge" `Quick
+    (expect_type_error "not shown initialized"
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn bad(p: borrow uninit &mut Links, other: usize) requires init_links(p.next, p.head)
+         { let mut cursor: usize = p.head; let mut steps: usize = 0;
+           while (cursor < 3 && steps < 3) { let next: usize = p.next[cursor]; cursor = other; steps = steps + 1; } }");
+  Alcotest.test_case "Linked push and pop transfer initialization without clearing" `Quick
+    (expect_codegen_ok
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn empty(p: borrow uninit &mut Links) ensures init_links(p.next, p.head) { p.head = 3; }
+       fn push(p: borrow uninit &mut Links, i: {0..<3 as usize})
+         requires init_links(p.next, p.head) ensures init_links(p.next, p.head)
+         { p.next[i] = p.head; p.head = i; }
+       fn pop(p: borrow uninit &mut Links) -> usize
+         requires init_links(p.next, p.head) ensures init_links(p.next, p.head)
+         { let head: usize = p.head; if (head < 3) { p.head = p.next[head]; return head; } return 3; }
+       fn f() -> usize { let mut p: Links; empty(&p); push(&p, 1); return pop(&p); }");
+  Alcotest.test_case "Linked push cannot omit the node write" `Quick
+    (expect_type_error "init_links cannot prove"
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn bad(p: borrow uninit &mut Links, i: {0..<3 as usize})
+         requires init_links(p.next, p.head) ensures init_links(p.next, p.head) { p.head = i; }");
+  Alcotest.test_case "Linked push cannot install an unrelated successor" `Quick
+    (expect_type_error "init_links cannot prove"
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn bad(p: borrow uninit &mut Links, i: {0..<3 as usize}, other: usize)
+         requires init_links(p.next, p.head) ensures init_links(p.next, p.head)
+         { p.next[i] = other; p.head = i; }");
+  Alcotest.test_case "Linked reads still require independent index bounds" `Quick
+    (expect_trap_sites 1
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn bad(p: borrow uninit &mut Links) -> usize requires init_links(p.next, p.head)
+         { let head: usize = p.head; return p.next[head]; }");
+  Alcotest.test_case "Replacing a linked head does not retain its old certificate" `Quick
+    (expect_type_error "init_links cannot prove"
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn bad(p: borrow uninit &mut Links) requires init_links(p.next, p.head)
+         ensures init_links(p.next, p.head) { p.head = 0; }");
+  Alcotest.test_case "Named global writes preserve fresh local linked storage" `Quick
+    (expect_codegen_ok
+      "struct Links { next: [usize; 3]; head: usize; }
+       let mut counter: usize = 0;
+       fn touch() { counter = counter + 1; }
+       fn relay() { touch(); }
+       fn empty(p: borrow uninit &mut Links) ensures init_links(p.next, p.head) { p.head = 3; }
+       fn accept(p: borrow uninit &mut Links) requires init_links(p.next, p.head) {}
+       fn f() { let mut p: Links; empty(&p); relay(); accept(&p); }");
+  Alcotest.test_case "Named global writes infer a parameter separation requirement" `Quick
+    (expect_codegen_ok
+      "struct Links { next: [usize; 3]; head: usize; }
+       let mut counter: usize = 0;
+       fn touch() { counter = counter + 1; }
+       fn bad(p: borrow uninit &mut Links) requires init_links(p.next, p.head)
+         ensures init_links(p.next, p.head) { touch(); }");
+  Alcotest.test_case "Global pointer writes do not acquire an inline destination" `Quick
+    (expect_type_error "init_links cannot prove"
+      "struct Links { next: [usize; 3]; head: usize; }
+       let mut address: *usize;
+       fn touch() !{unsafe} { unsafe { *address = 0; } }
+       fn bad(p: borrow uninit &mut Links) !{unsafe} requires init_links(p.next, p.head)
+         ensures init_links(p.next, p.head) { touch(); }");
+  Alcotest.test_case "Atomic reads preserve linked write frames" `Quick
+    (expect_codegen_ok
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn read(addr: usize) -> usize !{unsafe} { return unsafe { atomic_load_acquire(addr) }; }
+       fn keep(p: borrow uninit &mut Links, addr: usize) !{unsafe}
+         requires init_links(p.next, p.head) ensures init_links(p.next, p.head)
+         { let observed = read(addr); }");
+  Alcotest.test_case "Register reads preserve linked write frames" `Quick
+    (expect_ok
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn read() -> usize !{unsafe} { return mrs_daif(); }
+       fn keep(p: borrow uninit &mut Links) !{unsafe}
+         requires init_links(p.next, p.head) ensures init_links(p.next, p.head)
+         { let observed = read(); }");
+  Alcotest.test_case "Atomic stores cannot preserve unknown linked storage" `Quick
+    (expect_type_error "init_links cannot prove"
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn write(addr: usize) !{unsafe} { unsafe { atomic_store_release(addr, 0); } }
+       fn bad(p: borrow uninit &mut Links, addr: usize) !{unsafe}
+         requires init_links(p.next, p.head) ensures init_links(p.next, p.head)
+         { write(addr); }");
+  Alcotest.test_case "Atomic read arguments retain their write effects" `Quick
+    (expect_type_error "init_links cannot prove"
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn address(p: borrow uninit &mut Links) -> usize requires init(p.head) { p.head = 0; return 4096; }
+       fn read(p: borrow uninit &mut Links) -> usize !{unsafe} requires init(p.head)
+         { return unsafe { atomic_load_acquire(address(p)) }; }
+       fn bad(p: borrow uninit &mut Links) !{unsafe}
+         requires init_links(p.next, p.head) ensures init_links(p.next, p.head)
+         { let observed = read(p); }");
+  Alcotest.test_case "An inferred empty write footprint preserves the relation" `Quick
+    (expect_codegen_ok
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn inspect(p: borrow uninit &mut Links) -> usize requires init(p.head) {
+         let mut count: usize = 0;
+         while (count < 3) { count = count + 1; }
+         return p.head;
+       }
+       fn relay(p: borrow uninit &mut Links) -> usize requires init(p.head) { return inspect(p); }
+       fn keep(p: borrow uninit &mut Links) requires init_links(p.next, p.head)
+         ensures init_links(p.next, p.head) { let head = relay(p); }");
+  Alcotest.test_case "An actual write without a linked postcondition drops the relation" `Quick
+    (expect_type_error "init_links cannot prove"
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn touch(p: borrow uninit &mut Links) requires init(p.head) { p.head = 0; }
+       fn bad(p: borrow uninit &mut Links) requires init_links(p.next, p.head)
+         ensures init_links(p.next, p.head) { touch(p); }");
+  Alcotest.test_case "Transitive writes cannot masquerade as an empty footprint" `Quick
+    (expect_type_error "init_links cannot prove"
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn touch(p: borrow uninit &mut Links) requires init(p.head) { p.head = 0; }
+       fn relay(p: borrow uninit &mut Links) requires init(p.head) { touch(p); }
+       fn bad(p: borrow uninit &mut Links) requires init_links(p.next, p.head)
+         ensures init_links(p.next, p.head) { relay(p); }");
+  Alcotest.test_case "Unknown extern calls do not infer an empty footprint" `Quick
+    (expect_type_error "init_links cannot prove"
+      "struct Links { next: [usize; 3]; head: usize; }
+       extern fn external_write();
+       fn relay(p: borrow uninit &mut Links) requires init(p.head) { external_write(); }
+       fn bad(p: borrow uninit &mut Links) requires init_links(p.next, p.head)
+         ensures init_links(p.next, p.head) { relay(p); }");
+  Alcotest.test_case "Empty linked constructor transfers a checked contract" `Quick
+    (expect_codegen_ok
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn empty(p: borrow uninit &mut Links) ensures init_links(p.next, p.head) { p.head = 3; }
+       fn accept(p: borrow uninit &mut Links) requires init_links(p.next, p.head) {}
+       fn f() { let mut p: Links; empty(&p); accept(&p); }");
+  Alcotest.test_case "Linked terminal is not restricted to capacity itself" `Quick
+    (expect_codegen_ok
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn empty(p: borrow uninit &mut Links) ensures init_links(p.next, p.head) { p.head = 5; }
+       fn f() { let mut p: Links; empty(&p); }");
+  Alcotest.test_case "Linked constructor cannot publish an unwritten node" `Quick
+    (expect_type_error "init_links cannot prove"
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn bad(p: borrow uninit &mut Links) ensures init_links(p.next, p.head) { p.head = 0; }
+       fn f() { let mut p: Links; bad(&p); }");
+  Alcotest.test_case "Linked call cannot borrow another storage certificate" `Quick
+    (expect_type_error "init_links cannot prove"
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn empty(p: borrow uninit &mut Links) ensures init_links(p.next, p.head) { p.head = 3; }
+       fn accept(p: borrow uninit &mut Links) requires init_links(p.next, p.head) {}
+       fn f() { let mut a: Links; let mut b: Links; empty(&a); b.head = 0; accept(&b); }");
+  Alcotest.test_case "Fully initialized links need no successor-value premise" `Quick
+    (expect_codegen_ok
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn accept(p: borrow uninit &mut Links) requires init_links(p.next, p.head) {}
+       fn f(p: &mut Links) { accept(p); }");
+  Alcotest.test_case "Linked contracts do not initialize unrelated array elements" `Quick
+    (expect_type_error "uninitialized"
+      "struct Links { next: [usize; 3]; head: usize; }
+       fn empty(p: borrow uninit &mut Links) ensures init_links(p.next, p.head) { p.head = 3; }
+       fn f() -> usize { let mut p: Links; empty(&p); return p.next[0]; }");
+
+]
+
 let named_groups_unisolated = [
+  "linked-init-domain", init_link_tests;
   "function-value-effects", function_value_effect_tests;
   "operator-kinds", operator_kind_tests;
   "struct-pointer-casts", struct_pointer_cast_tests;
@@ -33316,7 +34203,7 @@ let named_groups_unisolated = [
   "loan-transfer", loan_transfer_tests;
   "indexed-reference", indexed_reference_tests;
   "definite-init", definite_init_tests;
-  "init-contracts", init_contract_tests;
+  "init-contracts", init_publish_output_tests @ init_result_field_tests @ init_slot_identity_tests @ init_record_contract_tests @ init_contract_tests;
   "init-path-facts", init_path_fact_tests;
   "raw-authority-policy", raw_authority_policy_tests;
   "execution-model-policy", execution_model_policy_tests;

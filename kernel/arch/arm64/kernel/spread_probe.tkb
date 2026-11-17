@@ -1,3 +1,5 @@
+use "kernel/arch/arm64/kernel/el0_getcpu.tkb";
+
 /* Two compute-bound processes with no affinity mask end up on different
  * CPUs (GitHub issue #582). A static-PIE EL0 program, kept free of writable
  * globals and compiled with trap sites rejected. Its one line is compared by the
@@ -62,28 +64,24 @@ private fn spread_fail(line: borrow []const u8) {
     svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
 }
 
-private fn spread_cpu(cpu_bytes: borrow [u8; 4..]) -> usize {
-    if (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize, 0, 0, 0, 0) != 0) {
-        return SPREAD_NO_CPU;
+private fn spread_cpu() -> usize  {
+    match el0_getcpu() {
+        El0CpuResult::Ready(cpu) => { return cpu; }
+        El0CpuResult::Failed(code) => { return SPREAD_NO_CPU; }
     }
-    return cpu_bytes[0] as usize |
-           ((cpu_bytes[1] as usize) << 8) |
-           ((cpu_bytes[2] as usize) << 16) |
-           ((cpu_bytes[3] as usize) << 24);
 }
 
 // Spin `chunks` chunks and return the CPU the last getcpu named. The
 // accumulator is folded into the answer so the arithmetic cannot be
 // discarded; it never reaches SPREAD_NO_CPU's bit.
 private fn spread_spin(chunks: usize) -> usize {
-    let mut cpu_bytes: [u8; 4];
     let mut cpu: usize = SPREAD_NO_CPU;
     let mut acc: usize = 1;
     for round: usize in 0..<chunks {
         for step: usize in 0..<SPREAD_CHUNK {
             acc = acc * 6364136223846793005 + 1442695040888963407;
         }
-        cpu = spread_cpu(cpu_bytes as []u8);
+        cpu = spread_cpu();
     }
     if (acc == 0) { return SPREAD_NO_CPU; }
     return cpu;
@@ -99,14 +97,13 @@ private fn spread_set_mask(pid: usize, low: u8) -> bool {
 // The exit status is its final CPU. The kernel observation, not an early
 // getcpu syscall, establishes that the child really entered CPU 0 EL0.
 private fn spread_leave_child() {
-    let mut cpu_bytes: [u8; 4];
     let mut acc: usize = 1;
     for round: usize in 0..<SPREAD_LEAVE_CHUNKS {
         for step: usize in 0..<SPREAD_CHUNK {
             acc = acc * 6364136223846793005 + 1442695040888963407;
         }
     }
-    let last: usize = spread_cpu(cpu_bytes as []u8);
+    let last: usize = spread_cpu();
     if (acc == 0 || last > 15) {
         svc5(EXIT_SYSCALL, SPREAD_NO_CPU, 0, 0, 0, 0);
     }
@@ -127,11 +124,10 @@ private fn spread_leave() {
     }
     // fork ran on core 0; wait to be back on CPU 1, where the child can
     // only be Ready while this process runs.
-    let mut cpu_bytes: [u8; 4];
-    let mut here: usize = spread_cpu(cpu_bytes as []u8);
+    let mut here: usize = spread_cpu();
     for poll: usize in 0..<SPREAD_PARENT_ARRIVAL_POLLS {
         if (here == 1) { break; }
-        here = spread_cpu(cpu_bytes as []u8);
+        here = spread_cpu();
     }
     if (here != 1) {
         spread_fail(bs"spread: the parent never returned to cpu 1\n");

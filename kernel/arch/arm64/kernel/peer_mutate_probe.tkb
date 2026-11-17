@@ -1,3 +1,6 @@
+use "kernel/arch/arm64/kernel/el0_getcpu.tkb";
+use "kernel/arch/arm64/kernel/el0_read.tkb";
+
 /* The three ext2 directory mutations on a peer (GitHub issue #597). A
  * static-PIE EL0 program, kept free of writable globals and compiled with
  * the trap-site rejection, run once from init.sh. It pins itself to CPU 1, then
@@ -39,24 +42,25 @@ const LINUX_AT_FDCWD: usize = 0xFFFFFFFFFFFFFF9C;
 const LINUX_AT_REMOVEDIR: usize = 0x200;
 const PEER_MUTATE_ARRIVAL_POLLS: usize = 1000000;
 
-private fn peer_mutate_fail(line: borrow []const u8) !{unsafe} {
+private fn peer_mutate_fail(line: borrow []const u8) !{unsafe, noreturn} {
     // Raw ABI input only: these syscalls read the readonly bytes.
     // The bridge exposes no writable slice or checked mutation.
     svc5(WRITE_SYSCALL, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0);
     svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+    while (true) { }
 }
 
-private fn peer_mutate_cpu(cpu_bytes: borrow [u8; 4..]) -> usize {
-    if (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize, 0, 0, 0, 0) != 0) {
-        return 99;
+private fn peer_mutate_cpu() -> usize {
+    match el0_getcpu() {
+        El0CpuResult::Ready(cpu) => { return cpu; }
+        El0CpuResult::Failed(code) => { return 99; }
     }
-    return cpu_bytes[0] as usize;
 }
 
-private fn peer_mutate_back_on_cpu1(cpu_bytes: borrow [u8; 4..]) {
-    let mut here: usize = peer_mutate_cpu(cpu_bytes);
+private fn peer_mutate_back_on_cpu1() {
+    let mut here: usize = peer_mutate_cpu();
     for poll: usize in 0..<PEER_MUTATE_ARRIVAL_POLLS {
-        if (here != 1) { here = peer_mutate_cpu(cpu_bytes); }
+        if (here != 1) { here = peer_mutate_cpu(); }
     }
     if (here != 1) {
         peer_mutate_fail(bs"peer-mutate: never came back to cpu 1\n");
@@ -80,8 +84,7 @@ private fn peer_mutate_wait() {
     if (child >= PEER_MUTATE_ERROR_FLOOR) {
         peer_mutate_fail(bs"peer-mutate: fork failed\n");
     }
-    let mut cpu_bytes: [u8; 4];
-    peer_mutate_back_on_cpu1(cpu_bytes as []u8);
+    peer_mutate_back_on_cpu1();
     let mut status: [u8; 4];
     for index: usize in 0..<4 { status[index] = 0xFF; }
     if (svc5(WAIT4_SYSCALL, child, status as *u8 as usize, 0, 0, 0) != child ||
@@ -100,10 +103,9 @@ fn peer_mutate() !{unsafe} {
     if (svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) != 0) {
         peer_mutate_fail(bs"peer-mutate: cpu 1 alone was refused\n");
     }
-    let mut cpu_bytes: [u8; 4];
-    let mut here: usize = peer_mutate_cpu(cpu_bytes as []u8);
+    let mut here: usize = peer_mutate_cpu();
     for poll: usize in 0..<PEER_MUTATE_ARRIVAL_POLLS {
-        if (here != 1) { here = peer_mutate_cpu(cpu_bytes as []u8); }
+        if (here != 1) { here = peer_mutate_cpu(); }
     }
     if (here != 1) {
         peer_mutate_fail(bs"peer-mutate: never reached cpu 1\n");
@@ -129,26 +131,40 @@ fn peer_mutate() !{unsafe} {
     if (read_fd >= PEER_MUTATE_ERROR_FLOOR) {
         peer_mutate_fail(bs"peer-mutate: /mutable.txt did not open for reading\n");
     }
-    let length: usize = svc5(READ_SYSCALL, read_fd, original as *u8 as usize,
-                             64, 0, 0);
+    let length: usize = peer_mutate_read(read_fd, original as []u8);
     svc5(CLOSE_SYSCALL, read_fd, 0, 0, 0, 0);
     if (length == 0 || length >= 64) {
         peer_mutate_fail(bs"peer-mutate: /mutable.txt was not a small file\n");
     }
-    let write_fd: usize = svc5(OPENAT_SYSCALL, LINUX_AT_FDCWD,
-                               (unsafe { file as *u8 }) as usize, LINUX_O_WRONLY, 0, 0);
-    if (write_fd >= PEER_MUTATE_ERROR_FLOOR) {
-        peer_mutate_fail(bs"peer-mutate: /mutable.txt did not open for writing\n");
+    if (length < 64) {
+        let write_fd: usize = svc5(OPENAT_SYSCALL, LINUX_AT_FDCWD,
+                                   (unsafe { file as *u8 }) as usize, LINUX_O_WRONLY, 0, 0);
+        if (write_fd >= PEER_MUTATE_ERROR_FLOOR) {
+            peer_mutate_fail(bs"peer-mutate: /mutable.txt did not open for writing\n");
+        }
+        let wrote: usize = svc5(WRITE_SYSCALL, write_fd,
+                                original[0..<length] as *u8 as usize, length, 0, 0);
+        svc5(CLOSE_SYSCALL, write_fd, 0, 0, 0, 0);
+        if (wrote != length) {
+            peer_mutate_fail(bs"peer-mutate: the write back to /mutable.txt failed\n");
+        }
+        if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_MUTATION_TAG, 0, 0, 0, 0) != 1) {
+            peer_mutate_fail(bs"peer-mutate: the four mutations did not all complete on a peer\n");
+        }
+        peer_mutate_wait();
+        svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+    } else {
+        peer_mutate_fail(bs"peer-mutate: read length exceeded buffer\n");
     }
-    let wrote: usize = svc5(WRITE_SYSCALL, write_fd,
-                            original as *u8 as usize, length, 0, 0);
-    svc5(CLOSE_SYSCALL, write_fd, 0, 0, 0, 0);
-    if (wrote != length) {
-        peer_mutate_fail(bs"peer-mutate: the write back to /mutable.txt failed\n");
+}
+
+// Preserve only the bytes actually returned by the audited read wrapper.
+private fn peer_mutate_read(fd: usize, output: borrow uninit []u8) -> usize
+        ensures init(output[0..<result]) {
+    match el0_read(fd, output) {
+        El0ReadResult::Read(count) => { return count; }
+        El0ReadResult::Failed(code) => {
+            peer_mutate_fail(bs"peer-mutate: read failed\n");
+        }
     }
-    if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_MUTATION_TAG, 0, 0, 0, 0) != 1) {
-        peer_mutate_fail(bs"peer-mutate: the four mutations did not all complete on a peer\n");
-    }
-    peer_mutate_wait();
-    svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
 }

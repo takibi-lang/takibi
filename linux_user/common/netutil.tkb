@@ -251,7 +251,8 @@ fn read_u16be(s: borrow [u8; 2..]) -> i32 {
     return (s[0] as i32) * 256 + (s[1] as i32);
 }
 
-fn write_u16be(s: borrow [u8; 2..], v: i32) {
+fn write_u16be(s: borrow uninit [u8; 2..], v: i32)
+        ensures init(s[0..<2]) {
     s[0] = (v / 256) as u8;
     s[1] = (v - (v / 256) * 256) as u8;
 }
@@ -261,7 +262,8 @@ fn read_u32be(s: borrow [u8; 4..]) -> i32 {
     return ((s[0] as i32) << 24) | ((s[1] as i32) << 16) | ((s[2] as i32) << 8) | (s[3] as i32);
 }
 
-fn write_u32be(s: borrow [u8; 4..], v: i32) {
+fn write_u32be(s: borrow uninit [u8; 4..], v: i32)
+        ensures init(s[0..<4]) {
     s[0] = (v >> 24) as u8;
     s[1] = (v >> 16) as u8;
     s[2] = (v >> 8) as u8;

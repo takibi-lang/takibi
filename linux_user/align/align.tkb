@@ -33,6 +33,8 @@ fn test_align() -> i32 {
     uart_println_hex((addr4096 & 4095) as i32);   // 0x00000000
 
     let mut local_buf32: [u8; 32] align(32);
+    // This fixture tests address alignment, not uninitialized storage.
+    zero_fill(local_buf32 as []u8);
     let local_addr32: usize = (&local_buf32) as usize;
     uart_println_hex((local_addr32 & 31) as i32); // 0x00000000
     return 0;

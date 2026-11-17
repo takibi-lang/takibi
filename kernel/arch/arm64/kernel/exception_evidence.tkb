@@ -397,21 +397,23 @@ fn ddb_put_udec(value_in: usize) !{unsafe} {
     let mut count: usize = 0;
     let mut value: usize = value_in;
     if (value == 0) { uart_debug_putc(0x30); return; }
-    for index: usize in 0..<20 {
-        if (value != 0) {
-            digits[index] = 0x30 + ((value % 10) as u8);
-            count = count + 1;
-            value = value / 10;
-        }
+    while (value != 0 && count < 20) {
+        digits[count] = 0x30 + ((value % 10) as u8);
+        count = count + 1;
+        value = value / 10;
     }
-    while (count != 0) {
-        count = count - 1;
-        if (count >= 0 && count < 20) { uart_debug_putc(digits[count]); }
+    let length: usize = count;
+    for index: usize in 0..<20 {
+        if (index < length) {
+            let at: usize = length - index - 1;
+            if (at < 20) { uart_debug_putc(digits[at]); }
+        }
     }
 }
 
-private fn ddb_command_is(line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..],
-                          length: usize, text: []const u8) -> bool {
+private fn ddb_command_is(line: borrow uninit [u8; CRASH_CONSOLE_LINE_BYTES..],
+                          length: usize, text: []const u8) -> bool
+        requires init(line[0..<length]) {
     if (length != text.len) { return false; }
     let mut index: usize = 0;
     while (index < length && index < CRASH_CONSOLE_LINE_BYTES) {
@@ -422,8 +424,9 @@ private fn ddb_command_is(line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..],
 }
 
 private fn ddb_command_starts_with(
-        line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..],
-        length: usize, prefix: []const u8) -> bool {
+        line: borrow uninit [u8; CRASH_CONSOLE_LINE_BYTES..],
+        length: usize, prefix: []const u8) -> bool
+        requires init(line[0..<length]) {
     if (length < prefix.len) { return false; }
     let mut index: usize = 0;
     while (index < prefix.len && index < CRASH_CONSOLE_LINE_BYTES) {
@@ -433,8 +436,10 @@ private fn ddb_command_starts_with(
     return true;
 }
 
-private fn ddb_append(line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..],
-                      length: usize, byte: u8) -> usize {
+private fn ddb_append(line: borrow uninit [u8; CRASH_CONSOLE_LINE_BYTES..],
+                      length: usize, byte: u8) -> usize
+        requires init(line[0..<length])
+        ensures init(line[0..<result]) {
     if (length < 32) {
         line[length] = byte;
         return length + 1;
@@ -451,8 +456,9 @@ must_use variant DdbProfileCommand {
     Dump;
 }
 
-private fn ddb_parse_profile(line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..],
-                             length: usize) -> DdbProfileCommand {
+private fn ddb_parse_profile(line: borrow uninit [u8; CRASH_CONSOLE_LINE_BYTES..],
+                             length: usize) -> DdbProfileCommand
+        requires init(line[0..<length]) {
     if (ddb_command_is(line, length, bs"profile stop")) {
         return DdbProfileCommand::Stop;
     }
@@ -519,8 +525,9 @@ private fn ddb_hex_digit(byte: u8) -> usize {
 // report bound. ADDRESS is
 // hexadecimal (an optional 0x prefix); COUNT is decimal and defaults to 16.
 private fn ddb_parse_memory(
-        line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize)
-        -> DdbMemoryCommand {
+        line: borrow uninit [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize)
+        -> DdbMemoryCommand
+        requires init(line[0..<length]) {
     let kernel_command: bool =
         ddb_command_starts_with(line, length, bs"xk ");
     let physical_command: bool =
@@ -574,8 +581,9 @@ private fn ddb_parse_memory(
 
 // `xu PID HEX_ADDRESS [COUNT]`. PID/count are decimal; the address is hex.
 private fn ddb_parse_user_memory(
-        line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize)
-        -> DdbUserMemoryCommand {
+        line: borrow uninit [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize)
+        -> DdbUserMemoryCommand
+        requires init(line[0..<length]) {
     if (ddb_command_starts_with(line, length, bs"xu ") == false) {
         return DdbUserMemoryCommand::NotUserMemory;
     }
@@ -639,8 +647,9 @@ must_use variant DdbBacktraceCommand {
 }
 
 private fn ddb_parse_backtrace(
-        line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize)
-        -> DdbBacktraceCommand {
+        line: borrow uninit [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize)
+        -> DdbBacktraceCommand
+        requires init(line[0..<length]) {
     if (ddb_command_is(line, length, bs"bt")) {
         return DdbBacktraceCommand::Current;
     }
@@ -1587,9 +1596,10 @@ must_use variant DdbTraceCommand {
 // an overflow.
 must_use variant DdbDecimalResult { None; Parsed(usize); }
 
-private fn ddb_parse_decimal_after(line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..],
+private fn ddb_parse_decimal_after(line: borrow uninit [u8; CRASH_CONSOLE_LINE_BYTES..],
                                    length: usize, start: usize)
-        -> DdbDecimalResult {
+        -> DdbDecimalResult
+        requires init(line[0..<length]) {
     let mut value: usize = 0;
     let mut digits: usize = 0;
     for index: usize in 0..<32 {
@@ -1608,8 +1618,9 @@ private fn ddb_parse_decimal_after(line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..]
     return DdbDecimalResult::Parsed(value);
 }
 
-private fn ddb_parse_trace(line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..],
-                           length: usize) -> DdbTraceCommand {
+private fn ddb_parse_trace(line: borrow uninit [u8; CRASH_CONSOLE_LINE_BYTES..],
+                           length: usize) -> DdbTraceCommand
+        requires init(line[0..<length]) {
     if (ddb_command_is(line, length, bs"trace on")) { return DdbTraceCommand::On; }
     if (ddb_command_is(line, length, bs"trace off")) { return DdbTraceCommand::Off; }
     if (ddb_command_is(line, length, bs"trace all")) { return DdbTraceCommand::KeepAll; }
@@ -3468,8 +3479,9 @@ private fn crash_snapshot_render_core(cpu: CpuHere,
 }
 
 
-private fn crash_console_command_is(line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..],
-                                    length: usize, text: []const u8) -> bool {
+private fn crash_console_command_is(line: borrow uninit [u8; CRASH_CONSOLE_LINE_BYTES..],
+                                    length: usize, text: []const u8) -> bool
+        requires init(line[0..<length]) {
     if (length != text.len) { return false; }
     let mut index: usize = 0;
     while (index < length && index < CRASH_CONSOLE_LINE_BYTES) {
@@ -3482,8 +3494,9 @@ private fn crash_console_command_is(line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..
 must_use variant CrashConsolePidResult { Invalid; Parsed(usize); }
 
 private fn crash_console_parse_proc(
-        line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize)
-        -> CrashConsolePidResult {
+        line: borrow uninit [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize)
+        -> CrashConsolePidResult
+        requires init(line[0..<length]) {
     if (ddb_command_starts_with(line, length, bs"proc ") == false) {
         return CrashConsolePidResult::Invalid;
     }
@@ -3506,8 +3519,9 @@ private fn crash_console_parse_proc(
 }
 
 private fn crash_console_dispatch_cached(cpu: CpuHere, 
-        line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize)
-        -> bool !{unsafe} {
+        line: borrow uninit [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize)
+        -> bool !{unsafe}
+        requires init(line[0..<length]) {
     if (crash_console_command_is(line, length, bs"oops")) {
         crash_snapshot_render_every_core(cpu);
         return true;
@@ -3527,7 +3541,8 @@ private fn crash_console_dispatch_cached(cpu: CpuHere,
 
 private fn crash_console_dispatch_stopped(cpu: CpuHere, 
         stopped: borrow MachineStopped[&kernel_world_stop],
-        line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize) !{unsafe} {
+        line: borrow uninit [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize) !{unsafe}
+        requires init(line[0..<length]) {
     if (crash_console_dispatch_cached(cpu, line, length)) { return; }
     if (crash_console_command_is(line, length, bs"ps")) {
         kernel_process_monitor_ps(stopped);
@@ -3541,7 +3556,8 @@ private fn crash_console_dispatch_stopped(cpu: CpuHere,
 }
 
 private fn crash_console_dispatch_unavailable(cpu: CpuHere, 
-        line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize) !{unsafe} {
+        line: borrow uninit [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize) !{unsafe}
+        requires init(line[0..<length]) {
     if (crash_console_dispatch_cached(cpu, line, length)) { return; }
     if (crash_console_command_is(line, length, bs"ps")) {
         ddb_puts("ps: unavailable reason=machine-not-stopped\n");
@@ -3557,8 +3573,10 @@ private fn crash_console_dispatch_unavailable(cpu: CpuHere,
 }
 
 private fn crash_console_append(
-        line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize,
-        byte: u8) -> usize {
+        line: borrow uninit [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize,
+        byte: u8) -> usize
+        requires init(line[0..<length])
+        ensures init(line[0..<result]) {
     if (length < 32) {
         line[length] = byte;
         return length + 1;
@@ -3660,8 +3678,9 @@ private fn crash_console_prepare() !{unsafe} {
     crash_report_release();
 }
 
-private fn crash_console_read(line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..])
-        -> usize !{unsafe} {
+private fn crash_console_read(line: borrow uninit [u8; CRASH_CONSOLE_LINE_BYTES..])
+        -> usize !{unsafe}
+        ensures init(line[0..<result]) {
     let mut length: usize = 0;
     // GitHub issue #486: the prompt is one of this file's writes and
     // takes the claim like the rest. The BLOCKING READ below does not --
@@ -3844,9 +3863,9 @@ private fn crash_snapshot_shared_stopped(cpu: CpuHere,
 
 // user_entry.S defines this four-word output order using generated offsets.
 private fn crash_snapshot_capture_frame(cpu: CpuHere,
-        frame: sink LeveledFrame[process]) {
+        frame: sink LeveledFrame[process])  {
     let mut saved: [usize; 4];
-    crash_snapshot_copy_leveled_frame(frame, saved as *usize);
+    crash_snapshot_copy_leveled_frame(frame, saved as []usize);
     crash_snapshot_per_core[cpu].capture.saved_sp_el0 = saved[0];
     crash_snapshot_per_core[cpu].capture.saved_elr_el1 = saved[1];
     crash_snapshot_per_core[cpu].capture.saved_spsr_el1 = saved[2];

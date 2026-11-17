@@ -1,3 +1,6 @@
+use "kernel/arch/arm64/kernel/el0_affinity.tkb";
+use "kernel/arch/arm64/kernel/el0_termios.tkb";
+use "kernel/arch/arm64/kernel/el0_read.tkb";
 /* GitHub issue #228: the EL0 syscall-ABI test payload that used to be
  * hand-written AArch64 assembly in user_entry.S. Only the two register-level
  * scheduler-preemption probes remain in raw asm (user_payload_asm.S), since
@@ -16,10 +19,12 @@
  * rule and KERNEL_EXT2_IMAGE's e2cp step.
  */
 
-extern fn scheduler_probe_run(asid_va: usize, asid_marker: usize,
+extern fn scheduler_probe_run(asid_va: borrow *u8, asid_marker: usize,
                                simd_pattern: usize, busy_count: usize)
     -> usize;
 extern fn busy_spin(count: usize);
+extern fn user_payload_readv_invalid_tail(fd: usize, output: borrow *u8,
+        capacity: usize) -> usize;
 extern fn sigchld_probe_arm(record: usize);
 extern fn sigchld_probe_handler_address() -> usize;
 extern fn sigchld_probe_restorer_address() -> usize;
@@ -95,15 +100,13 @@ fn initial_user_payload() !{unsafe} {
      * CPU now, so compare the reported CPU with its allowed affinity mask
      * instead of assuming core 0. This non-NUMA kernel reports node 0. */
     let mut cpu_node: [u8; 8];
+    payload_getcpu_pair(src_loc(), cpu_node as []u8);
     let cpu_node_base: *u8 = cpu_node as *u8;
-    fail_if(src_loc(), svc5(168, ptr_of(cpu_node_base, 0), ptr_of(cpu_node_base, 4),
-                            0, 0, 0) != 0);
     let cpu_and_node: usize = payload_read_u64(cpu_node_base, 0);
     let reported_cpu: usize = cpu_and_node & 0xFFFFFFFF;
     fail_if(src_loc(), (cpu_and_node >> 32) != 0);
     let mut allowed_cpus: [u8; 8];
-    fail_if(src_loc(), svc5(GETAFFINITY_SYSCALL, 0, 8,
-                            allowed_cpus as *u8 as usize, 0, 0) != 8);
+    payload_getaffinity(src_loc(), allowed_cpus as []u8);
     let mut reported_cpu_is_allowed: bool = false;
     for byte_index: usize in 0..<8 {
         for bit_index: usize in 0..<8 {
@@ -159,8 +162,7 @@ fn initial_user_payload() !{unsafe} {
     let fd4: usize = svc5(56, 0, mutable_path as usize, 0, 0, 0);
     fail_if(src_loc(), fd4 != 3);
     let mut short_readback: [u8; 5];
-    fail_if(src_loc(), svc5(63, fd4, short_readback as *u8 as usize,
-                            short_content.len, 0, 0) != short_content.len);
+    payload_read_exact(src_loc(), fd4, short_readback as []u8);
     for i: usize in 0..<5 {
         fail_if(src_loc(), short_readback[i] != short_content[i]);
     }
@@ -203,8 +205,7 @@ fn initial_user_payload() !{unsafe} {
     let fd6: usize = svc5(56, 0, mutable_path as usize, 0, 0, 0);
     fail_if(src_loc(), fd6 != 3);
     let mut long_readback: [u8; 14];
-    fail_if(src_loc(), svc5(63, fd6, long_readback as *u8 as usize,
-                            long_content.len, 0, 0) != long_content.len);
+    payload_read_exact(src_loc(), fd6, long_readback as []u8);
     for i: usize in 0..<14 {
         fail_if(src_loc(), long_readback[i] != long_content[i]);
     }
@@ -223,7 +224,7 @@ fn initial_user_payload() !{unsafe} {
     let fd8: usize = svc5(56, 0, mutable_path as usize, 0, 0, 0);
     fail_if(src_loc(), fd8 != 3);
     let overwritten: []const u8 = bs"EXtended ext2\n";
-    fail_if(src_loc(), svc5(63, fd8, long_readback as *u8 as usize, 14, 0, 0) != 14);
+    payload_read_exact(src_loc(), fd8, long_readback[0..<14]);
     for i: usize in 0..<14 {
         fail_if(src_loc(), long_readback[i] != overwritten[i]);
     }
@@ -243,8 +244,8 @@ fn initial_user_payload() !{unsafe} {
      * kernel side writes them that way: a *usize cast onto a u8 array
      * assumes an alignment the array does not promise. */
     let mut rlimit_buf: [u8; 16];
+    payload_getrlimit(src_loc(), 7, rlimit_buf as []u8);
     let rlimit_base: *u8 = rlimit_buf as *u8;
-    fail_if(src_loc(), svc5(261, 0, 7, 0, ptr_of(rlimit_base, 0), 0) != 0);
     fail_if(src_loc(), payload_read_u64(rlimit_base, 0) != 1024);
     fail_if(src_loc(), payload_read_u64(rlimit_base, 8) != 4096);
     payload_write_u64(rlimit_base, 0, 64);
@@ -283,12 +284,12 @@ fn initial_user_payload() !{unsafe} {
      * a second is several 1/64-second scheduler ticks: returning immediately
      * or selecting this process while it is still asleep both fail here. */
     let mut time_buf: [u8; 16];
+    payload_put_u64(time_buf[0..<8], 0);
+    payload_put_u64(time_buf[8..<16], 125000000);
     let time_base: *u8 = time_buf as *u8;
-    payload_write_u64(time_base, 0, 0);
-    payload_write_u64(time_base, 8, 125000000);
     let mut before_buf: [u8; 16];
+    payload_clock(src_loc(), 1, before_buf as []u8);
     let before_base: *u8 = before_buf as *u8;
-    fail_if(src_loc(), svc5(113, 1, ptr_of(before_base, 0), 0, 0, 0) != 0);
     fail_if(src_loc(), svc5(101, ptr_of(time_base, 0), 0, 0, 0, 0) != 0);
     fail_if(src_loc(), svc5(113, 1, ptr_of(time_base, 0), 0, 0, 0) != 0);
     let before_ns: usize = payload_read_u64(before_base, 0) * 1000000000 +
@@ -328,8 +329,8 @@ fn initial_user_payload() !{unsafe} {
      * consume it through rt_sigtimedwait, then prove both poll and finite
      * timeout return EAGAIN once no signal remains pending. */
     let mut signal_set: [u8; 8];
+    payload_put_u64(signal_set[0..<8], 1 << 16);
     let signal_base: *u8 = signal_set as *u8;
-    payload_write_u64(signal_base, 0, 1 << 16);
     fail_if(src_loc(), svc5(135, 2, ptr_of(signal_base, 0), 0, 8, 0) != 0);
     fail_if(src_loc(), svc5(129, my_pid, 0, 0, 0, 0) != 0);
     fail_if(src_loc(), svc5(129, my_pid, 17, 0, 0, 0) != 0);
@@ -380,8 +381,8 @@ fn initial_user_payload() !{unsafe} {
     let fd6: usize = svc5(242, 4, 0, 0, 0, 0);
     fail_if(src_loc(), fd6 != 6);
 
-    let connection_b_response: []const u8 = bs"conn-B\n!";
-    let socket_response: []const u8 = bs"HTTP/1.0 200 OK\r\n\r\n";
+    let connection_b_response: [const u8; 8..] = bs"conn-B\n!";
+    let socket_response: [const u8; 19..] = bs"HTTP/1.0 200 OK\r\n\r\n";
     // GitHub issue #228 (found on real hardware), reconfirmed under the
     // real static-PIE ELF (issue #241): this buffer MUST be a local
     // (stack) variable, not a global. scripts/check_user_payload_no_rw_globals.py
@@ -390,41 +391,28 @@ fn initial_user_payload() !{unsafe} {
     // hang; stack locals are always safe since they live in this process's
     // private, writable stack mapping.
     let mut user_payload_rx_buf: [u8; 16];
-    let rx_base: *u8 = user_payload_rx_buf as *u8;
-
-    // Three iovecs include an empty entry between two real segments.
-    let mut io_vectors: [u8; 48];
-    let vectors_base: *u8 = io_vectors as *u8;
-    payload_write_u64(vectors_base, 0, ptr_of(rx_base, 0));
-    payload_write_u64(vectors_base, 8, 3);
-    payload_write_u64(vectors_base, 16, 0);
-    payload_write_u64(vectors_base, 24, 0);
-    payload_write_u64(vectors_base, 32, ptr_of(rx_base, 3));
-    payload_write_u64(vectors_base, 40, 5);
-    fail_if(src_loc(), svc5(65, 5, ptr_of(vectors_base, 0), 3, 0, 0) != 8);
-    // A short first segment must return without touching the invalid next
-    // segment or waiting for another packet on this connection.
-    payload_write_u64(vectors_base, 8, 16);
-    payload_write_u64(vectors_base, 16, 0);
-    payload_write_u64(vectors_base, 24, 1);
-    fail_if(src_loc(), svc5(65, 6, ptr_of(vectors_base, 0), 2, 0, 0) != 8);
-    // The physical peer fixture expects connection B's reply in one packet.
-    // Empty neighbors still exercise writev without changing that wire shape.
-    payload_write_u64(vectors_base, 0, 0);
-    payload_write_u64(vectors_base, 8, 0);
-    payload_write_u64(vectors_base, 16, (unsafe { connection_b_response as *u8 }) as usize);
-    payload_write_u64(vectors_base, 24, connection_b_response.len);
-    payload_write_u64(vectors_base, 32, 0);
-    payload_write_u64(vectors_base, 40, 0);
-    fail_if(src_loc(), svc5(66, 6, ptr_of(vectors_base, 0), 3, 0, 0) != 8);
-    fail_if(src_loc(), svc5(63, 5, ptr_of(rx_base, 0), 8, 0, 0) != 8);
+    payload_readv_probe(src_loc(), user_payload_rx_buf as []u8);
+    let rx_base: *u8 = user_payload_rx_buf[0..<8] as *u8;
+    // Empty neighbors preserve the vectored syscall and packet shape.
+    let response_empty_left = io_write_span(connection_b_response[0..<0]);
+    let response_body = io_write_span(connection_b_response);
+    let response_empty_right = io_write_span(connection_b_response[0..<0]);
+    let response_written: usize = unsafe {
+        io_writev(6, response_empty_left, response_body, response_empty_right)
+    };
+    io_span_end(response_empty_right);
+    io_span_end(response_body);
+    io_span_end(response_empty_left);
+    fail_if(src_loc(), response_written != 8);
+    fail_if(src_loc(), svc5(63, 5, (rx_base as usize), 8, 0, 0) != 8);
     // Connection A's peer collects a byte stream, so split its header into
     // two real TCP writev segments and retain the exact response content.
-    payload_write_u64(vectors_base, 0, (unsafe { socket_response as *u8 }) as usize);
-    payload_write_u64(vectors_base, 8, 9);
-    payload_write_u64(vectors_base, 16, ptr_of((unsafe { socket_response as *u8 }), 9));
-    payload_write_u64(vectors_base, 24, 10);
-    fail_if(src_loc(), svc5(66, 5, ptr_of(vectors_base, 0), 2, 0, 0) != 19);
+    let header_first = io_write_span(socket_response[0..<9]);
+    let header_last = io_write_span(socket_response[9..<19]);
+    let header_written: usize = unsafe { io_writev(5, header_first, header_last) };
+    io_span_end(header_last);
+    io_span_end(header_first);
+    fail_if(src_loc(), header_written != 19);
 
     // Same reasoning as user_payload_rx_buf above: must be a stack local.
     let mut user_payload_large_buf: [u8; LARGE_LEN];
@@ -433,11 +421,12 @@ fn initial_user_payload() !{unsafe} {
     }
     let large_base: *u8 = user_payload_large_buf as *u8;
     // A partial TCP segment ends writev before the following sentinel.
-    payload_write_u64(vectors_base, 0, ptr_of(large_base, 0));
-    payload_write_u64(vectors_base, 8, LARGE_LEN);
-    payload_write_u64(vectors_base, 16, (unsafe { connection_b_response as *u8 }) as usize);
-    payload_write_u64(vectors_base, 24, 1);
-    fail_if(src_loc(), svc5(66, 5, ptr_of(vectors_base, 0), 2, 0, 0) != 1460);
+    let large_body = io_write_span(user_payload_large_buf as []u8);
+    let large_sentinel = io_write_span(connection_b_response[0..<1]);
+    let large_written: usize = unsafe { io_writev(5, large_body, large_sentinel) };
+    io_span_end(large_sentinel);
+    io_span_end(large_body);
+    fail_if(src_loc(), large_written != 1460);
     fail_if(src_loc(), svc5(64, 5, ptr_of(large_base, 1460), 1, 0, 0) != 1);
     // GitHub issue #1112: a zero-length write on a connected TCP socket
     // returns 0 and sends nothing, as on Linux; it was EINVAL.
@@ -462,12 +451,13 @@ fn initial_user_payload() !{unsafe} {
     // GitHub issue #1116: a read or readv on the listening fd 4 is Linux's
     // ENOTCONN (it was EBADF), and a zero-length read on the connected fd 5
     // returns 0 without waiting (it was EBADF).
-    fail_if(src_loc(), svc5(63, 4, ptr_of(rx_base, 0), 8, 0, 0) != ENOTCONN_RC);
-    fail_if(src_loc(), svc5(63, 4, ptr_of(rx_base, 0), 0, 0, 0) != ENOTCONN_RC);
-    payload_write_u64(vectors_base, 0, ptr_of(rx_base, 0));
-    payload_write_u64(vectors_base, 8, 8);
-    fail_if(src_loc(), svc5(65, 4, ptr_of(vectors_base, 0), 1, 0, 0) != ENOTCONN_RC);
-    fail_if(src_loc(), svc5(63, 5, ptr_of(rx_base, 0), 0, 0, 0) != 0);
+    fail_if(src_loc(), svc5(63, 4, (rx_base as usize), 8, 0, 0) != ENOTCONN_RC);
+    fail_if(src_loc(), svc5(63, 4, (rx_base as usize), 0, 0, 0) != ENOTCONN_RC);
+    let listener_read = io_read_span(user_payload_rx_buf[0..<8]);
+    let listener_answer: usize = unsafe { io_readv(4, listener_read) };
+    io_span_end(listener_read);
+    fail_if(src_loc(), listener_answer != ENOTCONN_RC);
+    fail_if(src_loc(), svc5(63, 5, (rx_base as usize), 0, 0, 0) != 0);
     let socket_write_success: []const u8 =
         bs"userspace socket partial write: 1460+1, empty ok\nuserspace socket write on a listener: EPIPE, SIGPIPE, MSG_NOSIGNAL ok\nuserspace socket read on a listener: ENOTCONN, empty read ok\nuserspace socket vectored io: split, empty, short ok\n";
     fail_if(src_loc(), svc5(64, 1, ((unsafe { socket_write_success as *u8 })) as usize,
@@ -479,7 +469,7 @@ fn initial_user_payload() !{unsafe} {
     // fix only close() and write() did, and this read hung until its own
     // 30-second timeout.
     user_payload_rx_buf[0] = 0;
-    fail_if(src_loc(), svc5(63, 5, ptr_of(rx_base, 0), 1, 0, 0) != 1);
+    fail_if(src_loc(), svc5(63, 5, (rx_base as usize), 1, 0, 0) != 1);
     fail_if(src_loc(), user_payload_rx_buf[0] != 0x72);
     let blocked_read_success: []const u8 =
         bs"userspace socket read: a blocked read retransmits its own dropped segment ok\n";
@@ -527,7 +517,7 @@ fn initial_user_payload() !{unsafe} {
     let unread_byte: []const u8 = bs"p";
     fail_if(src_loc(), svc5(64, 5, (unsafe { unread_byte as *u8 }) as usize, 1, 0, 0) != 1);
     user_payload_rx_buf[0] = 0;
-    fail_if(src_loc(), svc5(63, 6, ptr_of(rx_base, 0), 1, 0, 0) != 1);
+    fail_if(src_loc(), svc5(63, 6, (rx_base as usize), 1, 0, 0) != 1);
     fail_if(src_loc(), user_payload_rx_buf[0] != 0x71);
     let unread_success: []const u8 =
         bs"userspace socket retransmit: a connection nobody reads resends its dropped segment ok\n";
@@ -542,19 +532,20 @@ fn initial_user_payload() !{unsafe} {
     // The trigger bytes go out of the stack buffer, so they need no
     // unsafe slice-to-pointer conversion.
     user_payload_rx_buf[0] = 0x79;
-    fail_if(src_loc(), svc5(64, 6, ptr_of(rx_base, 0), 1, 0, 0) != 1);
-    fail_if(src_loc(), svc5(63, 6, ptr_of(rx_base, 0), 8, 0, 0) != 0);
-    fail_if(src_loc(), svc5(63, 6, ptr_of(rx_base, 0), 8, 0, 0) != 0);
-    payload_write_u64(vectors_base, 0, ptr_of(rx_base, 0));
-    payload_write_u64(vectors_base, 8, 8);
-    fail_if(src_loc(), svc5(65, 6, ptr_of(vectors_base, 0), 1, 0, 0) != 0);
+    fail_if(src_loc(), svc5(64, 6, (rx_base as usize), 1, 0, 0) != 1);
+    fail_if(src_loc(), svc5(63, 6, (rx_base as usize), 8, 0, 0) != 0);
+    fail_if(src_loc(), svc5(63, 6, (rx_base as usize), 8, 0, 0) != 0);
+    let closed_read = io_read_span(user_payload_rx_buf[0..<8]);
+    let closed_answer: usize = unsafe { io_readv(6, closed_read) };
+    io_span_end(closed_read);
+    fail_if(src_loc(), closed_answer != 0);
     user_payload_rx_buf[0] = 0x7a;
-    fail_if(src_loc(), svc5(64, 5, ptr_of(rx_base, 0), 1, 0, 0) != 1);
-    fail_if(src_loc(), svc5(63, 5, ptr_of(rx_base, 0), 8, 0, 0) != ECONNRESET_RC);
-    fail_if(src_loc(), svc5(63, 5, ptr_of(rx_base, 0), 8, 0, 0) != 0);
+    fail_if(src_loc(), svc5(64, 5, (rx_base as usize), 1, 0, 0) != 1);
+    fail_if(src_loc(), svc5(63, 5, (rx_base as usize), 8, 0, 0) != ECONNRESET_RC);
+    fail_if(src_loc(), svc5(63, 5, (rx_base as usize), 8, 0, 0) != 0);
     payload_write_u64(signal_base, 0, 1 << 12);
     fail_if(src_loc(), svc5(135, 2, ptr_of(signal_base, 0), 0, 8, 0) != 0);
-    fail_if(src_loc(), svc5(64, 5, ptr_of(rx_base, 0), 1, 0, 0) != EPIPE_RC);
+    fail_if(src_loc(), svc5(64, 5, (rx_base as usize), 1, 0, 0) != EPIPE_RC);
     fail_if(src_loc(), svc5(137, ptr_of(signal_base, 0), 0, 0, 8, 0) != 13);
     payload_write_u64(signal_base, 0, 0);
     fail_if(src_loc(), svc5(135, 2, ptr_of(signal_base, 0), 0, 8, 0) != 0);
@@ -579,8 +570,6 @@ fn initial_user_payload() !{unsafe} {
      * same VA, exactly what the "private same-VA data" probe needs.
      */
     let mut scheduler_probe_slot: [u8; 8];
-    let scheduler_probe_va: usize =
-        (scheduler_probe_slot as *u8) as usize;
 
     /* Syscall 451 delivers one raw byte directly when the child is Blocked,
      * and reads the UART ring when it is runnable. Canonical input would
@@ -589,7 +578,7 @@ fn initial_user_payload() !{unsafe} {
      * then restore the inherited settings once the child is reaped. */
     let mut saved_terminal: [u8; 36];
     let mut scalar_terminal: [u8; 36];
-    fail_if(src_loc(), svc5(29, 0, 0x5401, saved_terminal as *u8 as usize, 0, 0) != 0);
+    payload_tcgets(src_loc(), saved_terminal as []u8);
     for index: usize in 0..<36 { scalar_terminal[index] = saved_terminal[index]; }
     // c_lflag's low byte: clear ICANON (2) and ECHO (8).
     scalar_terminal[12] = scalar_terminal[12] & 0xF5;
@@ -609,12 +598,12 @@ fn initial_user_payload() !{unsafe} {
         }
         /* Scheduler acceptance: private same-VA data plus GPR and SIMD
          * signatures must survive involuntary timer preemption. */
-        fail_if(src_loc(), scheduler_probe_run(scheduler_probe_va, 0x22, 0x5a,
+        fail_if(src_loc(), payload_scheduler_probe(scheduler_probe_slot as []u8, 0x22, 0x5a,
                                                 SCHEDULER_CHILD_BUSY) == 0);
         svc5(93, 42, 0, 0, 0, 0);
     } else {
         fail_if(src_loc(), pid != my_pid + 1);
-        fail_if(src_loc(), scheduler_probe_run(scheduler_probe_va, 0x11, 0xa5,
+        fail_if(src_loc(), payload_scheduler_probe(scheduler_probe_slot as []u8, 0x11, 0xa5,
                                                 SCHEDULER_PARENT_BUSY) == 0);
 
         /* Accepted only if this parent reached the end of its compute
@@ -679,7 +668,7 @@ fn initial_user_payload() !{unsafe} {
                                    O_CREAT_WRONLY, 0x1A4, 0);
         fail_if(src_loc(), spare_fd >= 64);
         for block: usize in 0..<6 {
-            fail_if(src_loc(), svc5(64, spare_fd, write_block as *u8 as usize,
+            fail_if(src_loc(), svc5(64, spare_fd, large_base as usize,
                                     1024, 0, 0) != 1024);
         }
         fail_if(src_loc(), svc5(57, spare_fd, 0, 0, 0, 0) != 0);
@@ -710,16 +699,17 @@ fn initial_user_payload() !{unsafe} {
         fail_if(src_loc(), exhaustion_read >= 64);
         for block: usize in 0..<12 {
             if (block < committed) {
-                fail_if(src_loc(), svc5(63, exhaustion_read, read_block as *u8 as usize,
-                                        1024, 0, 0) != 1024);
+                payload_read_exact(src_loc(), exhaustion_read, read_block[0..<1024]);
                 for byte: usize in 0..<1024 {
                     fail_if(src_loc(), read_block[byte] !=
                                    (((block * 1024 + byte) * 37 + 11) % 251) as u8);
                 }
             }
         }
-        fail_if(src_loc(), svc5(63, exhaustion_read, read_block as *u8 as usize,
-                                1, 0, 0) != 0);
+        match el0_read(exhaustion_read, read_block[0..<1]) {
+            El0ReadResult::Read(count) => { fail_if(src_loc(), count != 0); }
+            El0ReadResult::Failed(code) => { fail_halt_at(src_loc()); }
+        }
         fail_if(src_loc(), svc5(57, exhaustion_read, 0, 0, 0, 0) != 0);
         // GitHub issue #698: the spare file's six blocks are free again.
         // mkdirat
@@ -731,9 +721,14 @@ fn initial_user_payload() !{unsafe} {
         for byte: usize in 0..<9 { dir_path[byte] = dir_stem[byte]; }
         dir_path[10] = 0;
         dir_path[11] = 0;
-        let mut made: usize = 0;
+        // Peel the first real attempt so the path is initialized even
+        // after the remaining conditional iterations stop making progress.
+        dir_path[9] = 0x41;
+        fail_if(src_loc(), svc5(34, 0xFFFFFFFFFFFFFF9C,
+                                dir_path as *u8 as usize, 0x1ED, 0, 0) != 0);
+        let mut made: usize = 1;
         let mut refused: bool = false;
-        for attempt: usize in 0..<32 {
+        for attempt: usize in 1..<32 {
             if (refused == false) {
                 dir_path[9] = (0x41 + attempt) as u8;
                 let answer: usize = svc5(34, 0xFFFFFFFFFFFFFF9C,
@@ -757,7 +752,19 @@ fn initial_user_payload() !{unsafe} {
         file_path[11] = 0;
         let mut created: usize = 0;
         let mut create_refused: bool = false;
-        for attempt: usize in 0..<104 {
+        file_path[9] = 0x41;
+        file_path[10] = 0x41;
+        let first_file: usize = svc5(56, 0xFFFFFFFFFFFFFF9C,
+                                     file_path as *u8 as usize,
+                                     O_CREAT_WRONLY, 0x1A4, 0);
+        if (first_file < 64) {
+            fail_if(src_loc(), svc5(57, first_file, 0, 0, 0, 0) != 0);
+            created = 1;
+        } else {
+            fail_if(src_loc(), first_file != ENOSPC_RC);
+            create_refused = true;
+        }
+        for attempt: usize in 1..<104 {
             if (create_refused == false) {
                 file_path[9] = (0x41 + attempt / 26) as u8;
                 file_path[10] = (0x41 + attempt % 26) as u8;
@@ -815,24 +822,24 @@ fn initial_user_payload() !{unsafe} {
         let back_fd: usize = svc5(56, 0xFFFFFFFFFFFFFF9C,
                                   "/trunc-file" as *u8 as usize, 0, 0, 0);
         fail_if(src_loc(), back_fd >= 64);
-        fail_if(src_loc(), svc5(63, back_fd, trunc_content as *u8 as usize,
-                                3072, 0, 0) != 3072);
+        payload_read_exact(src_loc(), back_fd, trunc_content[0..<3072]);
         fail_if(src_loc(), svc5(57, back_fd, 0, 0, 0, 0) != 0);
         for byte: usize in 0..<3072 {
             fail_if(src_loc(), trunc_content[byte] != (byte / 1024 + 0x61) as u8);
         }
         let mut trunc_stat: [u8; 128];
+        payload_stat(src_loc(), "/trunc-file" as *u8 as usize, trunc_stat as []u8);
         let trunc_stat_base: *u8 = trunc_stat as *u8;
-        fail_if(src_loc(), svc5(79, 0xFFFFFFFFFFFFFF9C, "/trunc-file" as *u8 as usize,
-                                ptr_of(trunc_stat_base, 0), 0, 0) != 0);
         fail_if(src_loc(), payload_read_u64(trunc_stat_base, 48) != 3072);
         let free_before: usize = free_blocks_by_mkdir();
         let truncated_fd: usize = svc5(56, 0xFFFFFFFFFFFFFF9C,
                                        "/trunc-file" as *u8 as usize,
                                        O_TRUNC_RDWR, 0, 0);
         fail_if(src_loc(), truncated_fd >= 64);
-        fail_if(src_loc(), svc5(63, truncated_fd, read_block as *u8 as usize,
-                                1, 0, 0) != 0);
+        match el0_read(truncated_fd, read_block[0..<1]) {
+            El0ReadResult::Read(count) => { fail_if(src_loc(), count != 0); }
+            El0ReadResult::Failed(code) => { fail_halt_at(src_loc()); }
+        }
         fail_if(src_loc(), svc5(57, truncated_fd, 0, 0, 0, 0) != 0);
         fail_if(src_loc(), svc5(79, 0xFFFFFFFFFFFFFF9C, "/trunc-file" as *u8 as usize,
                                 ptr_of(trunc_stat_base, 0), 0, 0) != 0);
@@ -912,11 +919,11 @@ fn initial_user_payload() !{unsafe} {
         write_block[0] = 0x78;
         let filler_a: usize = svc5(56, 0, "/enospc-a" as *u8 as usize, 0x201, 0, 0);
         fail_if(src_loc(), filler_a >= 64);
-        fail_if(src_loc(), svc5(64, filler_a, write_block as *u8 as usize, 1, 0, 0) != 1);
+        fail_if(src_loc(), svc5(64, filler_a, write_block[0..<1] as *u8 as usize, 1, 0, 0) != 1);
         fail_if(src_loc(), svc5(57, filler_a, 0, 0, 0, 0) != 0);
         let filler_b: usize = svc5(56, 0, "/enospc-b" as *u8 as usize, 0x201, 0, 0);
         fail_if(src_loc(), filler_b >= 64);
-        fail_if(src_loc(), svc5(64, filler_b, write_block as *u8 as usize, 1, 0, 0) != 1);
+        fail_if(src_loc(), svc5(64, filler_b, write_block[0..<1] as *u8 as usize, 1, 0, 0) != 1);
         fail_if(src_loc(), svc5(57, filler_b, 0, 0, 0, 0) != 0);
         fail_if(src_loc(), svc5(35, 0xFFFFFFFFFFFFFF9C,
                                 "/enospc-a" as *u8 as usize, 0, 0, 0) != 0);
@@ -933,9 +940,12 @@ fn initial_user_payload() !{unsafe} {
                                      "/creat-file" as *u8 as usize,
                                      O_CREAT_EXCL_RDWR, 0x1A4, 0);
         fail_if(src_loc(), created_fd >= 64);
-        fail_if(src_loc(), svc5(63, created_fd, read_block as *u8 as usize, 1, 0, 0) != 0);
+        match el0_read(created_fd, read_block[0..<1]) {
+            El0ReadResult::Read(count) => { fail_if(src_loc(), count != 0); }
+            El0ReadResult::Failed(code) => { fail_halt_at(src_loc()); }
+        }
         write_block[0] = 0x43;
-        fail_if(src_loc(), svc5(64, created_fd, write_block as *u8 as usize, 1, 0, 0) != 1);
+        fail_if(src_loc(), svc5(64, created_fd, write_block[0..<1] as *u8 as usize, 1, 0, 0) != 1);
         fail_if(src_loc(), svc5(57, created_fd, 0, 0, 0, 0) != 0);
         fail_if(src_loc(), svc5(56, 0xFFFFFFFFFFFFFF9C, "/creat-file" as *u8 as usize,
                                 O_CREAT_EXCL_RDWR, 0x1A4, 0) != EEXIST_RC);
@@ -943,8 +953,13 @@ fn initial_user_payload() !{unsafe} {
                                       "/creat-file" as *u8 as usize,
                                       O_CREAT_RDONLY, 0x1A4, 0);
         fail_if(src_loc(), reopened_fd >= 64);
-        fail_if(src_loc(), svc5(63, reopened_fd, read_block as *u8 as usize, 2, 0, 0) != 1);
-        fail_if(src_loc(), read_block[0] != 0x43);
+        match el0_read(reopened_fd, read_block[0..<2]) {
+            El0ReadResult::Read(count) => {
+                if (count != 1) { fail_halt_at(src_loc()); }
+                fail_if(src_loc(), read_block[0] != 0x43);
+            }
+            El0ReadResult::Failed(code) => { fail_halt_at(src_loc()); }
+        }
         fail_if(src_loc(), svc5(57, reopened_fd, 0, 0, 0, 0) != 0);
         fail_if(src_loc(), svc5(56, 0xFFFFFFFFFFFFFF9C, "/" as *u8 as usize,
                                 O_CREAT_WRONLY, 0x1A4, 0) != EISDIR_RC);
@@ -954,24 +969,25 @@ fn initial_user_payload() !{unsafe} {
         // failure that moved its offset would create a zero-filled gap,
         // caught by the read and EOF.
         write_block[0] = 0x21;
-        fail_if(src_loc(), svc5(64, exhaustion_fd, write_block as *u8 as usize,
-                                1, 0, 0) != 1);
+        fail_if(src_loc(), svc5(64, exhaustion_fd, write_block[0..<1] as *u8 as usize, 1, 0, 0) != 1);
         fail_if(src_loc(), svc5(57, exhaustion_fd, 0, 0, 0, 0) != 0);
         let retry_read: usize = svc5(56, 0, mutable_path as usize, 0, 0, 0);
         fail_if(src_loc(), retry_read >= 64);
         for block: usize in 0..<12 {
             if (block < committed) {
-                fail_if(src_loc(), svc5(63, retry_read, read_block as *u8 as usize,
-                                        1024, 0, 0) != 1024);
+                payload_read_exact(src_loc(), retry_read, read_block[0..<1024]);
                 for byte: usize in 0..<1024 {
                     fail_if(src_loc(), read_block[byte] !=
                                    (((block * 1024 + byte) * 37 + 11) % 251) as u8);
                 }
             }
         }
-        fail_if(src_loc(), svc5(63, retry_read, read_block as *u8 as usize, 1, 0, 0) != 1);
+        payload_read_exact(src_loc(), retry_read, read_block[0..<1]);
         fail_if(src_loc(), read_block[0] != 0x21);
-        fail_if(src_loc(), svc5(63, retry_read, read_block as *u8 as usize, 1, 0, 0) != 0);
+        match el0_read(retry_read, read_block[0..<1]) {
+            El0ReadResult::Read(count) => { fail_if(src_loc(), count != 0); }
+            El0ReadResult::Failed(code) => { fail_halt_at(src_loc()); }
+        }
         fail_if(src_loc(), svc5(57, retry_read, 0, 0, 0, 0) != 0);
         let exhaustion_message: []const u8 =
             bs"userspace ext2 exhaustion: write+mkdir+creat ENOSPC, data+offset unchanged, unlink+retry ok, creat excl+reopen ok, trunc frees direct blocks\n";
@@ -996,15 +1012,16 @@ fn initial_user_payload() !{unsafe} {
         let read_fd: usize = svc5(56, 0, mutable_path as usize, 0, 0, 0);
         fail_if(src_loc(), read_fd >= 64);
         for block: usize in 0..<13 {
-            fail_if(src_loc(), svc5(63, read_fd, read_block as *u8 as usize,
-                                    1024, 0, 0) != 1024);
+            payload_read_exact(src_loc(), read_fd, read_block[0..<1024]);
             for byte: usize in 0..<1024 {
                 fail_if(src_loc(), read_block[byte] !=
                                (((block * 1024 + byte) * 37 + 11) % 251) as u8);
             }
         }
-        fail_if(src_loc(), svc5(63, read_fd, read_block as *u8 as usize,
-                                1, 0, 0) != 0);
+        match el0_read(read_fd, read_block[0..<1]) {
+            El0ReadResult::Read(count) => { fail_if(src_loc(), count != 0); }
+            El0ReadResult::Failed(code) => { fail_halt_at(src_loc()); }
+        }
         fail_if(src_loc(), svc5(57, read_fd, 0, 0, 0, 0) != 0);
         // GitHub issue #1016: thirteen blocks reach the singly-indirect
         // block, which O_TRUNC releases with the data. Counting the free
@@ -1014,13 +1031,14 @@ fn initial_user_payload() !{unsafe} {
         let indirect_fd: usize = svc5(56, 0, mutable_path as usize,
                                       O_TRUNC_RDONLY, 0, 0);
         fail_if(src_loc(), indirect_fd >= 64);
-        fail_if(src_loc(), svc5(63, indirect_fd, read_block as *u8 as usize,
-                                1, 0, 0) != 0);
+        match el0_read(indirect_fd, read_block[0..<1]) {
+            El0ReadResult::Read(count) => { fail_if(src_loc(), count != 0); }
+            El0ReadResult::Failed(code) => { fail_halt_at(src_loc()); }
+        }
         fail_if(src_loc(), svc5(57, indirect_fd, 0, 0, 0, 0) != 0);
         let mut indirect_stat: [u8; 128];
+        payload_stat(src_loc(), mutable_path as usize, indirect_stat as []u8);
         let indirect_stat_base: *u8 = indirect_stat as *u8;
-        fail_if(src_loc(), svc5(79, 0xFFFFFFFFFFFFFF9C, mutable_path as usize,
-                                ptr_of(indirect_stat_base, 0), 0, 0) != 0);
         fail_if(src_loc(), payload_read_u64(indirect_stat_base, 48) != 0);
         let restore_fd: usize = svc5(56, 0, mutable_path as usize, 1, 0, 0);
         fail_if(src_loc(), restore_fd >= 64);
@@ -1103,19 +1121,19 @@ fn sigchld_siginfo_probe_alone() !{unsafe} {
 
 fn sigchld_siginfo_probe() !{unsafe} {
     let mut record: [u8; 40];
-    let record_base: *u8 = record as *u8;
     for index: usize in 0..<40 { record[index] = 0; }
+    let record_base: *u8 = record as *u8;
     sigchld_probe_arm(ptr_of(record_base, 0));
     let mut action: [u8; 32];
+    payload_put_u64(action[0..<8], sigchld_probe_handler_address());
+    payload_put_u64(action[8..<16], SA_SIGINFO | SA_RESTORER);
+    payload_put_u64(action[16..<24], sigchld_probe_restorer_address());
+    payload_put_u64(action[24..<32], 0);
     let action_base: *u8 = action as *u8;
-    payload_write_u64(action_base, 0, sigchld_probe_handler_address());
-    payload_write_u64(action_base, 8, SA_SIGINFO | SA_RESTORER);
-    payload_write_u64(action_base, 16, sigchld_probe_restorer_address());
-    payload_write_u64(action_base, 24, 0);
     fail_if(src_loc(), svc5(134, SIGCHLD, ptr_of(action_base, 0), 0, 8, 0) != 0);
     let mut signal_set: [u8; 8];
+    payload_put_u64(signal_set[0..<8], 1 << 16);
     let signal_base: *u8 = signal_set as *u8;
-    payload_write_u64(signal_base, 0, 1 << 16);
 
     // A child killed by SIGTERM: CLD_KILLED, si_status the signal.
     let killed: usize = sigchld_probe_child(0);
@@ -1200,30 +1218,30 @@ fn sigaltstack_probe() !{unsafe} {
     for index: usize in 0..<ALTSTACK_PROBE_SIZE { alt[index] = 0; }
     let alt_base: usize = alt as *u8 as usize;
     let mut record: [u8; 104];
-    let record_base: *u8 = record as *u8;
     for index: usize in 0..<104 { record[index] = 0; }
+    let record_base: *u8 = record as *u8;
     sigchld_probe_arm(ptr_of(record_base, 0));
     let mut stack: [u8; 24];
-    let stack_base: *u8 = stack as *u8;
     // The change the handler tries: the stack as installed below, so it is
     // refused on that stack (EPERM) and a no-op off it.
     altstack_probe_set(record_base, 80, alt_base, 0, ALTSTACK_PROBE_SIZE);
 
     // None yet: SS_DISABLE, no stack. Bad mode, small size, bad pointer.
-    altstack_probe_expect_query(stack_base, 0, SS_DISABLE, 0);
-    altstack_probe_set(stack_base, 0, alt_base, 4, ALTSTACK_PROBE_SIZE);
+    altstack_probe_expect_query(stack as []u8, 0, SS_DISABLE, 0);
+    let stack_base: *u8 = stack as *u8;
+    payload_altstack_build(stack as []u8, alt_base, 4, ALTSTACK_PROBE_SIZE);
     fail_if(src_loc(), svc5(SIGALTSTACK_SYSCALL, ptr_of(stack_base, 0), 0, 0, 0, 0) != EINVAL_RC);
     // 1024: below arm64's MINSIGSTKSZ (5120) and qemu-user's own (2048).
-    altstack_probe_set(stack_base, 0, alt_base, 0, 1024);
+    payload_altstack_build(stack as []u8, alt_base, 0, 1024);
     fail_if(src_loc(), svc5(SIGALTSTACK_SYSCALL, ptr_of(stack_base, 0), 0, 0, 0, 0) != ENOMEM_RC);
     fail_if(src_loc(), svc5(SIGALTSTACK_SYSCALL, 1, 0, 0, 0, 0) != EFAULT_RC);
     fail_if(src_loc(), svc5(SIGALTSTACK_SYSCALL, 0, 1, 0, 0, 0) != EFAULT_RC);
-    altstack_probe_expect_query(stack_base, 0, SS_DISABLE, 0);
+    altstack_probe_expect_query(stack as []u8, 0, SS_DISABLE, 0);
 
     // Installed: the query reports it, off it.
-    altstack_probe_set(stack_base, 0, alt_base, 0, ALTSTACK_PROBE_SIZE);
+    payload_altstack_build(stack as []u8, alt_base, 0, ALTSTACK_PROBE_SIZE);
     fail_if(src_loc(), svc5(SIGALTSTACK_SYSCALL, ptr_of(stack_base, 0), 0, 0, 0, 0) != 0);
-    altstack_probe_expect_query(stack_base, alt_base, 0, ALTSTACK_PROBE_SIZE);
+    altstack_probe_expect_query(stack as []u8, alt_base, 0, ALTSTACK_PROBE_SIZE);
 
     // SA_ONSTACK: the handler runs on it, sees SS_ONSTACK, cannot change
     // it, and its frame's uc_stack is the stack as set.
@@ -1243,27 +1261,30 @@ fn sigaltstack_probe() !{unsafe} {
     let child: usize = svc5(220, SIGCHLD, 0, 0, 0, 0);
     if (child == 0) {
         let mut child_stack: [u8; 24];
-        let child_base: *u8 = child_stack as *u8;
         let mut code: usize = 1;
-        if (svc5(SIGALTSTACK_SYSCALL, 0, ptr_of(child_base, 0), 0, 0, 0) == 0 &&
-            payload_read_u64(child_base, 0) == alt_base &&
-            payload_read_u64(child_base, 16) == ALTSTACK_PROBE_SIZE) {
-            code = 0;
+        match payload_altstack_output(child_stack as []u8) {
+            PayloadAltstackResult::Failed(error) => {}
+            PayloadAltstackResult::Ready => {
+                if (payload_get_u64(child_stack[0..<8]) == alt_base &&
+                    payload_get_u64(child_stack[16..<24]) == ALTSTACK_PROBE_SIZE) {
+                    code = 0;
+                }
+            }
         }
         svc5(93, code, 0, 0, 0, 0);
     }
     fail_if(src_loc(), child >= 0x8000000000000000);
     let mut status: [u8; 8];
+    payload_put_u64(status[0..<8], 0xFF);
     let status_base: *u8 = status as *u8;
-    payload_write_u64(status_base, 0, 0xFF);
     fail_if(src_loc(), svc5(260, child, ptr_of(status_base, 0), 0, 0, 0) != child);
     fail_if(src_loc(), (payload_read_u64(status_base, 0) & 0xFFFFFFFF) != 0);
 
     // SS_DISABLE removes it: an SA_ONSTACK handler runs on the process
     // stack, and uc_stack says SS_DISABLE.
-    altstack_probe_set(stack_base, 0, 0, SS_DISABLE, 0);
+    payload_altstack_build(stack as []u8, 0, SS_DISABLE, 0);
     fail_if(src_loc(), svc5(SIGALTSTACK_SYSCALL, ptr_of(stack_base, 0), 0, 0, 0, 0) != 0);
-    altstack_probe_expect_query(stack_base, 0, SS_DISABLE, 0);
+    altstack_probe_expect_query(stack as []u8, 0, SS_DISABLE, 0);
     altstack_probe_raise(SA_ONSTACK);
     fail_if(src_loc(), payload_read_u64(record_base, 0) != 3);
     fail_if(src_loc(), altstack_probe_on(payload_read_u64(record_base, 8), alt_base));
@@ -1273,7 +1294,7 @@ fn sigaltstack_probe() !{unsafe} {
     // The handler's own change installed a stack, and rt_sigreturn put
     // back the disabled one its frame recorded.
     fail_if(src_loc(), payload_read_u64(record_base, 24) != 0);
-    altstack_probe_expect_query(stack_base, 0, SS_DISABLE, 0);
+    altstack_probe_expect_query(stack as []u8, 0, SS_DISABLE, 0);
 
     altstack_probe_reset();
     let message: []const u8 =
@@ -1292,20 +1313,20 @@ fn sigaltstack_autodisarm_probe() !{unsafe} {
     for index: usize in 0..<ALTSTACK_PROBE_SIZE { alt[index] = 0; }
     let alt_base: usize = alt as *u8 as usize;
     let mut record: [u8; 104];
-    let record_base: *u8 = record as *u8;
     for index: usize in 0..<104 { record[index] = 0; }
+    let record_base: *u8 = record as *u8;
     sigchld_probe_arm(ptr_of(record_base, 0));
     let mut stack: [u8; 24];
-    let stack_base: *u8 = stack as *u8;
     altstack_probe_set(record_base, 80, alt_base, 0, ALTSTACK_PROBE_SIZE);
-    altstack_probe_set(stack_base, 0, alt_base, SS_AUTODISARM, ALTSTACK_PROBE_SIZE);
+    payload_altstack_build(stack as []u8, alt_base, SS_AUTODISARM, ALTSTACK_PROBE_SIZE);
+    let stack_base: *u8 = stack as *u8;
     fail_if(src_loc(), svc5(SIGALTSTACK_SYSCALL, ptr_of(stack_base, 0), 0, 0, 0, 0) != 0);
-    altstack_probe_expect_query(stack_base, alt_base, SS_AUTODISARM, ALTSTACK_PROBE_SIZE);
+    altstack_probe_expect_query(stack as []u8, alt_base, SS_AUTODISARM, ALTSTACK_PROBE_SIZE);
     altstack_probe_raise(SA_ONSTACK);
     altstack_probe_expect_run(record_base, 1, alt_base, true, 0,
                               SS_DISABLE, 0, 0, 0);
     fail_if(src_loc(), payload_read_u64(record_base, 40) != SS_AUTODISARM);
-    altstack_probe_expect_query(stack_base, alt_base, SS_AUTODISARM, ALTSTACK_PROBE_SIZE);
+    altstack_probe_expect_query(stack as []u8, alt_base, SS_AUTODISARM, ALTSTACK_PROBE_SIZE);
     altstack_probe_reset();
     let message: []const u8 =
         bs"userspace sigaltstack SS_AUTODISARM: disarmed in the handler, restored by rt_sigreturn ok\n";
@@ -1316,8 +1337,8 @@ fn sigaltstack_autodisarm_probe() !{unsafe} {
 // No alternate stack, and SIGUSR1 back to SIG_DFL.
 fn altstack_probe_reset() !{unsafe} {
     let mut stack: [u8; 24];
+    payload_altstack_build(stack as []u8, 0, SS_DISABLE, 0);
     let stack_base: *u8 = stack as *u8;
-    altstack_probe_set(stack_base, 0, 0, SS_DISABLE, 0);
     fail_if(src_loc(), svc5(SIGALTSTACK_SYSCALL, ptr_of(stack_base, 0), 0, 0, 0, 0) != 0);
     let mut action: [u8; 32];
     for index: usize in 0..<32 { action[index] = 0; }
@@ -1332,10 +1353,11 @@ fn altstack_probe_set(base: *u8, offset: usize, sp: usize, flags: usize,
     payload_write_u64(base, offset + 16, size);
 }
 
-fn altstack_probe_expect_query(base: *u8, sp: usize, flags: usize,
-                               size: usize) !{unsafe} {
-    altstack_probe_set(base, 0, 0xAA, 0xAAAA, 0xAA);
-    fail_if(src_loc(), svc5(SIGALTSTACK_SYSCALL, 0, ptr_of(base, 0), 0, 0, 0) != 0);
+fn altstack_probe_expect_query(output: borrow uninit [u8; 24..], sp: usize,
+        flags: usize, size: usize) !{unsafe} ensures init(output[0..<24]) {
+    payload_altstack_build(output, 0xAA, 0xAAAA, 0xAA);
+    let base: *u8 = output[0..<24] as *u8;
+    fail_if(src_loc(), svc5(SIGALTSTACK_SYSCALL, 0, (base as usize), 0, 0, 0) != 0);
     fail_if(src_loc(), payload_read_u64(base, 0) != sp);
     // ss_flags is an int; the padding after it is not the kernel's.
     fail_if(src_loc(), (payload_read_u64(base, 8) & 0xFFFFFFFF) != flags);
@@ -1351,11 +1373,11 @@ fn altstack_probe_on(sp: usize, alt_base: usize) -> bool {
 // this process; it runs at the kill's return.
 fn altstack_probe_raise(flags: usize) !{unsafe} {
     let mut action: [u8; 32];
+    payload_put_u64(action[0..<8], altstack_probe_handler_address());
+    payload_put_u64(action[8..<16], SA_SIGINFO | SA_RESTORER | flags);
+    payload_put_u64(action[16..<24], sigchld_probe_restorer_address());
+    payload_put_u64(action[24..<32], 0);
     let action_base: *u8 = action as *u8;
-    payload_write_u64(action_base, 0, altstack_probe_handler_address());
-    payload_write_u64(action_base, 8, SA_SIGINFO | SA_RESTORER | flags);
-    payload_write_u64(action_base, 16, sigchld_probe_restorer_address());
-    payload_write_u64(action_base, 24, 0);
     fail_if(src_loc(), svc5(134, SIGUSR1, ptr_of(action_base, 0), 0, 8, 0) != 0);
     fail_if(src_loc(), svc5(129, svc5(172, 0, 0, 0, 0, 0), SIGUSR1, 0, 0, 0) != 0);
 }
@@ -1393,8 +1415,14 @@ const MAP_PRIVATE_ANONYMOUS: usize = 0x22;
 const SHARED_PROBE_LENGTH: usize = 8192;
 
 // ru_utime plus ru_stime, in microseconds.
-fn rusage_total(usage_base: *u8, who: usize) -> usize !{unsafe} {
-    fail_if(src_loc(), svc5(GETRUSAGE_SYSCALL, who, ptr_of(usage_base, 0), 0, 0, 0) != 0);
+fn rusage_total(output: borrow uninit [u8; 144..], who: usize) -> usize
+        !{unsafe} ensures init(output[0..<144]) {
+    let usage_base: *u8 = unsafe { output as *u8 };
+    if (svc5(GETRUSAGE_SYSCALL, who, (usage_base as usize), 0, 0, 0) != 0) {
+        fail_halt_at(src_loc());
+    }
+    // Audited getrusage success includes the full 144-byte zero fill.
+    unsafe { assume_init(output[0..<144]); }
     return (payload_read_u64(usage_base, 0) + payload_read_u64(usage_base, 16)) * 1000000 +
         payload_read_u64(usage_base, 8) + payload_read_u64(usage_base, 24);
 }
@@ -1403,13 +1431,12 @@ fn rusage_total(usage_base: *u8, who: usize) -> usize !{unsafe} {
 // most ten seconds of the monotonic clock.
 fn rusage_burn_until_charged() !{unsafe} {
     let mut usage: [u8; 144];
-    let usage_base: *u8 = usage as *u8;
     let mut now: [u8; 16];
+    let start_total: usize = rusage_total(usage as []u8, 0);
+    payload_clock(src_loc(), 1, now as []u8);
     let now_base: *u8 = now as *u8;
-    let start_total: usize = rusage_total(usage_base, 0);
-    fail_if(src_loc(), svc5(113, 1, ptr_of(now_base, 0), 0, 0, 0) != 0);
     let deadline: usize = payload_read_u64(now_base, 0) + 10;
-    while (rusage_total(usage_base, 0) == start_total) {
+    while (rusage_total(usage as []u8, 0) == start_total) {
         fail_if(src_loc(), svc5(113, 1, ptr_of(now_base, 0), 0, 0, 0) != 0);
         fail_if(src_loc(), payload_read_u64(now_base, 0) > deadline);
     }
@@ -1450,8 +1477,8 @@ fn shared_mapping_probe() !{unsafe} {
     }
     fail_if(src_loc(), child >= 0x8000000000000000);
     let mut status: [u8; 8];
+    payload_put_u64(status[0..<8], 0xFF);
     let status_base: *u8 = status as *u8;
-    payload_write_u64(status_base, 0, 0xFF);
     fail_if(src_loc(), svc5(260, child, ptr_of(status_base, 0), 0, 0, 0) != child);
     fail_if(src_loc(), (payload_read_u64(status_base, 0) & 0xFFFFFFFF) != 0);
     // The child's stores reached the shared pages and not the private one.
@@ -1480,25 +1507,25 @@ fn shared_mapping_probe() !{unsafe} {
     fail_if(src_loc(), umask_child >= 0x8000000000000000);
     payload_write_u64(status_base, 0, 0xFF);
     let mut usage: [u8; 144];
-    let usage_base: *u8 = usage as *u8;
     // GitHub issue #1314: wait4 writes its rusage argument; the bytes
     // poisoned here would read as tv_usec past a second if it did not.
     for index: usize in 0..<144 { usage[index] = 0xFF; }
+    let usage_base: *u8 = usage as *u8;
     fail_if(src_loc(), svc5(260, umask_child, ptr_of(status_base, 0), 0,
-                            ptr_of(usage_base, 0), 0) != umask_child);
+                            (usage_base as usize), 0) != umask_child);
     fail_if(src_loc(), (payload_read_u64(status_base, 0) & 0xFFFFFFFF) != 0);
     fail_if(src_loc(), payload_read_u64(usage_base, 8) >= 1000000);
     fail_if(src_loc(), payload_read_u64(usage_base, 24) >= 1000000);
 
-    fail_if(src_loc(), svc5(GETRUSAGE_SYSCALL, 0, ptr_of(usage_base, 0), 0, 0, 0) != 0);
-    fail_if(src_loc(), svc5(GETRUSAGE_SYSCALL, 0xFFFFFFFFFFFFFFFF, ptr_of(usage_base, 0), 0, 0, 0) != 0);
-    fail_if(src_loc(), svc5(GETRUSAGE_SYSCALL, 5, ptr_of(usage_base, 0), 0, 0, 0) != EINVAL_RC);
+    fail_if(src_loc(), svc5(GETRUSAGE_SYSCALL, 0, (usage_base as usize), 0, 0, 0) != 0);
+    fail_if(src_loc(), svc5(GETRUSAGE_SYSCALL, 0xFFFFFFFFFFFFFFFF, (usage_base as usize), 0, 0, 0) != 0);
+    fail_if(src_loc(), svc5(GETRUSAGE_SYSCALL, 5, (usage_base as usize), 0, 0, 0) != EINVAL_RC);
     fail_if(src_loc(), svc5(GETRUSAGE_SYSCALL, 0, 1, 0, 0, 0) != EFAULT_RC);
     // GitHub issue #1309: CPU used shows in RUSAGE_SELF, and a child's in
     // RUSAGE_CHILDREN once it has been waited for. Each burns until the kernel
     // reports it, so the check does not depend on how a tick lands; a kernel
     // that reports no time runs into the bound.
-    let before: usize = rusage_total(usage_base, 0xFFFFFFFFFFFFFFFF);
+    let before: usize = rusage_total(usage as []u8, 0xFFFFFFFFFFFFFFFF);
     rusage_burn_until_charged();
     let burner: usize = svc5(220, SIGCHLD, 0, 0, 0, 0);
     if (burner == 0) {
@@ -1507,11 +1534,11 @@ fn shared_mapping_probe() !{unsafe} {
     }
     fail_if(src_loc(), burner >= 0x8000000000000000);
     fail_if(src_loc(), svc5(260, burner, 0, 0, 0, 0) != burner);
-    fail_if(src_loc(), rusage_total(usage_base, 0xFFFFFFFFFFFFFFFF) <= before);
+    fail_if(src_loc(), rusage_total(usage as []u8, 0xFFFFFFFFFFFFFFFF) <= before);
 
     let mut fs: [u8; 120];
-    let fs_base: *u8 = fs as *u8;
     for index: usize in 0..<120 { fs[index] = 0; }
+    let fs_base: *u8 = fs as *u8;
     fail_if(src_loc(), svc5(STATFS_SYSCALL, "/" as *u8 as usize, ptr_of(fs_base, 0), 0, 0, 0) != 0);
     fail_if(src_loc(), payload_read_u64(fs_base, 8) == 0);
     fail_if(src_loc(), payload_read_u64(fs_base, 24) > payload_read_u64(fs_base, 16));
@@ -1588,8 +1615,8 @@ fn mmap_region_probe() !{unsafe} {
     }
     fail_if(src_loc(), child >= 0x8000000000000000);
     let mut status: [u8; 8];
+    payload_put_u64(status[0..<8], 0xFF);
     let status_base: *u8 = status as *u8;
-    payload_write_u64(status_base, 0, 0xFF);
     fail_if(src_loc(), svc5(260, child, ptr_of(status_base, 0), 0, 0, 0) != child);
     fail_if(src_loc(), (payload_read_u64(status_base, 0) & 0xFFFFFFFF) != 0);
     fail_if(src_loc(), payload_read_u64(shared_base, shared_last) != 0x1151C);
@@ -1667,8 +1694,8 @@ fn realtime_clock_probe_alone() !{unsafe} {
 // One clock as nanoseconds; fails the probe on an error or a bad timespec.
 fn realtime_probe_read_ns(clock: usize) -> usize !{unsafe} {
     let mut ts: [u8; 16];
+    payload_clock(src_loc(), clock, ts as []u8);
     let ts_base: *u8 = ts as *u8;
-    fail_if(src_loc(), svc5(CLOCK_GETTIME_SYSCALL, clock, ptr_of(ts_base, 0), 0, 0, 0) != 0);
     let seconds: usize = payload_read_u64(ts_base, 0);
     let nanos: usize = payload_read_u64(ts_base, 8);
     fail_if(src_loc(), nanos >= 1000000000 || seconds >= 10000000000);
@@ -1680,9 +1707,9 @@ fn realtime_clock_probe() !{unsafe} {
     let mono_before: usize = realtime_probe_read_ns(1);
     fail_if(src_loc(), real_before < 1000000000 * 1000000000);
     let mut request: [u8; 16];
+    payload_put_u64(request[0..<8], 0);
+    payload_put_u64(request[8..<16], REALTIME_PROBE_SLEEP_NS);
     let request_base: *u8 = request as *u8;
-    payload_write_u64(request_base, 0, 0);
-    payload_write_u64(request_base, 8, REALTIME_PROBE_SLEEP_NS);
     fail_if(src_loc(), svc5(NANOSLEEP_SYSCALL, ptr_of(request_base, 0), 0, 0, 0, 0) != 0);
     let real_after: usize = realtime_probe_read_ns(0);
     let mono_after: usize = realtime_probe_read_ns(1);
@@ -1690,7 +1717,10 @@ fn realtime_clock_probe() !{unsafe} {
     fail_if(src_loc(), mono_after < mono_before + REALTIME_PROBE_MIN_NS);
     // An unknown clock is EINVAL.
     let mut ts: [u8; 16];
-    fail_if(src_loc(), svc5(CLOCK_GETTIME_SYSCALL, 0x7FFF, ptr_of(ts as *u8, 0), 0, 0, 0) != EINVAL_RC);
+    match payload_clock_output(0x7FFF, ts as []u8) {
+        PayloadClockResult::Ready => { fail_halt_at(src_loc()); }
+        PayloadClockResult::Failed(code) => { fail_if(src_loc(), code != EINVAL_RC); }
+    }
     let message: []const u8 =
         bs"userspace clocks: CLOCK_REALTIME and CLOCK_MONOTONIC advance across a 20 ms nanosleep, unknown clock EINVAL ok\n";
     fail_if(src_loc(), svc5(64, 1, (unsafe { message as *u8 }) as usize,
@@ -1717,85 +1747,88 @@ fn itimer_probe_alone() !{unsafe} {
 }
 
 // A struct itimerval from two microsecond counts.
-fn itimer_probe_store(base: *u8, interval_us: usize, value_us: usize) {
-    payload_write_u64(base, 0, interval_us / 1000000);
-    payload_write_u64(base, 8, interval_us % 1000000);
-    payload_write_u64(base, 16, value_us / 1000000);
-    payload_write_u64(base, 24, value_us % 1000000);
+fn itimer_probe_store(output: borrow uninit [u8; 32..], interval_us: usize,
+        value_us: usize) ensures init(output[0..<32]) {
+    payload_put_u64(output[0..<8], interval_us / 1000000);
+    payload_put_u64(output[8..<16], interval_us % 1000000);
+    payload_put_u64(output[16..<24], value_us / 1000000);
+    payload_put_u64(output[24..<32], value_us % 1000000);
 }
 
-fn itimer_probe_us(base: *u8, offset: usize) -> usize {
+fn itimer_probe_us(base: borrow *u8, offset: usize) -> usize {
     let micros: usize = payload_read_u64(base, offset + 8);
     fail_if(src_loc(), micros >= 1000000);
     return payload_read_u64(base, offset) * 1000000 + micros;
 }
 
 // The caller's ITIMER_REAL as (interval, remaining) microseconds.
-fn itimer_probe_get(base: *u8) -> (usize, usize) !{unsafe} {
-    for word: usize in 0..<4 { payload_write_u64(base, word * 8, 0xFFFFFFFFFFFFFFFF); }
-    fail_if(src_loc(), svc5(GETITIMER_SYSCALL, ITIMER_WHICH_REAL, ptr_of(base, 0), 0, 0, 0) != 0);
+fn itimer_probe_get(output: borrow uninit [u8; 32..]) -> (usize, usize)
+        !{unsafe} ensures init(output[0..<32]) {
+    for byte: usize in 0..<32 { output[byte] = 0xFF; }
+    let base: *u8 = output[0..<32] as *u8;
+    fail_if(src_loc(), svc5(GETITIMER_SYSCALL, ITIMER_WHICH_REAL, (base as usize), 0, 0, 0) != 0);
     return (itimer_probe_us(base, 0), itimer_probe_us(base, 16));
 }
 
 // rt_sigtimedwait for SIGALRM alone, at most `seconds`.
 fn itimer_probe_wait(seconds: usize) -> usize !{unsafe} {
     let mut set: [u8; 8];
+    payload_put_u64(set[0..<8], 1 << (SIGALRM - 1));
     let set_base: *u8 = set as *u8;
-    payload_write_u64(set_base, 0, 1 << (SIGALRM - 1));
     let mut timeout: [u8; 16];
+    payload_put_u64(timeout[0..<8], seconds);
+    payload_put_u64(timeout[8..<16], 0);
     let timeout_base: *u8 = timeout as *u8;
-    payload_write_u64(timeout_base, 0, seconds);
-    payload_write_u64(timeout_base, 8, 0);
     return svc5(137, ptr_of(set_base, 0), 0, ptr_of(timeout_base, 0), 8, 0);
 }
 
 fn itimer_probe() !{unsafe} {
     let mut value: [u8; 32];
-    let value_base: *u8 = value as *u8;
     let mut old: [u8; 32];
-    let old_base: *u8 = old as *u8;
     // Nothing armed.
-    let (idle_interval, idle_left) = itimer_probe_get(old_base);
+    let (idle_interval, idle_left) = itimer_probe_get(old as []u8);
+    let old_base: *u8 = old as *u8;
     fail_if(src_loc(), idle_interval != 0 || idle_left != 0);
     // A one-shot 500 ms timer: the old value is zero, and getitimer reports
     // no interval and at most 500 ms left.
-    itimer_probe_store(value_base, 0, 500000);
+    itimer_probe_store(value as []u8, 0, 500000);
+    let value_base: *u8 = value as *u8;
     for index: usize in 0..<32 { old[index] = 0xFF; }
     fail_if(src_loc(), svc5(ITIMER_SET_SYSCALL, ITIMER_WHICH_REAL, ptr_of(value_base, 0),
                             ptr_of(old_base, 0), 0, 0) != 0);
     fail_if(src_loc(), itimer_probe_us(old_base, 0) != 0 || itimer_probe_us(old_base, 16) != 0);
-    let (armed_interval, armed_left) = itimer_probe_get(old_base);
+    let (armed_interval, armed_left) = itimer_probe_get(old as []u8);
     fail_if(src_loc(), armed_interval != 0 || armed_left == 0 || armed_left > 500000);
     // Disarming answers the time that was left.
-    itimer_probe_store(value_base, 0, 0);
+    itimer_probe_store(value as []u8, 0, 0);
     fail_if(src_loc(), svc5(ITIMER_SET_SYSCALL, ITIMER_WHICH_REAL, ptr_of(value_base, 0),
                             ptr_of(old_base, 0), 0, 0) != 0);
     let left: usize = itimer_probe_us(old_base, 16);
     fail_if(src_loc(), left == 0 || left > 500000);
-    let (off_interval, off_left) = itimer_probe_get(old_base);
+    let (off_interval, off_left) = itimer_probe_get(old as []u8);
     fail_if(src_loc(), off_interval != 0 || off_left != 0);
     // An unknown `which` and a tv_usec of a whole second are EINVAL.
     fail_if(src_loc(), svc5(ITIMER_SET_SYSCALL, 3, ptr_of(value_base, 0), 0, 0, 0) != EINVAL_RC);
     fail_if(src_loc(), svc5(GETITIMER_SYSCALL, 3, ptr_of(old_base, 0), 0, 0, 0) != EINVAL_RC);
-    itimer_probe_store(value_base, 0, 0);
+    itimer_probe_store(value as []u8, 0, 0);
     payload_write_u64(value_base, 24, 1000000);
     fail_if(src_loc(), svc5(ITIMER_SET_SYSCALL, ITIMER_WHICH_REAL, ptr_of(value_base, 0), 0, 0, 0) != EINVAL_RC);
 
     // With SIGALRM blocked, a 20 ms one-shot timer fires once and disarms.
     let mut mask: [u8; 8];
+    payload_put_u64(mask[0..<8], 1 << (SIGALRM - 1));
     let mask_base: *u8 = mask as *u8;
-    payload_write_u64(mask_base, 0, 1 << (SIGALRM - 1));
     fail_if(src_loc(), svc5(135, 0, ptr_of(mask_base, 0), 0, 8, 0) != 0);
-    itimer_probe_store(value_base, 0, 20000);
+    itimer_probe_store(value as []u8, 0, 20000);
     fail_if(src_loc(), svc5(ITIMER_SET_SYSCALL, ITIMER_WHICH_REAL, ptr_of(value_base, 0), 0, 0, 0) != 0);
     fail_if(src_loc(), itimer_probe_wait(2) != SIGALRM);
-    let (fired_interval, fired_left) = itimer_probe_get(old_base);
+    let (fired_interval, fired_left) = itimer_probe_get(old as []u8);
     fail_if(src_loc(), fired_interval != 0 || fired_left != 0);
     // A 10 ms interval timer fires again and again, and keeps its interval.
-    itimer_probe_store(value_base, 10000, 10000);
+    itimer_probe_store(value as []u8, 10000, 10000);
     fail_if(src_loc(), svc5(ITIMER_SET_SYSCALL, ITIMER_WHICH_REAL, ptr_of(value_base, 0), 0, 0, 0) != 0);
     for round: usize in 0..<3 { fail_if(src_loc(), itimer_probe_wait(2) != SIGALRM); }
-    itimer_probe_store(value_base, 0, 0);
+    itimer_probe_store(value as []u8, 0, 0);
     fail_if(src_loc(), svc5(ITIMER_SET_SYSCALL, ITIMER_WHICH_REAL, ptr_of(value_base, 0),
                             ptr_of(old_base, 0), 0, 0) != 0);
     fail_if(src_loc(), itimer_probe_us(old_base, 0) != 10000);
@@ -1806,31 +1839,31 @@ fn itimer_probe() !{unsafe} {
 
     // A fork child does not inherit the parent's timer, and a default
     // SIGALRM ends it in its sleep.
-    itimer_probe_store(value_base, 0, 5000000);
+    itimer_probe_store(value as []u8, 0, 5000000);
     fail_if(src_loc(), svc5(ITIMER_SET_SYSCALL, ITIMER_WHICH_REAL, ptr_of(value_base, 0), 0, 0, 0) != 0);
     let child: usize = svc5(220, SIGCHLD, 0, 0, 0, 0);
     if (child == 0) {
         let mut child_value: [u8; 32];
+        let (child_interval, child_left) = itimer_probe_get(child_value as []u8);
         let child_base: *u8 = child_value as *u8;
-        let (child_interval, child_left) = itimer_probe_get(child_base);
         if (child_interval != 0 || child_left != 0) { svc5(93, 2, 0, 0, 0, 0); }
-        itimer_probe_store(child_base, 0, 20000);
+        itimer_probe_store(child_value as []u8, 0, 20000);
         svc5(ITIMER_SET_SYSCALL, ITIMER_WHICH_REAL, ptr_of(child_base, 0), 0, 0, 0);
         let mut sleep: [u8; 16];
+        payload_put_u64(sleep[0..<8], 2);
+        payload_put_u64(sleep[8..<16], 0);
         let sleep_base: *u8 = sleep as *u8;
-        payload_write_u64(sleep_base, 0, 2);
-        payload_write_u64(sleep_base, 8, 0);
         svc5(NANOSLEEP_SYSCALL, ptr_of(sleep_base, 0), 0, 0, 0, 0);
         svc5(93, 1, 0, 0, 0, 0);
     }
     fail_if(src_loc(), child >= 0x8000000000000000);
     let mut status: [u8; 8];
+    payload_put_u64(status[0..<8], 0xFF);
     let status_base: *u8 = status as *u8;
-    payload_write_u64(status_base, 0, 0xFF);
     fail_if(src_loc(), svc5(260, child, ptr_of(status_base, 0), 0, 0, 0) != child);
     fail_if(src_loc(), (payload_read_u64(status_base, 0) & 0xFFFFFFFF) != SIGALRM);
     // The parent's own timer survived the fork; disarm it.
-    itimer_probe_store(value_base, 0, 0);
+    itimer_probe_store(value as []u8, 0, 0);
     fail_if(src_loc(), svc5(ITIMER_SET_SYSCALL, ITIMER_WHICH_REAL, ptr_of(value_base, 0),
                             ptr_of(old_base, 0), 0, 0) != 0);
     fail_if(src_loc(), itimer_probe_us(old_base, 16) == 0);
@@ -1846,8 +1879,8 @@ fn itimer_probe() !{unsafe} {
 // as Linux's vfs_create and vfs_mkdir do.
 fn statfs_umask_kernel_probe() !{unsafe} {
     let mut fs: [u8; 120];
-    let fs_base: *u8 = fs as *u8;
     for index: usize in 0..<120 { fs[index] = 0; }
+    let fs_base: *u8 = fs as *u8;
     fail_if(src_loc(), svc5(STATFS_SYSCALL, "/" as *u8 as usize, ptr_of(fs_base, 0), 0, 0, 0) != 0);
     fail_if(src_loc(), payload_read_u64(fs_base, 0) != 0xEF53);
     fail_if(src_loc(), payload_read_u64(fs_base, 8) != 1024);
@@ -1866,9 +1899,8 @@ fn statfs_umask_kernel_probe() !{unsafe} {
     fail_if(src_loc(), svc5(57, file, 0, 0, 0, 0) != 0);
     fail_if(src_loc(), svc5(34, 0xFFFFFFFFFFFFFF9C, "/umask-dir" as *u8 as usize, 0x1FF, 0, 0) != 0);
     let mut stat: [u8; 128];
+    payload_stat(src_loc(), "/umask-file" as *u8 as usize, stat as []u8);
     let stat_base: *u8 = stat as *u8;
-    fail_if(src_loc(), svc5(79, 0xFFFFFFFFFFFFFF9C, "/umask-file" as *u8 as usize,
-                            ptr_of(stat_base, 0), 0, 0) != 0);
     fail_if(src_loc(), (payload_read_u64(stat_base, 16) & 0xFFFFFFFF) != 0x8180);
     fail_if(src_loc(), svc5(79, 0xFFFFFFFFFFFFFF9C, "/umask-dir" as *u8 as usize,
                             ptr_of(stat_base, 0), 0, 0) != 0);
@@ -1920,7 +1952,7 @@ fn sigchld_probe_expect(record_base: *u8, runs: usize, code: usize,
     }
 }
 
-fn fail_halt_at(loc: SrcLoc) !{unsafe} {
+fn fail_halt_at(loc: SrcLoc) !{unsafe, noreturn} {
     let message: []const u8 = bs"userspace syscall fixture: failed srcloc=0x";
     svc5(64, 2, (unsafe { message as *u8 }) as usize, message.len, 0, 0);
     let bits: u32 = loc as u32;
@@ -1972,13 +2004,15 @@ fn credentials_probe_alone() !{unsafe} {
 
 // getresgid (group) or getresuid into three 8-byte cells; true when the call
 // returned 0 and all three equal `want`.
-fn credentials_probe_res(group: bool, base: *u8, want: usize) -> bool !{unsafe} {
-    for cell: usize in 0..<3 { payload_write_u64(base, cell * 8, 0xFFFFFFFFFFFFFFFF); }
+fn credentials_probe_res(group: bool, output: borrow uninit [u8; 24..], want: usize)
+        -> bool !{unsafe} ensures init(output[0..<24]) {
+    for byte: usize in 0..<24 { output[byte] = 0xFF; }
+    let base: *u8 = output[0..<24] as *u8;
     let mut answer: usize = 0;
     if (group) {
-        answer = svc5(GETRESGID_SYSCALL, ptr_of(base, 0), ptr_of(base, 8), ptr_of(base, 16), 0, 0);
+        answer = svc5(GETRESGID_SYSCALL, (base as usize), ((base + 8) as usize), ((base + 16) as usize), 0, 0);
     } else {
-        answer = svc5(GETRESUID_SYSCALL, ptr_of(base, 0), ptr_of(base, 8), ptr_of(base, 16), 0, 0);
+        answer = svc5(GETRESUID_SYSCALL, (base as usize), ((base + 8) as usize), ((base + 16) as usize), 0, 0);
     }
     if (answer != 0) { return false; }
     for cell: usize in 0..<3 {
@@ -1989,7 +2023,6 @@ fn credentials_probe_res(group: bool, base: *u8, want: usize) -> bool !{unsafe} 
 
 fn credentials_probe_child() -> usize !{unsafe} {
     let mut ids: [u8; 24];
-    let ids_base: *u8 = ids as *u8;
     let mut uid: usize = svc5(174, 0, 0, 0, 0, 0);
     let mut gid: usize = svc5(176, 0, 0, 0, 0, 0);
     if (svc5(175, 0, 0, 0, 0, 0) == 0) {
@@ -2002,8 +2035,9 @@ fn credentials_probe_child() -> usize !{unsafe} {
         gid = CREDENTIALS_DROP_ID;
     }
     if (uid == 0) { return 3; }
-    if (credentials_probe_res(false, ids_base, uid) == false) { return 4; }
-    if (credentials_probe_res(true, ids_base, gid) == false) { return 5; }
+    if (credentials_probe_res(false, ids as []u8, uid) == false) { return 4; }
+    let ids_base: *u8 = ids as *u8;
+    if (credentials_probe_res(true, ids as []u8, gid) == false) { return 5; }
     if (svc5(174, 0, 0, 0, 0, 0) != uid || svc5(175, 0, 0, 0, 0, 0) != uid) { return 6; }
     if (svc5(176, 0, 0, 0, 0, 0) != gid || svc5(177, 0, 0, 0, 0, 0) != gid) { return 7; }
     if (svc5(SETRESUID_SYSCALL, ID_KEEP, ID_KEEP, ID_KEEP, 0, 0) != 0) { return 8; }
@@ -2021,7 +2055,7 @@ fn credentials_probe_child() -> usize !{unsafe} {
     if (svc5(GETRESUID_SYSCALL, 1, ptr_of(ids_base, 8), ptr_of(ids_base, 16), 0, 0)
             != EFAULT_RC) { return 20; }
     // The refusals changed nothing.
-    if (credentials_probe_res(false, ids_base, uid) == false) { return 21; }
+    if (credentials_probe_res(false, ids as []u8, uid) == false) { return 21; }
     // A fork grandchild inherits the ids.
     let grandchild: usize = svc5(220, SIGCHLD, 0, 0, 0, 0);
     if (grandchild == 0) {
@@ -2047,13 +2081,12 @@ fn credentials_probe() !{unsafe} {
     }
     fail_if(src_loc(), child >= 0x8000000000000000);
     let mut status: [u8; 8];
+    payload_put_u64(status[0..<8], 0xFF);
     let status_base: *u8 = status as *u8;
-    payload_write_u64(status_base, 0, 0xFF);
     fail_if(src_loc(), svc5(260, child, ptr_of(status_base, 0), 0, 0, 0) != child);
     // The parent keeps its own ids.
     let mut ids: [u8; 24];
-    let ids_base: *u8 = ids as *u8;
-    fail_if(src_loc(), credentials_probe_res(false, ids_base,
+    fail_if(src_loc(), credentials_probe_res(false, ids as []u8,
                                              svc5(174, 0, 0, 0, 0, 0)) == false);
     let mut message: []const u8 =
         bs"userspace credentials: a non-root child gets EPERM for other ids, EINVAL for setuid(-1), EFAULT, and its ids across fork, unknown socket family EAFNOSUPPORT ok\n";
@@ -2091,19 +2124,19 @@ fn signal_conformance_probe_alone() !{unsafe} {
 // SIGALRM to the counting handler, with or without SA_RESTART.
 fn signal_conformance_alarm_action(flags: usize) !{unsafe} {
     let mut action: [u8; 32];
+    payload_put_u64(action[0..<8], sigchld_probe_handler_address());
+    payload_put_u64(action[8..<16], SA_SIGINFO | SA_RESTORER | flags);
+    payload_put_u64(action[16..<24], sigchld_probe_restorer_address());
+    payload_put_u64(action[24..<32], 0);
     let action_base: *u8 = action as *u8;
-    payload_write_u64(action_base, 0, sigchld_probe_handler_address());
-    payload_write_u64(action_base, 8, SA_SIGINFO | SA_RESTORER | flags);
-    payload_write_u64(action_base, 16, sigchld_probe_restorer_address());
-    payload_write_u64(action_base, 24, 0);
     fail_if(src_loc(), svc5(134, SIGALRM, ptr_of(action_base, 0), 0, 8, 0) != 0);
 }
 
 // A one-shot ITIMER_REAL of `us` microseconds.
 fn signal_conformance_alarm(us: usize) !{unsafe} {
     let mut value: [u8; 32];
+    itimer_probe_store(value as []u8, 0, us);
     let value_base: *u8 = value as *u8;
-    itimer_probe_store(value_base, 0, us);
     fail_if(src_loc(), svc5(ITIMER_SET_SYSCALL, ITIMER_WHICH_REAL, ptr_of(value_base, 0),
                             0, 0, 0) != 0);
 }
@@ -2111,8 +2144,8 @@ fn signal_conformance_alarm(us: usize) !{unsafe} {
 // wait4 for `pid`, retried across handler runs; returns the status word.
 fn signal_conformance_status(pid: usize) -> usize !{unsafe} {
     let mut status: [u8; 8];
+    payload_put_u64(status[0..<8], 0);
     let status_base: *u8 = status as *u8;
-    payload_write_u64(status_base, 0, 0);
     let mut reaped: usize = EINTR_RC;
     while (reaped == EINTR_RC) {
         reaped = svc5(260, pid, ptr_of(status_base, 0), 0, 0, 0);
@@ -2137,8 +2170,8 @@ fn signal_conformance_fault_child(kind: usize) -> usize !{unsafe} {
 
 fn signal_conformance_probe() !{unsafe} {
     let mut record: [u8; 40];
-    let record_base: *u8 = record as *u8;
     for index: usize in 0..<40 { record[index] = 0; }
+    let record_base: *u8 = record as *u8;
     sigchld_probe_arm(ptr_of(record_base, 0));
 
     // #882: a child killed by SIGTERM has status SIGTERM, no 128 offset and
@@ -2169,21 +2202,24 @@ fn signal_conformance_probe() !{unsafe} {
     // #726: a read of an empty pipe is EINTR after a handler without
     // SA_RESTART, and restarts (and reads what a child writes later) with it.
     let mut fds: [u8; 8];
+    payload_pipe(src_loc(), fds as []u8);
     let fds_base: *u8 = fds as *u8;
-    fail_if(src_loc(), svc5(59, ptr_of(fds_base, 0), 0, 0, 0, 0) != 0);
     let read_fd: usize = payload_read_u64(fds_base, 0) & 0xFFFFFFFF;
     let write_fd: usize = payload_read_u64(fds_base, 0) >> 32;
     let mut byte: [u8; 1];
     signal_conformance_alarm(20000);
-    fail_if(src_loc(), svc5(63, read_fd, byte as *u8 as usize, 1, 0, 0) != EINTR_RC);
+    match el0_read(read_fd, byte as []u8) {
+        El0ReadResult::Read(count) => { fail_halt_at(src_loc()); }
+        El0ReadResult::Failed(code) => { fail_if(src_loc(), code != EINTR_RC); }
+    }
     fail_if(src_loc(), payload_read_u64(record_base, 0) != 2);
     signal_conformance_alarm_action(SA_RESTART);
     let writer: usize = svc5(220, SIGCHLD, 0, 0, 0, 0);
     if (writer == 0) {
         let mut pause: [u8; 16];
+        payload_put_u64(pause[0..<8], 0);
+        payload_put_u64(pause[8..<16], 200000000);
         let pause_base: *u8 = pause as *u8;
-        payload_write_u64(pause_base, 0, 0);
-        payload_write_u64(pause_base, 8, 200000000);
         svc5(101, ptr_of(pause_base, 0), 0, 0, 0, 0);
         byte[0] = 0x72;
         svc5(64, write_fd, byte as *u8 as usize, 1, 0, 0);
@@ -2191,7 +2227,7 @@ fn signal_conformance_probe() !{unsafe} {
     }
     fail_if(src_loc(), writer >= 0x8000000000000000);
     signal_conformance_alarm(20000);
-    fail_if(src_loc(), svc5(63, read_fd, byte as *u8 as usize, 1, 0, 0) != 1);
+    payload_read_exact(src_loc(), read_fd, byte[0..<1]);
     fail_if(src_loc(), byte[0] != 0x72);
     fail_if(src_loc(), payload_read_u64(record_base, 0) != 3);
     fail_if(src_loc(), signal_conformance_status(writer) != 0);
@@ -2199,8 +2235,8 @@ fn signal_conformance_probe() !{unsafe} {
     fail_if(src_loc(), svc5(57, write_fd, 0, 0, 0, 0) != 0);
 
     let mut action: [u8; 32];
-    let action_base: *u8 = action as *u8;
     for index: usize in 0..<32 { action[index] = 0; }
+    let action_base: *u8 = action as *u8;
     fail_if(src_loc(), svc5(134, SIGALRM, ptr_of(action_base, 0), 0, 8, 0) != 0);
 
     // #1373: a fault the kernel does not resolve ends only the faulting
@@ -2249,11 +2285,11 @@ fn signal_xfail_fault_handled() -> bool !{unsafe} {
     if (child == 0) {
         sigchld_probe_arm(shared);
         let mut action: [u8; 32];
+        payload_put_u64(action[0..<8], sigchld_probe_handler_address());
+        payload_put_u64(action[8..<16], SA_SIGINFO | SA_RESTORER | SA_RESETHAND);
+        payload_put_u64(action[16..<24], sigchld_probe_restorer_address());
+        payload_put_u64(action[24..<32], 0);
         let action_base: *u8 = action as *u8;
-        payload_write_u64(action_base, 0, sigchld_probe_handler_address());
-        payload_write_u64(action_base, 8, SA_SIGINFO | SA_RESTORER | SA_RESETHAND);
-        payload_write_u64(action_base, 16, sigchld_probe_restorer_address());
-        payload_write_u64(action_base, 24, 0);
         if (svc5(134, SIGSEGV, ptr_of(action_base, 0), 0, 8, 0) == 0) {
             xfail_probe_touch(XFAIL_FAULT_ADDRESS);
         }
@@ -2279,18 +2315,18 @@ fn signal_xfail_fault_handled() -> bool !{unsafe} {
 // timeout, whichever answer the first call gave.
 fn signal_xfail_timedwait_filled() -> bool !{unsafe} {
     let mut set: [u8; 8];
+    payload_put_u64(set[0..<8], 1 << (SIGUSR1 - 1));
     let set_base: *u8 = set as *u8;
-    payload_write_u64(set_base, 0, 1 << (SIGUSR1 - 1));
     fail_if(src_loc(), svc5(135, 0, ptr_of(set_base, 0), 0, 8, 0) != 0);
     let me: usize = svc5(172, 0, 0, 0, 0, 0);
     fail_if(src_loc(), svc5(129, me, SIGUSR1, 0, 0, 0) != 0);
     let mut info: [u8; 128];
-    let info_base: *u8 = info as *u8;
     for index: usize in 0..<128 { info[index] = 0; }
+    let info_base: *u8 = info as *u8;
     let mut zero: [u8; 16];
+    payload_put_u64(zero[0..<8], 0);
+    payload_put_u64(zero[8..<16], 0);
     let zero_base: *u8 = zero as *u8;
-    payload_write_u64(zero_base, 0, 0);
-    payload_write_u64(zero_base, 8, 0);
     let taken: usize = svc5(RT_SIGTIMEDWAIT_SYSCALL, ptr_of(set_base, 0),
                             ptr_of(info_base, 0), ptr_of(zero_base, 0), 8, 0);
     let filled: bool = taken == SIGUSR1 &&
@@ -2333,7 +2369,7 @@ fn ptr_of(base: *u8, offset: usize) -> usize {
 
 /* struct rlimit64's little-endian u64s, byte at a time. See the
  * prlimit64 block above for why not a pointer cast. */
-fn payload_read_u64(base: *u8, offset: usize) -> usize {
+fn payload_read_u64(base: borrow *u8, offset: usize) -> usize {
     let mut value: usize = 0;
     for i: usize in 0..<8 {
         value = value | ((base[(offset + i) as isize] as usize) << (i * 8));
@@ -2341,8 +2377,176 @@ fn payload_read_u64(base: *u8, offset: usize) -> usize {
     return value;
 }
 
-fn payload_write_u64(base: *u8, offset: usize, value: usize) {
+fn payload_write_u64(base: borrow *u8, offset: usize, value: usize) {
     for i: usize in 0..<8 {
         base[(offset + i) as isize] = ((value >> (i * 8)) & 0xFF) as u8;
     }
+}
+
+// Exact-output fixture boundary: a short read stops before any caller read.
+fn payload_read_exact(loc: SrcLoc, fd: usize, output: borrow uninit []u8)
+         ensures init(output) {
+    match el0_read(fd, output) {
+        El0ReadResult::Failed(code) => { fail_halt_at(loc); }
+        El0ReadResult::Read(count) => {
+            if (count != output.len) { fail_halt_at(loc); }
+        }
+    }
+}
+
+// Typed construction of one little-endian ABI word, without raw stores.
+fn payload_put_u64(output: borrow uninit [u8; 8..], value: usize)
+        ensures init(output[0..<8]) {
+    for index: usize in 0..<8 {
+        output[index] = ((value >> (index * 8)) & 0xFF) as u8;
+    }
+}
+
+// Audited getcpu pair: each non-null output receives a u32 on success.
+fn payload_getcpu_pair(loc: SrcLoc, output: borrow uninit [u8; 8..])
+        !{unsafe} ensures init(output[0..<8]) {
+    let raw: *u8 = unsafe { output as *u8 };
+    if (svc5(168, (raw as usize), ((raw + 4) as usize), 0, 0, 0) != 0) {
+        fail_halt_at(loc);
+    }
+    unsafe { assume_init(output[0..<8]); }
+}
+
+fn payload_getaffinity(loc: SrcLoc, output: borrow uninit [u8; 8..])
+        !{unsafe} ensures init(output[0..<8]) {
+    match el0_getaffinity(0, output) {
+        El0AffinityResult::Ready => {}
+        El0AffinityResult::Failed(code) => { fail_halt_at(loc); }
+    }
+}
+
+fn payload_tcgets(loc: SrcLoc, output: borrow uninit [u8; 36..])
+        !{unsafe} ensures init(output[0..<36]) {
+    match el0_tcgets(0, output) {
+        El0TermiosResult::Ready => {}
+        El0TermiosResult::Failed(code) => { fail_halt_at(loc); }
+    }
+}
+
+// Audited old-limit output: prlimit64's success follows a 16-byte copy.
+fn payload_getrlimit(loc: SrcLoc, resource: usize,
+        output: borrow uninit [u8; 16..]) !{unsafe}
+        ensures init(output[0..<16]) {
+    let raw: *u8 = unsafe { output as *u8 };
+    if (svc5(261, 0, resource, 0, raw as usize, 0) != 0) { fail_halt_at(loc); }
+    unsafe { assume_init(output[0..<16]); }
+}
+
+// Audited pipe2 output: success follows both u32 descriptor writes.
+fn payload_pipe(loc: SrcLoc, output: borrow uninit [u8; 8..])
+        !{unsafe} ensures init(output[0..<8]) {
+    let raw: *u8 = unsafe { output as *u8 };
+    if (svc5(59, raw as usize, 0, 0, 0, 0) != 0) { fail_halt_at(loc); }
+    unsafe { assume_init(output[0..<8]); }
+}
+
+must_use variant PayloadClockResult { Ready; Failed(usize); }
+
+// Audited clock_gettime byte layout: both u64 stores precede success.
+fn payload_clock_output(clock: usize, output: borrow uninit [u8; 16..])
+        -> PayloadClockResult !{unsafe}
+        ensures match result {
+            PayloadClockResult::Ready => init(output[0..<16]),
+            PayloadClockResult::Failed(code) => true
+        } {
+    let raw: *u8 = unsafe { output as *u8 };
+    let code: usize = svc5(113, clock, raw as usize, 0, 0, 0);
+    if (code == 0) {
+        unsafe { assume_init(output[0..<16]); }
+        return PayloadClockResult::Ready;
+    }
+    return PayloadClockResult::Failed(code);
+}
+
+fn payload_clock(loc: SrcLoc, clock: usize, output: borrow uninit [u8; 16..])
+         ensures init(output[0..<16]) {
+    match payload_clock_output(clock, output) {
+        PayloadClockResult::Ready => {}
+        PayloadClockResult::Failed(code) => { fail_halt_at(loc); }
+    }
+}
+
+// Audited stat output: each success path starts with a checked full zero
+// fill, then joins the field-write results before returning zero.
+fn payload_stat(loc: SrcLoc, path: usize, output: borrow uninit [u8; 128..])
+        !{unsafe} ensures init(output[0..<128]) {
+    let raw: *u8 = unsafe { output as *u8 };
+    if (svc5(79, 0xFFFFFFFFFFFFFF9C, path, raw as usize, 0, 0) != 0) {
+        fail_halt_at(loc);
+    }
+    unsafe { assume_init(output[0..<128]); }
+}
+
+fn payload_altstack_build(output: borrow uninit [u8; 24..], sp: usize,
+        flags: usize, size: usize) ensures init(output[0..<24]) {
+    payload_put_u64(output[0..<8], sp);
+    payload_put_u64(output[8..<16], flags);
+    payload_put_u64(output[16..<24], size);
+}
+
+// Read a typed eight-byte subview, including a partially initialized buffer.
+fn payload_get_u64(input: borrow [const u8; 8..]) -> usize {
+    let mut value: usize = 0;
+    for index: usize in 0..<8 {
+        value = value | ((input[index] as usize) << (index * 8));
+    }
+    return value;
+}
+
+must_use variant PayloadAltstackResult { Ready; Failed(usize); }
+// Only ss_sp and ss_size are consumed by the fork-inheritance probe.
+// The four padding bytes after ss_flags deliberately receive no guarantee.
+fn payload_altstack_output(output: borrow uninit [u8; 24..])
+        -> PayloadAltstackResult !{unsafe}
+        ensures match result {
+            PayloadAltstackResult::Ready => init(output[0..<8]),
+            PayloadAltstackResult::Failed(code) => true
+        }
+        ensures match result {
+            PayloadAltstackResult::Ready => init(output[16..<24]),
+            PayloadAltstackResult::Failed(code) => true
+        } {
+    let raw: *u8 = unsafe { output as *u8 };
+    let code: usize = svc5(SIGALTSTACK_SYSCALL, 0, raw as usize, 0, 0, 0);
+    if (code == 0) {
+        unsafe { assume_init(output[0..<8]); assume_init(output[16..<24]); }
+        return PayloadAltstackResult::Ready;
+    }
+    return PayloadAltstackResult::Failed(code);
+}
+
+// Audited readv fixture: each successful call transfers exactly eight bytes.
+// The second call stops before the invalid next segment. Only that prefix
+// becomes readable; the remaining eight destination bytes stay uninitialized.
+fn payload_readv_probe(loc: SrcLoc, output: borrow uninit [u8; 16..]) !{unsafe}
+        ensures init(output[0..<8]) {
+    // Each descriptor retains the source loan until explicitly ended.
+    let first = io_read_span(output[0..<3]);
+    let empty = io_read_span(output[3..<3]);
+    let last = io_read_span(output[3..<8]);
+    let code: usize = unsafe { io_readv(5, first, empty, last) };
+    io_span_end(first);
+    io_span_end(empty);
+    io_span_end(last);
+    if (code != 8) { fail_halt_at(loc); }
+    // Only the negative ABI fixture can construct the invalid null tail.
+    let raw: *u8 = unsafe { output as *u8 };
+    if (user_payload_readv_invalid_tail(6, raw, 16) != 8) { fail_halt_at(loc); }
+    unsafe { assume_init(output[0..<8]); }
+}
+
+// scheduler_probe_run unconditionally stores one byte before its checks.
+// No claim is made about the unused seven bytes of the caller's slot.
+fn payload_scheduler_probe(output: borrow uninit [u8; 1..], marker: usize,
+        pattern: usize, count: usize) -> usize !{unsafe}
+        ensures init(output[0..<1]) {
+    let raw: *u8 = unsafe { output as *u8 };
+    let answer: usize = scheduler_probe_run(raw, marker, pattern, count);
+    unsafe { assume_init(output[0..<1]); }
+    return answer;
 }

@@ -5,6 +5,9 @@
 # handwritten assembly as the whole trusted base.
 
 # K: mint to keep for now; shrinks with #637 steps C, A, B
+# Audited output-only address exports to user_entry.S (10-word resume probe,
+# 4-word crash frame); checked uninit wrappers assert only the written range.
+kernel/arch/arm64/kernel/user_entry_extern.tkb
 kernel/arch/arm64/kernel/frame_ref.tkb
 kernel/arch/arm64/mm/mmu.tkb
 kernel/boot/fdt.tkb

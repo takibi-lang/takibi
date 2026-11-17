@@ -871,11 +871,17 @@ contract_body:
 
 contract_pred:
   | TRUE { Init_state.PTrue }
+  | word = IDENT LPAREN array = expr COMMA head = expr RPAREN
+    { if word <> "init_links" then
+        raise (Types.TypeError ($symbolstartpos,
+          "two-argument initialization predicate must be init_links(array, head)"));
+      Init_state.PLinked (array, head) }
   | word = IDENT LPAREN e = expr RPAREN
-    { if word <> "init" then
-        raise (Types.TypeError ($symbolstartpos, Printf.sprintf
-          "unknown contract predicate '%s' (expected init(...) or true)" word));
-      Init_state.PInit e }
+    { match word with
+      | "init" -> Init_state.PInit e
+      | "init_fields" -> Init_state.PFields e
+      | _ -> raise (Types.TypeError ($symbolstartpos, Printf.sprintf
+          "unknown contract predicate '%s' (expected init(...), init_fields(...) or true)" word)) }
 
 contract_arm:
   | pat = contract_pattern DARROW p = contract_pred { (pat, p) }

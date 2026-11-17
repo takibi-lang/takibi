@@ -9454,10 +9454,9 @@ fn kernel_syscall_cow_read_probe() -> SyscallCowReadReport !{unsafe} {
     }
     let mut expected: [u8; 1024];
     let total: usize = procfs_render_file(inode, expected as [u8; 1024..]);
-    if (total < 8) { ok = false; }
-
     let mut report: SyscallCowReadReport = SyscallCowReadReport::Failed;
-    if (ok) {
+    if (total < 8) { ok = false; }
+    else if (ok) {
         // read(fd, address, 8)
         let (first_action, first_value) = kernel_syscall_dispatch(
             SYSCALL_TRAP_ESR, 63, fd, address, 8, 0, 0, 0);
@@ -9466,7 +9465,7 @@ fn kernel_syscall_cow_read_probe() -> SyscallCowReadReport !{unsafe} {
             if (kernel_syscall_file_offset(fd) == 8 &&
                 address_space_pte_is_cow(after_first) == false &&
                 (after_first & USER_PAGE_PHYS_MASK) != shared_physical &&
-                user_probe_boot_read_matches(address, expected as []const u8)) {
+                user_probe_boot_read_matches(address, expected[0..<8])) {
                 report = SyscallCowReadReport::Delivered;
             }
         } else if (first_action == 1 && first_value == LINUX_EFAULT &&
@@ -9478,7 +9477,7 @@ fn kernel_syscall_cow_read_probe() -> SyscallCowReadReport !{unsafe} {
                 SYSCALL_TRAP_ESR, 63, fd, address, 8, 0, 0, 0);
             if (retry_action == 1 && retry_value == 8 &&
                 kernel_syscall_file_offset(fd) == 8 &&
-                user_probe_boot_read_matches(address, expected as []const u8)) {
+                user_probe_boot_read_matches(address, expected[0..<8])) {
                 report = SyscallCowReadReport::RefusedThenDelivered;
             }
         }

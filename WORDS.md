@@ -91,7 +91,7 @@ The complete inventory of source words the compiler gives a meaning, generated f
 | --- |
 | `protocol` |
 
-## Compiler builtins (84)
+## Compiler builtins (90)
 
 | Builtin | Kind |
 | --- | --- |
@@ -129,6 +129,12 @@ The complete inventory of source words the compiler gives a meaning, generated f
 | `dma_span_length` | general |
 | `checked_add_usize` | general |
 | `checked_mul_usize` | general |
+| `io_read_span` | general |
+| `io_write_span` | general |
+| `io_span_length` | general |
+| `io_span_end` | general |
+| `io_readv` | general |
+| `io_writev` | general |
 | `mrs_cntfrq_el0` | instruction |
 | `mrs_cntpct_el0` | instruction |
 | `mrs_sctlr_el1` | instruction |

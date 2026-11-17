@@ -182,6 +182,7 @@ let () =
          Takibi.Range_obligation.fault_native_leaf := true;
          Takibi.Range_obligation.fault_native_init_leaf := true;
          Takibi.Range_obligation.fault_init_nowrap := true;
+         Takibi.Range_obligation.fault_init_padding := true;
          Takibi.Range_obligation.fault_index := true;
          Takibi.Range_obligation.fault_static_constants := true;
          Takibi.Range_obligation.fault_overlay_short := true;
@@ -412,6 +413,17 @@ let () =
     (* HM type inference -- catches type errors and produces resolved types *)
     Type_inf.set_held_guard_audit_enabled facts_on;
     let prog_types = Typechecker.infer_program prog in
+
+    List.iter (function
+      | Ast.FuncDef f when List.mem f.name !external_entries ->
+          let key = Call_graph.definition_key prog_types f in
+          (match Types.StringMap.find_opt key prog_types.Types.separation_conditions with
+           | Some cs when not (Init_separation_domain.Conditions.is_empty cs) ->
+               raise (Types.TypeError (f.def_loc, Printf.sprintf
+                 "--external-entry '%s' would erase inferred separation: %s; export a checked wrapper that discharges the condition"
+                 f.name (Init_separation_domain.show (Init_separation_domain.Conditions.min_elt cs))))
+           | _ -> ())
+      | _ -> ()) prog;
 
     if !raw_mint_files <> [] && not !confine_raw_authority then begin
       Printf.eprintf "Error: --raw-mint-file requires --confine-raw-authority\n";

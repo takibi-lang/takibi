@@ -1,0 +1,20 @@
+// Audited TCGETS output boundary for standalone EL0 fixtures.
+// Current limitations (2026-11-16): the 36-byte AArch64 termios layout and
+// the kernel's complete-write success guarantee are audited ABI premises.
+must_use variant El0TermiosResult { Ready; Failed(usize); }
+
+// syscall_ioctl returns zero only after all 36 user_write_byte calls succeed.
+fn el0_tcgets(fd: usize, output: borrow uninit [u8; 36..])
+        -> El0TermiosResult !{unsafe}
+        ensures match result {
+            El0TermiosResult::Ready => init(output[0..<36]),
+            El0TermiosResult::Failed(code) => true
+        } {
+    let raw: *u8 = unsafe { output as *u8 };
+    let code: usize = svc5(29, fd, 0x5401, raw as usize, 0, 0);
+    if (code == 0) {
+        unsafe { assume_init(output[0..<36]); }
+        return El0TermiosResult::Ready;
+    }
+    return El0TermiosResult::Failed(code);
+}

@@ -1,0 +1,34 @@
+Memory initialization integration: linked-image measurement, 2026-11-17
+
+Boundary: ordinary production QEMU and RPi5 linked kernel images, built by
+scripts/space_delta.py. Baseline e971bc2fc9405482b13a6a6b6de78599cbb3ab30;
+candidate is the memory-initialization integration worktree. This measures
+fixed image storage, not live allocator occupancy or a proof of memory safety.
+The integration changes checking and API contracts, with audited output
+wrappers; it introduces no new production allocation workload or pool field.
+Native deferred-report storage and the approved 32-byte alignment clear are
+outside these kernel images.
+
+| Metric | QEMU baseline | QEMU candidate | RPi5 baseline | RPi5 candidate |
+| text | 827792 | 827800 | 4215484 | 4220948 |
+| data | 4616 | 4616 | 5592 | 5592 |
+| bss | 1314816 | 1314816 | 1921024 | 1916928 |
+| usable_ram_start | 0x40210000 | 0x40210000 | 0x7e0000 | 0x7e0000 |
+
+No data/BSS symbol changed size. The RPi5 aggregate BSS decrease is therefore
+not an allocator or payload-size saving; it concerns image layout/padding.
+The usable RAM boundary and the five checked allocator expectations remain
+unchanged. The memory-map checker passes.
+
+Assessment: accept the measured text growth (8 bytes QEMU, 5464 bytes RPi5)
+for initialization enforcement and audited boundary wrappers. Do not weaken
+static checking to optimize these amounts. This observation does not claim
+smaller live memory usage, OS superiority, or hardware timing/coherence proof.
+Existing allocation workload comparisons retain their original scope.
+
+Next measurement trigger: a changed kernel pool/owner representation, retained
+capacity, allocation/lifetime workload, or the next completed kernel feature.
+
+Command: python3 scripts/space_delta.py e971bc2f
+Exit status: 0
+Capture: /tmp/takibi-stored-address-pilot/integration-space.txt

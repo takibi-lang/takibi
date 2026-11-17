@@ -4448,7 +4448,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
          an explicit "trust me" when that proof is absent. *)
       let load_from_array ?(is_volatile = false) elem_ty n arr_ptr =
         let checker_proven =
-          Hashtbl.mem Type_inf.array_index_proven_in_bounds_at idx.loc in
+          Hashtbl.mem Type_inf.array_index_proven_in_bounds_at idx.loc
+          || Hashtbl.mem Type_inf.arithmetic_array_index_proven_at (!current_runtime_bounds_key, idx.loc) in
         let needs_check = not checker_proven in
         if needs_check && !unsafe_depth = 0 then emit_bounds_check ~idx_loc:idx.loc e.loc idx_ty idx_v n
         else if needs_check then note_unsafe_use ();
@@ -5020,6 +5021,59 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
 
   (* GitHub issue #623. Sync rule: type_inf.ml's dma_device_span proved
      offset + length within the extent; this only computes the values. *)
+  | Call (name, [source]) when Io_span.constructor name <> None ->
+      let (_, source_value) = gen_expr locals source in
+      let ptr = build_extractvalue source_value 0 "io.source" builder in
+      let length = build_extractvalue source_value 1 "io.length" builder in
+      let address = build_ptrtoint ptr (usize_lltype ()) "io.address" builder in
+      let name = Option.get (Io_span.constructor name) in
+      let llty = Hashtbl.find struct_lltypes name in
+      let (ai, _) = field_info name "address" in
+      let (li, _) = field_info name "length" in
+      let value = build_insertvalue (undef llty) address ai "io.span" builder in
+      let value = build_insertvalue value length li "io.span" builder in
+      (TypeIndexed (name, [StaticInt 0]), value)
+  | Call ("io_span_length", [span]) ->
+      let (ty, value) = gen_expr locals span in
+      let name = match ty with TypeIndexed (n, _) | TypeNamed n -> n
+        | _ -> raise (Error "io_span_length: invalid span type") in
+      let (li, _) = field_info name "length" in
+      (TypeUsize, build_extractvalue value li "io.length" builder)
+  | Call ("io_span_end", [span]) ->
+      ignore (gen_expr locals span);
+      (TypeVoid, const_null (i1_type context))
+  | Call (("io_readv" | "io_writev") as name, fd :: spans) ->
+      let (_, fd) = gen_expr ~expected_ty:TypeUsize locals fd in
+      let values = List.map (gen_expr locals) spans in
+      let ity = usize_lltype () in
+      let aty = array_type ity (2 * List.length spans) in
+      let storage = entry_alloca aty "io.vectors" in
+      List.iteri (fun index (ty, value) ->
+        let record = match ty with TypeIndexed (n, _) | TypeNamed n -> n
+          | _ -> raise (Error "io syscall: invalid span type") in
+        List.iteri (fun word field ->
+          let (fi, _) = field_info record field in
+          let v = build_extractvalue value fi "io.word" builder in
+          let at = build_in_bounds_gep aty storage
+            [| const_int (i32_type context) 0; const_int (i32_type context) (2 * index + word) |]
+            "io.vector.word" builder in
+          ignore (build_store v at builder)) ["address"; "length"]) values;
+      let ptr = build_ptrtoint storage ity "io.vector.address" builder in
+      let count = const_int ity (List.length spans) in
+      let triple = target_triple !the_module in
+      let reading = name = "io_readv" in
+      let asm, constraints, arguments =
+        if String.starts_with ~prefix:"aarch64" triple then
+          let spec = Instr_spec.syscall_trap in
+          spec.asm, spec.constraints,
+          [| const_int ity (if reading then 65 else 66); fd; ptr; count; const_int ity 0; const_int ity 0 |]
+        else if String.starts_with ~prefix:"x86_64" triple && Text_search.contains triple "linux" then
+          "syscall", "={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}",
+          [| const_int ity (if reading then 19 else 20); fd; ptr; count |]
+        else raise (Error (name ^ " requires the AArch64 syscall ABI or native Linux/AMD64")) in
+      let fty = function_type ity (Array.map (fun _ -> ity) arguments) in
+      let inline = const_inline_asm fty asm constraints true false in
+      (TypeUsize, build_call fty inline arguments (name ^ ".result") builder)
   | Call ("dma_device_span", [owner; { desc = Var record; _ }; offset_e; length_e]) ->
       let _ = gen_expr locals owner in
       (match Dma_fixed_registry.allocation_of record,
@@ -5936,7 +5990,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let (_, rhs_v) = gen_expr ?expected_ty:elem_ty_hint locals rhs in
            let store_to_array ?(is_volatile = false) elem_ty n arr_ptr =
              let checker_proven =
-               Hashtbl.mem Type_inf.array_index_proven_in_bounds_at idx.loc in
+               Hashtbl.mem Type_inf.array_index_proven_in_bounds_at idx.loc
+          || Hashtbl.mem Type_inf.arithmetic_array_index_proven_at (!current_runtime_bounds_key, idx.loc) in
              let needs_check = not checker_proven in
              if needs_check && !unsafe_depth = 0 then
                emit_bounds_check ~idx_loc:idx.loc idx.loc idx_ty idx_v n
@@ -6133,7 +6188,8 @@ and gen_index_place locals (base : Ast.expr) (idx : Ast.expr) loc
   match resolve_index_storage ~op:"Index" locals base with
   | IdxArray (elem_ty, n, array_place, is_volatile) ->
       let checker_proven =
-        Hashtbl.mem Type_inf.array_index_proven_in_bounds_at idx.loc in
+        Hashtbl.mem Type_inf.array_index_proven_in_bounds_at idx.loc
+          || Hashtbl.mem Type_inf.arithmetic_array_index_proven_at (!current_runtime_bounds_key, idx.loc) in
       let needs_check = not checker_proven in
       if needs_check && !unsafe_depth = 0 then
         emit_bounds_check ~idx_loc:idx.loc loc idx_ty idx_v n
@@ -6640,7 +6696,11 @@ let gen_func ?prog_types fdef =
     | Expr e ->
         ignore (gen_expr locals e);
         (match e.desc with
-         | Call (name, _) when Hashtbl.mem noreturn_functions name ->
+         | Call (name, _) when Hashtbl.mem noreturn_functions
+             (match prog_types with
+              | Some pt -> Option.value ~default:name
+                  (Types.StringMap.find_opt (Types.loc_key e.loc) pt.Types.call_targets)
+              | None -> name) ->
              ignore (build_unreachable builder)
          | _ -> ())
 
@@ -7890,6 +7950,18 @@ let declare_func ?prog_types fdef =
     (* GitHub issue #897: an external entry keeps the aggregate convention
        its assembly or debugger caller expects. *)
     let entry = Hashtbl.mem external_entry_names key in
+    let separation = match prog_types with
+      | None -> None
+      | Some types -> Types.StringMap.find_opt key types.Types.separation_conditions in
+    let constrained = match separation with
+      | None -> false
+      | Some cs -> not (Init_separation_domain.Conditions.is_empty cs) in
+    if entry && constrained then
+      raise (Types.TypeError (fdef.def_loc, Printf.sprintf
+        "--external-entry '%s' would erase inferred separation: %s; export a checked wrapper that discharges the condition"
+        key (Init_separation_domain.show
+          (Init_separation_domain.Conditions.min_elt (Option.get separation)))));
+
     let param_lls = param_ast
       |> List.filter (fun t -> not (is_erased_view_type t))
       |> List.map (fun t -> match t with
@@ -7901,6 +7973,11 @@ let declare_func ?prog_types fdef =
     let ft = if entry then function_type (ltype_of_ret_ast ret_ast) param_lls
       else takibi_function_type ret_ast param_lls in
     let f         = declare_function key ft !the_module in
+    if constrained then set_linkage Linkage.Internal f;
+    if Option.fold ~none:false ~some:(List.mem "noreturn") fdef.effects then begin
+      Hashtbl.replace noreturn_functions key ();
+      add_function_attr f (create_enum_attr context "noreturn" 0L) AttrIndex.Function
+    end;
     if fn_type_has_sret ft ret_ast then begin
       add_function_attr f (sret_attr ret_ast) (AttrIndex.Param 0);
       add_function_attr f (create_enum_attr context "noalias" 0L) (AttrIndex.Param 0)

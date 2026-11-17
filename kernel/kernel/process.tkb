@@ -2792,8 +2792,13 @@ private fn scheduled_process_diagnostic_copy(
 private fn scheduled_process_diagnostic_fill_stopped(
         stopped: borrow MachineStopped[&kernel_world_stop],
         record: borrow &mut ProcessRecord,
-        snapshot: borrow &mut ProcessDiagnosticSnapshot)
-        -> ProcessImageDiagnosticCount !{unsafe} {
+        snapshot: borrow uninit &mut ProcessDiagnosticSnapshot)
+        -> ProcessImageDiagnosticCount !{unsafe}
+        ensures match result {
+            ProcessImageDiagnosticCount::Ready(pages) => init_fields(snapshot),
+            ProcessImageDiagnosticCount::Busy => true,
+            ProcessImageDiagnosticCount::Stale => true
+        } {
     let mut words: ProcessPoolHandleWords = process_image_record_words(record);
     let pages: usize = match process_image_active_page_count_stopped(stopped, words) {
         ProcessImageDiagnosticCount::Busy => { return ProcessImageDiagnosticCount::Busy; }
@@ -2810,7 +2815,8 @@ private fn scheduled_process_diagnostic_fill_stopped(
 // a debug build's 16 KiB kernel stack. The caller retains its own authority.
 private fn scheduled_process_diagnostic_record_fill(
         record: borrow &mut ProcessRecord, parent_pid: usize, resident_pages: usize,
-        snapshot: borrow &mut ProcessDiagnosticSnapshot) {
+        snapshot: borrow uninit &mut ProcessDiagnosticSnapshot)
+        ensures init_fields(snapshot) {
     snapshot.pid = record.pid;
     snapshot.session_id = record.session_id;
     snapshot.ppid = parent_pid;
@@ -6010,7 +6016,7 @@ private fn kernel_process_el1_resume_probe_run(frame: usize) -> bool !{unsafe} {
     // the El1 resume asserts the priority mask is open, as for every El1 frame;
     // an IRQ before that masks nothing it needs (the tick's El1 branch only
     // charges and requests a reschedule outside the stage 8 window).
-    el1_resume_probe_run(frame, results as *usize);
+    el1_resume_probe_checked(frame, results as []usize);
     return results[0] == frame + EXC_CONTEXT_SIZE &&
         results[1] == KERNEL_PROCESS_EL1_RESUME_X0 &&
         results[2] == KERNEL_PROCESS_EL1_RESUME_X30 &&
@@ -6562,7 +6568,8 @@ fn kernel_process_trace_handle_peer_pid(event: usize, subject: ProcessHandle,
 
 // Copies oldest-to-newest into the caller-owned fixed array. This gives the
 // crash report a stable chronological tail even after the ring wrapped.
-fn kernel_process_crash_trace_copy(output: borrow [usize; KERNEL_CRASH_TRACE_WORDS..]) -> usize {
+fn kernel_process_crash_trace_copy(output: borrow uninit [usize; KERNEL_CRASH_TRACE_WORDS..]) -> usize
+        ensures init(output[0..<KERNEL_CRASH_TRACE_WORDS]) {
     // A slot's commit sequence is written LAST and is zero while the record
     // is in flight, so chronology is never derived from a count: every slot
     // is validated against the sequence being looked for, and an in-flight
@@ -6590,38 +6597,33 @@ fn kernel_process_crash_trace_copy(output: borrow [usize; KERNEL_CRASH_TRACE_WOR
     if (latest > KERNEL_CRASH_TRACE_EVENTS) {
         first = latest - KERNEL_CRASH_TRACE_EVENTS + 1;
     }
-    let mut copied: usize = 0;
+    let mut written_words: {0..<KERNEL_CRASH_TRACE_WORDS + 1 as usize} = 0;
     for item: usize in 0..<KERNEL_CRASH_TRACE_EVENTS {
         let sequence: usize = first + item;
         if (sequence <= latest) {
             for slot: usize in 0..<KERNEL_CRASH_TRACE_SLOTS {
                 let source_base: usize =
                     slot * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
-                let destination: usize = copied;
+                let destination: usize = written_words;
                 if (kernel_crash_trace[
                         source_base + KERNEL_PROCESS_TRACE_SEQUENCE_WORD] ==
                         sequence &&
-                    destination < KERNEL_CRASH_TRACE_EVENTS) {
-                    let output_base: usize =
-                        destination * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
+                    destination <= KERNEL_CRASH_TRACE_WORDS - KERNEL_PROCESS_TRACE_WORDS_PER_EVENT) {
+                    let output_base: usize = destination;
+                    let record_output = output[output_base..<output_base + KERNEL_PROCESS_TRACE_WORDS_PER_EVENT];
                     for word: usize in 0..<KERNEL_PROCESS_TRACE_WORDS_PER_EVENT {
-                        output[output_base + word] =
+                        record_output[word] =
                             kernel_crash_trace[source_base + word];
                     }
-                    copied = copied + 1;
+                    written_words = destination + KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
                 }
             }
         }
     }
-    for item: usize in 0..<KERNEL_CRASH_TRACE_EVENTS {
-        if (item >= copied) {
-            let output_base: usize = item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
-            for word: usize in 0..<KERNEL_PROCESS_TRACE_WORDS_PER_EVENT {
-                output[output_base + word] = 0;
-            }
-        }
-    }
-    return copied;
+    // Preserve the existing zeroed tail; the used prefix was copied above.
+    let tail_start: usize = written_words;
+    zero_fill(output[tail_start..<KERNEL_CRASH_TRACE_WORDS]);
+    return written_words / KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
 }
 
 

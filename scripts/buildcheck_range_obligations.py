@@ -293,7 +293,13 @@ def check_dir(directory: pathlib.Path, z3: str,
                          if l.startswith("; rule:")), "")
             report = [f"{path.name}: {verdict}  ({rule[2:]}, {claim[2:]})"]
             report += [f"  at {s}" for s in sites]
-            if verdict == "sat" and is_init:
+            if verdict == "sat" and rule == "; rule: index":
+                # Index goals describe source atoms directly; unlike a
+                # coverage query they do not declare a witness named k.
+                model = solve(z3, body, "(get-model)\n")
+                report.append("  counterexample (index expression and path-fact atoms):")
+                report += ["    " + l for l in model.strip().splitlines()[1:]]
+            elif verdict == "sat" and is_init:
                 model = solve(z3, body, "(get-model)\n(get-value (k))\n")
                 report.append("  counterexample (k: an element not covered):")
                 report += ["    " + l for l in model.strip().splitlines()[1:]]
@@ -342,6 +348,14 @@ fn sub990(o: borrow uninit [u8; 8..], m: usize) ensures init(o[0..<8]) {
     zero_fill(o[0..<8]);
 }
 
+// The historical contract check omitted padding. The solver must still
+// require it from the whole-byte predicate, independently of that verdict.
+struct Padding1511 { a: u8; b: usize; }
+fn padding1511(p: borrow uninit &mut Padding1511) ensures init(p) {
+    p.a = 1;
+    p.b = 2;
+}
+
 fn planted798(s: borrow []const u8, i: usize) -> u8 {
     return s[i];
 }
@@ -381,6 +395,14 @@ fn cast1233(s: borrow [u8; 7..]) -> bool {
 
 fn size1233() -> usize {
     return sizeof(Skew1233Over);
+}
+
+struct ArithmeticArray { data: [usize; 5]; }
+fn arithmetic_array_control(a: &mut ArithmeticArray, chunk: usize @ k) where k < 3 {
+    for offset: usize in 0..<2 {
+        let slot: usize = chunk * 2 + offset;
+        a.data[slot] = 1;
+    }
 }
 
 fn main() -> i32 {
@@ -587,13 +609,29 @@ def control(takibi: str) -> int:
         print("FAIL range-obligation control: #798's planted index proof "
               "was not reported sat")
         return 1
+    array_planted = [f for f in failures
+                     if ": sat " in f and "rule: index" in f
+                     and "slot < 5" in f]
+    if not array_planted or any("unknown constant" in f for f in index_planted + array_planted):
+        print("\n".join(failures))
+        print("FAIL range-obligation control: the fixed-array arithmetic "
+              "proof must report a counterexample without an undefined witness")
+        return 1
+    padding_planted = [f for f in failures
+                       if ": sat " in f and "rule: init-leaves" in f
+                       and "padding1511" in f]
+    if not padding_planted:
+        print("\n".join(failures))
+        print("FAIL range-obligation control: the unwritten padding "
+              "certified by a whole-record contract was not reported sat")
+        return 1
     report_pass("range-obligation-control",
                 "z3 reports #935's planted unsigned-Sub range, #961's "
                 "planted min/max range (#984), the three planted native "
                 "constant readings of #956, #961 and #983 (#960), a planted "
                 "no-wrap judgement (#990), a planted index proof (#798), a planted "
                 "init coverage claim (#954) and a planted path-fact claim "
-                "(#975) with counterexamples",
+                "(#975), and the unwritten-padding contract (#1511) with counterexamples",
                 obligations=len(failures) + len(init_planted)
                 + len(fact_planted) + len(mm_planted))
     return 0

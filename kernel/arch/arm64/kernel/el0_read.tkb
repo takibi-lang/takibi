@@ -1,0 +1,24 @@
+// Audited EL0 syscall output contracts shared by standalone ABI fixtures.
+// Current limitations (2026-11-16): the kernel's syscall implementations and
+// this separately compiled image are not connected by a compiler proof.
+// Each assertion trusts the named syscall's success result and exact writes;
+// the pointer is borrowed only for the synchronous syscall invocation.
+
+must_use variant El0ReadResult { Read(usize); Failed(usize); }
+
+// read writes exactly the returned prefix on success, including the empty
+// EOF prefix. Error returns and impossible oversized results certify nothing.
+fn el0_read(fd: usize, output: borrow uninit []u8) -> El0ReadResult !{unsafe}
+        ensures match result {
+            El0ReadResult::Read(count) => init(output[0..<count]),
+            El0ReadResult::Failed(code) => true
+        } {
+    let raw: *u8 = unsafe { output as *u8 };
+    let capacity: usize = output.len;
+    let code: usize = svc5(63, fd, raw as usize, capacity, 0, 0);
+    if (code < 0xFFFFFFFFFFFFF001 && code <= capacity) {
+        unsafe { assume_init(output[0..<code]); }
+        return El0ReadResult::Read(code);
+    }
+    return El0ReadResult::Failed(code);
+}

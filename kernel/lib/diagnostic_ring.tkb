@@ -120,8 +120,9 @@ fn diagnostic_trace_record_uart_break(data: usize) !{interrupt, unsafe} {
 // than plausible stale data -- that re-check is the compiler's now, and it
 // is the step this loop used to have to remember.
 fn diagnostic_trace_copy_cpu(cpu: usize,
-        output: borrow [DiagnosticEvent; DIAGNOSTIC_TRACE_EVENTS..])
-        -> DiagnosticTraceCopyResult !{interrupt, unsafe} {
+        output: borrow uninit [DiagnosticEvent; DIAGNOSTIC_TRACE_EVENTS..])
+        -> DiagnosticTraceCopyResult !{interrupt, unsafe}
+        ensures init_fields(output[0..<result.count]) {
     let mut count: usize = 0;
     let mut damaged: usize = 0;
     let mut overwritten: usize = 0;
@@ -147,7 +148,7 @@ fn diagnostic_trace_copy_cpu(cpu: usize,
                 // knows which sequence chronologically belongs here, so a
                 // consistent copy of a DIFFERENT record is still damage --
                 // the ring wrapped past this position while the copy ran.
-                if (taken == sequence) { count = count + 1; }
+                if (taken > 0 && taken == sequence) { count = count + 1; }
                 else { damaged = damaged + 1; }
             }
         }

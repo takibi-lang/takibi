@@ -1,0 +1,39 @@
+// Audited EL0 syscall output contracts shared by standalone ABI fixtures.
+// Current limitations (2026-11-16): the kernel's syscall implementations and
+// this separately compiled image are not connected by a compiler proof.
+// Each assertion trusts the named syscall's success result and exact writes;
+// the pointer is borrowed only for the synchronous syscall invocation.
+
+must_use variant El0OutputResult { Ready; Failed(usize); }
+must_use variant El0CpuResult { Ready(usize); Failed(usize); }
+
+// getcpu(x0, NULL, NULL) writes one little-endian u32 at x0 on success.
+// kernel/kernel/syscall.tkb returns zero only after user_write_u32 succeeds.
+private fn el0_getcpu_output(output: borrow uninit [u8; 4..]) -> El0OutputResult
+        !{unsafe}
+        ensures match result {
+            El0OutputResult::Ready => init(output[0..<4]),
+            El0OutputResult::Failed(code) => true
+        } {
+    let raw: *u8 = unsafe { output as *u8 };
+    let code: usize = svc5(168, raw as usize, 0, 0, 0, 0);
+    if (code == 0) {
+        unsafe { assume_init(output[0..<4]); }
+        return El0OutputResult::Ready;
+    }
+    return El0OutputResult::Failed(code);
+}
+
+fn el0_getcpu() -> El0CpuResult  {
+    let mut bytes: [u8; 4];
+    match el0_getcpu_output(bytes as []u8) {
+        El0OutputResult::Ready => {
+            let cpu: usize = bytes[0] as usize |
+                ((bytes[1] as usize) << 8) |
+                ((bytes[2] as usize) << 16) |
+                ((bytes[3] as usize) << 24);
+            return El0CpuResult::Ready(cpu);
+        }
+        El0OutputResult::Failed(code) => { return El0CpuResult::Failed(code); }
+    }
+}

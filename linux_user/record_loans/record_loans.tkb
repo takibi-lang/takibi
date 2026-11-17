@@ -1,6 +1,6 @@
 // Whole-record reference load/store is executed independently of pool mints.
 fn reference_record_copy(source: borrow &LoanRecord) -> LoanRecord { return *source; }
-fn reference_record_assign(target: borrow &mut LoanRecord, source: borrow &LoanRecord) {
+fn reference_record_assign(target: borrow uninit &mut LoanRecord, source: borrow &LoanRecord) {
     *target = *source;
 }
 fn reference_record_copy_probe() -> usize {
@@ -31,6 +31,8 @@ fn reference_place_write(target: borrow &mut ReferencePlaceOuter) -> usize {
 }
 fn reference_place_probe() -> usize {
     let mut value: ReferencePlaceOuter;
+    // This probes mutation through references, not an output initializer.
+    zero_fill(&value);
     return reference_place_write(&value);
 }
 

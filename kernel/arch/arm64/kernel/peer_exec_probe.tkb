@@ -1,3 +1,5 @@
+use "kernel/arch/arm64/kernel/el0_getcpu.tkb";
+
 /* execve on a peer (GitHub issue #610): two static-PIE EL0 programs linked
  * from this one object, kept free of writable globals and compiled with
  * the trap-site rejection. run once from init.sh.
@@ -37,17 +39,16 @@ private fn peer_exec_move_to(cpu: u8) {
     if (svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) != 0) {
         peer_exec_fail(bs"peer-exec: the affinity mask was refused\n");
     }
-    let mut cpu_bytes: [u8; 4];
-    cpu_bytes[0] = 99;
+    let mut here: u8 = 99;
     for poll: usize in 0..<PEER_EXEC_ARRIVAL_POLLS {
-        if (cpu_bytes[0] != cpu) {
-            if (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize,
-                     0, 0, 0, 0) != 0) {
-                cpu_bytes[0] = 99;
+        if (here != cpu) {
+            match el0_getcpu() {
+                El0CpuResult::Ready(value) => { here = value as u8; }
+                El0CpuResult::Failed(code) => { here = 99; }
             }
         }
     }
-    if (cpu_bytes[0] != cpu) {
+    if (here != cpu) {
         peer_exec_fail(bs"peer-exec: never arrived on the pinned cpu\n");
     }
 }

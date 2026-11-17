@@ -10,15 +10,13 @@
    merge of two paths is a union, the dual of C#/Swift definite assignment.
 
    Tracked roots:
-   - a local declared without an initializer whose type is not an array
-     (stage 1 tracks arrays only inside scratch globals; uninitialized local
-     arrays remain unchecked, as SPEC.md records);
-   - a `borrow uninit` parameter, which starts uninit and must be fully
-     initialized at every return (an out parameter, C# `out`);
-   - a `scratch` global, all of whose leaves are uninit at function entry,
-     whatever an earlier call left there. Any index of a scratch array
-     global is the same path: the per-CPU exclusivity of its element is a
-     trusted premise (TRUSTED_BASE.md).
+   - a local declared without an initializer, including fixed-size arrays;
+   - a `borrow uninit` parameter, whose checked output contract describes
+     the initialized fields or ranges at return;
+   - a `scratch` global, uninitialized at function entry. Array elements
+     have separate roots selected by a local binding/field chain or constant.
+     Selector writes, owner consumption and rebinding invalidate dependent
+     facts; different bindings are conservatively distinct.
 
    Events:
    - reading a place needs every leaf under it initialized, padding
@@ -30,20 +28,20 @@
      marked: a struct literal (only ever a `let` initializer) leaves
      padding uninit, an untracked value
      (a call result, a parameter) counts as initialized;
-   - a store into an element of an array leaf changes nothing (stage 1
-     has no ranges) and reads nothing, except the whole-length counted
-     loop of `filled_by_loop` (#888);
-   - zero_fill(p), unsafe assume_init(p), passing p (or `p as []T`, `&p`)
-     to a `borrow uninit` parameter initialize everything under p, padding
-     included. Passing `&p` to a `&mut T` parameter initializes its field
-     leaves but not its padding: the callee is trusted to store every
-     field, until stage 3 contracts replace that trust (TRUSTED_BASE.md).
+   - an array element store adds its singleton interval; counted-loop
+     coverage and checked API contracts can establish larger intervals;
+   - zero_fill(p) and unsafe assume_init(p) establish byte initialization
+     for the specified footprint. A `borrow uninit` call transfers only its
+     checked output contract. Ordinary `&mut T` arguments require initialized
+     fields and add no initialization fact. `init_fields` transfers fields
+     without asserting padding.
 
    A loop body may run no times, so the state after a loop is the state
    before it; the body is checked against that same state, which is a
    superset of what any later iteration sees. *)
 
 module StringMap = Map.Make (String)
+module StringSet = Set.Make (String)
 
 type leaf = string * string list   (* root key, field path *)
 
@@ -69,7 +67,7 @@ let trace_out : (string -> unit) ref = ref prerr_string
 type root = {
   display : string;
   leaves : (string list * Ast.type_expr) list;
-  array_root : bool;     (* `g[i]` names the same path as `g` *)
+  array_root : bool;     (* scratch array whose elements need selected roots *)
   out_param : bool;      (* borrow uninit: must be init at return *)
 }
 
@@ -104,7 +102,12 @@ let layout_size : (Ast.type_expr -> int option) ref = ref (fun _ -> None)
    uninitialized (as before); [iv] holds, for a leaf in [u] that is an array
    or slice, intervals of its elements known initialized (Init_pred); [eqs]
    are linear equalities known on the path. *)
+(* Rare scratch identities and linked certificates share one cold field.
+   Ordinary interval-state copies keep the original record size. *)
+type extras = { links : Init_link.t; touched : StringSet.t }
+let empty_extras = { links = Init_link.empty; touched = StringSet.empty }
 type state = {
+  extras : extras;
   u : Leaves.t;
   iv : (leaf * Init_pred.interval) list;
   eqs : Init_pred.eqs;
@@ -117,17 +120,35 @@ type state = {
        the local. *)
 }
 
+let set_links st links =
+  if links == st.extras.links then st
+  else {st with extras = {st.extras with links}}
+
 (* A tracked view of an array or slice leaf: elements [off, off + len) of
    the leaf at [vp]. *)
 type view = { vp : place; off : Init_pred.lin; len : Init_pred.lin option }
+
+type link_argument = [ `Whole of place | `View of view | `Untracked ] option
+type link_ops = {
+  assign_value : state -> string -> Ast.expr -> state;
+  value_key : Ast.expr -> string option;
+  view_ready : state -> view -> Ast.expr -> bool;
+  check_pred : state -> arg_view:(string -> link_argument) -> Init_state.pred -> Ast.loc -> state;
+  apply_pred : state -> arg_view:(string -> link_argument) -> Init_state.pred -> Ast.loc -> state;
+  invalidate_aliases : Init_link.t -> string -> Init_link.t;
+}
 
 (* A fact a call establishes: elements [lo, hi) (callee terms already mapped
    into the caller, except the atoms "result" and binder names) of a leaf. *)
 type fact = place * Init_pred.interval
 
+type contract_value = [ `Val of Init_pred.lin option | `Len of Init_pred.lin option | `Field of string ]
+
 type guarded =
   | GBool of bool * (view * Init_pred.interval) list
       (* holds when result = the bool *)
+  | GPositive of Init_pred.lin * (view * Init_pred.interval) list
+      (* a publish_copy result is nonzero only after all fields were copied *)
   | GCase of string option * string option * (view * Init_pred.interval) list
       (* case (None: any other case), payload binder atom, facts *)
 
@@ -139,7 +160,16 @@ let check
     ?(linear_owner : string -> bool = fun _ -> false)
     ?(variant_payload : string -> string -> Ast.type_expr option = fun _ _ -> None)
     ?(callee_ret : string -> Ast.type_expr option = fun _ -> None)
+    ?(global_singleton : string -> int option = fun _ -> None)
+    ?(global_byte_array_length : string -> int option = fun _ -> None)
+    ?(noreturn : Ast.expr -> bool = fun _ -> false)
+    ?(write_footprint : Ast.expr -> Init_writes.t = fun _ -> Init_writes.Unknown)
+    ?(pointer_store_origin : Ast.expr -> string option = fun _ -> None)
+    ?(global_view_origin : Ast.expr -> string option = fun _ -> None)
+    ?(separated : string -> string -> bool = fun _ _ -> false)
+    ?(note_unsafe : Ast.loc -> unit = fun _ -> ())
     ?(decide_index : Ast.loc -> string option -> unit = fun _ _ -> ())
+    ?(decide_array_index : Ast.loc -> string option -> unit = fun _ _ -> ())
     (finfo : Types.func_info) (fdef : Ast.func) =
   let bindings = finfo.Types.bindings in
   (* GitHub issue #763: every independent error is recorded, in traversal
@@ -169,6 +199,10 @@ let check
              @ (if has_padding n fields then [(prefix @ [pad], Ast.TypeVoid)]
                 else [])
          | None -> [(prefix, ty)])
+    | (Ast.TypeArray (element, _) | Ast.TypeSlice (element, _, _)) as t ->
+        let element_leaves = leaves_of [] seen element in
+        (prefix, t) :: (if List.exists (fun (path, _) -> is_pad path) element_leaves
+          then [(prefix @ [pad], t)] else [])
     | t -> [(prefix, t)]
   in
   let roots : (string, root) Hashtbl.t = Hashtbl.create 8 in
@@ -197,10 +231,13 @@ let check
     List.fold_left (fun s l -> Leaves.add l s) acc (all_leaves key))
     roots Leaves.empty in
   (* Parameter ids by name, and the pointee of each `borrow uninit`. *)
-  let param_ids = List.combine (List.map fst fdef.Ast.params)
-      bindings.Local_bindings.param_ids in
-  let param_types = List.filter_map (fun (n, t) ->
-    Option.map (fun t -> (n, t)) t) fdef.Ast.params in
+  let param_ids = List.map2 (fun (name, _) id -> name, id)
+      fdef.Ast.params bindings.Local_bindings.param_ids in
+  let rec typed_params = function
+    | [] -> []
+    | (name, Some ty) :: rest -> (name, ty) :: typed_params rest
+    | (_, None) :: rest -> typed_params rest in
+  let param_types = typed_params fdef.Ast.params in
   (* borrow uninit parameters. *)
   let entry_u = List.fold_left2 (fun st (name, ty) id ->
     match ty, Init_state.param_qual fdef.Ast.def_loc name with
@@ -218,27 +255,9 @@ let check
         List.fold_left (fun s l -> Leaves.add l s) st (all_leaves key)
     | _ -> st) entry_u fdef.Ast.params bindings.Local_bindings.param_ids in
   let contracts = Init_state.contracts_of fdef.Ast.def_loc in
-  (* GitHub issue #975 (maintainer, 2026-10-24): one meaning per type. A
-     plain `borrow T` is wholly initialized; partial state lives only in a
-     `borrow uninit` parameter's requires/ensures. So a requires clause may
-     narrow only a `borrow uninit` parameter. *)
-  List.iter (fun (c : Init_state.clause) ->
-    match c.body with
-    | Init_state.CPlain (Init_state.PInit e) when c.requires ->
-        let rec base (e : Ast.expr) = match e.desc with
-          | Ast.SliceOf (b, _, _) -> base b
-          | Ast.Var x -> Some x
-          | _ -> None in
-        (match base e with
-         | Some x when List.mem_assoc x fdef.Ast.params
-                       && Init_state.param_qual fdef.Ast.def_loc x
-                          <> Some Init_state.Uninit ->
-             error c.cloc (Printf.sprintf
-               "requires init(%s...): '%s' is not `borrow uninit`; a plain \
-                borrow is wholly initialized, so partial initialization needs \
-                `%s: borrow uninit ...` with this requires" x x x)
-         | _ -> ())
-    | _ -> ()) contracts;
+  (* Initialization clauses name tracked output parameters. In particular,
+     a plain &mut input promises fields, not padding: an unchecked ensures
+     on that input must not manufacture a whole-byte guarantee. *)
   (* ---- immutable bindings: the atoms of linear terms ------------------- *)
   let mutable_ids = Hashtbl.create 16 in
   let let_mut_ids = Hashtbl.create 16 in
@@ -290,25 +309,43 @@ let check
      same-named binding elsewhere in the function stays an atom), else by
      name, conservatively. *)
   let addr_taken = Hashtbl.create 8 in
+  let changed_records = Hashtbl.create 8 in
   let written =
     let acc = Hashtbl.create 8 in
     let note (v : Ast.expr) n =
       match Local_bindings.id_for_expr bindings v with
       | Some id -> Hashtbl.replace acc ("#" ^ string_of_int id) ()
       | None -> Hashtbl.replace acc n () in
+    let rec record_root (e : Ast.expr) = match e.desc with
+      | Ast.Var _ -> Option.iter (fun id -> Hashtbl.replace changed_records id ())
+          (Local_bindings.id_for_expr bindings e)
+      | Ast.FieldGet (b, _) -> record_root b
+      | _ -> () in
     let rec go (e : Ast.expr) = match e.desc with
       | Ast.AddrOf ({ desc = Ast.Var n; _ } as v) ->
-          note v n;
+          note v n; record_root v;
           (match Local_bindings.id_for_expr bindings v with
            | Some id -> Hashtbl.replace addr_taken id ()
-           | None -> Hashtbl.replace addr_taken (-1) ())
-      | Ast.Assign (({ desc = Ast.Var n; _ } as v), rhs) -> note v n; go rhs
-      | Ast.Assign (l, r) -> go l; go r
-      | Ast.AddrOf x | Ast.Bnot x | Ast.Deref x | Ast.Cast (_, x)
+           (* Name resolution found no local: taking a global's address
+              does not expose unrelated local loop cursors. *)
+           | None -> ())
+      | Ast.Assign (({ desc = Ast.Var n; _ } as v), rhs) -> note v n; record_root v; go rhs
+      | Ast.Assign (l, r) -> record_root l; go l; go r
+      | Ast.AddrOf x -> record_root x; go x
+      | Ast.Call (name, xs) ->
+          let ps = match callee name with Some (ps, _) -> ps | None -> [] in
+          List.iteri (fun i x ->
+            let shared = match List.nth_opt ps i with
+              | Some (_, Some (Ast.TypeBorrow _)) -> true | _ -> false in
+            if not shared then (match x.Ast.desc with
+              | Ast.Var _ -> record_root x
+              | _ -> ());
+            go x) xs
+      | Ast.Bnot x | Ast.Deref x | Ast.Cast (_, x)
       | Ast.FieldGet (x, _) | Ast.Unsafe x | Ast.VariantCtor (_, _, x) -> go x
       | Ast.BinOp (_, a, b) | Ast.Index (a, b) -> go a; go b
       | Ast.SliceOf (a, b, c) -> go a; go b; go c
-      | Ast.Call (_, xs) | Ast.StructLit xs | Ast.TupleLit xs -> List.iter go xs
+      | Ast.StructLit xs | Ast.TupleLit xs -> List.iter go xs
       | _ -> () in
     let rec st (s : Ast.stmt) = match s.desc with
       | Ast.Let (_, _, _, Some e, _) | Ast.LetTuple (_, e) | Ast.Expr e
@@ -347,6 +384,50 @@ let check
        | None -> name_of (String.sub a 1 (String.length a - 1)))
     else a in
   let show l = Init_pred.to_string ~name:atom_name l in
+  (* Scratch facts name an element selected by a particular local authority,
+     not every element of the backing array. An unsupported selector is an
+     error: source position is not an identity across calls or iterations. *)
+  let selected_roots = Hashtbl.create 8 in
+  let binding_id (e : Ast.expr) name =
+    match Local_bindings.id_for_expr bindings e with
+    | Some id -> Some id
+    | None -> List.assoc_opt name param_ids in
+  let rec selector (e : Ast.expr) = match e.desc with
+    | Ast.Var x -> (match binding_id e x with
+        | Some id -> ("v" ^ string_of_int id, Some id)
+        (* fold-not-proof: selector identity only; no range/width claim. *)
+        | None -> (match Const_env.find x with
+            | Some n -> ("literal:" ^ string_of_int n, None)
+            | None ->
+                error e.loc "scratch initialization needs a local selector or constant index";
+                ("unsupported:" ^ x, None)))
+    | Ast.FieldGet (b, f) -> let k, id = selector b in (k ^ "." ^ f, id)
+    | Ast.IntLit n -> ("literal:" ^ Int64.to_string n, None)
+    | _ ->
+        error e.loc "scratch initialization needs a local selector or constant index";
+        (Printf.sprintf "unsupported:%d:%d" e.loc.pos_lnum e.loc.pos_cnum, None) in
+  let scratch_element global idx =
+    let base = "G" ^ global in
+    match Hashtbl.find_opt roots base with
+    | Some r when r.array_root ->
+        let selected, owner = selector idx in
+        let key = base ^ "[" ^ selected ^ "]" in
+        if not (Hashtbl.mem roots key) then begin
+          Hashtbl.add roots key { r with display = global ^ "[" ^ selected ^ "]";
+                                       array_root = false };
+          Hashtbl.add selected_roots key (base, owner)
+        end;
+        { root = key; path = []; inside = false }
+    | _ -> { root = base; path = []; inside = false } in
+  let touch_root st key =
+    if StringSet.mem key st.extras.touched then st else
+    match Hashtbl.find_opt selected_roots key with
+    | None -> st
+    | Some (base, _) ->
+        let u = List.fold_left (fun u (r, path) ->
+          if Leaves.mem (base, path) st.u then Leaves.add (r, path) u else u)
+          st.u (all_leaves key) in
+        { st with u; extras = {st.extras with touched = StringSet.add key st.extras.touched} } in
   (* ---- places ---------------------------------------------------------- *)
   let rec place (e : Ast.expr) : place option =
     match e.desc with
@@ -368,6 +449,9 @@ let check
               | Some _ -> Some { p with inside = true }   (* through a leaf *)
               | None -> Some { p with path = p.path @ [f] })
          | None -> None)
+    | Ast.Index (({ desc = Ast.Var g; _ } as base), idx)
+      when StringMap.mem g scratch_names && Local_bindings.id_for_expr bindings base = None ->
+        Some (scratch_element g idx)
     | Ast.Index (base, _) ->
         (match place base with
          | Some p when p.path = [] && not p.inside
@@ -413,13 +497,27 @@ let check
      being walked; every walk entry point sets it from its state. *)
   let versionable x id =
     not (immutable_var x id) && Hashtbl.mem let_mut_ids id && unsigned_id id
-    && not (Hashtbl.mem addr_taken id) && not (Hashtbl.mem addr_taken (-1)) in
+    && not (Hashtbl.mem addr_taken id) in
   let cur_vers = ref Types.IntMap.empty in
   let next_ver = ref 0 in
   let fresh_ver () = incr next_ver; !next_ver in
   let ver_name id k = Printf.sprintf "v%d@%d" id k in
   let ver_of vers id = match Types.IntMap.find_opt id vers with Some k -> k | None -> 0 in
   let ver_atom id = Init_pred.atom (ver_name id (ver_of !cur_vers id)) in
+  let record_fields ty = match strip ty with
+    | Ast.TypeNamed n | Ast.TypeIndexed (n, _) -> struct_fields n
+    | _ -> None in
+  let numeric_field ty field = match record_fields ty with
+    | Some fields -> (match List.assoc_opt field fields with
+        | Some ty -> unsigned_ty ty | None -> false)
+    | None -> false in
+  let field_name st id field =
+    "field:" ^ ver_name id (ver_of st.vers id) ^ "." ^ field in
+  let field_term st id field =
+    if Hashtbl.mem changed_records id then None else
+    match id_type id with
+    | Some ty when numeric_field ty field -> Some (Init_pred.atom (field_name st id field))
+    | _ -> None in
   let aliases : (int, view) Hashtbl.t = Hashtbl.create 8 in
   (* Linear integer terms of the body, under the path facts [f].
 
@@ -485,7 +583,9 @@ let check
          | Some id when immutable_var x id -> Some (v_atom id)
          | Some id when versionable x id -> Some (ver_atom id)
          | Some _ -> None
-         | None -> leaf_const (Const_env.find x) ?src:(const_src e x))
+         | None -> (match leaf_const (Const_env.find x) ?src:(const_src e x) with
+           | Some _ as term -> term
+           | None -> leaf_const (global_singleton x)))
     | Ast.SizeOf t -> leaf_const (size_of t)
     | Ast.BinOp (Ast.Add, a, b) ->
         (match lin f a, lin f b with
@@ -517,8 +617,14 @@ let check
          | Some v -> v.len
          | None ->
              (match b.desc, Local_bindings.id_for_expr bindings b with
+              | Ast.Cast (Ast.TypeSlice (Ast.TypeU8, _, _),
+                  ({ desc = Ast.Var name; _ } as source)), _
+                  when Local_bindings.id_for_expr bindings source = None ->
+                  leaf_const (global_byte_array_length name)
               | Ast.Var x, Some id when immutable_var x id -> Some (len_atom id)
               | _ -> None))
+    | Ast.FieldGet (({ desc = Ast.Var _; _ } as b), field) ->
+        Option.bind (Local_bindings.id_for_expr bindings b) (fun id -> field_term f id field)
     | _ -> None
   (* A tracked view: an array or slice leaf, an alias of one, a sub-slice
      of a view with linear bounds, or a same-element `as` slice cast. The
@@ -572,6 +678,11 @@ let check
                             | Some (Ast.TypeSlice _) -> true | _ -> false) ->
              Some (len_atom id)
          | _ -> None)
+    | Ast.FieldGet ({ desc = Ast.Var _; _ }, _) -> lin st e
+    | Ast.BinOp ((Ast.Add | Ast.Mul), a, b) ->
+        (match side st a, side st b with
+         | Some _, Some _ -> lin st e
+         | _ -> None)
     | Ast.BinOp (Ast.Sub, a, b) ->
         (match side st a, side st b with
          | Some x, Some y when Init_pred.entails st.facts (Init_pred.sub x y) ->
@@ -584,6 +695,13 @@ let check
   let add_fact (st : state) t =
     if List.exists (Init_pred.equal t) st.facts.Init_pred.ge then st
     else { st with facts = { st.facts with Init_pred.ge = t :: st.facts.Init_pred.ge } } in
+  let add_declared_bounds st id atom =
+    match id_type id with
+    | Some (Ast.TypeRefined (lo, hi, base)) when unsigned_ty base
+        && lo >= 0 && hi > lo && hi <= Init_pred.limit ->
+        add_fact (add_fact st (Init_pred.sub atom (Init_pred.const lo)))
+          (Init_pred.sub (Init_pred.const (hi - 1)) atom)
+    | _ -> st in
   (* The state on the path where condition [c] evaluated to [b]. Operands
      of `&&` (true) and `||` (false) are assumed left to right, so a later
      operand's subtraction may rely on an earlier operand. *)
@@ -614,12 +732,13 @@ let check
      leaf whose whole length is covered leaves [u]. *)
   let cur_loc = ref fdef.Ast.def_loc in
   let add_iv st (p : place) (iv : Init_pred.interval) =
+    let st = touch_root st p.root in
     let l = (p.root, p.path) in
     if not (Leaves.mem l st.u) || Init_pred.is_empty iv then st
     else
       let st = { st with iv = (l, iv) :: st.iv } in
       match leaf_len p with
-      | Some n when Init_pred.uncovered ~eqs:st.eqs ~facts:st.facts (ivs_of st l)
+      | Some n when Init_pred.uncovered ~need_gap:false ~eqs:st.eqs ~facts:st.facts (ivs_of st l)
                       (Init_pred.const 0, n) = None ->
           (* The whole leaf is covered: a conclusion z3 re-checks too. *)
           let whole = path_to_string (root_display p) p.path in
@@ -631,6 +750,24 @@ let check
                     iv = List.filter (fun (l', _) -> l' <> l) st.iv }
       | _ -> st
   in
+  let padding_place p =
+    let q = { p with path = p.path @ [pad] } in
+    if leaf_type q.root q.path <> None then Some q else None in
+  let forget_array_padding st p = match padding_place p with
+    | None -> st
+    | Some q ->
+        let leaf = (q.root, q.path) in
+        { st with u = Leaves.add leaf st.u;
+                  iv = List.filter (fun (l, _) -> l <> leaf) st.iv } in
+  let forget_padding st p =
+    let st = touch_root st p.root in
+    let pads = List.filter (fun (r, path) ->
+      r = p.root && is_prefix p.path path && is_pad path) (all_leaves p.root) in
+    { st with u = List.fold_left (fun u leaf -> Leaves.add leaf u) st.u pads;
+              iv = List.filter (fun (leaf, _) -> not (List.mem leaf pads)) st.iv } in
+  let add_bytes_iv st p iv =
+    let st = add_iv st p iv in
+    match padding_place p with Some q -> add_iv st q iv | None -> st in
   (* GitHub issue #975: the linear facts the walk had, for the message. *)
   let path_facts st =
     let f = st.facts in
@@ -641,10 +778,22 @@ let check
     match ge @ mins with
     | [] -> "; no path facts"
     | fs -> "; path facts: " ^ String.concat ", " fs in
+  let record_leaf_coverage st p ~bytes loc what =
+    if !Range_obligation.enabled then
+      let leaves = List.map (fun ((_, path) as leaf) ->
+        (String.concat "." (root_display p :: path),
+         not (Leaves.mem leaf st.u),
+         (is_prefix p.path path || is_prefix path p.path)
+           && (bytes || not (is_pad path)))) (all_leaves p.root) in
+      Init_obligation.record loc
+        ~claim:(fdef.Ast.name ^ ": " ^ what ^ ": " ^ path_to_string (root_display p) p.path) leaves
+  in
   let need st (v : view) ((a, b) : Init_pred.interval) loc what =
+    let st = touch_root st v.vp.root in
     let l = leaf_of_view v in
-    if not (Leaves.mem l st.u) then st
-    else
+    if not (Leaves.mem l st.u) then begin
+      record_leaf_coverage st v.vp ~bytes:true loc what; st
+    end else
       let ivs = ivs_of st l in
       let whole = path_to_string (root_display v.vp) v.vp.path in
       match Init_pred.uncovered ~eqs:st.eqs ~facts:st.facts ivs (a, b) with
@@ -673,6 +822,7 @@ let check
                     iv = List.filter (fun (l', _) -> l' <> l) st.iv }
   in
   let need_view st v loc what =
+    let st = touch_root st v.vp.root in
     match v.len with
     | Some n -> need st v (v.off, Init_pred.add v.off n) loc what
     | None ->
@@ -691,6 +841,8 @@ let check
              end else st)
   in
   let check_read st p ~bytes loc =
+    let st = touch_root st p.root in
+    record_leaf_coverage st p ~bytes loc (if bytes then "byte read" else "field read");
     let bad = Leaves.filter (fun (r, l) ->
       r = p.root && (is_prefix p.path l || is_prefix l p.path)
       && (bytes || not (is_pad l))) st.u in
@@ -726,14 +878,15 @@ let check
   in
   let drop_root_ivs u iv = List.filter (fun (l, _) -> Leaves.mem l u) iv in
   let fill st p =
+    let st = touch_root st p.root in
     if p.inside then st
     else
       let u = Leaves.filter (fun (r, l) -> not (r = p.root && is_prefix p.path l)) st.u in
       { st with u; iv = drop_root_ivs u st.iv }
   in
-  (* A `&mut` callee is trusted to store every field; a field store never
-     writes padding, so padding keeps its state. *)
+  (* A field-only contract never asserts that padding was written. *)
   let fill_fields st p =
+    let st = touch_root st p.root in
     if p.inside then st
     else
       let u = Leaves.filter (fun (r, l) ->
@@ -743,8 +896,7 @@ let check
   (* ---- contracts -------------------------------------------------------- *)
   (* A contract term over the callee's parameter names, `result` and an arm
      binder, mapped by [env]. *)
-  let rec clin (env : string -> [`Val of Init_pred.lin option | `Len of Init_pred.lin option]
-                      -> Init_pred.lin option) (e : Ast.expr) =
+  let rec clin (env : string -> contract_value -> Init_pred.lin option) (e : Ast.expr) =
     match e.desc with
     (* GitHub issue #983: a contract term is mathematical over its atoms
        (the callee proves exactly that interval, and the caller maps each
@@ -754,9 +906,12 @@ let check
     | Ast.Var x ->
         (match env x (`Val None) with
          | Some t -> Some t
-         | None -> leaf_const (Const_env.find x) ?src:(const_src e x))
+         | None -> (match leaf_const (Const_env.find x) ?src:(const_src e x) with
+           | Some _ as term -> term
+           | None -> leaf_const (global_singleton x)))
     | Ast.SizeOf t -> leaf_const (size_of t)
     | Ast.FieldGet ({ desc = Ast.Var x; _ }, "len") -> env x (`Len None)
+    | Ast.FieldGet ({ desc = Ast.Var x; _ }, field) -> env x (`Field field)
     | Ast.BinOp (Ast.Add, a, b) ->
         (match clin env a, clin env b with
          | Some x, Some y -> checked (fun () -> Some (Init_pred.add x y)) | _ -> None)
@@ -779,14 +934,15 @@ let check
         (match split_target b with
          | Some (r, None) -> Some (r, Some (lo, hi))
          | _ -> None)
-    | Ast.Var x -> Some (`Param x, None)
+    | Ast.Var x -> Some (`Param (x, []), None)
     | Ast.FieldGet _ ->
         let rec chain (e : Ast.expr) acc = match e.desc with
           | Ast.FieldGet (b, f) -> chain b (f :: acc)
-          | Ast.Index ({ desc = Ast.Var g; _ }, idx) -> Some (g, idx, acc)
+          | Ast.Index ({ desc = Ast.Var g; _ }, idx) -> Some (`Global (g, idx, acc))
+          | Ast.Var x -> Some (`Param (x, acc))
           | _ -> None in
         (match chain e [] with
-         | Some (g, idx, path) -> Some (`Global (g, idx, path), None)
+         | Some target -> Some (target, None)
          | None -> None)
     | _ -> None
   in
@@ -802,19 +958,40 @@ let check
   let ret_is_bool = match Option.map strip fdef.Ast.ret_type with
     | Some Ast.TypeBool -> true | _ -> false in
   let validate_target loc (e : Ast.expr) ~binders =
-    let env x _ =
-      if x = "result" || List.mem x binders || List.mem_assoc x param_ids
-      then Some (Init_pred.atom x) else None in
+    let env x kind =
+      let ty = if x = "result" then fdef.Ast.ret_type else
+        match List.assoc_opt x binders with
+        | Some ty -> ty
+        | None -> List.assoc_opt x param_types in
+      match kind with
+      | `Field field -> (match ty with
+          | Some ty when numeric_field ty field -> Some (Init_pred.atom (x ^ "." ^ field))
+          | _ -> None)
+      | _ -> if x = "result" || List.mem_assoc x binders || List.mem_assoc x param_ids
+             then Some (Init_pred.atom x) else None in
     match split_target e with
     | None ->
         error loc "init(...) names a parameter, `p[lo..<hi]`, or a scratch \
                    slot `G[s.index].f`"
     | Some (target, bounds) ->
         (match target with
-         | `Param x when not (List.mem_assoc x param_ids) ->
+         | `Param (x, _) when not (List.mem_assoc x param_ids) ->
              error loc (Printf.sprintf "init(%s): '%s' is not a parameter of '%s'"
                           x x fdef.Ast.name)
-         | `Param _ -> ()
+         | `Param (x, path) ->
+             (if path <> [] then begin
+               let key = "L" ^ string_of_int (List.assoc x param_ids) in
+               match Hashtbl.find_opt roots key with
+               | Some r when List.exists (fun (leaf, _) -> is_prefix path leaf) r.leaves ->
+                   if bounds <> None then
+                     (match Option.map strip (leaf_type key path) with
+                      | Some (Ast.TypeArray _) -> ()
+                      | _ -> error loc "an init field range needs an inline fixed array")
+               | _ -> error loc "init field contract needs an inline tracked field"
+             end);
+             if Init_state.param_qual fdef.Ast.def_loc x <> Some Init_state.Uninit then
+               error loc (Printf.sprintf
+                 "initialization contract: '%s' is not `borrow uninit`; use a tracked output parameter to check its initialization clauses" x)
          | `Global (g, idx, _) ->
              let ok_idx = match idx.desc with
                | Ast.FieldGet ({ desc = Ast.Var s; _ }, _) ->
@@ -834,7 +1011,7 @@ let check
              List.iter (fun b ->
                if clin env b = None then
                  error loc "an init(...) bound must be a linear integer term \
-                            over parameters, their .len, constants and result")
+                            over parameters, their .len, unsigned record fields, constants and result")
                [lo; hi]
          | None -> ())
   in
@@ -843,9 +1020,49 @@ let check
       | Init_state.CPlain p | Init_state.CIf (_, p) -> [(p, [])]
       | Init_state.CMatch arms ->
           List.map (fun (pat, p) ->
-            (p, match pat.Init_state.bind with Some b -> [b] | None -> [])) arms in
+            let payload = match Option.map strip fdef.Ast.ret_type, pat.Init_state.case with
+              | Some (Ast.TypeNamed n | Ast.TypeIndexed (n, _) | Ast.TypeVariant (n, _, _)), Some k ->
+                  variant_payload n k
+              | _ -> None in
+            (p, match pat.Init_state.bind with Some b -> [(b, payload)] | None -> [])) arms in
     List.iter (fun (p, binders) -> match p with
       | Init_state.PInit e -> validate_target c.cloc e ~binders
+      | Init_state.PFields e ->
+          let rec record_reference t = match strip t with
+            | Ast.TypeBorrow t | Ast.TypeBorrowMut t -> record_reference t
+            | Ast.TypeRefMut t ->
+                (match strip t with
+                 | Ast.TypeNamed n | Ast.TypeIndexed (n, _) ->
+                     Option.is_some (struct_fields n)
+                 | _ -> false)
+            | _ -> false in
+          let record_array t =
+            let rec element = function
+              | Ast.TypeBorrow t | Ast.TypeBorrowMut t -> element (strip t)
+              | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _, _) -> record_fields t <> None
+              | _ -> false in
+            element (strip t) in
+          (match e.desc with
+           | Ast.Var x when (match List.assoc_opt x param_types with
+               | Some t -> record_reference t || record_array t | None -> false) ->
+               validate_target c.cloc e ~binders
+           | Ast.SliceOf ({ desc = Ast.Var x; _ }, _, _)
+             when (match List.assoc_opt x param_types with
+               | Some t -> record_array t | None -> false) ->
+               validate_target c.cloc e ~binders
+           | _ -> error c.cloc
+               "init_fields needs a whole mutable-reference record parameter or a record-array range")
+      | Init_state.PLinked (array, head) ->
+          validate_target c.cloc array ~binders;
+          validate_target c.cloc head ~binders;
+          (match c.body, split_target array, split_target head with
+           | Init_state.CPlain _, Some (`Param (a, ap), None), Some (`Param (h, hp), None)
+             when a = h && ap <> [] && hp <> [] ->
+               let root = "L" ^ string_of_int (List.assoc a param_ids) in
+               (match Option.map strip (leaf_type root ap), Option.map strip (leaf_type root hp) with
+                | Some (Ast.TypeArray (Ast.TypeUsize, _)), Some Ast.TypeUsize -> ()
+                | _ -> error c.cloc "init_links needs an inline usize array and a usize head field")
+           | _ -> error c.cloc "init_links needs an unconditional contract on two fields of one output parameter")
       | Init_state.PTrue -> ()) (preds_of c.body);
     (match c.body with
      | (Init_state.CIf _ | Init_state.CMatch _) when c.requires ->
@@ -894,8 +1111,8 @@ let check
         | Init_state.CPlain p | Init_state.CIf (_, p) -> [p]
         | Init_state.CMatch arms -> List.map snd arms in
       List.filter_map (function
-        | Init_state.PInit e ->
-            (match split_target e with Some (`Param x, _) -> Some x | _ -> None)
+        | Init_state.PInit e | Init_state.PFields e | Init_state.PLinked (e, _) ->
+            (match split_target e with Some (`Param (x, _), _) -> Some x | _ -> None)
         | Init_state.PTrue -> None) preds) cs in
   let own_named = named_params contracts in
   let out_keys = Hashtbl.fold (fun k r acc ->
@@ -904,19 +1121,33 @@ let check
   (* Resolve a contract predicate to facts in the CURRENT function's terms.
      [arg_view x] gives the view the caller passes for parameter x (or the
      callee's own root, when checking a body); [env] maps names to terms. *)
-  let resolve_pred ?(strengthen = false) ~arg_view ~env (p : Init_state.pred)
+  let rec resolve_pred ?(strengthen = false) ~arg_view ~index_expr ~env (p : Init_state.pred)
       : (view * Init_pred.interval) option list =
     match p with
     | Init_state.PTrue -> []
-    | Init_state.PInit e ->
+    | Init_state.PLinked (_, head) ->
+        resolve_pred ~strengthen ~arg_view ~index_expr ~env (Init_state.PInit head)
+    | Init_state.PInit e | Init_state.PFields e ->
+        let endpoint = match p with Init_state.PFields _ -> -2 | _ -> -1 in
         (match split_target e with
          | None -> [None]
          | Some (target, bounds) ->
              let v = match target with
-               | `Param x -> arg_view x
-               | `Global (g, _, path) ->
+               | `Param (x, path) ->
+                   (match arg_view x with
+                    | Some (`Whole p) when path <> [] ->
+                        let p = { p with path = p.path @ path } in
+                        (match Option.map strip (leaf_type p.root p.path) with
+                         | Some (Ast.TypeArray _) ->
+                             Some (`View { vp = p; off = Init_pred.const 0; len = leaf_len p })
+                         | _ -> Some (`Whole p))
+                    | v when path = [] -> v
+                    | Some `Untracked -> Some `Untracked
+                    | _ -> None)
+               | `Global (g, idx, path) ->
                    if StringMap.mem g scratch_names then
-                     let p = { root = "G" ^ g; path; inside = false } in
+                     let p = scratch_element g (index_expr idx) in
+                     let p = { p with path } in
                      if leaf_elem p <> None then
                        Some (`View { vp = p; off = Init_pred.const 0; len = leaf_len p })
                      else Some (`Whole p)
@@ -926,7 +1157,7 @@ let check
               | Some `Untracked -> []
               | Some (`Whole p) ->
                   [Some ({ vp = p; off = Init_pred.const 0; len = None },
-                         (Init_pred.const 0, Init_pred.const (-1)))]
+                         (Init_pred.const 0, Init_pred.const endpoint))]
               | Some (`View v) ->
                   let iv = match bounds with
                     | None -> (match v.len with
@@ -938,7 +1169,10 @@ let check
                              Some (Init_pred.add v.off lo, Init_pred.add v.off hi)
                          | _ -> None) in
                   (match iv with
-                   | Some iv -> [Some (v, iv)]
+                   | Some iv ->
+                       Some (v, iv) :: (match p, padding_place v.vp with
+                         | Init_state.PInit _, Some padding -> [Some ({ v with vp = padding }, iv)]
+                         | _ -> [])
                    | None ->
                        (* A requires shown at a call (strengthen) may ask
                           for the whole leaf when its bounds are not
@@ -949,31 +1183,170 @@ let check
                                 (Init_pred.const 0, Init_pred.const (-1)))]
                        else [None])))
   in
-  (* A (view, interval) whose interval is the marker [0, -1) with len = None
-     means "the whole leaf". *)
-  let is_whole_marker (v, (lo, hi)) =
-    v.len = None && Init_pred.equal lo (Init_pred.const 0)
-    && Init_pred.equal hi (Init_pred.const (-1)) in
-  let apply_fact st (v, iv) =
-    if is_whole_marker (v, iv) then fill st v.vp else add_iv st v.vp iv in
-  let need_fact st (v, iv) loc what =
-    if is_whole_marker (v, iv) then
-      (if Leaves.exists (fun (r, l) -> r = v.vp.root && is_prefix v.vp.path l
-                                       && not (is_pad l)) st.u
-       then begin
-         error loc (Printf.sprintf "%s: '%s' may be uninitialized here" what
-                      (path_to_string (root_display v.vp) v.vp.path));
-         fill st v.vp
-       end else st)
-    else need st v iv loc what
+  (* Negative endpoints cannot be element ranges: -1 is whole storage,
+     -2 is a record's fields only. Guarded substitution leaves both fixed. *)
+  let whole_kind (v, (lo, hi)) =
+    if v.len <> None || not (Init_pred.equal lo (Init_pred.const 0)) then None
+    else if Init_pred.equal hi (Init_pred.const (-1)) then Some true
+    else if Init_pred.equal hi (Init_pred.const (-2)) then Some false
+    else None in
+  let apply_fact st ((v, iv) as fact) =
+    match whole_kind fact with
+    | Some true -> fill st v.vp
+    | Some false -> fill_fields st v.vp
+    | None -> add_iv st v.vp iv in
+  let need_fact st ((v, iv) as fact) loc what =
+    let st = touch_root st v.vp.root in
+    match whole_kind fact with
+    | Some bytes ->
+        record_leaf_coverage st v.vp ~bytes loc what;
+        (if Leaves.exists (fun (r, l) -> r = v.vp.root && is_prefix v.vp.path l
+                 && ((bytes && not !Range_obligation.fault_init_padding) || not (is_pad l))) st.u
+         then begin
+           error loc (Printf.sprintf "%s: '%s' may be uninitialized here%s" what
+                        (path_to_string (root_display v.vp) v.vp.path)
+                        (if bytes then " (including padding)" else ""));
+           fill st v.vp
+         end else st)
+    | None -> need st v iv loc what
   in
   let subst_atom a by (lo, hi) =
     (Init_pred.subst a by lo, Init_pred.subst a by hi) in
-  let mentions_atom a (v, (lo, hi)) =
-    Init_pred.SMap.mem a lo.Init_pred.m || Init_pred.SMap.mem a hi.Init_pred.m
-    || (match v.len with Some l -> Init_pred.SMap.mem a l.Init_pred.m | None -> false) in
+  (* Linked facts are separate from contiguous initialization intervals.
+     They never turn a partial array into a fully initialized byte view. *)
+  let link_storage p = (p.root, p.path) in
+  let linked_contract = List.exists (fun (c : Init_state.clause) ->
+    match c.body with Init_state.CPlain (Init_state.PLinked _) -> true | _ -> false) contracts in
+  (* Most functions never use a linked fact. Allocate their helper closures
+     only when such a fact or contract is actually encountered. *)
+  let link_ops = lazy (
+  let rec link_value_key (e : Ast.expr) = match e.desc with
+    | Ast.Var n -> (match binding_id e n with
+        | Some id -> Some ("L" ^ string_of_int id ^ ":")
+        | None -> Option.map (fun (n : Init_pred.lin) -> "literal:" ^ string_of_int n.c)
+            (leaf_const (Const_env.find n) ?src:(const_src e n)))
+    | Ast.IntLit n -> Some ("literal:" ^ Int64.to_string n)
+    | Ast.FieldGet (base, field) ->
+        Option.map (fun key -> key ^ "." ^ field) (link_value_key base)
+    | _ -> None in
+  let link_key p = p.root ^ ":" ^
+      (if p.path = [] then "" else "." ^ String.concat "." p.path) in
+  (* This helper is also called after an assignment has advanced scalar
+     versions. Only source-constant terms can be read then; re-evaluating
+     x + 1 in the post-state would describe the next increment instead. *)
+  let rec link_constant (e : Ast.expr) = match e.desc with
+    | Ast.IntLit _ | Ast.SizeOf _ -> true
+    (* fold-not-proof: only tests whether this syntax names a constant;
+       link_terminal reads its value through lin/leaf_const below. *)
+    | Ast.Var n -> binding_id e n = None && Const_env.find n <> None
+    | Ast.BinOp ((Ast.Add | Ast.Sub | Ast.Mul), a, b) -> link_constant a && link_constant b
+    | _ -> false in
+  let link_terminal st p e = if not (link_constant e) then false else
+    match leaf_len p, checked (fun () -> lin st e) with
+    | Some n, Some term ->
+        (match checked (fun () -> Some (Init_pred.normalize st.eqs (Init_pred.sub term n))) with
+         | Some diff -> Init_pred.SMap.is_empty diff.m && diff.c >= 0
+         | None -> false)
+    | _ -> false in
+  let link_ready st p e =
+    let storage = link_storage p in
+    not (Leaves.mem storage st.u) || link_terminal st p e ||
+    (match link_value_key e with
+     | Some value -> Init_link.ready st.extras.links ~full:false storage value
+     | None -> false) in
+  let link_view_ready st v e =
+    leaf_elem v.vp = Some Ast.TypeUsize &&
+    Init_pred.equal v.off (Init_pred.const 0) && link_ready st v.vp e in
+  let link_assign st target rhs =
+    if not linked_contract && Init_link.Values.is_empty st.extras.links then st else
+    let links = match link_value_key rhs with
+      | Some source -> Init_link.copy st.extras.links ~target ~source
+      | None -> Init_link.forget_value st.extras.links target in
+    let links = Hashtbl.fold (fun root r links ->
+      List.fold_left (fun links (path, ty) -> match strip ty with
+        | Ast.TypeArray (Ast.TypeUsize, _) ->
+            let p = {root; path; inside = false} in
+            let ready = link_terminal st p rhs || (match rhs.Ast.desc with
+              | Ast.Index (array, index) -> (match view_of st array with
+                  | Some v when link_storage v.vp = (root, path) -> link_view_ready st v index
+                  | _ -> false)
+              | _ -> false) in
+            if ready then Init_link.establish links (root, path) target else links
+        | _ -> links) links r.leaves) roots links in
+    set_links st links in
+  let resolve_link ~arg_view array head =
+    match split_target array, split_target head with
+    | Some (`Param (a, ap), None), Some (`Param (h, hp), None) when a = h ->
+        (match arg_view a with
+         | Some (`Whole p) when not p.inside ->
+             let array = {p with path = p.path @ ap} and head = {p with path = p.path @ hp} in
+             (match leaf_elem array, leaf_type head.root head.path with
+              | Some Ast.TypeUsize, Some Ast.TypeUsize -> Some (`Tracked (array, head))
+              | _ -> None)
+         | Some `Untracked -> Some `Full
+         | _ -> None)
+    | _ -> None in
+  let require_link st ~arg_view pred loc = match pred with
+    | Init_state.PLinked (array, head) ->
+        (match resolve_link ~arg_view array head with
+         | Some `Full -> ()
+         | Some (`Tracked (array, head)) ->
+             let full = not (Leaves.mem (link_storage array) st.u) in
+             if not (Init_link.ready st.extras.links ~full (link_storage array) (link_key head)) then
+               error loc "init_links cannot prove initialized traversal from this head in this storage"
+         | None -> error loc "init_links storage identity is not expressible at this boundary");
+        st
+    | _ -> st in
+  let establish_link st ~arg_view pred loc = match pred with
+    | Init_state.PLinked (array, head) ->
+        (match resolve_link ~arg_view array head with
+         | Some `Full -> st
+         | Some (`Tracked (array, head)) ->
+             set_links st (Init_link.establish st.extras.links (link_storage array) (link_key head))
+         | None -> error loc "init_links storage identity is not expressible at this boundary"; st)
+    | _ -> st in
+  let shared_root key = String.starts_with ~prefix:"G" key ||
+    match Hashtbl.find_opt roots key with Some r -> r.out_param | None -> false in
+  let invalidate_aliases links root =
+    if not (shared_root root) then links else
+      Hashtbl.fold (fun other _ links ->
+        if other <> root && shared_root other then
+          let invalidated = Init_link.invalidate_path links (other, []) in
+          if invalidated = links || separated root other then links else invalidated
+        else links) roots links in
+    { assign_value = link_assign; value_key = link_value_key;
+      view_ready = link_view_ready; check_pred = require_link;
+      apply_pred = establish_link; invalidate_aliases }) in
   let unsafe_depth = ref 0 in
+  let unsafe_uses = ref 0 in
   let bound_gs : (int, guarded list) Hashtbl.t = Hashtbl.create 8 in
+  let invalidate_selector st id =
+    let keys = Hashtbl.fold (fun key (_, owner) acc ->
+      if owner = Some id then key :: acc else acc) selected_roots [] in
+    if keys = [] then st else begin
+      let affected (v, _) = List.mem v.vp.root keys in
+      Hashtbl.filter_map_inplace (fun _ gs ->
+        let gs = List.filter (function GBool (_, fs) | GPositive (_, fs) | GCase (_, _, fs) ->
+          not (List.exists affected fs)) gs in
+        if gs = [] then None else Some gs) bound_gs;
+      let u = List.fold_left (fun u key ->
+        List.fold_left (fun u l -> Leaves.add l u) u (all_leaves key)) st.u keys in
+      { st with u; iv = List.filter (fun ((r, _), _) -> not (List.mem r keys)) st.iv;
+                extras = {st.extras with touched = List.fold_left (fun seen key -> StringSet.add key seen) st.extras.touched keys} }
+    end in
+  let apply_positive st =
+    Hashtbl.fold (fun _ gs st -> List.fold_left (fun st -> function
+      | GPositive (result, facts)
+        when Init_pred.entails (Init_pred.normalize_facts st.eqs st.facts)
+          (Init_pred.normalize st.eqs (Init_pred.sub result (Init_pred.const 1))) ->
+          List.fold_left apply_fact st facts
+      | _ -> st) st gs) bound_gs st in
+  let rec selector_binding (e : Ast.expr) = match e.desc with
+    | Ast.Var x -> binding_id e x
+    | Ast.FieldGet (b, _) -> selector_binding b
+    | _ -> None in
+  let invalidate_place st e = match selector_binding e with
+    | Some id -> invalidate_selector st id | None -> st in
   let bound_guarded (e : Ast.expr) = match Local_bindings.id_for_expr bindings e with
     | Some id -> Hashtbl.find_opt bound_gs id
     | None -> None in
@@ -1031,9 +1404,11 @@ let check
     let finish st eq =
       let vers = Types.IntMap.add id k st.vers in
       cur_vers := vers;
-      let st = { st with vers } in
+      let st = add_declared_bounds { st with vers } id (Init_pred.atom name) in
       match eq with
-      | Some t -> { st with eqs = st.eqs @ [(name, t)] }
+      | Some t ->
+          let t = Init_pred.normalize st.eqs t in
+          { st with eqs = st.eqs @ [(name, t)] }
       | None -> st in
     match rhs.desc with
     | Ast.Call (f, _) when f <> "min" && f <> "zero_fill" && f <> "assume_init" ->
@@ -1071,6 +1446,23 @@ let check
                let goal = Init_pred.normalize st.eqs
                    (Init_pred.sub (Init_pred.sub len t) (Init_pred.const 1)) in
                let ok = !Range_obligation.fault_index || Init_pred.entails f goal in
+               (* Import declared bounds only when ordinary path facts do not
+                  suffice. Keep the common whole-kernel path allocation-free. *)
+               let before_declared = st in
+               let st = if ok || not (List.exists (function
+                   | _, Ast.TypeRefined _ -> true | _ -> false) param_types) then st else
+                 let st = List.fold_left (fun st (name, ty) -> match ty with
+                   | Ast.TypeRefined _ -> (match List.assoc_opt name param_ids with
+                       | Some id when immutable_var name id && not (Hashtbl.mem addr_taken id) ->
+                           add_declared_bounds st id (v_atom id)
+                       | _ -> st)
+                   | _ -> st) st param_types in
+                 match Option.map strip (id_type id) with
+                 | Some (Ast.TypeSlice (_, minimum, _)) when minimum > 0 ->
+                     add_fact st (Init_pred.sub len (Init_pred.const minimum))
+                 | _ -> st in
+               let ok = ok || (st != before_declared &&
+                 Init_pred.entails (Init_pred.normalize_facts st.eqs st.facts) goal) in
                let loc = j.Ast.loc in
                let claim = Printf.sprintf "%s < %s.len" (show t) x in
                (match Hashtbl.find_opt index_decisions loc with
@@ -1089,20 +1481,109 @@ let check
            | None -> ())
       | _ -> ()
   in
+  (* Fixed-array arithmetic is initially enabled at explicit where boundaries.
+     Recover only declared inline array places, never a raw-pointer extent. *)
+  let array_decisions = if fdef.Ast.where_clauses = [] then None else Some (Hashtbl.create 4) in
+  let rec place_ty (e : Ast.expr) = match e.desc with
+    | Ast.Var _ -> Option.bind (Local_bindings.id_for_expr bindings e) id_type
+    | Ast.FieldGet (b, field) ->
+        let rec fields ty = match strip ty with
+          | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeRef t | Ast.TypeRefMut t -> fields t
+          | Ast.TypeNamed n | Ast.TypeIndexed (n, _) -> struct_fields n
+          | _ -> None in
+        Option.bind (Option.bind (place_ty b) fields) (List.assoc_opt field)
+    | _ -> None in
+  let array_index st b j =
+    if fdef.Ast.where_clauses <> [] && not !in_trial then begin
+      cur_vers := st.vers;
+      let decisions = Option.get array_decisions in
+      match Option.map strip (place_ty b) with
+      | Some (Ast.TypeArray (_, n)) ->
+          let term = checked (fun () -> lin st j) in
+          let len = Init_pred.const n in
+          let ok = match term with
+            | Some t -> !Range_obligation.fault_index || (nonneg st t && Init_pred.entails
+                (Init_pred.normalize_facts st.eqs st.facts)
+                (Init_pred.normalize st.eqs (Init_pred.sub (Init_pred.sub len t) (Init_pred.const 1))))
+            | None -> false in
+          let reason = if ok then None else Some (Printf.sprintf
+            "arithmetic index needs 0 <= %s < %d%s; check the input where contract and capacity constants; \
+             if an intended compile-time capacity relation is missing, express it with static_assert \
+             (a false assertion or an assertion about an unproved runtime value cannot supply the proof)"
+            (match term with Some t -> show t ^ " (= " ^ show (Init_pred.normalize st.eqs t) ^ ")"
+             | None -> "index (machine arithmetic not proved non-wrapping)")
+            n (path_facts st)) in
+          (match Hashtbl.find_opt decisions j.Ast.loc with
+           | Some (Some _) -> () | _ -> Hashtbl.replace decisions j.loc reason);
+          (match term with Some t when ok ->
+            Range_obligation.record_text j.loc (Init_pred.index_obligation
+              ~claim:(Printf.sprintf "%s < %d" (show t) n)
+              ~facts:st.facts st.eqs ~index:t ~len)
+           | _ -> ())
+      | _ -> () end in
   let rec expr st (e : Ast.expr) : state =
+    let result = expr_inner st e in
+    if not linked_contract && Init_link.Values.is_empty result.extras.links then result else
+    match e.desc with
+    | Ast.Assign ({desc = Ast.Index (array, index); _}, rhs) ->
+        (match view_of result array with
+         | Some v when Init_pred.equal v.off (Init_pred.const 0) ->
+             let result = set_links result
+               ((Lazy.force link_ops).invalidate_aliases result.extras.links v.vp.root) in
+             let written = (Lazy.force link_ops).assign_value result "$link-store" rhs in
+             let storage = link_storage v.vp in
+             let links = match (Lazy.force link_ops).value_key index with
+               | Some index -> Init_link.store written.extras.links
+                   ~full:(not (Leaves.mem storage result.u)) storage
+                   ~index ~successor:"$link-store"
+               | None -> Init_link.invalidate written.extras.links storage in
+             set_links result (Init_link.forget_value links "$link-store")
+         | Some v -> set_links result (Init_link.invalidate_path
+             ((Lazy.force link_ops).invalidate_aliases result.extras.links v.vp.root)
+             (link_storage v.vp))
+         | None -> (match global_view_origin array with
+             | Some name ->
+                 let root = "G" ^ name in
+                 set_links result (Init_link.invalidate_path
+                   ((Lazy.force link_ops).invalidate_aliases result.extras.links root) (root, []))
+             | None -> set_links result Init_link.empty))
+    | Ast.Assign (lhs, rhs) ->
+        (match place lhs, (Lazy.force link_ops).value_key lhs with
+         | Some p, Some target when not p.inside ->
+             let written = (Lazy.force link_ops).assign_value result "$link-write" rhs in
+             let links = (Lazy.force link_ops).invalidate_aliases written.extras.links p.root in
+             let links = Init_link.invalidate_path links (p.root, p.path) in
+             let links = Init_link.copy links ~target ~source:"$link-write" in
+             set_links result (Init_link.forget_value links "$link-write")
+         | None, Some target -> (Lazy.force link_ops).assign_value result target rhs
+         | _ -> (match pointer_store_origin e with
+             | Some name ->
+                 let root = "G" ^ name in
+                 set_links result (Init_link.invalidate_path
+                   ((Lazy.force link_ops).invalidate_aliases result.extras.links root) (root, []))
+             | None -> set_links result Init_link.empty))
+    | _ -> result
+  and expr_inner st (e : Ast.expr) : state =
+    let st = match e.desc with
+      | Ast.Assign (lhs, _) -> invalidate_place st lhs
+      | _ -> st in
     cur_vers := st.vers;
     (match e.desc with
      | Ast.Index (b, j) | Ast.Assign ({ desc = Ast.Index (b, j); _ }, _) ->
-         slice_index st b j
+         slice_index st b j; array_index st b j
      | _ -> ());
     if is_len_of st e then st else
     match e.desc with
     | Ast.Assign (({ desc = Ast.Var x; _ } as v), rhs) when var_id v x <> None ->
         assign_versioned expr call st (Option.get (var_id v x)) rhs
+    | Ast.FieldGet (({ desc = Ast.Index (b, _); _ } as element), _)
+      when view_of st b <> None -> expr st element
     | Ast.Index (b, j) when view_of st b <> None ->
         let v = Option.get (view_of st b) in
         let st = expr st j in
         let st = place_subexprs_view st b in
+        if (linked_contract || not (Init_link.Values.is_empty st.extras.links)) &&
+           Leaves.mem (link_storage v.vp) st.u && (Lazy.force link_ops).view_ready st v j then st else
         (match lin st j with
          | Some j ->
              let k = Init_pred.add v.off j in
@@ -1119,6 +1600,36 @@ let check
         check_read st { p with inside = false } ~bytes:false e.loc
     | None ->
     match e.desc with
+    | Ast.Cast (target, ({ desc = Ast.Index _; _ } as element))
+      when unsigned_ty target || strip target = Ast.TypeI32 || strip target = Ast.TypeIsize ->
+        (* Numeric conversion reads the indexed scalar, not every byte of
+           its backing array. Address/byte reinterpretations stay below. *)
+        expr st element
+    | Ast.Cast ((Ast.TypePtr _ | Ast.TypeAlignedPtr _),
+                { desc = Ast.AddrOf inner; _ })
+      when !unsafe_depth > 0 && (match place inner with
+        | Some p when not p.inside ->
+            (match Hashtbl.find_opt roots p.root with
+             | Some r -> r.out_param | None -> false)
+        | _ -> false) ->
+        (* An explicit raw mint may name uninitialized output storage. It
+           reads no pointee and establishes no init fact. A raw writer must
+           discharge its output via a checked store or an audited assume_init.
+           Do not extend this to traversal through an uninitialized pointer
+           field (inside), or to a checked reference/slice view. *)
+        incr unsafe_uses;
+        place_subexprs st inner
+    | Ast.Cast ((Ast.TypePtr _ | Ast.TypeAlignedPtr _), inner)
+      when !unsafe_depth > 0 && (match view_of st inner with
+        | Some v when not v.vp.inside ->
+            (match Hashtbl.find_opt roots v.vp.root with
+             | Some r -> r.out_param | None -> false)
+        | _ -> false) ->
+        (* A borrowed output slice already carries a valid address/length.
+           Exporting its address to an audited external writer reads no
+           element and establishes no initialization fact. *)
+        incr unsafe_uses;
+        place_subexprs_view st inner
     | Ast.Cast (_, { desc = Ast.AddrOf inner; _ }) | Ast.Cast (_, inner) ->
         (* Reinterpreting a place (or its address) with `as` exposes its
            bytes, padding included. *)
@@ -1143,7 +1654,10 @@ let check
              let st = place_subexprs st base in
              check_read st { p with inside = false } ~bytes:true e.loc
          | None -> expr st base)
-    | Ast.Call ("zero_fill", [a]) -> fill_arg st a
+    | Ast.Call ("io_read_span", [a]) -> place_subexprs_view st a
+    | Ast.Call ("zero_fill", [a]) ->
+        let st = if Init_link.Values.is_empty st.extras.links then st else set_links st Init_link.empty in
+        fill_arg st a
     | Ast.Call ("assume_init", [a]) -> fill_arg st a
     | Ast.Call _ -> fst (call st e ~result:None)
     | Ast.BinOp ((Ast.And | Ast.Or) as op, l, r) ->
@@ -1157,6 +1671,9 @@ let check
         (* An element store writes element j of the view. *)
         let v = Option.get (view_of st b) in
         let st = expr st rhs in
+        (* Aggregate stores may copy undefined padding from the source.
+           A prior clear of the destination cannot justify those bytes. *)
+        let st = forget_array_padding st v.vp in
         let st = expr st j in
         let st = place_subexprs_view st b in
         (match lin st j with
@@ -1183,7 +1700,9 @@ let check
         expr st x
     | Ast.Unsafe x ->
         incr unsafe_depth;
+        let before = !unsafe_uses in
         let st = expr st x in
+        if not !in_trial && !unsafe_uses <> before then note_unsafe e.loc;
         decr unsafe_depth; st
     | Ast.StructLit xs | Ast.TupleLit xs -> List.fold_left expr st xs
     | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.ByteSliceLit _
@@ -1197,7 +1716,7 @@ let check
   (* The index expressions inside a place chain are ordinary reads. *)
   and place_subexprs st (e : Ast.expr) = match e.desc with
     | Ast.FieldGet (b, _) | Ast.Deref b -> place_subexprs st b
-    | Ast.Index (b, i) -> place_subexprs (expr st i) b
+    | Ast.Index (b, i) -> array_index st b i; place_subexprs (expr st i) b
     | _ -> st
   and place_subexprs_view st (e : Ast.expr) = match e.desc with
     | Ast.SliceOf (b, lo, hi) -> place_subexprs_view (expr (expr st lo) hi) b
@@ -1235,12 +1754,12 @@ let check
     | `Partial inner ->
         (match view_of st a with
          | Some ({ len = Some n; _ } as v) ->
-             add_iv (place_subexprs_view st a) v.vp (v.off, Init_pred.add v.off n)
+             add_bytes_iv (place_subexprs_view st a) v.vp (v.off, Init_pred.add v.off n)
          | _ -> place_subexprs_any st inner)
     | `Other ->
         (match view_of st a with
          | Some ({ len = Some n; _ } as v) ->
-             add_iv (place_subexprs_view st a) v.vp (v.off, Init_pred.add v.off n)
+             add_bytes_iv (place_subexprs_view st a) v.vp (v.off, Init_pred.add v.off n)
          | _ -> expr st a)
   and assign st p (rhs : Ast.expr) =
     let src = match rhs.desc with
@@ -1263,12 +1782,48 @@ let check
      the call and the facts that hold only for some results. [result] is
      the term the caller binds the result to, if any. *)
   and call st (e : Ast.expr) ~result : state * guarded list =
+    let st = match e.desc with
+      | Ast.Call (("slice_copy" | "publish_copy"), _) when not (Init_link.Values.is_empty st.extras.links) ->
+          set_links st Init_link.empty
+      | _ -> st in
     match e.desc with
+    | Ast.Call ("io_read_span", [a]) -> (place_subexprs_view st a, [])
+    | Ast.Call ("publish_copy", [src; { desc = Ast.AddrOf dst; _ }]) ->
+        let st = expr st src in
+        let st = place_subexprs_any st dst in
+        let fact = match dst.desc with
+          | Ast.Index (base, index) -> (match view_of st base, lin st index with
+              | Some v, Some index ->
+                  let at = Init_pred.add v.off index in
+                  Some (v, (at, Init_pred.add at (Init_pred.const 1)))
+              | _ -> None)
+          | _ -> (match place dst with
+              | Some p when not p.inside -> Some ({ vp = p; off = Init_pred.const 0; len = None },
+                  (Init_pred.const 0, Init_pred.const (-2)))
+              | _ -> None) in
+        (st, match result, fact with
+          | Some result, Some fact -> [GPositive (result, [fact])]
+          | _ -> [])
     | Ast.Call ("slice_copy", [d; s]) when view_of st d <> None ->
         (* Builtin contract: init(dst[0..<result]). *)
         let v = Option.get (view_of st d) in
         let st = expr st s in
         let st = place_subexprs_view st d in
+        let st = forget_array_padding st v.vp in
+        let source_len = match s.desc with
+          | Ast.SliceOf (_, lo, hi) -> (match lin st lo, lin st hi with
+              | Some lo, Some hi -> checked (fun () -> Some (Init_pred.sub hi lo))
+              | _ -> None)
+          | _ -> lin st { s with desc = Ast.FieldGet (s, "len") } in
+        let known = match v.len, source_len with
+          | Some d, Some s ->
+              let le a b = Init_pred.entails (Init_pred.normalize_facts st.eqs st.facts)
+                  (Init_pred.normalize st.eqs (Init_pred.sub b a)) in
+              if le d s then Some d else if le s d then Some s else None
+          | _ -> None in
+        let st = match known with
+          | Some n -> add_iv st v.vp (v.off, Init_pred.add v.off n)
+          | None -> st in
         (match result with
          | Some r -> (add_iv st v.vp (v.off, Init_pred.add v.off r), [])
          | None -> (st, []))
@@ -1282,18 +1837,11 @@ let check
         let (st, fills) = List.fold_left (fun (st, fills) (i, a) ->
           let out = match params with
             | Some (ps, loc) ->
-                let (pname, pty) = List.nth ps i in
+                let (pname, _) = List.nth ps i in
                 (match Init_state.param_qual loc pname with
                  | Some Init_state.Uninit when List.mem pname named -> `Contract
                  | Some Init_state.Uninit -> `Out
-                 | _ ->
-                     let rec is_ref_mut t = match strip t with
-                       | Ast.TypeBorrow t -> is_ref_mut t
-                       | Ast.TypeRefMut _ -> true
-                       | _ -> false in
-                     (match pty, a.Ast.desc with
-                      | Some t, Ast.AddrOf _ when is_ref_mut t -> `Fields
-                      | _ -> `No))
+                 | _ -> `No)
             | None -> `No in
           match out with
           | `Contract ->
@@ -1305,9 +1853,9 @@ let check
                     | `Partial inner -> (place_subexprs_any st inner, fills)
                     | `Other when has_view_base st a -> (place_subexprs_view st a, fills)
                     | `Other -> (expr st a, fills)))
-          | `Out | `Fields ->
+          | `Out ->
               (match fill_target a with
-               | `Whole (p, inner) -> (place_subexprs st inner, (`P (p, out)) :: fills)
+               | `Whole (p, inner) -> (place_subexprs st inner, (`P p) :: fills)
                | `Partial inner ->
                    (match view_of st a with
                     | Some ({ len = Some n; _ } as v) when out = `Out ->
@@ -1327,6 +1875,10 @@ let check
         let pnames = match params with Some (ps, _) -> List.map fst ps | None -> [] in
         let arg_of x = match List.find_index (( = ) x) pnames with
           | Some i -> Some (List.nth args i) | None -> None in
+        let rec index_expr (idx : Ast.expr) = match idx.desc with
+          | Ast.Var x -> (match arg_of x with Some a -> a | None -> idx)
+          | Ast.FieldGet (b, f) -> { idx with desc = Ast.FieldGet (index_expr b, f) }
+          | _ -> idx in
         let arg_view x = match arg_of x with
           | Some a ->
               (match view_of st a with
@@ -1337,12 +1889,21 @@ let check
                     | _ -> Some `Untracked))
           | None -> None in
         let env ~binder x kind =
-          if x = "result" then result
+          if x = "result" then (match kind, result with
+            | `Field field, Some term when term.Init_pred.c = 0 ->
+                (match Init_pred.SMap.bindings term.Init_pred.m with
+                 | [(name, 1)] when String.starts_with ~prefix:"v" name ->
+                     (match int_of_string_opt (String.sub name 1 (String.length name - 1)) with
+                      | Some id -> field_term st id field | None -> None)
+                 | _ -> None)
+            | `Field _, _ -> None
+            | _ -> result)
           else match binder with
-            | Some (b, t) when b = x -> t
+            | Some (b, value) when b = x -> value kind
             | _ ->
                 match arg_of x, kind with
                 | Some a, `Val _ -> lin st a
+                | Some a, `Field field -> lin st { a with desc = Ast.FieldGet (a, field) }
                 | Some a, `Len _ ->
                     (match view_of st a with
                      | Some v -> v.len
@@ -1352,6 +1913,8 @@ let check
           if not c.requires then st else
           match c.body with
           | Init_state.CPlain p ->
+              let st = match p with Init_state.PLinked _ ->
+                (Lazy.force link_ops).check_pred st ~arg_view p e.loc | _ -> st in
               List.fold_left (fun st r -> match r with
                 | Some f -> need_fact st f e.loc
                               (Printf.sprintf "required initialized by '%s'" name)
@@ -1359,22 +1922,67 @@ let check
                     error e.loc (Printf.sprintf
                       "cannot show the requires clause of '%s' at this call: \
                        its place or bounds are not expressible here" name);
-                    st) st (resolve_pred ~strengthen:true ~arg_view ~env:(env ~binder:None) p)
+                    st) st (resolve_pred ~strengthen:true ~arg_view ~index_expr ~env:(env ~binder:None) p)
           | _ -> st) st cs in
+        (* Mutable aggregate calls may replace fields with a value whose
+           padding is undefined. Pre-call byte initialization is not a
+           frame guarantee. Explicit whole-byte outputs below restore it. *)
+        let rec mutable_storage ty = match strip ty with
+          | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t -> mutable_storage t
+          | Ast.TypeRefMut _ | Ast.TypeSlice (_, _, Ast.SliceWritable) -> true
+          | _ -> false in
+        let st = match params with
+          | None -> st
+          | Some (ps, _) -> List.fold_left2 (fun st (_, ty) arg ->
+              if not (Option.fold ~none:false ~some:mutable_storage ty) then st
+              else match view_of st arg with
+                | Some v -> forget_padding st v.vp
+                | None -> (match fill_target arg with
+                    | `Whole (p, _) -> forget_padding st p
+                    | _ -> st)) st ps args in
         let st = List.fold_left (fun st f -> match f with
-          | `P (p, `Fields) -> fill_fields st p
-          | `P (p, _) -> fill st p
-          | `V (v, iv) -> add_iv st v.vp iv) st fills in
+          | `P p -> fill st p
+          | `V (v, iv) -> add_bytes_iv st v.vp iv) st fills in
+        (* Distinct reference bindings are not proof of disjoint memory.
+           A scalar-only call can also mutate globals that alias a parameter.
+           Preserve facts only from a checked body footprint or postcondition. *)
+        let st = if Init_link.Values.is_empty st.extras.links then st else
+          match write_footprint e with
+          | Init_writes.Unknown -> set_links st Init_link.empty
+          | Init_writes.Writes paths ->
+              let links = Init_writes.Paths.fold (fun (root, suffix) links ->
+                match root with
+                | Init_writes.Global name ->
+                    let key = "G" ^ name in
+                    Init_link.invalidate_path
+                      ((Lazy.force link_ops).invalidate_aliases links key) (key, suffix)
+                | Init_writes.Parameter i -> match List.nth_opt args i with
+                | None -> Init_link.empty
+                | Some arg ->
+                    let destination = match fill_target arg with
+                      | `Whole (p, _) when not p.inside -> Some (p, suffix)
+                      | _ -> (match view_of st arg with
+                          | Some v -> Some (v.vp, [])
+                          | None -> None) in
+                    match destination with
+                    | Some (p, suffix) -> Init_link.invalidate_path
+                        ((Lazy.force link_ops).invalidate_aliases links p.root)
+                        (p.root, p.path @ suffix)
+                    | None -> Init_link.empty) paths st.extras.links in
+              set_links st links in
         (* Ensures. *)
         let facts ~binder p =
           List.filter_map (fun x -> x)
-            (resolve_pred ~arg_view ~env:(env ~binder) p) in
+            (resolve_pred ~arg_view ~index_expr ~env:(env ~binder) p) in
         let bind_atom b = "arm:" ^ b in
-        List.fold_left (fun (st, gs) (c : Init_state.clause) ->
+        let st, gs = List.fold_left (fun (st, gs) (c : Init_state.clause) ->
           if c.requires then (st, gs) else
           match c.body with
           | Init_state.CPlain p ->
-              (List.fold_left apply_fact st (facts ~binder:None p), gs)
+              let st = List.fold_left apply_fact st (facts ~binder:None p) in
+              let st = match p with Init_state.PLinked _ ->
+                (Lazy.force link_ops).apply_pred st ~arg_view p e.loc | _ -> st in
+              (st, gs)
           | Init_state.CIf (cond, p) ->
               let pol = match cond.desc with
                 | Ast.BinOp (Ast.Eq, _, { desc = Ast.BoolLit b; _ }) -> b
@@ -1383,10 +1991,34 @@ let check
           | Init_state.CMatch arms ->
               (st, List.map (fun ((pat : Init_state.arm_pat), p) ->
                  let binder = Option.map (fun b ->
-                   (b, Some (Init_pred.atom (bind_atom b)))) pat.bind in
+                   (b, (function
+                     | `Val _ -> Some (Init_pred.atom (bind_atom b))
+                     | `Field field -> Some (Init_pred.atom (bind_atom b ^ "." ^ field))
+                     | `Len _ -> None))) pat.bind in
                  GCase (pat.case, Option.map bind_atom pat.bind,
                         facts ~binder p)) arms @ gs))
-          (st, []) cs
+          (st, []) cs in
+        let st = List.fold_left (fun st (i, arg) ->
+          match arg.Ast.desc with
+          | Ast.AddrOf target -> invalidate_place st target
+          | Ast.Var x ->
+              (match binding_id arg x with
+               | Some id ->
+                   let is_owner = match Types.IntMap.find_opt id finfo.Types.binding_types with
+                     | Some ty ->
+                         let rec owner = function
+                           | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t -> owner t
+                           | Ast.TypeIndexed (n, _) | Ast.TypeNamed n -> linear_owner n
+                           | _ -> false in owner (strip ty)
+                     | None -> false in
+                   let shared = match params with
+                     | Some (ps, _) -> (match snd (List.nth ps i) with
+                         | Some (Ast.TypeBorrow _) -> true | _ -> false)
+                     | None -> false in
+                   if is_owner && not shared then invalidate_selector st id else st
+               | None -> st)
+          | _ -> st) st (List.mapi (fun i a -> i, a) args) in
+        (st, gs)
     | _ -> (expr st e, [])
   in
   ignore callee_ret;
@@ -1396,19 +2028,24 @@ let check
       | GBool (pol, fs) when pol = b ->
           List.fold_left apply_fact st fs
       | _ -> st) st gs in
-  let apply_case st gs case binder_term =
-    (* The arm for [case], else the wildcard. *)
+  let apply_case st gs case binder_value =
     let exact = List.exists (function GCase (Some k, _, _) -> k = case | _ -> false) gs in
     List.fold_left (fun st g -> match g with
       | GCase (k, b, fs) when (if exact then k = Some case else k = None) ->
           List.fold_left (fun st (v, iv) ->
-            let iv = match b, binder_term with
-              | Some a, Some t -> subst_atom a t iv
-              | _ -> iv in
-            let still_bound = match b with
-              | Some a -> mentions_atom a (v, iv)
-              | None -> false in
-            if still_bound then st else apply_fact st (v, iv)) st fs
+            let placeholders = match b with
+              | None -> []
+              | Some b -> List.filter (fun a -> a = b || String.starts_with ~prefix:(b ^ ".") a)
+                  (List.sort_uniq compare (Init_pred.atoms (fst iv) @ Init_pred.atoms (snd iv))) in
+            let iv, unresolved = List.fold_left (fun (iv, unresolved) a ->
+              let kind = match b with
+                | Some b when a <> b -> `Field (String.sub a (String.length b + 1)
+                    (String.length a - String.length b - 1))
+                | _ -> `Val None in
+              match binder_value kind with
+              | Some t -> (subst_atom a t iv, unresolved)
+              | None -> (iv, true)) (iv, false) placeholders in
+            if unresolved then st else apply_fact st (v, iv)) st fs
       | _ -> st) st gs in
   (* The call an `if` condition tests, and the outcome its true branch sees. *)
   let cond_call (c : Ast.expr) = match c.desc with
@@ -1428,10 +2065,10 @@ let check
            else Some (`Whole p))
         else Some `Untracked
     | None -> None in
-  let own_env ~result ~binder x kind =
-    if x = "result" then result
+  let own_env ?(result_field = fun _ -> None) ~result ~binder x kind =
+    if x = "result" then (match kind with `Field field -> result_field field | _ -> result)
     else match binder with
-      | Some (b, t) when b = x -> t
+      | Some (b, value) when b = x -> value kind
       | _ ->
           match List.assoc_opt x param_ids, kind with
           | Some id, `Val _ when not (is_written x id) -> Some (v_atom id)
@@ -1443,13 +2080,16 @@ let check
       | None, Some e -> lin st e
       | None, None -> None in
     let need_pred st ~binder p =
+      let st = match p with Init_state.PLinked _ ->
+        (Lazy.force link_ops).check_pred st ~arg_view:own_arg_view p loc | _ -> st in
       List.fold_left (fun st r -> match r with
         | Some f -> need_fact st f loc "the ensures clause needs it initialized"
         | None ->
             error loc "cannot show this ensures clause here: its bounds are \
                        not expressible at this return";
-            st) st (resolve_pred ~arg_view:own_arg_view
-                      ~env:(own_env ~result ~binder) p) in
+            st) st (resolve_pred ~index_expr:Fun.id ~arg_view:own_arg_view
+                      ~env:(own_env ~result ~binder ~result_field:(fun field ->
+                        Option.bind eo (fun e -> lin st { e with desc = Ast.FieldGet (e, field) }))) p) in
     List.iter (fun (c : Init_state.clause) ->
       if c.requires then () else
       match c.body with
@@ -1484,7 +2124,10 @@ let check
            | Some { desc = Ast.VariantCtor (_, case, payload); _ } ->
                (match arm_for case with
                 | Some (pat, p) ->
-                    let binder = Option.map (fun b -> (b, lin st payload)) pat.bind in
+                    let binder = Option.map (fun b -> (b, function
+                      | `Val _ -> lin st payload
+                      | `Field field -> lin st { payload with desc = Ast.FieldGet (payload, field) }
+                      | `Len _ -> None)) pat.bind in
                     ignore (need_pred st ~binder p)
                 | None -> ())
            | Some { desc = Ast.EnumVariant (_, case); _ } ->
@@ -1501,17 +2144,22 @@ let check
                    | None -> List.filter (fun k -> not (List.exists
                        (fun ((q : Init_state.arm_pat), _) -> q.case = Some k) arms)) cases in
                  List.iter (fun k ->
-                   let t = Option.map (fun b -> Init_pred.atom ("ret:" ^ b)) pat.bind in
-                   let st = apply_case st gs k t in
-                   let binder = Option.map (fun b -> (b, t)) pat.bind in
+                   let value kind = Option.bind pat.bind (fun b -> match kind with
+                     | `Val _ -> Some (Init_pred.atom ("ret:" ^ b))
+                     | `Field field -> Some (Init_pred.atom ("ret:" ^ b ^ "." ^ field))
+                     | `Len _ -> None) in
+                   let st = apply_case st gs k value in
+                   let binder = Option.map (fun b -> (b, value)) pat.bind in
                    ignore (need_pred st ~binder p)) mine) arms
            | _ ->
                List.iter (fun ((pat : Init_state.arm_pat), p) ->
-                 let binder = Option.map (fun b -> (b, None)) pat.bind in
+                 let binder = Option.map (fun b -> (b, fun _ -> None)) pat.bind in
                  ignore (need_pred st ~binder p)) arms)) contracts
   in
   let check_outs st loc =
     List.iter (fun key ->
+      record_leaf_coverage st { root = key; path = []; inside = false }
+        ~bytes:true loc "output return";
       let bad = Leaves.filter (fun (r, _) -> r = key) st.u in
       match Leaves.min_elt_opt bad with
       | None -> ()
@@ -1541,13 +2189,17 @@ let check
      leaf fully initialized. *)
   let merge results =
     match List.filter (fun (_, dead) -> not dead) results with
-    | [] -> ({ u = Leaves.empty; iv = []; eqs = []; facts = Init_pred.no_facts;
+    | [] -> ({ extras = empty_extras; u = Leaves.empty; iv = []; eqs = []; facts = Init_pred.no_facts;
                 vers = Types.IntMap.empty }, true)
     | live ->
         (* GitHub issue #978: a local whose version differs between arms
            gets a fresh version, and each arm's facts about its own version
            are restated for the fresh one (a phi). *)
         let states = List.map fst live in
+        let touched = List.fold_left (fun acc st -> StringSet.union acc st.extras.touched)
+          StringSet.empty states in
+        let states = List.map (fun st -> StringSet.fold
+          (fun key st -> touch_root st key) touched st) states in
         let ids = List.sort_uniq compare (List.concat_map (fun s ->
           List.map fst (Types.IntMap.bindings s.vers)) states) in
         let (vers, states) = List.fold_left (fun (vers, states) id ->
@@ -1566,14 +2218,46 @@ let check
         let all = states in
         let u = List.fold_left (fun acc s -> Leaves.union acc s.u) first.u
             (List.map fst rest) in
-        let cands = List.sort_uniq compare
-            (List.concat_map (fun s -> s.iv) all) in
+        let existing = List.concat_map (fun s ->
+          List.filter (fun (leaf, _) -> Leaves.mem leaf u) s.iv) all in
+        let leaves = List.sort_uniq compare (List.map fst existing) in
+        let counters = if leaves = [] then [] else List.filter_map (fun (id, k) ->
+          if not (unsigned_id id) then None else
+          let bound = Init_pred.atom (ver_name id k) in
+          Some (bound, List.map (fun s -> Init_pred.normalize s.eqs bound) all))
+          (Types.IntMap.bindings vers) in
+        let prefixes = List.concat_map (fun leaf ->
+          (* Guess aliases of observed endpoints, not arbitrary expressions
+             that merely share one atom. Normalize once per predecessor.
+             These are only search candidates;
+             every retained interval still needs all-predecessor coverage. *)
+          let endpoints = List.concat_map (fun s ->
+            List.concat_map (fun (lo, hi) ->
+              [Init_pred.normalize s.eqs lo; Init_pred.normalize s.eqs hi])
+              (ivs_of s leaf)) all in
+          List.filter_map (fun (bound, normalized) ->
+            let related = List.exists (fun normalized ->
+              List.exists (fun endpoint ->
+                not (Init_pred.equal normalized (Init_pred.const 0)) &&
+                Init_pred.equal normalized endpoint) endpoints) normalized in
+            if related then Some (leaf, (Init_pred.const 0, bound)) else None)
+            counters) leaves in
+        let cands = List.sort_uniq compare (existing @ prefixes) in
         let iv = List.filter (fun (l, i) ->
           Leaves.mem l u &&
           List.for_all (fun s ->
-            not (Leaves.mem l s.u)
-            || List.exists (fun (l', i') -> l' = l && Init_pred.interval_equal i i') s.iv)
+            if not (Leaves.mem l s.u) then true
+            else if List.exists (fun (l', i') -> l' = l && Init_pred.interval_equal i i') s.iv then true
+            else Init_pred.uncovered ~need_gap:false ~eqs:s.eqs ~facts:s.facts (ivs_of s l) i = None)
             all) cands in
+        (* Only retained facts need certificates. A candidate that fails in
+           another arm never contributes to the merged state. *)
+        List.iter (fun (l, i) -> List.iter (fun s ->
+          if Leaves.mem l s.u && not (List.exists (fun (l', i') ->
+              l' = l && Init_pred.interval_equal i i') s.iv) then
+            Range_obligation.record_text !cur_loc
+              (Init_pred.obligation ~claim:"branch join initialization coverage"
+                ~facts:s.facts s.eqs (ivs_of s l) i)) all) iv;
         let eqs = List.filter (fun (a, t) ->
           List.for_all (fun s ->
             List.exists (fun (a', t') -> a = a' && Init_pred.equal t t') s.eqs) all)
@@ -1588,30 +2272,28 @@ let check
           in_all (fun s -> List.exists (fun (x', a', b') ->
             x = x' && Init_pred.equal a a' && Init_pred.equal b b') s.facts.Init_pred.mins))
           first.facts.Init_pred.mins in
-        ({ u; iv; eqs; facts = { Init_pred.ge; mins }; vers }, false)
+        let links = List.fold_left (fun acc st -> Init_link.join acc st.extras.links)
+             (List.hd states).extras.links (List.tl states) in
+        let extras = if links == first.extras.links && touched == first.extras.touched
+          then first.extras else {links; touched} in
+        ({ extras; u; iv; eqs; facts = { Init_pred.ge; mins }; vers }, false)
   in
-  let trackable ty = match strip ty with
-    | Ast.TypeArray _ -> false
-    | _ -> true
-  in
+  let trackable _ty = true in
   (* GitHub issue #888, generalized by #954: a counted loop that stores
      element i of a view on every iteration,
 
        for i in lo ..< hi { ...; P[i] = e; ... }
 
-     where P is a view named by a variable and field chain or an alias (the
-     same place on every iteration), the store is a statement at the top
-     level of the body (inside plain or unsafe blocks only, never under an
-     if, match or inner loop), its index is the loop's own counter, and
-     nothing in the body leaves the iteration early: no `return` anywhere,
-     no `break` or `continue` outside an inner loop. Every iteration then
-     runs that store, so elements [off + lo, off + hi) are initialized once
-     the loop ends: one instance of the interval predicate. With lo = 0 and
-     hi = the array's length the whole leaf is initialized, #888's rule.
-     The body itself is still checked with P as before the loop. *)
+     where P is a stable variable/field-chain view and i is the loop's
+     own counter. Intersect stores on normally completing branch paths;
+     a function return cannot reach the post-loop consumer. An outer break
+     or continue prevents this summary. Nested loops do not contribute
+     stores. The body may use the preceding prefix [off + lo, off + i),
+     never its current element merely because a later store will fill it.
+     The completed loop establishes [off + lo, off + hi). *)
   let rec leaves_iteration depth ss = List.exists (fun (s : Ast.stmt) ->
     match s.desc with
-    | Ast.Return _ -> true
+    | Ast.Return _ -> false
     | Ast.Break | Ast.Continue -> depth = 0
     | Ast.Block b | Ast.UnsafeBlock b -> leaves_iteration depth b
     | Ast.If (_, a, b) -> leaves_iteration depth a || leaves_iteration depth b
@@ -1625,28 +2307,64 @@ let check
   let filled_by_loop f (s : Ast.stmt) lo hi body =
     let counter = match Local_bindings.ids_for_stmt bindings s with
       | [_; binder] -> Some binder | _ -> None in
+    let rec body_ids ss = List.concat_map (fun (s : Ast.stmt) ->
+      Local_bindings.ids_for_stmt bindings s @
+      (match s.desc with
+       | Ast.Block b | Ast.UnsafeBlock b | Ast.While (_, b)
+       | Ast.For (_, _, _, _, b) | Ast.ForEach (_, _, b) -> body_ids b
+       | Ast.If (_, a, b) -> body_ids a @ body_ids b
+       | Ast.Match (_, arms) | Ast.LetMatch (_, _, _, _, arms) ->
+           List.concat_map (fun arm -> body_ids (arm_body arm)) arms
+       | _ -> [])) ss in
+    let declared_inside = body_ids body in
     let rec plain_chain (e : Ast.expr) = match e.desc with
-      | Ast.Var _ -> true
+      | Ast.Var _ -> (match Local_bindings.id_for_expr bindings e with
+          | Some id -> not (List.mem id declared_inside)
+          | None -> true)
       | Ast.FieldGet (b, _) -> plain_chain b
       | _ -> false in
-    let rec top_stores ss = List.concat_map (fun (st : Ast.stmt) ->
-      match st.desc with
-      | Ast.Block b | Ast.UnsafeBlock b -> top_stores b
-      | Ast.Expr { desc = Ast.Assign (
-          { desc = Ast.Index (base, ({ desc = Ast.Var _; _ } as iv)); _ }, _); _ }
-        when plain_chain base
-             && counter <> None
-             && Local_bindings.id_for_expr bindings iv = counter ->
-          (match view_of f base, lin f lo, lin f hi with
-           | Some v, Some lo, Some hi ->
-               [(v.vp, (Init_pred.add v.off lo, Init_pred.add v.off hi))]
-           | _ -> [])
-      | _ -> []) ss in
-    if leaves_iteration 0 body then [] else top_stores body
+    let equal (p, i) (q, j) = p = q && Init_pred.interval_equal i j in
+    let union a b = a @ List.filter (fun x -> not (List.exists (equal x) a)) b in
+    let merge_paths paths =
+      match List.filter_map Fun.id paths with
+      | [] -> None
+      | first :: rest -> Some (List.filter (fun x ->
+          List.for_all (List.exists (equal x)) rest) first) in
+    let rec normal_stores ss =
+      List.fold_left (fun acc (st : Ast.stmt) -> match acc with
+        | None -> None
+        | Some before ->
+            let after = match st.desc with
+              | Ast.Return _ -> None
+              | Ast.Block b | Ast.UnsafeBlock b -> normal_stores b
+              | Ast.If (_, a, b) -> merge_paths [normal_stores a; normal_stores b]
+              | Ast.Match (_, arms) | Ast.LetMatch (_, _, _, _, arms) ->
+                  merge_paths (List.map (fun arm -> normal_stores (arm_body arm)) arms)
+              | Ast.Expr { desc = Ast.Assign (
+                  { desc = Ast.Index (base, ({ desc = Ast.Var _; _ } as iv)); _ }, _); _ }
+                when plain_chain base && counter <> None
+                     && Local_bindings.id_for_expr bindings iv = counter ->
+                  (match view_of f base, lin f lo, lin f hi with
+                   | Some v, Some lo, Some hi ->
+                       Some [(v.vp, (Init_pred.add v.off lo, Init_pred.add v.off hi))]
+                   | _ -> Some [])
+              | _ -> Some [] in
+            Option.map (union before) after) (Some []) ss in
+    let rec skips depth ss = List.exists (fun (s : Ast.stmt) -> match s.desc with
+      | Ast.Break | Ast.Continue -> depth = 0
+      | Ast.Block b | Ast.UnsafeBlock b -> skips depth b
+      | Ast.If (_, a, b) -> skips depth a || skips depth b
+      | Ast.Match (_, arms) | Ast.LetMatch (_, _, _, _, arms) ->
+          List.exists (fun arm -> skips depth (arm_body arm)) arms
+      | Ast.While (_, b) | Ast.For (_, _, _, _, b) | Ast.ForEach (_, _, b) -> skips (depth + 1) b
+      | _ -> false) ss in
+    if skips 0 body then [] else Option.value ~default:[] (normal_stores body)
   in
   let bind_result (s : Ast.stmt) =
     match Local_bindings.ids_for_stmt bindings s with
-    | id :: _ when immutable id -> Some (v_atom id)
+    | id :: _ when immutable id || (match id_type id with
+          | Some ty -> record_fields ty <> None && not (Hashtbl.mem changed_records id)
+          | None -> false) -> Some (v_atom id)
     | _ -> None in
   let trace_state (s : Ast.stmt) st =
     let kind = match s.desc with
@@ -1663,6 +2381,7 @@ let check
     let keys = List.sort compare
         (Hashtbl.fold (fun k _ acc -> k :: acc) roots []) in
     List.iter (fun key ->
+      let st = touch_root st key in
       let r = Hashtbl.find roots key in
       List.iter (fun (path, _) ->
         let l = (key, path) in
@@ -1681,7 +2400,22 @@ let check
     List.fold_left (fun (st, dead) s ->
       if dead then (st, dead) else stmt st s) (st, false) ss
   and stmt st (s : Ast.stmt) =
+    let st = apply_positive st in
+    let st = match s.desc with
+      | Ast.Let _ | Ast.LetTuple _ | Ast.LetMatch _ ->
+          List.fold_left invalidate_selector st (Local_bindings.ids_for_stmt bindings s)
+      | _ -> st in
+    let before = !unsafe_uses in
     let r = stmt_inner st s in
+    let r = if not linked_contract && Init_link.Values.is_empty (fst r).extras.links then r
+      else match s.desc, Local_bindings.ids_for_stmt bindings s with
+      | Ast.Let (_, _, _, Some rhs, _), id :: _ ->
+          ((Lazy.force link_ops).assign_value (fst r) ("L" ^ string_of_int id ^ ":") rhs, snd r)
+      | Ast.Let (_, _, _, None, _), id :: _ ->
+          (set_links (fst r) (Init_link.forget_value (fst r).extras.links
+              ("L" ^ string_of_int id ^ ":")), snd r)
+      | _ -> r in
+    if not !in_trial && !unsafe_uses <> before then note_unsafe s.loc;
     (match !trace_func with
      | Some f when f = fdef.Ast.name -> trace_state s (fst r)
      | _ -> ());
@@ -1709,13 +2443,22 @@ let check
                                    (all_leaves key) }, false)
               | _ -> (st, false))
          | [] -> (st, false))
-    | Ast.Let (_, name, _, Some ({ desc = Ast.StructLit _; _ } as e), _) ->
+    | Ast.Let (_, name, _, Some ({ desc = Ast.StructLit values; _ } as e), _) ->
         (* A struct literal writes every field and no padding. *)
         let st = expr st e in
         (match Local_bindings.ids_for_stmt bindings s with
          | id :: _ ->
              (match Types.IntMap.find_opt id finfo.Types.binding_types with
               | Some ty ->
+                  let equations = match record_fields ty with
+                    | Some fields when List.length fields = List.length values ->
+                        List.filter_map (fun ((field, ty), value) ->
+                          if unsigned_ty ty then Option.map (fun term -> field, Init_pred.normalize st.eqs term)
+                            (lin st value) else None) (List.combine fields values)
+                    | _ -> [] in
+                  let st = bump st [id] in
+                  let st = { st with eqs = st.eqs @ List.map (fun (field, term) ->
+                    field_name st id field, term) equations } in
                   let key = "L" ^ string_of_int id in
                   let leaves = leaves_of [] [] ty in
                   Hashtbl.replace roots key
@@ -1756,6 +2499,10 @@ let check
               | None, None -> (st, false))
          | _ -> (st, false))
     | Ast.Let (_, _, _, Some ({ desc = Ast.Call _; _ } as e), _) ->
+        let st = match Local_bindings.ids_for_stmt bindings s with
+          | id :: _ when (match id_type id with Some ty -> record_fields ty <> None | None -> false) ->
+              bump st [id]
+          | _ -> st in
         let (st, gs) = call st e ~result:(bind_result s) in
         (* GitHub issue #975: an immutable binding of a call's result keeps
            the facts that depend on it, for a later `match` or `return`. *)
@@ -1799,7 +2546,7 @@ let check
              ({ st with eqs = st.eqs @ [("v" ^ string_of_int id, t)] }, false)
          | None -> (st, false))
     | Ast.Let (_, _, _, Some e, _) | Ast.LetTuple (_, e) | Ast.Expr e
-    | Ast.Yield e -> (expr st e, false)
+    | Ast.Yield e -> (expr st e, noreturn e)
     | Ast.Return eo ->
         (* GitHub issue #977: `return g(...)` names g's result by an atom
            of its own, so g's ensures over `result` meets this function's
@@ -1834,7 +2581,8 @@ let check
     | Ast.While (c, body) ->
         let head = loop_head st body (fun h ->
           let h = expr h c in (assume h c true, h)) in
-        (assume (expr head c) c false, false)
+        (assume (expr head c) c false,
+         Control_flow.never_returns ~noreturn [s])
     | Ast.For (_, _, lo, hi, body) ->
         let st = expr (expr st lo) hi in
         (* GitHub issue #975: the counter lies in [lo, hi) in the body. *)
@@ -1850,9 +2598,18 @@ let check
         let head = loop_head st body (fun h ->
           (* the head state plus the counter's range facts, which are
              about the immutable counter and bounds fixed before the loop *)
-          ({ h with facts = { h.facts with Init_pred.ge =
+          let entered = { h with facts = { h.facts with Init_pred.ge =
                List.filter (fun t -> not (List.exists (Init_pred.equal t) st.facts.Init_pred.ge))
-                 in_body.facts.Init_pred.ge @ h.facts.Init_pred.ge } }, h)) in
+                 in_body.facts.Init_pred.ge @ h.facts.Init_pred.ge } } in
+          let entered = match Local_bindings.ids_for_stmt bindings s with
+            | [_; id] -> (match lin st lo with
+                | Some start -> List.fold_left (fun acc (p, (lower, _)) ->
+                    let offset = Init_pred.sub lower start in
+                    add_iv acc p (lower, Init_pred.add offset (v_atom id)))
+                    entered (filled_by_loop st s lo hi body)
+                | None -> entered)
+            | _ -> entered in
+          (entered, h)) in
         (List.fold_left (fun st (p, iv) -> add_iv st p iv) head
            (filled_by_loop st s lo hi body), false)
     | Ast.ForEach (_, seq, body) ->
@@ -1871,13 +2628,18 @@ let check
            | _ -> ());
           let st = match a with
             | Ast.ArmVariant (_, case, payload, _) when gs <> [] ->
-                let term = match payload with
+                let st = match Local_bindings.id_for_arm bindings s.loc i with
+                  | Some id -> bump st [id] | None -> st in
+                let value kind = match payload with
                   | Some (Ast.PayloadBind (_, false)) ->
                       (match Local_bindings.id_for_arm bindings s.loc i with
-                       | Some id when immutable id -> Some (v_atom id)
+                       | Some id when immutable id -> (match kind with
+                           | `Val _ -> Some (v_atom id)
+                           | `Field field -> field_term st id field
+                           | `Len _ -> None)
                        | _ -> None)
                   | _ -> None in
-                apply_case st gs case term
+                apply_case st gs case value
             | _ -> st in
           stmts st (arm_body a)) arms)
     | Ast.Break | Ast.Continue -> (st, true)
@@ -1895,6 +2657,7 @@ let check
      condition first). The body is checked once, for real, from the
      fixpoint. *)
   and loop_head st body enter =
+    let link_head = ref st.extras.links in
     let ids = List.sort_uniq compare (List.fold_left assigned_s [] body) in
     let hv = List.map (fun id -> (id, fresh_ver ())) ids in
     let to_head (s : state) =
@@ -1909,18 +2672,24 @@ let check
         | _ -> s) s hv in
       { s with vers = List.fold_left (fun m (id, k) -> Types.IntMap.add id k m) s.vers hv } in
     let head_of cands =
+      let st = List.fold_left (fun st ((root, _), _) -> touch_root st root) st cands in
+      let st = set_links st !link_head in
       let h = { st with vers = List.fold_left (fun m (id, k) -> Types.IntMap.add id k m)
                                  st.vers hv } in
+      let h = List.fold_left (fun h (id, k) ->
+        add_declared_bounds h id (Init_pred.atom (ver_name id k))) h hv in
       { h with iv = h.iv @ List.filter (fun (l, _) -> Leaves.mem l h.u) cands } in
     (* entry: the head versions equal the entry ones *)
     let entry_eqs = List.filter_map (fun (id, k) ->
       match Types.IntMap.find_opt id st.vers with
       | Some old -> Some (ver_name id k, Init_pred.atom (ver_name id old))
       | None -> None) hv in
-    let holds (s : state) eqs (l, iv) =
+    let holds (s : state) eqs ((root, _) as l, iv) =
+      let s = touch_root s root in
       not (Leaves.mem l s.u)
-      || Init_pred.uncovered ~eqs:(eqs @ s.eqs) ~facts:s.facts (ivs_of s l) iv = None in
-    let record (s : state) eqs (l, iv) what =
+      || Init_pred.uncovered ~need_gap:false ~eqs:(eqs @ s.eqs) ~facts:s.facts (ivs_of s l) iv = None in
+    let record (s : state) eqs ((root, _) as l, iv) what =
+      let s = touch_root s root in
       if Leaves.mem l s.u then
         Range_obligation.record_text !cur_loc
           (Init_pred.obligation
@@ -1944,6 +2713,21 @@ let check
       in_trial := saved_trial;
       errors := saved_errors; Range_obligation.enabled := saved_obl;
       trace_func := saved_trace; r in
+    (* Linked candidates are the entry certificates, intersected with every
+       backedge. Mutable binding keys denote their current values here; the
+       scalar assignments above replace, rather than accumulate, certificates.
+       Abrupt loop exits retain no candidate in this restricted connection. *)
+    if not (Init_link.Values.is_empty !link_head) then
+      quiet (fun () ->
+        let rec shrink fuel =
+          if fuel = 0 || leaves_iteration 0 body then link_head := Init_link.empty
+          else match run (head_of []) with
+          | None -> link_head := Init_link.empty
+          | Some fin ->
+              let kept = Init_link.join !link_head fin.extras.links in
+              if not (Init_link.Values.equal Init_link.Storages.equal kept !link_head) then
+                (link_head := kept; shrink (fuel - 1)) in
+        shrink 32);
     let cands =
       if ids = [] || leaves_iteration 0 body then []
       else
@@ -1952,8 +2736,6 @@ let check
           let first = match run (head_of []) with
             | Some fin -> List.filter mentions_head fin.iv
             | None -> [] in
-          (* and the prefix shape: from 0, or from an entry interval's
-             start, up to each head version *)
           let starts l = Init_pred.const 0 :: List.map fst (ivs_of st l) in
           let shaped = List.concat_map (fun l ->
             List.concat_map (fun lo ->
@@ -1985,15 +2767,43 @@ let check
   in
   (* Requires: assumed at entry. *)
   ignore assigned_s;
-  let entry = { u = entry_u; iv = []; eqs = []; facts = Init_pred.no_facts;
+  let entry = { extras = empty_extras; u = entry_u; iv = []; eqs = []; facts = Init_pred.no_facts;
                 vers = Types.IntMap.empty } in
+  (* A where clause is already checked at every call. Import only scalar
+     unsigned singleton parameters whose bindings cannot be changed by alias. *)
+  let static_params = if fdef.Ast.where_clauses = [] then [] else List.filter_map (fun (name, ty) ->
+    match ty, List.assoc_opt name param_ids with
+    | Ast.TypeSingleton (base, Ast.StaticName k), Some id
+      when unsigned_ty base && not (Hashtbl.mem addr_taken id)
+           && immutable_var name id -> Some (k, v_atom id)
+    | _ -> None) param_types in
+  let rec static_term = function
+    | Ast.StaticInt n -> leaf_const (Some n)
+    | Ast.StaticName n -> List.assoc_opt n static_params
+    | Ast.StaticAdd (a, b) -> Option.bind (static_term a) (fun a ->
+        Option.map (Init_pred.add a) (static_term b))
+    | Ast.StaticSub (a, b) -> Option.bind (static_term a) (fun a ->
+        Option.map (Init_pred.sub a) (static_term b))
+    | Ast.StaticMul (a, b) -> (match static_term a, static_term b with
+        | Some a, Some b when Init_pred.SMap.is_empty a.m -> Some (Init_pred.scale a.c b)
+        | Some a, Some b when Init_pred.SMap.is_empty b.m -> Some (Init_pred.scale b.c a)
+        | _ -> None)
+    | _ -> None in
+  let entry = List.fold_left (fun st (a, cmp, b) ->
+    match checked (fun () -> match static_term a, static_term b with
+      | Some a, Some b -> Some (Init_pred.sub (Init_pred.sub b a)
+          (Init_pred.const (if cmp = Ast.WhereLt then 1 else 0)))
+      | _ -> None) with
+    | Some fact -> add_fact st fact | None -> st) entry fdef.Ast.where_clauses in
   let entry = List.fold_left (fun st (c : Init_state.clause) ->
     match c.body with
     | Init_state.CPlain p when c.requires ->
+        let st = match p with Init_state.PLinked _ ->
+          (Lazy.force link_ops).apply_pred st ~arg_view:own_arg_view p c.cloc | _ -> st in
         List.fold_left (fun st r -> match r with
           | Some f -> apply_fact st f
           | None -> st) st
-          (resolve_pred ~arg_view:own_arg_view
+          (resolve_pred ~index_expr:Fun.id ~arg_view:own_arg_view
              ~env:(own_env ~result:None ~binder:None) p)
     | _ -> st) entry contracts in
   (* GitHub issue #983: a term step past the checker's native range is
@@ -2011,6 +2821,7 @@ let check
        "an initialization interval bound leaves the checker's integer range \
         (2^62); bound it with a smaller constant");
   Hashtbl.iter decide_index index_decisions;
+  Option.iter (Hashtbl.iter decide_array_index) array_decisions;
   match List.rev !errors with
   | [] -> ()
   | [(loc, msg)] -> raise (Types.TypeError (loc, msg))

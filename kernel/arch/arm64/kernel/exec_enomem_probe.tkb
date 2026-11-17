@@ -1,3 +1,4 @@
+use "kernel/arch/arm64/kernel/el0_getcpu.tkb";
 use "kernel/arch/arm64/kernel/el0_fail.tkb";
 /* Real EL0 execve exhaustion and retry, driven by GDB on CPU 0 and CPU 1.
  * The marker arms one ExecArgs allocation refusal after this image starts.
@@ -26,9 +27,12 @@ private fn exec_enomem_run(cpu: {0..<2 as usize}) {
     if (svc5(122, 0, 8, mask as *u8 as usize, 0, 0) != 0) {
         exec_enomem_fail(src_loc());
     }
-    let mut before: [u8; 4];
-    if (svc5(168, before as *u8 as usize, 0, 0, 0, 0) != 0 ||
-        before[0] != cpu as u8) { exec_enomem_fail(src_loc()); }
+    match el0_getcpu() {
+        El0CpuResult::Ready(actual) => {
+            if (actual != cpu) { exec_enomem_fail(src_loc()); }
+        }
+        El0CpuResult::Failed(code) => { exec_enomem_fail(src_loc()); }
+    }
     let mut args: [usize; 3];
     args[0] = "/bin/echo" as *u8 as usize;
     args[1] = "exec-enomem: cpu 0 retry replaced the image" as *u8 as usize;
@@ -41,9 +45,12 @@ private fn exec_enomem_run(cpu: {0..<2 as usize}) {
              args as *usize as usize, 0, 0, 0) != EXEC_ENOMEM_RESULT) {
         exec_enomem_fail(src_loc());
     }
-    let mut after: [u8; 4];
-    if (svc5(168, after as *u8 as usize, 0, 0, 0, 0) != 0 ||
-        after[0] != before[0]) { exec_enomem_fail(src_loc()); }
+    match el0_getcpu() {
+        El0CpuResult::Ready(actual) => {
+            if (actual != cpu) { exec_enomem_fail(src_loc()); }
+        }
+        El0CpuResult::Failed(code) => { exec_enomem_fail(src_loc()); }
+    }
     if (cpu == 0) {
         exec_enomem_say(bs"exec-enomem: cpu 0 returned ENOMEM and this image kept running\n");
     } else {

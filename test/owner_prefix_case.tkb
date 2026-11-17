@@ -1,0 +1,19 @@
+// Exercise owner-derived payload framing through a subsequent insertion.
+use "linux_user/growable_pool/growable_pool_lib.tkb";
+extern fn linux_exit(code: i32);
+fn main() !{unsafe} {
+ page_allocator_init();
+ let mut pool: GrowablePool(usize, 2, 3, 6);
+ growable_pool_init(&pool);
+ let owner = match growable_pool_insert(&pool) {
+  GrowablePoolInsertResult::OutOfMemory => { linux_exit(2); return; }
+  GrowablePoolInsertResult::Allocated(o) => { o }
+ };
+ *growable_pool_ref(&pool, owner) = 7;
+ let second = match growable_pool_insert(&pool) {
+  GrowablePoolInsertResult::OutOfMemory => { freelist_owner_drop(owner); linux_exit(3); return; }
+  GrowablePoolInsertResult::Allocated(o) => { o }
+ };
+ freelist_owner_drop(second);
+ freelist_owner_drop(owner);
+}

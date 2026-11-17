@@ -217,18 +217,17 @@ private fn procfs_put_usize(output: borrow uninit [u8; 1024..], offset_in: usize
     let mut count: usize = 0;
     let mut value: usize = value_in;
     if (value == 0) { return procfs_put_byte(output, offset_in, 0x30); }
-    for index: usize in 0..<20 {
-        if (value != 0) {
-            digits[index] = 0x30 + ((value % 10) as u8);
-            count = count + 1;
-            value = value / 10;
-        }
+    while (value != 0 && count < 20) {
+        digits[count] = 0x30 + ((value % 10) as u8);
+        count = count + 1;
+        value = value / 10;
     }
     let mut offset: usize = offset_in;
-    while (count != 0) {
-        count = count - 1;
-        if (count >= 0 && count < 20) {
-            offset = procfs_put_byte(output, offset, digits[count]);
+    let length: usize = count;
+    for index: usize in 0..<20 {
+        if (index < length) {
+            let at: usize = length - index - 1;
+            if (at < 20) { offset = procfs_put_byte(output, offset, digits[at]); }
         }
     }
     return offset;
@@ -414,28 +413,26 @@ fn procfs_next_pid(after: usize) -> usize !{unsafe} {
     return scheduled_process_diagnostic_next_pid(after);
 }
 
-fn procfs_pid_name(pid: usize, output: borrow [u8; 20..]) -> usize {
+fn procfs_pid_name(pid: usize, output: borrow uninit [u8; 20..]) -> usize
+        ensures init(output[0..<result]) {
     let mut reverse: [u8; 20];
     let mut count: usize = 0;
     let mut value: usize = pid;
     if (value == 0) { output[0] = 0x30; return 1; }
-    for index: usize in 0..<20 {
-        if (value != 0) {
-            reverse[index] = 0x30 + ((value % 10) as u8);
-            count = count + 1;
-            value = value / 10;
-        }
+    while (value != 0 && count < 20) {
+        reverse[count] = 0x30 + ((value % 10) as u8);
+        count = count + 1;
+        value = value / 10;
     }
     let length: usize = count;
     let mut at: usize = 0;
-    while (count != 0 && at < 20) {
-        count = count - 1;
-        if (at >= 0 && at < 20 && count >= 0 && count < 20) {
-            output[at] = reverse[count];
-        }
+    while (at < length && at < 20) {
+        let source: usize = length - at - 1;
+        if (source < 20) { output[at] = reverse[source]; }
+        else { return at; }
         at = at + 1;
     }
-    return length;
+    return at;
 }
 
 // A write to a procfs node: only /proc/takibi/profile accepts one. Answers

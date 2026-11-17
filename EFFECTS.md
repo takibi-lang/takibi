@@ -19,7 +19,7 @@
 | `requires_devices` | inferred | no | yes | yes | - | - | allowed | allowed |
 | `devices_unmapped` | explicit | yes | no | no | requires_devices | requires_devices | rejected | allowed |
 | `requires_irq_unmasked` | inferred | no | yes | yes | - | - | allowed | allowed |
-| `noreturn` | trusted extern only | no | no | no | - | - | allowed | allowed |
+| `noreturn` | checked body / trusted extern | no | no | no | - | - | allowed | allowed |
 
 A bare `!{}` contract forbids the transitive effects: `may_block`, `no_handler_lock`, `allocates`, `locks`, `logs`. `locks` propagates and is forbidden by `!{}`, but is intentionally allowed from `interrupt` and `exception` roots; an `nmi` root forbids it.
 

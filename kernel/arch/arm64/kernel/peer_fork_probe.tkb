@@ -1,3 +1,5 @@
+use "kernel/arch/arm64/kernel/el0_getcpu.tkb";
+
 /* fork on a peer (GitHub issue #611). A static-PIE EL0 program, kept free
  * of writable globals and compiled with trap sites rejected, run once from
  * init.sh.
@@ -36,12 +38,10 @@ private fn peer_fork_fail(line: borrow []const u8) !{unsafe} {
 }
 
 private fn peer_fork_cpu() -> u8 {
-    let mut cpu_bytes: [u8; 4];
-    cpu_bytes[0] = 99;
-    if (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize, 0, 0, 0, 0) != 0) {
-        return 99;
+    match el0_getcpu() {
+        El0CpuResult::Ready(cpu) => { return cpu as u8; }
+        El0CpuResult::Failed(code) => { return 99; }
     }
-    return cpu_bytes[0];
 }
 
 // Pin to one CPU and wait until this process is running there.

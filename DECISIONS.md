@@ -1,5 +1,97 @@
 # Maintainer decisions
 
+- 2026-11-17 Initialize the 32-byte local buffer in the native alignment
+  fixture before inspecting its address. This test-only clear preserves the
+  alignment verdict; it does not authorize runtime initialization fallbacks
+  in kernel or GrowablePool code. [active] #1508
+
+- 2026-11-17 Defer the native GrowablePool exerciser's console output until
+  its pool operations return, preserving the transcript and early-failure
+  messages. This is a linux_user test change, not a kernel console change
+  or authorization for a new trusted extern frame contract. [active] #1508
+
+- 2026-11-17 Extend the bounded experiment to provenance across the concrete
+  GrowablePool chunk-address store/load path. Keep runtime representation
+  unchanged and reject corruption, unacquired chunks and unknown writes.
+  Compare prior research before choosing if the experiment opens materially
+  broader design alternatives. This does not authorize dynamic fallbacks or
+  new trusted assertions. [active] #1508
+
+- 2026-11-17 Infer limited initialization-frame separation requirements,
+  validate bodies under frozen candidates, and prove or propagate them at
+  direct callers. Allow public wrappers and existing checked interfaces that
+  discharge the conditions. Internalize only implementations with remaining
+  requirements absent from their interface; reject external-entry and
+  function-value conversions that erase them. No runtime fallback or new
+  trusted assumption is authorized. [active] #1508
+
+- 2026-11-17 Measure a limited combination of body-derived access summaries,
+  field/range provenance and SPARK-like harmful-alias checks against the
+  current kernel before developing general heap inference. Keep unknown
+  external effects conservative; consult before adding dynamic fallbacks or
+  a broader trust boundary. [active] #1508
+
+- 2026-11-17 Infer write footprints from function bodies and existing
+  pre/postconditions, borrowing and ownership information before adding
+  annotations. Keep unknown raw/extern boundaries conservative and report
+  concrete inference limits before proposing further contracts. [active] #1508
+
+- 2026-11-16 Linked initialization certifies initialized reads when an index
+  is in bounds; existing bounds checking separately authorizes each access.
+  Do not require N as the only terminal value. Keep unsafe assertions local
+  to audited boundaries and omit redundant caller declarations. [active] #1508
+
+- 2026-11-16 Connect checked scalar `where` contracts to arithmetic array
+  bounds verification. Infer concrete capacity relations when possible;
+  retain useful static_assert checks and diagnostics that explain when an
+  intended compile-time invariant should be stated explicitly. [active] #1508
+
+- 2026-11-16 Allow a leaf assembly adapter only in user_payload ABI fixtures
+  to submit a borrowed valid first readv span followed by a null one-byte
+  span. Do not link it into the kernel or ordinary programs. Normal vector
+  I/O uses typed borrowed descriptors. [active] #1508
+
+- 2026-11-16 Implement checked `noreturn` on Takibi bodies to let output
+  helpers reject failures without duplicating per-call proof code. Reject
+  any reachable normal return; extern contracts remain audited. [active] #1456
+
+- 2026-11-16 Use audited syscall-specific EL0 output wrappers with success-
+  conditioned initialized ranges. Kernel-to-EL0 contract correspondence is
+  an explicit cross-image trust boundary, not a Z3 proof. [active] #1508
+
+- 2026-11-16 Mutable aggregate calls conservatively discard pre-call padding
+  guarantees; `init_fields` cannot restore byte completeness. Reconsider
+  with concrete examples if the annotation or migration cost is excessive.
+  [active] #1511
+
+- 2026-11-16 Extend field-only initialization contracts to record array and
+  slice ranges. Typed access needs initialized fields; byte views also need
+  initialized padding. Keep annotations at API boundaries. [active] #1511
+
+- 2026-11-16 Keep audited assembly output guarantees in narrow uninit
+  wrappers, with no runtime clearing or init-state flags. Prioritize checked
+  Takibi callers; add targeted assembly checks when concrete defects justify
+  them rather than building full assembly verification. [active] #1508
+
+- 2026-11-16 Allow unsigned numerical fields of returned record payloads in
+  initialization contracts; preserve existing result APIs and check writes
+  against the returned footprint rather than adding per-access annotations.
+  [active] #1508
+
+- 2026-11-16 Prototype a restricted linked-initialization contract checked at
+  constructor/API boundaries; allow incomplete construction without adding
+  runtime clearing or per-access proof annotations. [active] #1508
+
+- 2026-11-16 Pursue compile-time initialization checks before adding runtime
+  clearing; consider restricting language expressions and boundary types when
+  current contracts cannot express the proof. [active] #1508
+
+- 2026-11-16 Initialization proof annotations at API boundaries are acceptable
+  at the measured cost. Use explicit pre/postconditions and extend the Z3
+  re-check to tracked uninit coverage; avoid per-access annotations and
+  handwritten loop invariants. Whole-byte and field-only guarantees remain
+  distinct, and solver claims state their compiler-fact trust boundary.
+
 One line per decision the maintainer made, so any agent or session can find
 the current ruling before it proposes or builds something. The reasoning
 lives on the linked issue; this file only says what was decided, when, and

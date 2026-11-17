@@ -1,5 +1,19 @@
 # takibi Engineering History
 
+## 2026-11-16: initialization contracts preserve the field/byte distinction
+
+The annotation pilot found a whole-record contract checking field leaves but
+publishing initialized padding. Whole `init` now checks padding, while an
+explicit `init_fields` contract transfers fields only. The stopped-process
+snapshot uses two checked output signatures and two postconditions, without
+new runtime zeroing or loop invariants. Ordinary mutable-reference calls no
+longer invent initialization; the native pool initializer exposes its existing
+raw lock zeroing as one audited output assertion. Finite leaf coverage joins
+the existing Z3 interval re-check, with a planted padding omission as a SAT
+control. This checks coverage under compiler state facts, not the full memory
+model or all initialization state transfers.
+
+
 ## 2026-11-16: no_copy bulk access boundary (#1510)
 
 The next memory-model control used the maintained LockedCell API: whole-cell

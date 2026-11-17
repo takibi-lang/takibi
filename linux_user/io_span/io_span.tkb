@@ -1,0 +1,63 @@
+// Execute compiler-owned vector I/O on Linux/AMD64, without a C adapter.
+// Sentinel-filled destinations detect writes outside the returned prefix;
+// compile-time rejection tests separately cover uninitialized readability.
+extern fn linux_syscall(nr: usize, a0: usize, a1: usize, a2: usize, a3: usize) -> isize;
+
+fn io_fixture_fail() !{noreturn} {
+    linux_syscall(60, 1, 0, 0, 0);
+    while (true) {}
+}
+
+fn io_fixture_case(count: {0..<9 as usize}) !{unsafe} {
+    let mut fds: [u32; 2] = { 0, 0 };
+    // pipe2 writes two descriptors synchronously; initialized test storage
+    // makes this raw host ABI boundary independent of assume_init.
+    if (linux_syscall(293, (&fds[0]) as usize, 0, 0, 0) != 0) {
+        io_fixture_fail();
+    }
+    let mut input: [u8; 8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    let first = io_write_span(input[0..<count]);
+    let empty = io_write_span(input[0..<0]);
+    let write_fd: usize = fds[1] as usize;
+    let written: usize = unsafe { io_writev(write_fd, empty, first) };
+    io_span_end(first);
+    io_span_end(empty);
+    if (written != count) { io_fixture_fail(); }
+    if (linux_syscall(3, fds[1] as usize, 0, 0, 0) != 0) { io_fixture_fail(); }
+
+    let mut output: [u8; 8] = { 99, 99, 99, 99, 99, 99, 99, 99 };
+    let a = io_read_span(output[0..<3]);
+    let b = io_read_span(output[3..<3]);
+    let c = io_read_span(output[3..<8]);
+    let length: usize = io_span_length(c);
+    let read_fd: usize = fds[0] as usize;
+    let answer: usize = unsafe { io_readv(read_fd, a, b, c) };
+    io_span_end(c);
+    io_span_end(b);
+    io_span_end(a);
+    if (length != 5 || answer != count) { io_fixture_fail(); }
+    if (linux_syscall(3, fds[0] as usize, 0, 0, 0) != 0) { io_fixture_fail(); }
+    let mut checksum: usize = 0;
+    for i: usize in 0..<8 {
+        if (i < count) {
+            if (output[i] != input[i]) { io_fixture_fail(); }
+            checksum = checksum + (output[i] as usize);
+        } else {
+            if (output[i] != 99) { io_fixture_fail(); }
+        }
+    }
+    uart_println(checksum as u64);
+}
+
+fn app_main() !{unsafe} {
+    io_fixture_case(8);
+    io_fixture_case(4);
+    io_fixture_case(2);
+    io_fixture_case(0);
+    let mut unchanged: [u8; 1] = { 77 };
+    let span = io_read_span(unchanged as []u8);
+    let result: usize = unsafe { io_readv(0xFFFFFFFFFFFFFFFF, span) };
+    io_span_end(span);
+    if (result != 0xFFFFFFFFFFFFFFF7 || unchanged[0] != 77) { io_fixture_fail(); }
+    uart_println(unchanged[0] as u64);
+}

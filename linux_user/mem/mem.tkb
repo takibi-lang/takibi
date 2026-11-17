@@ -1,13 +1,17 @@
 // memset / memcpy demo using a stack-allocated [u8; 5] array.
+// Carry this fixture's capacity and initialized prefix across helper calls.
 
-fn my_memset(p: *u8, val: u8, n: isize) {
-    for i in 0..<n {
+fn my_memset(p: borrow uninit [u8; 5..], val: u8, n: {0..<6 as usize})
+        ensures init(p[0..<n]) {
+    for i: usize in 0..<n {
         p[i] = val;
     }
 }
 
-fn my_memcpy(dst: *u8, src: *u8, n: isize) {
-    for i in 0..<n {
+fn my_memcpy(dst: borrow uninit [u8; 5..], src: borrow [const u8; 5..],
+             n: {0..<6 as usize})
+        ensures init(dst[0..<n]) {
+    for i: usize in 0..<n {
         dst[i] = src[i];
     }
 }
@@ -24,12 +28,12 @@ fn test_mem() {
     let mut buf_a: [u8; 5];
     let mut buf_b: [u8; 5];
 
-    my_memset(buf_a, 'A', 5);
+    my_memset(buf_a as []u8, 'A', 5);
     uart_puts("memset: ");
     print_buf(buf_a, 5);
     uart_puts("\r\n");
 
-    my_memcpy(buf_b, buf_a, 5);
+    my_memcpy(buf_b as []u8, buf_a as []const u8, 5);
     uart_puts("memcpy: ");
     print_buf(buf_b, 5);
     uart_puts("\r\n");

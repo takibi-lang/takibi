@@ -317,8 +317,12 @@ struct TerminalEncodedCounts {
 }
 must_use variant TerminalEncodeResult { NoRoom; Encoded(TerminalEncodedCounts); }
 
-fn terminal_encode_onlcr(bytes: borrow []const u8, encoded: borrow [u8; 512..],
-                         room: usize) -> TerminalEncodeResult {
+fn terminal_encode_onlcr(bytes: borrow []const u8, encoded: borrow uninit [u8; 512..],
+                         room: usize) -> TerminalEncodeResult
+        ensures match result {
+            TerminalEncodeResult::Encoded(counts) => init(encoded[0..<counts.output_bytes]),
+            TerminalEncodeResult::NoRoom => true
+        } {
     let mut produced: usize = 0;
     let mut consumed: usize = 0;
     let mut filling: bool = true;
@@ -333,10 +337,12 @@ fn terminal_encode_onlcr(bytes: borrow []const u8, encoded: borrow [u8; 512..],
                 if (value == 10) {
                     let position: usize = produced;
                     if (position < 512) { encoded[position] = 13; }
+                    else { return TerminalEncodeResult::NoRoom; }
                     produced = produced + 1;
                 }
                 let position: usize = produced;
                 if (position < 512) { encoded[position] = value; }
+                else { return TerminalEncodeResult::NoRoom; }
                 produced = produced + 1;
                 consumed = consumed + 1;
             }

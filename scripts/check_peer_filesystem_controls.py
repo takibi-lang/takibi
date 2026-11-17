@@ -91,7 +91,7 @@ def problems(tree: dict[str, str]) -> list[str]:
     core_reader_pin = (
         "if (peer_pin(0) == false) "
         "{ svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }\n"
-        "    while (peer_read_cpu(cpu_bytes as []u8) != 0) {}")
+        "    while (peer_read_cpu() != 0) {}")
     if core_reader_pin not in payload:
         result.append("the competing reader still assumes an unset affinity "
                       "mask keeps it on core 0")
@@ -127,8 +127,8 @@ def problems(tree: dict[str, str]) -> list[str]:
     for shape in (
         "const PEER_READ_CHUNK: usize = 1024;",
         "const PEER_READ_CHUNKS: usize = 96;",
-        "while (peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {}",
-        "while (peer_read_cpu(cpu_bytes as []u8) != 0) {}",
+        "while (peer_read_cpu() != peer_cpu) {}",
+        "while (peer_read_cpu() != 0) {}",
     ):
         if shape not in payload:
             result.append(f"payload placement or bounded-read shape changed: {shape}")
@@ -179,8 +179,8 @@ def main() -> int:
         "reader pin": ("kernel/arch/arm64/kernel/peer_read.tkb", "if (peer_pin(peer_cpu) == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }\n    // Do not spend the bounded read attempts", "// Do not spend the bounded read attempts"),
         "core reader pin": (
             "kernel/arch/arm64/kernel/peer_read.tkb",
-            "if (peer_pin(0) == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }\n    while (peer_read_cpu(cpu_bytes as []u8) != 0) {}",
-            "while (peer_read_cpu(cpu_bytes as []u8) != 0) {}"),
+            "if (peer_pin(0) == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }\n    while (peer_read_cpu() != 0) {}",
+            "while (peer_read_cpu() != 0) {}"),
         "core reader start gate": (
             "kernel/arch/arm64/kernel/peer_read.tkb",
             "if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CORE_READY_TAG,",

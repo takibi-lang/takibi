@@ -1,0 +1,36 @@
+// Test-only deferred console. Formatting runs against bounded byte storage;
+// the single external write happens after the pool exercise has returned.
+extern fn linux_write(fd: i32, buf: *u8, len: usize) -> isize;
+extern fn linux_exit(code: i32) -> void;
+const REPORT_CAPACITY: usize = 2048;
+enum ReportState: u8 { Recording; Full; }
+private let mut report_bytes: [u8; REPORT_CAPACITY];
+private let mut report_length: usize = 0;
+private let mut report_state: ReportState = ReportState::Recording;
+fn uart_putc(c: u8) {
+    let at: usize = report_length;
+    if (at < REPORT_CAPACITY) {
+        report_bytes[at] = c;
+        report_length = at + 1;
+    } else {
+        report_state = ReportState::Full;
+    }
+}
+fn uart_puts(s: *u8) {
+    let mut offset: usize = 0;
+    while (*(s + (offset as isize)) != 0) {
+        uart_putc(*(s + (offset as isize)));
+        offset = offset + 1;
+    }
+}
+fn growable_report_flush() {
+    match report_state {
+        ReportState::Full => { linux_exit(1); return; }
+        ReportState::Recording => {}
+    }
+    let length: usize = report_length;
+    let written: isize = linux_write(1, report_bytes as *u8, length);
+    if (written != length as isize) { linux_exit(1); }
+}
+fn platform_init() {}
+fn platform_shutdown() {}

@@ -1,3 +1,6 @@
+use "kernel/arch/arm64/kernel/el0_getcpu.tkb";
+use "kernel/arch/arm64/kernel/el0_read.tkb";
+
 /* The window scripts/validate_protocol_trace.py replays against
  * StackOwnership.tla (GitHub issue #606). A static-PIE EL0 program, kept
  * free of writable globals and compiled with trap sites rejected, run once from
@@ -48,11 +51,12 @@ const PROTOCOL_TRACE_ERROR_FLOOR: usize = 0xFFFFFFFFFFFFF000;
 // Every CPU the kernel can have, as an affinity mask.
 const PROTOCOL_TRACE_ANY_CPU: u8 = 0x0F;
 
-private fn protocol_trace_fail(line: borrow []const u8) !{unsafe} {
+private fn protocol_trace_fail(line: borrow []const u8) !{unsafe, noreturn} {
     // Raw ABI input only: these syscalls read the readonly bytes.
     // The bridge exposes no writable slice or checked mutation.
     svc5(WRITE_SYSCALL, 1, (unsafe { line as *u8 }) as usize, line.len, 0, 0);
     svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+    while (true) { }
 }
 
 private fn protocol_trace_pin(cpus: u8) -> usize {
@@ -87,17 +91,16 @@ private fn protocol_trace_lifecycle(child_cpus: u8) {
 
 // Spin on getcpu until this process runs on `cpu`; false if it never does.
 private fn protocol_trace_reach(cpu: u8) -> bool {
-    let mut cpu_bytes: [u8; 4];
-    cpu_bytes[0] = 99;
+    let mut here: u8 = 99;
     for poll: usize in 0..<PROTOCOL_TRACE_ARRIVAL_POLLS {
-        if (cpu_bytes[0] != cpu) {
-            if (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize,
-                     0, 0, 0, 0) != 0) {
-                cpu_bytes[0] = 99;
+        if (here != cpu) {
+            match el0_getcpu() {
+                El0CpuResult::Ready(value) => { here = value as u8; }
+                El0CpuResult::Failed(code) => { here = 99; }
             }
         }
     }
-    return cpu_bytes[0] == cpu;
+    return here == cpu;
 }
 
 // GitHub issue #847: the window must show a LeaveBegin and a LeaveComplete,
@@ -162,13 +165,23 @@ private fn protocol_trace_el1_preempt() {
 }
 
 // The first bytes of one ext2 file into `buffer`; the count read.
-private fn protocol_trace_read_file(path: borrow []const u8, buffer: *u8,
-                                    size: usize) -> usize !{unsafe} {
+private fn protocol_trace_read_file(path: borrow []const u8,
+        buffer: borrow uninit []u8) -> usize !{unsafe}
+        ensures init(buffer[0..<result]) {
     let fd: usize = svc5(OPENAT_SYSCALL, AT_FDCWD, (unsafe { path as *u8 }) as usize, 0, 0, 0);
-    if (fd >= PROTOCOL_TRACE_ERROR_FLOOR) { return PROTOCOL_TRACE_ERROR_FLOOR; }
-    let got: usize = svc5(READ_SYSCALL, fd, buffer as usize, size, 0, 0);
-    svc5(CLOSE_SYSCALL, fd, 0, 0, 0, 0);
-    return got;
+    if (fd >= PROTOCOL_TRACE_ERROR_FLOOR) {
+        protocol_trace_fail(bs"protocol-trace: file did not open\n");
+    }
+    match el0_read(fd, buffer) {
+        El0ReadResult::Read(count) => {
+            svc5(CLOSE_SYSCALL, fd, 0, 0, 0, 0);
+            return count;
+        }
+        El0ReadResult::Failed(code) => {
+            svc5(CLOSE_SYSCALL, fd, 0, 0, 0, 0);
+            protocol_trace_fail(bs"protocol-trace: file did not read\n");
+        }
+    }
 }
 
 /* GitHub issue #638 stage 9 (c), maintainer option A1: the lasting evidence
@@ -186,7 +199,7 @@ private fn protocol_trace_el1_real() !{unsafe} {
     let mut first: [u8; 64];
     let mut again: [u8; 64];
     let path = bs"/etc/init.sh\0";
-    let expected: usize = protocol_trace_read_file(path, first as *u8, 64);
+    let expected: usize = protocol_trace_read_file(path, first as []u8);
     if (expected == 0 || expected >= PROTOCOL_TRACE_ERROR_FLOOR) {
         protocol_trace_fail(bs"protocol-trace: el1 real: /etc/init.sh did not read\n");
     }
@@ -206,12 +219,12 @@ private fn protocol_trace_el1_real() !{unsafe} {
             }
             for round: usize in 0..<PROTOCOL_TRACE_REAL_READS {
                 for index: usize in 0..<64 { again[index] = 0; }
-                let got: usize = protocol_trace_read_file(path, again as *u8, 64);
+                let got: usize = protocol_trace_read_file(path, again as []u8);
                 if (got != expected) {
                     protocol_trace_fail(bs"protocol-trace: el1 real: a read returned another length\n");
                 }
                 for index: usize in 0..<64 {
-                    if (again[index] != first[index]) {
+                    if (index < expected && again[index] != first[index]) {
                         protocol_trace_fail(bs"protocol-trace: el1 real: a read returned other bytes\n");
                     }
                 }
@@ -240,7 +253,7 @@ private fn protocol_trace_el1_real_cross() !{unsafe} {
     let mut first: [u8; 64];
     let mut again: [u8; 64];
     let path = bs"/etc/init.sh\0";
-    let expected: usize = protocol_trace_read_file(path, first as *u8, 64);
+    let expected: usize = protocol_trace_read_file(path, first as []u8);
     if (expected == 0 || expected >= PROTOCOL_TRACE_ERROR_FLOOR) {
         protocol_trace_fail(bs"protocol-trace: el1 cross: /etc/init.sh did not read\n");
     }
@@ -264,12 +277,12 @@ private fn protocol_trace_el1_real_cross() !{unsafe} {
             }
             for round: usize in 0..<PROTOCOL_TRACE_REAL_READS {
                 for index: usize in 0..<64 { again[index] = 0; }
-                let got: usize = protocol_trace_read_file(path, again as *u8, 64);
+                let got: usize = protocol_trace_read_file(path, again as []u8);
                 if (got != expected) {
                     protocol_trace_fail(bs"protocol-trace: el1 cross: a read returned another length\n");
                 }
                 for index: usize in 0..<64 {
-                    if (again[index] != first[index]) {
+                    if (index < expected && again[index] != first[index]) {
                         protocol_trace_fail(bs"protocol-trace: el1 cross: a read returned other bytes\n");
                     }
                 }

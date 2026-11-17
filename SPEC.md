@@ -828,9 +828,10 @@ Rules:
   `unsafe` region holding only `assume_init` calls is not a raw-authority
   assertion, and TRUSTED_BASE.md lists every such site.
 - Passing `p`, `p as []T` or `&p` to a `borrow uninit` parameter makes `p`
-  `init` after the call, padding included. Passing `&p` to a `&mut T`
-  parameter makes its fields `init` but not its padding: the callee is
-  trusted to store every field (TRUSTED_BASE.md).
+  `init` after the call, padding included, unless explicit contracts replace
+  that default. An ordinary `&mut T` argument requires initialized fields
+  and establishes no initialization fact. Output APIs use `borrow uninit`
+  with checked contracts; a mutable reference alone is not an output contract.
 - At an `if` or `match`, a leaf is `uninit` after the merge if it is `uninit`
   at the end of any arm that reaches the merge. A loop body may run no times,
   so the state after a loop is the state before it.
@@ -839,17 +840,31 @@ Rules:
 the argument is fully initialized; since every read already requires that,
 it documents the contract (for example `copy_to_user`'s source). `uninit`
 is an out parameter, as C#'s `out`: the callee may not read it before it
-writes it, and it must be `init` on every return. A `borrow uninit` slice
-must be filled whole (`zero_fill`, a whole assignment, another `borrow
-uninit` call, or `assume_init`); stage 2 has no byte ranges.
+writes it. Without an explicit postcondition it must be fully `init` on
+every return. An explicit postcondition can instead guarantee a prefix,
+field-only storage, or an output only on a specified return outcome (below).
+
+An `unsafe` raw-pointer cast of the address of a whole `borrow uninit`
+output place, one of its inline fields, or a borrowed output slice may name
+storage before it has been
+initialized. This is address formation, not a pointee read, and establishes
+no initialization fact. It does not permit a checked reference/byte-slice
+view or traversal through an uninitialized pointer field. A raw initializer
+must still establish its output contract; writes the checker cannot follow
+require a separately audited `assume_init` after the writes. The pointer's
+validity, bounds and unpublished-storage precondition remain trusted at this
+explicit raw boundary.
 
 `scratch let mut g: T;` (or `private scratch let mut ...`) declares per-call
 scratch storage. Whatever an earlier call left in it counts as stale, so
 every function that touches it sees it `uninit` on entry and must zero-fill
-or write a buffer whole before reading it or copying it out. Any index of a
-scratch array global names the same place, since each element is reached
-only by one holder at a time -- in the kernel, the holder of the slot that
-indexes it (a trusted premise).
+or establish the requested initialized range before reading it or copying it
+out. Scratch-array elements have separate initialization facts keyed by a
+local selector binding and its field path, or by a constant index. Different
+bindings are conservatively distinct. Rebinding or writing the selector,
+consuming its owner, or passing that owner mutably invalidates dependent
+facts. Exclusivity alone does not equate different slots or acquisitions.
+Other selector expressions must first be bound to a local value.
 
 ```takibi
 struct Pair { a: u8; b: u64; }
@@ -866,13 +881,68 @@ fn bytes() -> usize {
 fn fill(dst: borrow uninit []u8) { zero_fill(dst); }   // init on return
 ```
 
-Known limitations: local arrays declared without an initializer are not
-tracked yet, so reading one before writing it is not rejected. Intervals are
-compared only by constant differences between their bounds (an incomplete,
-sound check), path conditions other than a contract's own result are not
-used, and a merge keeps an interval only when every arm has the same one.
+Local arrays declared without an initializer are tracked. Element stores
+establish singleton intervals; checked output contracts and counted loops
+can establish wider ranges. A counted loop needs a store on every normally
+completing body path; a function return does not reach the post-loop read,
+while an outer `break` or `continue` prevents this summary. Reads inside the
+loop may use the preceding initialized prefix, not the current element
+before its store. Initialization inference remains incomplete: an unproved
+read is rejected even when the program could be safe. Path facts and loop
+inference are described below; arbitrary alias equivalence is not inferred.
 
 ### Initialization contracts (GitHub issue #954)
+
+For slice indexing, initialization-flow arithmetic can use the declared
+unsigned refinement of an immutable, non-address-taken scalar parameter and
+the slice type's minimum length. These are existing type premises, not runtime
+assertions. A copy from a named global byte array retains its exact length
+when converted to a byte slice; this does not initialize a destination suffix
+beyond the copied range.
+
+`init_links(p.next, p.head)` is an unconditional initialization contract on
+an inline `usize` array and a `usize` head field of the same `borrow uninit`
+record parameter. It states that following an in-range link reads initialized
+storage. Bounds remain independently checked; the relation does not assert
+acyclicity, allocation uniqueness or termination. A fully initialized array
+satisfies it regardless of successor values. Any proved terminal value at or
+above capacity ends traversal, rather than only capacity itself.
+
+The current connection checks entry, exit and call boundaries. An empty
+constructor can establish a constant terminal head without clearing the
+array. It transfers only the initialized head and the linked relation, never
+a whole-array or byte-view guarantee. Calls invalidate certificates before
+applying their checked postconditions; body-derived write footprints can
+preserve unaffected certificates without a new annotation. The summary
+records inline field paths relative to reference parameters or named globals
+and composes them through direct calls. It follows immutable aliases with
+recoverable addresses; pointer arithmetic, mutable aliases, unknown calls and
+recursive edges remain unproved. Array element writes conservatively affect
+the whole array. Local scalar assignments have an empty external footprint.
+Writes invalidate both overlapping link storage and overwritten scalar
+certificate values. Calls use resolved targets, including overloads, and
+argument evaluation is checked before any certificate is preserved.
+Distinct reference parameters are not assumed disjoint: a write may invalidate
+certificates rooted in other reference parameters or scratch globals. A
+scalar-only call can mutate globals, so its signature alone proves no frame
+property. Known global writes can preserve fresh local storage, but still
+invalidate potentially aliasing reference parameters. Loading a global pointer
+does not identify the storage it points to. Atomic loads and system-register
+reads have no own memory writes according to the builtin instruction tables;
+argument effects still apply. This does not prove concurrent stability.
+The checker can recover the named global array backing a returned slice when
+all returns identify that same array and the accessor has a body-derived empty
+write footprint. Immutable slice aliases and direct accessor wrappers retain
+this origin. Element writes through the slice affect the whole backing array;
+this does not prove that two slices of that array are disjoint. Mixed return
+origins, mutable aliases, pointer casts and external accessors remain unknown.
+Unknown write footprints discard all linked certificates.
+A certified node permits a typed successor read,
+while a store preserves the relation only when its successor is certified
+for that same storage. Loop entry certificates are retained only when all
+backedges preserve them; abrupt loop exits conservatively retain none.
+This connection currently recognizes source-constant terminal expressions;
+it does not re-evaluate a mutable arithmetic expression after assignment.
 
 A function may state, after its signature and `where` clause, which elements
 are `init` on entry and on return. `requires` and `ensures` are keywords.
@@ -891,13 +961,46 @@ fn path_view(slot: borrow SyscallSlot[0]) -> [u8; 256..]
         requires init(syscall_scratch[slot.index].path_buffer) { ... }
 ```
 
-- `init(P)` or `init(P[lo..<hi])` names a parameter, or a field of a
+- `init(P)` or `init(P[lo..<hi])` names a parameter, an inline field path
+  of a tracked `borrow uninit` record parameter, or a field of a
   `scratch` global indexed by a held slot capability: `G[s.index].f...`
   where `s` is a parameter of a `linear struct` owner type. Any other
   global is an error: the slot's linear ownership is what keeps another
   function from changing the element between caller and callee. `lo` and
   `hi` are linear terms over the parameters, their `.len`, constants and
-  `result` (for an integer result) or an arm's payload binder.
+  `result` (for an integer result) or an arm's payload binder. Unsigned
+  numerical fields of a returned record are also allowed: `result.count`
+  or `counts.output_bytes` for a variant payload binder. Projections are
+  one level deep for these returned numerical values. The body must relate the actual writes to the returned
+  field value; caller facts use a stable record snapshot. A mutated record
+  does not retain a prior field-based initialization guarantee.
+- Parameter field contracts can name nested inline fields, such as
+  `init(pool.core.free_head)` or `init(pool.flags[0..<n])`. Field ranges
+  require a fixed array; they cannot initialize a slice descriptor by
+  claiming writes to the memory it would point at. Pointer fields cannot
+  be traversed as inline storage. Only named fields/ranges become initialized;
+  ordinary whole-record borrows still require all typed fields initialized.
+  A whole nested-record `init` includes that record's padding.
+- `init(P)` for a whole record includes its padding, both when checking the
+  producer and when applying the guarantee. `init_fields(P)` instead names
+  all recursively stored fields, excluding padding. It currently accepts
+  a whole mutable-reference record parameter (including a borrowed or
+  address-indexed reference), or a record array/slice parameter and ranges
+  such as `init_fields(records[0..<n])`. A range initializes the typed
+  fields of each covered element, not its padding. Typed aggregate element
+  stores and `slice_copy` conservatively discard destination padding facts;
+  `zero_fill` and audited `assume_init` cover both fields and padding.
+  It works in `requires`, unconditional `ensures`, and bool/variant-conditional
+  `ensures`. Parameters named by either predicate in a pre/postcondition must be
+  `borrow uninit`, so the body tracks and checks their state. An unchecked
+  postcondition on an ordinary reference cannot invent initialized padding.
+  A call through a mutable record reference or writable record slice
+  discards pre-call padding facts, because aggregate replacement may bring
+  undefined padding. A field-only guarantee restores no padding; a subsequent
+  byte view needs an explicit whole-byte guarantee. Readonly calls retain
+  padding facts. This is conservative even for a field-only writer.
+  This keeps typed field access usable without adding runtime zeroing just
+  to satisfy a byte-complete contract.
 - `ensures C` holds at every return. On a `borrow uninit` parameter it
   replaces the default "whole parameter `init` at every return". At a call
   it is applied to the arguments: the callee's element `k` of parameter `x`
@@ -2562,11 +2665,18 @@ reversing this). `--forbid-unsafe` remains the opt-in, whole-program
 "reject if unsafe is reachable anywhere" mode for a subtree that wants
 that stronger guarantee.
 
-`noreturn` is currently a trusted extern-only contract. A call to such an
-extern terminates control-flow analysis, and LLVM receives the corresponding
-function attribute. Takibi functions and function-pointer rows cannot claim
-it yet; this narrow surface models the reviewed assembly fail-stop without
-pretending arbitrary Takibi loops are proven not to return.
+`noreturn` is a checked contract on a Takibi function and a trusted contract
+on an extern function. A Takibi body must have no reachable normal return or
+fallthrough path: direct calls to declared non-returning targets and
+`while (true)` loops with no exit establish this structurally. A reachable
+`return` inside such a loop still rejects; a nested loop's `break` exits only
+that nested loop. Branches are checked on every reachable arm. Calls use their
+resolved target, not a possibly overloaded or shadowed source name.
+
+Non-returning calls end initialization and ownership paths, and LLVM receives
+the function attribute. This proves no normal return, not termination,
+progress, or memory safety of the body. Function-pointer rows still cannot
+claim this contract. Unknown call targets remain conservative.
 
 Lock order is checked with two structured checker annotations. An acquisition
 function declares `acquires_lock_<rank>_<name>`; its minimum reachable rank is
@@ -3321,6 +3431,38 @@ see "Arrays and Pointers" below) over introducing a new type or tagged
 variant.
 
 ## Authority-Derived Region Returns
+
+### Synchronous borrowed byte-I/O descriptors
+
+`io_read_span(bytes)` creates a linear `IoReadSpan[0]` from a writable
+byte slice, including an uninitialized output slice. `io_write_span(bytes)`
+creates a linear `IoWriteSpan[0]` from an initialized writable or readonly
+byte slice. Each descriptor retains the source storage's loan until
+`io_span_end(span)` consumes it. End each descriptor on every returning path;
+construction alone never establishes output initialization.
+
+The compiler owns the address/length representation. Source code cannot
+construct, project, or mutate its private fields. The erased index `0` is
+not a storage identity; the checker tracks the originating binding and its
+owner loan. `io_span_length(span)` returns ordinary `usize` metadata and
+borrows the descriptor, so returning the length does not return the loan.
+Helpers may accept `borrow IoReadSpan[0]` or `borrow IoWriteSpan[0]`.
+
+`unsafe { io_readv(fd, span1, ...) }` and
+`unsafe { io_writev(fd, span1, ...) }` submit one or more matching spans
+synchronously. The descriptor count is the source argument count. Submission
+borrows each span without consuming it. Submission arguments and length
+access arguments must be named bindings or integer literals; nested
+expressions that could consume another argument's loan are rejected.
+
+The backend builds a stack iovec array and invokes the AArch64 syscall ABI
+(numbers 65/66) or Linux AMD64 ABI (19/20). Other targets reject these
+operations. The raw `usize` result follows the syscall ABI. This boundary
+trusts the execution environment to consume the descriptors synchronously
+without retaining their addresses. It is not a proof of the syscall body.
+Submission grants no initialization facts: an audited output wrapper must
+relate successful results to the actual written ranges. In particular, a
+total byte count does not automatically certify arbitrary overlapping spans.
 
 ### Owner-derived slices
 
@@ -4577,10 +4719,22 @@ A function may state constraints on its static indices before its body:
 the constraints; a false or unprovable constraint is a compile error, with
 no runtime fallback. `where` is a keyword.
 
-Const-generic arguments in function `where` clauses are substituted for each
-concrete instantiation, including arithmetic expressions. Runtime singleton
-names retain their call-site checking; specialization does not assume that
-the caller satisfies a bound.
+Const-generic values inferred from a parameter's generic struct type are
+substituted in these constraints separately for each instantiation. For
+example, `where k < N` on a function taking `Buffer(N)` becomes `k < 4`
+for `Buffer(4)`; the runtime singleton index `k` remains a call obligation.
+In functions with `where` clauses, the arithmetic flow checker also uses
+clauses over immutable unsigned scalar singleton parameters to prove fixed
+array indices, including inline record array fields. It checks machine
+non-overflow before using an arithmetic expression as an integer term. Each
+accepted index emits an arithmetic obligation for Z3; raw pointers do not
+acquire an inferred extent. Proofs are specific to the function instantiation.
+Concrete capacity relations need no redundant assertion. A remaining bounds
+diagnostic describes the required range and path facts, and points to
+`static_assert` for explicitly checking an intended compile-time capacity
+invariant. Such an assertion is checked, not assumed, and does not establish
+an unproved runtime input restriction; that restriction belongs in the input
+type or `where` contract. General nonlinear terms remain unsupported.
 
 Constants, normalized static expressions and constant refinement intervals
 keep their existing fast paths. In the interval path a product of static
@@ -4732,8 +4886,12 @@ let taken: usize = publish_copy(&records[slot], &out);
 Acquire-load the commit word, copy the payload, acquire-load it again,
 compare. Returns the sequence the copy is consistent at, or `0` for
 "nothing valid here" -- already this protocol's unpublished value, since a
-committed sequence is never 0. `out` is written only on success, so
-ignoring the result reads whatever `out` held rather than half a record.
+committed sequence is never 0. Payload stores can occur before a failed
+sequence re-check; only a nonzero result guarantees a complete copied
+record. For tracked uninitialized destinations, the checker grants
+field-only initialization under `taken > 0`. A zero or ignored result
+provides no initialization guarantee; padding is never certified by the
+publication operation.
 
 **The re-check after the copy is the part being bought.** The copy is not
 atomic; a writer that wrapped onto the slot while it ran leaves a mixture
@@ -4742,8 +4900,9 @@ commit word changing underneath. It is the step a hand-written reader
 omits, and its absence is invisible in review because the code looks
 finished without it.
 
-**Stated limit.** Nothing forces the caller to branch on the returned
-sequence: `publish_copy` itself still answers a `usize`. A caller that
+**Stated limit.** A pre-initialized destination can still be read without
+checking whether the copy succeeded; initialization is not freshness.
+For such a destination nothing forces a branch on the returned sequence: `publish_copy` itself still answers a `usize`. A caller that
 wants the branch forced can wrap it in a generic function returning a
 `must_use generic variant` such as `Snapshot(T) { Unpublished; Copied(*T); }`
 (see "Generic Variants"; linux_user/generic_variant does this for two
@@ -5991,3 +6150,47 @@ consumed, or when the inspection context is invalidated. These record-only
 operations share the trusted storage interpretation of the pointer accessors;
 they add no allocation or runtime ownership representation. Primitive element
 instances retain the existing pointer operations and have no record accessor.
+
+### Inferred initialization-frame separation
+
+The initialization checker may infer a requirement that a referenced input
+and another referenced input or named global occupy disjoint storage when
+this is needed to preserve an `init_links` certificate across a write. It
+validates the body again with the candidate requirements fixed. This is an
+erased compile-time condition, not a dynamic overlap test or an unsafe
+assertion. Bounds and initialization remain separate obligations.
+
+Direct callers must prove the condition from storage provenance or carry it
+as their own inferred entry requirement. Fresh inline local objects and
+distinct inline globals have independent storage; distinct inline fields of
+one object can be disjoint. Different reference parameter names alone do not
+prove disjointness. This initial domain conservatively rejects unknown
+returned addresses, pointer-loaded aliases, indexed aliases and reference
+rebinding. It does not infer general heap separation or infer exclusivity
+merely from a lifetime index.
+
+A function with remaining inferred requirements has internal LLVM linkage.
+It cannot be named as an `--external-entry`, used as a runtime function value,
+or used directly as a compiler-generated external entry hook: those
+interfaces do not carry the requirement. Diagnostics identify the required
+regions and suggest independent storage or a checked wrapper. A wrapper that
+discharges every requirement remains eligible for external linkage. Unknown
+external writes still invalidate certificates. Ordinary functions without
+such requirements retain their existing linkage and callback behavior.
+
+For a restricted source-derived pattern, a raw payload store may retain the
+initialization of unrelated local metadata even when its address passed
+through an integer array. The checker follows a declared static backing
+array, checked relative extent/alignment, chunk-address stores, acquired
+prefix growth, and matching table accessors. An owner-based access additionally
+requires the same local pool, a validated empty constructor and allocation
+body, and the returned owner's actual index field. A separately constructed
+owner, matching record type, or pool identity alone does not establish this
+coverage. This inference adds no runtime state or caller annotation.
+
+Unknown writes and unsupported flows discard these facts. Reinitialization
+invalidates old owner coverage. Known writes to unrelated named globals may
+preserve fresh-local facts; writes to the backing provider's globals do not.
+A covered payload store still invalidates aliases of its backing global.
+This is initialization framing, not an exemption from `unsafe`, a general
+heap/lifetime analysis, or a proof of allocation uniqueness or concurrency.

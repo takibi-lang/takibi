@@ -948,16 +948,17 @@ private fn profile_put_udec(value_in: usize) {
     let mut count: usize = 0;
     let mut value: usize = value_in;
     if (value == 0) { uart_debug_putc(0x30); return; }
-    for index: usize in 0..<20 {
-        if (value != 0) {
-            digits[index] = 0x30 + ((value % 10) as u8);
-            count = count + 1;
-            value = value / 10;
-        }
+    while (value != 0 && count < 20) {
+        digits[count] = 0x30 + ((value % 10) as u8);
+        count = count + 1;
+        value = value / 10;
     }
-    while (count != 0) {
-        count = count - 1;
-        if (count < 20) { uart_debug_putc(digits[count]); }
+    let length: usize = count;
+    for index: usize in 0..<20 {
+        if (index < length) {
+            let at: usize = length - index - 1;
+            if (at < 20) { uart_debug_putc(digits[at]); }
+        }
     }
 }
 

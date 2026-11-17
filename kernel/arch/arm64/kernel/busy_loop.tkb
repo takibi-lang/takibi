@@ -1,3 +1,6 @@
+use "kernel/arch/arm64/kernel/el0_getcpu.tkb";
+use "kernel/arch/arm64/kernel/el0_affinity.tkb";
+use "kernel/arch/arm64/kernel/el0_clock.tkb";
 /* The two CPU-bound EL0 programs /etc/inittab starts as `respawn` entries,
  * built from this one source and linked twice with different ELF entry
  * points (-e busy_loop_a, -e busy_loop_b; see the Makefile's
@@ -77,9 +80,7 @@ fn busy_loop_placement_guard() {
         return;
     }
     let mut state: usize = 0xD1B54A32D192ED03;
-    let mut start_time: [u64; 2];
-    let start_ns: usize = busy_loop_clock_monotonic_ns(
-        start_time as []u64);
+    let start_ns: usize = busy_loop_clock_monotonic_ns();
     if (start_ns == 0xFFFFFFFFFFFFFFFF) {
         svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
         return;
@@ -95,9 +96,7 @@ fn busy_loop_placement_guard() {
             svc5(WORKLOAD_EXIT_SYSCALL, state & 1, 0, 0, 0, 0);
             return;
         }
-        let mut now_time: [u64; 2];
-        let now_ns: usize = busy_loop_clock_monotonic_ns(
-            now_time as []u64);
+        let now_ns: usize = busy_loop_clock_monotonic_ns();
         if (now_ns == 0xFFFFFFFFFFFFFFFF ||
             (now_ns >= start_ns && now_ns - start_ns >=
              PLACEMENT_GUARD_TIMEOUT_NS)) {
@@ -107,12 +106,12 @@ fn busy_loop_placement_guard() {
     svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
 }
 
-private fn busy_loop_clock_monotonic_ns(bytes: borrow [u64; 2..]) -> usize {
-    if (svc5(CLOCK_GETTIME_SYSCALL, CLOCK_MONOTONIC,
-             bytes as *u64 as usize, 0, 0, 0) != 0) {
-        return 0xFFFFFFFFFFFFFFFF;
+private fn busy_loop_clock_monotonic_ns() -> usize  {
+    let mut time: [u64; 2];
+    match el0_clock_gettime(CLOCK_MONOTONIC, time as []u64) {
+        El0ClockResult::Ready => { return (time[0] * 1000000000 + time[1]) as usize; }
+        El0ClockResult::Failed(code) => { return 0xFFFFFFFFFFFFFFFF; }
     }
-    return (bytes[0] * 1000000000 + bytes[1]) as usize;
 }
 
 /* Report the placement recorded while the foreground pipeline ran. */
@@ -172,13 +171,12 @@ fn busy_loop_peer_net_wake() !{unsafe} {
         svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
         return;
     }
-    let mut cpu_bytes: [u8; 4];
-    while (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize,
-                0, 0, 0, 0) != 0 ||
-           (cpu_bytes[0] as usize |
-            ((cpu_bytes[1] as usize) << 8) |
-            ((cpu_bytes[2] as usize) << 16) |
-            ((cpu_bytes[3] as usize) << 24)) != peer_cpu) {}
+    while (true) {
+        match el0_getcpu() {
+            El0CpuResult::Ready(cpu) => { if (cpu == peer_cpu) { break; } }
+            El0CpuResult::Failed(code) => {}
+        }
+    }
 
     let waiting: []const u8 = bs"peer NetRx fixture: pinned to cpu 1\n";
     if (svc5(WRITE_SYSCALL, 1, (unsafe { waiting as *u8 }) as usize,
@@ -204,10 +202,12 @@ fn busy_loop_peer_net_wake() !{unsafe} {
 
 fn busy_loop_run(tag: usize) {
     let mut online_mask: [u8; 8];
-    if (svc5(GETAFFINITY_SYSCALL, 0, 8,
-             online_mask as *u8 as usize, 0, 0) != 8) {
-        svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
-        return;
+    match el0_getaffinity(0, online_mask as []u8) {
+        El0AffinityResult::Ready => {}
+        El0AffinityResult::Failed(code) => {
+            svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
+            return;
+        }
     }
     // The busy-pair fixture pins its two persistent workers while the staged
     // boot checks need the secondary idle loop. This is fixture-owned

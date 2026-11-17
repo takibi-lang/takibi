@@ -1,0 +1,21 @@
+// Audited clock_gettime output boundary for standalone EL0 fixtures.
+// Current limitations (2026-11-16): kernel writes and this separate image's
+// contract are connected by audit, not a cross-image compiler proof.
+must_use variant El0ClockResult { Ready; Failed(usize); }
+
+// Success follows both user_write_u64 operations at offsets 0 and 8 in
+// kernel/kernel/syscall.tkb. Failure may write only part of the output.
+fn el0_clock_gettime(clock: usize, output: borrow uninit [u64; 2..])
+        -> El0ClockResult !{unsafe}
+        ensures match result {
+            El0ClockResult::Ready => init(output[0..<2]),
+            El0ClockResult::Failed(code) => true
+        } {
+    let raw: *u64 = unsafe { output as *u64 };
+    let code: usize = svc5(113, clock, raw as usize, 0, 0, 0);
+    if (code == 0) {
+        unsafe { assume_init(output[0..<2]); }
+        return El0ClockResult::Ready;
+    }
+    return El0ClockResult::Failed(code);
+}

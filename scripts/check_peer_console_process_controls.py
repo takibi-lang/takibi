@@ -44,7 +44,7 @@ def problems(tree: dict[str, str]) -> list[str]:
     for shape in (
         "const WRITE_SYSCALL: usize = 64;",
         "output.len - total",
-        "while (peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {}",
+        "while (peer_read_cpu() != peer_cpu) {}",
     ):
         if shape not in payload:
             result.append(f"peer payload lost operation: {shape}")

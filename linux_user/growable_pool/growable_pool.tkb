@@ -49,7 +49,9 @@
 // detail this test does not pin down.
 use "linux_user/growable_pool/growable_pool_lib.tkb";
 
-fn app_main() {
+// Capture the transcript without external I/O while pool proofs are live.
+// app_main flushes it after this function returns, including early failures.
+fn growable_pool_exercise() {
     page_allocator_init();
     uart_puts("growable_pool\n");
 
@@ -330,12 +332,22 @@ fn app_main() {
 // "not Ok" only at the sites where anything but success means the test
 // itself is broken; the sites BELOW that are about which failure it is
 // now say so.
-fn ensure_ok(pool: &mut GrowablePool(usize, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
-             index: usize) -> bool {
+fn ensure_ok(pool: borrow uninit &mut GrowablePool(usize, SLOTS_PER_CHUNK, MAX_CHUNKS, N),
+             index: usize) -> bool
+        requires init(pool.active_chunks)
+        requires init(pool.chunk_data_base)
+        requires init(pool.chunk_page_index)
+        requires init_links(pool.core.next_free, pool.core.free_head)
+        ensures init_links(pool.core.next_free, pool.core.free_head) {
     match growable_pool_ensure(pool, index) {
         GrowablePoolEnsureResult::Ok => { return true; }
         GrowablePoolEnsureResult::IndexOutOfRange => { return false; }
         GrowablePoolEnsureResult::ChunkLimitReached => { return false; }
         GrowablePoolEnsureResult::OutOfMemory => { return false; }
     }
+}
+
+fn app_main() {
+    growable_pool_exercise();
+    growable_report_flush();
 }

@@ -33,6 +33,27 @@ ensures  match result { K(x) => init(...), K2 => true, _ => true }
 `lo` and `hi` are linear terms over parameters, their `.len`, constants,
 `result` and an arm's payload binder.
 
+### Whole records and padding
+
+`init(P)` requires every leaf of whole storage, including padding.
+`init_fields(P)` names a whole mutable-reference record parameter, or a
+record array/slice and its element ranges. It requires only the fields,
+recursively. Array coverage tracks a separate padding interval; typed element
+stores and typed slice copies discard destination padding evidence. Mutable
+record/reference and writable record-slice calls also discard pre-call
+padding evidence, even for field-only writers; explicit whole-byte outputs
+restore it. Readonly calls preserve it. Both
+predicates support the same conditional return contracts and require a
+`borrow uninit` parameter. Ordinary mutable references require initialized
+fields and add no post-call initialization fact. This avoids both silently
+certifying unwritten padding and adding runtime clearing for typed-only uses.
+
+Finite leaf coverage at reads and contract boundaries is re-checked by Z3
+alongside the interval goals below. The leaf state/layout and control-flow
+correspondence are compiler premises; the re-check does not prove the flow
+engine itself. Raw output initialization remains an explicitly audited
+boundary, and forming its address establishes no initialization fact.
+
 ### The predicate inside a function
 
 A tracked array or slice leaf that is not wholly `init` carries `Init(k)` for
@@ -63,7 +84,7 @@ version.
 
 A plain `borrow T` is always wholly initialized; the maintainer decided on
 2026-10-24 that partial initialization is expressed only by `borrow uninit`
-plus `requires`/`ensures`. A `requires` naming a plain borrow is an error,
+plus `requires`/`ensures`. Either clause naming a plain parameter is an error,
 so reading a signature's type never needs its contracts to know whether
 the value is whole.
 
@@ -111,6 +132,16 @@ trace suppressed during the trial runs. The body is then checked once
 from the fixpoint, and each kept interval writes two obligations ("on
 entry", "preserved"). A body that can leave an iteration early keeps no
 candidate. Everything stays quantifier free.
+
+Branch joins also test incoming intervals and prefixes whose endpoints alias
+an observed incoming endpoint. They do not guess a prefix for every unrelated
+mutable scalar. Every retained candidate must be covered in every live
+predecessor, with an emitted arithmetic certificate when coverage is derived.
+For a yes/no candidate query, the interval walk rejects early when neither
+the start nor any known upper endpoint can reach the requested end. A
+successful path must end at one of those points. Diagnostic queries retain
+the full walk to locate the gap. This changes search cost, not the coverage
+acceptance condition; constant and symbolic equivalence controls cover it.
 
 Representation 2, a bitmask for a constant N, turned out not to be needed:
 with constant bounds the interval union is already an exact finite set, and

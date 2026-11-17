@@ -20,6 +20,7 @@
    under --facts rangeobl, the channel of #952. *)
 
 module SMap = Map.Make (String)
+module SSet = Set.Make (String)
 
 type lin = { c : int; m : int SMap.t }   (* c + sum coeff * atom *)
 
@@ -56,13 +57,20 @@ let chk_mul a b =
     else chk p
 
 let add x y =
-  { c = chk_add x.c y.c;
+  let c = chk_add x.c y.c in
+  if x.c = 0 && SMap.is_empty x.m then y
+  else if y.c = 0 && SMap.is_empty y.m then x
+  else { c;
     m = SMap.union (fun _ a b ->
           let s = chk_add a b in if s = 0 then None else Some s) x.m y.m }
 
 let scale k x =
   if k = 0 then const 0
-  else { c = chk_mul k x.c; m = SMap.map (fun a -> chk_mul k a) x.m }
+  else if k = 1 then begin
+    ignore (chk x.c);
+    SMap.iter (fun _ a -> ignore (chk a)) x.m;
+    x
+  end else { c = chk_mul k x.c; m = SMap.map (fun a -> chk_mul k a) x.m }
 
 let sub x y = add x (scale (-1) y)
 
@@ -82,7 +90,10 @@ let atoms x = SMap.fold (fun a _ acc -> a :: acc) x.m []
 let subst a by x =
   match SMap.find_opt a x.m with
   | None -> x
-  | Some k -> add { x with m = SMap.remove a x.m } (scale k by)
+  | Some k ->
+      let rest = SMap.remove a x.m in
+      if x.c = 0 && SMap.is_empty rest then scale k by
+      else add { x with m = rest } (scale k by)
 
 let to_string ?(name = fun a -> a) x =
   let parts = SMap.fold (fun a k acc ->
@@ -144,41 +155,46 @@ let entails ?(depth = 4) (f : facts) (t : lin) =
   try go depth t with Overflow -> false
 
 (* None: covered. Some cur: the first point the walk could not cover. *)
-let uncovered ?(eqs = []) ?(facts = no_facts) (ivs : interval list) ((a, b) : interval) =
+let uncovered ?(need_gap = true) ?(eqs = []) ?(facts = no_facts) (ivs : interval list) ((a, b) : interval) =
   try
   let n = normalize eqs in
   let facts = normalize_facts eqs facts in
   let ge x y = entails facts (sub x y) in   (* x >= y *)
   let ivs = List.map (fun (lo, hi) -> (n lo, n hi)) ivs in
   let b = n b in
-  let pool = ref ivs in
-  (* [report] is the point a failure names: the walk's position after its
-     last step that provably advanced, so a step through a possibly empty
-     interval never names a point outside the goal. *)
-  let rec go cur report fuel =
+  (* Explore reachable endpoints rather than greedily taking the first
+     interval. Two known prefixes can have incomparable symbolic ends;
+     choosing the shorter-looking one must not hide a usable adjacent
+     chunk. Each endpoint is visited once, so the search stays bounded by
+     the number of intervals. Every edge still requires lo <= cur <= hi. *)
+  let visited = ref [] in
+  let rec go cur report =
     if ge cur b then None
-    else if fuel = 0 then Some report
-    else
-      (* An interval that starts at or before cur and reaches b ends the
-         walk; else one that starts at or before cur and ends at or past
-         it advances it. *)
-      let reaches = List.exists (fun (lo, hi) -> ge cur lo && ge hi b) ivs in
-      if reaches then None else
-      (* GitHub issue #977: a step needs only lo <= cur <= hi, not
-         progress: [a, cur) and [lo, hi) then cover [a, hi). So a possibly
-         empty prefix [0, offset) chains into [offset, offset + 1). Each
-         interval is stepped through at most once, so the walk ends. *)
-      let step = List.find_map (fun (lo, hi) ->
+    else if List.exists (fun (lo, hi) -> ge cur lo && ge hi b) ivs then None
+    else begin
+      visited := cur :: !visited;
+      let next = List.filter_map (fun (lo, hi) ->
         if ge cur lo && ge hi cur && not (equal hi cur) then Some hi
-        else None) !pool in
-      (match step with
-       | Some hi ->
-           pool := List.filter (fun (_, h) -> not (equal h hi)) !pool;
-           let advanced = entails facts (sub (sub hi cur) (const 1)) in
-           go hi (if advanced then hi else report) (fuel - 1)
-       | None -> Some report)
+        else None) ivs in
+      let rec search first_failure = function
+        | [] -> Some (Option.value ~default:report first_failure)
+        | hi :: rest when List.exists (equal hi) !visited -> search first_failure rest
+        | hi :: rest ->
+            let advanced = entails facts (sub (sub hi cur) (const 1)) in
+            match go hi (if advanced then hi else report) with
+            | None -> None
+            | Some point -> search (match first_failure with
+                | None -> Some point | old -> old) rest in
+      search None next
+    end
   in
-  go (n a) (n a) (List.length ivs + 1)
+  let start = n a in
+  (* A successful walk ends at its start or at an interval's upper bound.
+     If no such endpoint can reach b, candidate checking can reject without
+     exploring every edge. Diagnostics still walk to locate a useful gap. *)
+  if not need_gap && not (ge start b) &&
+     not (List.exists (fun (_, hi) -> ge hi b) ivs)
+  then Some start else go start start
   with Overflow -> Some a
 
 (* ---- z3 obligations ---------------------------------------------------- *)
@@ -212,6 +228,24 @@ let smt x =
    as a usize, the path's equalities and facts. [terms] are the other
    terms the query names, so their atoms are declared too. *)
 let prelude ~rule ~claim ?(facts = no_facts) (eqs : eqs) (terms : lin list) =
+  (* Drop disconnected premises, never strengthen one. The retained query
+     is at least as strong: fewer assumptions cannot hide a counterexample.
+     Close through equalities, inequalities and min definitions so multi-hop
+     arithmetic dependencies remain available. *)
+  let groups = List.map (fun (x, t) -> x :: atoms t) eqs
+    @ List.map atoms facts.ge
+    @ List.map (fun (x, l, r) -> x :: atoms l @ atoms r) facts.mins in
+  let intersects needed names = List.exists (fun x -> SSet.mem x needed) names in
+  let rec close needed =
+    let next = List.fold_left (fun needed names ->
+      if intersects needed names then List.fold_left (fun s x -> SSet.add x s) needed names
+      else needed) needed groups in
+    if SSet.equal next needed then needed else close next in
+  let needed = close (SSet.of_list (List.concat_map atoms terms)) in
+  let keep names = names = [] || intersects needed names in
+  let eqs = List.filter (fun (x, t) -> keep (x :: atoms t)) eqs in
+  let facts = { ge = List.filter (fun t -> keep (atoms t)) facts.ge;
+    mins = List.filter (fun (x, l, r) -> keep (x :: atoms l @ atoms r)) facts.mins } in
   let all = List.concat_map atoms terms
     @ List.concat_map (fun (x, t) -> x :: atoms t) eqs
     @ List.concat_map atoms facts.ge

@@ -1,3 +1,7 @@
+use "kernel/arch/arm64/kernel/el0_affinity.tkb";
+use "kernel/arch/arm64/kernel/el0_clock.tkb";
+use "kernel/arch/arm64/kernel/el0_getcpu.tkb";
+
 /* sched_setaffinity and sched_getaffinity, the affinity ABI (GitHub issue
  * #9). A static-PIE EL0 program, kept free of writable globals and compiled
  * with the trap-site rejection. The lines it prints are compared by the ash
@@ -95,11 +99,12 @@ private fn affinity_expect_result(label: borrow []const u8,
     let mut answer: [u8; 19];
     answer[0] = 0x30;
     answer[1] = 0x78;
+    let digits = answer[2..<18];
     for index: usize in 0..<16 {
         let digit: usize = (actual >> ((15 - index) * 4)) & 15;
         let mut byte: u8 = (digit + 0x30) as u8;
         if (digit >= 10) { byte = (digit - 10 + 0x61) as u8; }
-        answer[index + 2] = byte;
+        digits[index] = byte;
     }
     answer[18] = 10;
     svc5(WRITE_SYSCALL, 1, answer as *u8 as usize, 19, 0, 0);
@@ -107,7 +112,7 @@ private fn affinity_expect_result(label: borrow []const u8,
 }
 
 // Byte 0 holds CPUs 0-7 and byte 7 holds CPUs 56-63.
-private fn affinity_mask_fill(mask: borrow [u8; 8..], low: u8, high: u8) {
+private fn affinity_mask_fill(mask: borrow uninit [u8; 8..], low: u8, high: u8) ensures init(mask[0..<8]) {
     for index: usize in 0..<8 { mask[index] = 0; }
     mask[0] = low;
     mask[7] = high;
@@ -121,14 +126,11 @@ private fn affinity_mask_is(mask: borrow [u8; 8..], low: u8) -> bool {
     return true;
 }
 
-private fn affinity_cpu(cpu_bytes: borrow [u8; 4..]) -> usize {
-    if (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize, 0, 0, 0, 0) != 0) {
-        return 99;
+private fn affinity_cpu() -> usize  {
+    match el0_getcpu() {
+        El0CpuResult::Ready(cpu) => { return cpu; }
+        El0CpuResult::Failed(code) => { return 99; }
     }
-    return cpu_bytes[0] as usize |
-           ((cpu_bytes[1] as usize) << 8) |
-           ((cpu_bytes[2] as usize) << 16) |
-           ((cpu_bytes[3] as usize) << 24);
 }
 
 // Written when core 0 had no idle loop (it has one since GitHub issue #592),
@@ -165,12 +167,12 @@ private fn affinity_spinner() {
     affinity_spin_for(AFFINITY_SPINNER_NS);
 }
 
-private fn affinity_clock_ns(time: borrow [u64; 2..]) -> usize {
-    if (svc5(CLOCK_GETTIME_SYSCALL, CLOCK_MONOTONIC,
-             time as *u64 as usize, 0, 0, 0) != 0) {
-        return 0xFFFFFFFFFFFFFFFF;
+private fn affinity_clock_ns() -> usize  {
+    let mut time: [u64; 2];
+    match el0_clock_gettime(CLOCK_MONOTONIC, time as []u64) {
+        El0ClockResult::Ready => { return (time[0] * 1000000000 + time[1]) as usize; }
+        El0ClockResult::Failed(code) => { return 0xFFFFFFFFFFFFFFFF; }
     }
-    return (time[0] * 1000000000 + time[1]) as usize;
 }
 
 // Syscalls back to back -- a pending signal is taken at each return -- until
@@ -178,12 +180,14 @@ private fn affinity_clock_ns(time: borrow [u64; 2..]) -> usize {
 // spin at once, which the parent then reports as OUTLIVED, by name.
 private fn affinity_spin_for(limit: usize) {
     let mut probe_mask: [u8; 8];
-    let mut time: [u64; 2];
-    let start: usize = affinity_clock_ns(time as []u64);
+    let start: usize = affinity_clock_ns();
     let mut spinning: bool = start != 0xFFFFFFFFFFFFFFFF;
     while (spinning) {
-        svc5(GETAFFINITY_SYSCALL, 0, 8, probe_mask as *u8 as usize, 0, 0);
-        let now: usize = affinity_clock_ns(time as []u64);
+        match el0_getaffinity(0, probe_mask as []u8) {
+            El0AffinityResult::Ready => {}
+            El0AffinityResult::Failed(code) => {}
+        }
+        let now: usize = affinity_clock_ns();
         if (now == 0xFFFFFFFFFFFFFFFF || (now >= start && now - start >= limit)) {
             spinning = false;
         }
@@ -205,12 +209,11 @@ private fn affinity_remote_target() {
     if (svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) != 0) {
         svc5(EXIT_SYSCALL, 3, 0, 0, 0, 0);
     }
-    let mut cpu_bytes: [u8; 4];
     let mut arrived: bool = false;
     let mut attempts: usize = 0;
     while (arrived == false && attempts < AFFINITY_PIN_ATTEMPTS) {
         attempts = attempts + 1;
-        if (affinity_cpu(cpu_bytes as []u8) == 1) { arrived = true; }
+        if (affinity_cpu() == 1) { arrived = true; }
     }
     if (arrived == false) { svc5(EXIT_SYSCALL, 2, 0, 0, 0, 0); }
     affinity_mask_fill(mask as []u8, 3, 0);
@@ -231,7 +234,7 @@ private fn affinity_remote_target() {
         affinity_mask_fill(mask as []u8, 0, 0);
         if (svc5(GETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) == 8 &&
             affinity_mask_is(mask as []u8, 1)) {
-            if (affinity_cpu(cpu_bytes as []u8) == 0) {
+            if (affinity_cpu() == 0) {
                 svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
             }
             svc5(EXIT_SYSCALL, 4, 0, 0, 0, 0);
@@ -242,9 +245,8 @@ private fn affinity_remote_target() {
 
 fn affinity_probe() !{unsafe} {
     let mut mask: [u8; 8];
-    let mask_address: usize = mask as *u8 as usize;
-
     affinity_mask_fill(mask as []u8, 0, 0);
+    let mask_address: usize = mask as *u8 as usize;
     if (svc5(GETAFFINITY_SYSCALL, 0, 8, mask_address, 0, 0) != 8 ||
         (mask[0] & 1) == 0) {
         affinity_fail(bs"affinity: the default mask did not cover cpu 0\n");
@@ -339,12 +341,11 @@ fn affinity_probe() !{unsafe} {
     if (svc5(SETAFFINITY_SYSCALL, 0, 8, mask_address, 0, 0) != 0) {
         affinity_fail(bs"affinity: cpu 1 alone was refused\n");
     }
-    let mut cpu_bytes: [u8; 4];
     let mut on_peer: bool = false;
     let mut attempts: usize = 0;
     while (on_peer == false && attempts < AFFINITY_PIN_ATTEMPTS) {
         attempts = attempts + 1;
-        if (affinity_cpu(cpu_bytes as []u8) == 1) { on_peer = true; }
+        if (affinity_cpu() == 1) { on_peer = true; }
     }
     if (on_peer == false) {
         affinity_fail(bs"affinity: never ran on cpu 1\n");
@@ -444,14 +445,14 @@ fn affinity_probe() !{unsafe} {
         svc5(CLOSE_SYSCALL, directory, 0, 0, 0, 0) != 0) {
         affinity_fail(bs"affinity: procfs directory result changed on cpu 1\n");
     }
-    if (affinity_cpu(cpu_bytes as []u8) != 1) {
+    if (affinity_cpu() != 1) {
         affinity_fail(bs"affinity: descriptor calls moved the pinned caller\n");
     }
     // The same handler and errno run on the CPU admitted by this task's mask.
     if (svc5(PARENT_PROGRESS_SYSCALL, 0, 0, 0, 0, 0) != LINUX_EINVAL) {
         affinity_fail(bs"affinity: parent_progress asked from cpu 1 did not answer\n");
     }
-    if (affinity_cpu(cpu_bytes as []u8) != 1) {
+    if (affinity_cpu() != 1) {
         affinity_fail(bs"affinity: parent_progress moved the pinned caller\n");
     }
     affinity_say(bs"affinity: pinned to cpu 1, where parent_progress answered without rerouting\n");
@@ -485,7 +486,7 @@ fn affinity_probe() !{unsafe} {
             let mut attempts: usize = 0;
             while (arrived == false && attempts < AFFINITY_PIN_ATTEMPTS) {
                 attempts = attempts + 1;
-                if (affinity_cpu(cpu_bytes as []u8) == cpu) { arrived = true; }
+                if (affinity_cpu() == cpu) { arrived = true; }
             }
             if (arrived == false) {
                 affinity_fail(
@@ -519,7 +520,7 @@ fn affinity_probe() !{unsafe} {
     let mut back_attempts: usize = 0;
     while (back == false && back_attempts < AFFINITY_PIN_ATTEMPTS) {
         back_attempts = back_attempts + 1;
-        if (affinity_cpu(cpu_bytes as []u8) == 0) { back = true; }
+        if (affinity_cpu() == 0) { back = true; }
     }
     if (back == false) {
         affinity_fail(bs"affinity: never came back to cpu 0\n");

@@ -17,4 +17,4 @@ let cases = [
 
 let run (prog : toplevel list) : toplevel list =
   Type_layout.register_variant Atomic_spec.cas_result_type cases;
-  prog @ [VariantDef (Atomic_spec.cas_result_type, [], cases, true, loc)]
+  Io_span.run (prog @ [VariantDef (Atomic_spec.cas_result_type, [], cases, true, loc)])

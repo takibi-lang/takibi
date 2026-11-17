@@ -13,7 +13,7 @@ def main():
         (probe.replace('answered without rerouting', 'done'), watcher, syscall),
         (probe.replace('svc5(PARENT_PROGRESS_SYSCALL,', 'svc5(WRITE_SYSCALL,'), watcher, syscall),
         (probe, watcher.replace('DISPATCHED_SYSCALL = 452', 'DISPATCHED_SYSCALL = 160'), syscall),
-        (probe.replace('affinity_cpu(cpu_bytes as []u8) != 1', 'false'), watcher, syscall),
+        (probe.replace('affinity_cpu() != 1', 'false'), watcher, syscall),
         (probe, watcher.replace('*kernel_process_uart_record_parent_progress', '*kernel_syscall_migrate_return'), syscall),
         (probe, watcher.replace('handler.condition = f"$_thread == {CPU1_THREAD}"', 'handler.condition = "true"'), syscall),
         (probe, watcher.replace('resumed.condition = f"$x1 == {GETCPU_SYSCALL} && $_thread == {CPU1_THREAD}"', 'resumed.condition = "true"'), syscall),

@@ -1,0 +1,20 @@
+// Audited sched_getaffinity output boundary for standalone EL0 fixtures.
+// Current limitations (2026-11-16): this is the maintained eight-byte mask
+// ABI. Kernel-to-EL0 output correspondence is audited, not compiler-proved.
+must_use variant El0AffinityResult { Ready; Failed(usize); }
+
+// The kernel returns 8 only after a successful eight-byte mask copy.
+fn el0_getaffinity(pid: usize, output: borrow uninit [u8; 8..])
+        -> El0AffinityResult !{unsafe}
+        ensures match result {
+            El0AffinityResult::Ready => init(output[0..<8]),
+            El0AffinityResult::Failed(code) => true
+        } {
+    let raw: *u8 = unsafe { output as *u8 };
+    let code: usize = svc5(123, pid, 8, raw as usize, 0, 0);
+    if (code == 8) {
+        unsafe { assume_init(output[0..<8]); }
+        return El0AffinityResult::Ready;
+    }
+    return El0AffinityResult::Failed(code);
+}

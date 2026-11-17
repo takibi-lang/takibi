@@ -240,3 +240,41 @@ and requires z3 to refute both. On the QEMU kernel (2026-10-30): 3
   from conditions, for-loop counters, and the constant folds other proof sites
   read directly (`Const_env.folded_value`). Moving whole judgments to
   obligations is the later step of #952 and #13.
+
+## Tracked initialization leaves
+
+Whole-record initialization decisions also emit `takibi-init-obligation v1`,
+with `rule: init-leaves` and QF_LIA. Each layout leaf has an integer index,
+including padding leaves. Comments map indices to names. The query asks for
+an index required by the read or contract but absent from the definitely
+initialized set. Consecutive indices are emitted as intervals; no user
+loop invariant or proof program is added.
+
+Typed reads and `init_fields(P)` require fields only. Byte views, `init(P)`
+and implicit whole-output returns require padding too. Conditional contracts
+are checked on the corresponding return paths and applied only in matching
+caller outcomes. The compiler's normal flow rules select those states;
+Z3 checks finite coverage under their facts. Existing element-range goals
+continue to check partially filled arrays and slices.
+
+This is deliberately narrower than an independent memory-model proof. The
+required footprint is separate from the checker's acceptance decision, but
+layout, tracked-place extraction, state transfers, call/branch correspondence
+and untracked/raw-memory premises are not independently proved by this query.
+The existing range-obligation control plants the historical producer check
+that omits padding: it must compile under the internal fault flag while Z3
+reports a missing padding leaf. A typed-read-only positive control would not
+exercise that distinction.
+
+These obligations use the existing solver runner, canonical cache and 5-second
+cold init budget. No separate Python source analysis or test lane is added.
+
+### Initialization certificate premise selection
+
+Initialization certificates retain the transitive arithmetic premises connected
+with their goal and coverage intervals, including dependencies through equality,
+inequality and `min` definitions. Disconnected assumptions are omitted. Removing
+assumptions strengthens the query rather than hiding a counterexample. Branch
+joins emit certificates only for facts retained after checking every live arm;
+discarded candidates contribute no facts and need no certificate. The 5-second
+cold initialization budget is unchanged.

@@ -115,6 +115,9 @@ let by_name = List.fold_left (fun specs spec ->
 ) StringMap.empty all
 
 let find name = StringMap.find_opt name by_name
+(* Shared syscall lowering uses the same register contract as this row. *)
+let syscall_trap = Option.get (find "svc5")
+
 let is_instruction name = Option.is_some (find name)
 let names = List.map (fun spec -> spec.name) all
 

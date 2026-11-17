@@ -375,6 +375,8 @@ LINUX_UNUSED_CHECK       := --external-entry main
 # virtio_blk.tkb on QEMU's list.
 #
 # KERNEL_UNUSED_EXEMPT, with the reason each is not checked:
+# - arch/arm64/kernel/el0_{getcpu,read,clock,affinity,termios}.tkb: syscall contracts compiled and
+#   reached by the standalone EL0 fixtures, not the production kernel closure;
 # - boot/fdt.tkb: each platform uses its own DTB lookups, and linux_user/fdt
 #   drives the whole parser;
 # - drivers/block/memory.tkb: each platform picks one of its two block
@@ -416,6 +418,11 @@ KERNEL_GC_LIST = --print-gc-sections > $@.gc-sections
 # The DMA and GEM fixtures have their own --check-unused-file invocations and are
 # absent from both production closures.
 KERNEL_UNUSED_EXEMPT := \
+	kernel/arch/arm64/kernel/el0_termios.tkb \
+	kernel/arch/arm64/kernel/el0_clock.tkb \
+	kernel/arch/arm64/kernel/el0_affinity.tkb \
+	kernel/arch/arm64/kernel/el0_getcpu.tkb \
+	kernel/arch/arm64/kernel/el0_read.tkb \
 	kernel/lib/lz4.tkb \
 	kernel/tests/rpi5/gem_tx/fixture.tkb \
 	kernel/tests/rpi5/gem_tx/irq_fixture.tkb \
@@ -624,7 +631,7 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              nonexhaustive refined narrow enum align packed byte_view struct_align const_global \
                              sizeof_offsetof int64 bitops indexed_view tcp_conn_view \
                              affine_escape_via_index align_ptr_proof linear_obligation tuple_pair region_proto region_inspection pool_space_replay \
-                             field_lease match_int_lit record_loans \
+                             field_lease match_int_lit record_loans io_span \
                              callstack ringbuf crc8 djb2 siphash slice slice_from_field logical_eval foreach for loop fizzbuzz fibonacci \
                              bubblesort lz4 inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring boot_once set_once guarded_ref publish fdt number usb_config usb_init_report xhci_event_match xhci_regs uart_rx_ring pl011_rx block_cache gem_tx_wait virtio_net_tx virtio_net_reply generic_variant runtime_bounds pin_placement place_array protocol_ring protocol_tx protocol_txrx protocol_snapshot region_held region_table_retire header_overlay cache_geometry wait_status plain_variant variant_abi struct_array_arg struct_array_result preempt_region src_loc
 # GitHub issue #1035: linux_user/ext2_host is a driver program, not a
@@ -854,6 +861,8 @@ $(LINUX_USER_DIR)/growable_pool/growable_pool_exe.o: kernel/lib/freelist.tkb ker
 # linux_user/intrusive_pool/intrusive_pool_lib.tkb names no provider (issue #364), so the
 # is supplied here and must precede it.
 $(LINUX_USER_DIR)/growable_pool/growable_pool_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb
+$(LINUX_USER_DIR)/growable_pool/growable_pool_exe.o: COMMON_LINUX_UART := $(LINUX_USER_DIR)/growable_pool/report_uart.tkb
+$(LINUX_USER_DIR)/growable_pool/growable_pool_exe.o: $(LINUX_USER_DIR)/growable_pool/report_uart.tkb
 $(LINUX_USER_DIR)/growable_pool/growable_pool_exe.o: $(LINUX_USER_DIR)/growable_pool/growable_pool_lib.tkb kernel/lib/freelist.tkb $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb
 $(LINUX_USER_DIR)/intrusive_pool/intrusive_pool_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
 $(LINUX_USER_DIR)/pool_container/pool_container_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
@@ -1197,6 +1206,8 @@ KERNEL_RPI5_EXC_FRAME_TKB := $(KERNEL_DIR)/arch/arm64/kernel/exception_frame.tkb
 KERNEL_RPI5_USER_PAYLOAD_TKB := $(KERNEL_DIR)/arch/arm64/kernel/user_payload.tkb
 KERNEL_RPI5_USER_PAYLOAD_ASM_S := $(KERNEL_DIR)/arch/arm64/kernel/user_payload_asm.S
 KERNEL_RPI5_USER_PAYLOAD_TKB_O := $(KERNEL_BUILD_DIR)/user_payload_tkb.o
+KERNEL_USER_PAYLOAD_READV_S := $(KERNEL_DIR)/arch/arm64/kernel/user_payload_readv_fixture.S
+KERNEL_USER_PAYLOAD_READV_O := $(KERNEL_BUILD_DIR)/user_payload_readv_fixture.o
 KERNEL_RPI5_USER_PAYLOAD_ASM_O := $(KERNEL_BUILD_DIR)/user_payload_asm.o
 KERNEL_RPI5_USER_PAYLOAD_ELF := $(KERNEL_BUILD_DIR)/user_payload.elf
 # GitHub issue #1138: user_payload's sigaltstack probe alone, for host Linux.
@@ -1651,39 +1662,43 @@ $(KERNEL_RPI5_USER_PAYLOAD_TKB_O): $(KERNEL_RPI5_USER_PAYLOAD_TKB) $(TAKIBI) $(K
 $(KERNEL_RPI5_USER_PAYLOAD_ASM_O): $(KERNEL_RPI5_USER_PAYLOAD_ASM_S) | $(KERNEL_BUILD_DIR)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
-$(KERNEL_RPI5_USER_PAYLOAD_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O)
-	$(LLD) -pie --no-dynamic-linker -e initial_user_payload $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) -o $@
+# Deliberately invalid descriptors belong only to user_payload ABI fixtures.
+$(KERNEL_USER_PAYLOAD_READV_O): $(KERNEL_USER_PAYLOAD_READV_S) | $(KERNEL_BUILD_DIR)
+	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
+
+$(KERNEL_RPI5_USER_PAYLOAD_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) $(KERNEL_USER_PAYLOAD_READV_O)
+	$(LLD) -pie --no-dynamic-linker -e initial_user_payload $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) $(KERNEL_USER_PAYLOAD_READV_O) -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
-$(KERNEL_SIGALTSTACK_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O)
-	$(LLD) -pie --no-dynamic-linker -e sigaltstack_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) -o $@
+$(KERNEL_SIGALTSTACK_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) $(KERNEL_USER_PAYLOAD_READV_O)
+	$(LLD) -pie --no-dynamic-linker -e sigaltstack_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) $(KERNEL_USER_PAYLOAD_READV_O) -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
-$(KERNEL_SHARED_MAPPING_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O)
-	$(LLD) -pie --no-dynamic-linker -e shared_mapping_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) -o $@
+$(KERNEL_SHARED_MAPPING_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) $(KERNEL_USER_PAYLOAD_READV_O)
+	$(LLD) -pie --no-dynamic-linker -e shared_mapping_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) $(KERNEL_USER_PAYLOAD_READV_O) -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
-$(KERNEL_MMAP_REGION_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O)
-	$(LLD) -pie --no-dynamic-linker -e mmap_region_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) -o $@
+$(KERNEL_MMAP_REGION_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) $(KERNEL_USER_PAYLOAD_READV_O)
+	$(LLD) -pie --no-dynamic-linker -e mmap_region_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) $(KERNEL_USER_PAYLOAD_READV_O) -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
-$(KERNEL_CLOCK_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O)
-	$(LLD) -pie --no-dynamic-linker -e realtime_clock_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) -o $@
+$(KERNEL_CLOCK_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) $(KERNEL_USER_PAYLOAD_READV_O)
+	$(LLD) -pie --no-dynamic-linker -e realtime_clock_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) $(KERNEL_USER_PAYLOAD_READV_O) -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
-$(KERNEL_ITIMER_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O)
-	$(LLD) -pie --no-dynamic-linker -e itimer_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) -o $@
-$(KERNEL_CREDENTIALS_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O)
-	$(LLD) -pie --no-dynamic-linker -e credentials_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) -o $@
+$(KERNEL_ITIMER_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) $(KERNEL_USER_PAYLOAD_READV_O)
+	$(LLD) -pie --no-dynamic-linker -e itimer_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) $(KERNEL_USER_PAYLOAD_READV_O) -o $@
+$(KERNEL_CREDENTIALS_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) $(KERNEL_USER_PAYLOAD_READV_O)
+	$(LLD) -pie --no-dynamic-linker -e credentials_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) $(KERNEL_USER_PAYLOAD_READV_O) -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
-$(KERNEL_SIGNAL_CONFORMANCE_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O)
-	$(LLD) -pie --no-dynamic-linker -e signal_conformance_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) -o $@
+$(KERNEL_SIGNAL_CONFORMANCE_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) $(KERNEL_USER_PAYLOAD_READV_O)
+	$(LLD) -pie --no-dynamic-linker -e signal_conformance_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) $(KERNEL_USER_PAYLOAD_READV_O) -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
-$(KERNEL_SIGCHLD_SIGINFO_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O)
-	$(LLD) -pie --no-dynamic-linker -e sigchld_siginfo_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) -o $@
+$(KERNEL_SIGCHLD_SIGINFO_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) $(KERNEL_USER_PAYLOAD_READV_O)
+	$(LLD) -pie --no-dynamic-linker -e sigchld_siginfo_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) $(KERNEL_USER_PAYLOAD_READV_O) -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
-$(KERNEL_SIGNAL_XFAIL_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O)
-	$(LLD) -pie --no-dynamic-linker -e signal_xfail_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) -o $@
+$(KERNEL_SIGNAL_XFAIL_LINUX_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) $(KERNEL_USER_PAYLOAD_READV_O)
+	$(LLD) -pie --no-dynamic-linker -e signal_xfail_probe_alone $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) $(KERNEL_USER_PAYLOAD_READV_O) -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
 # GitHub issue #448: the CPU-bound pair /etc/inittab starts. One source and

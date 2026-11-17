@@ -697,31 +697,115 @@ rules globally.
   tail; borrowed holders keep the whole-body rule. The source recognizer
   and the named acquire/release boundary correspondence are build-check
   trust, not a compiler ownership or arbitrary control-flow proof.
-- Definite initialization (SPEC.md, "Definite Initialization") trusts three
-  premises. Scratch array elements currently share initialization facts across
-  indices. This is a known limit, not a consequence of exclusive ownership:
-  initializing one slot can satisfy a contract for another, including after
-  release and reacquisition. The syscall scratch pool uses leased slots,
-  not a fixed per-CPU element. Slot identity and the authority lifetime are
-  not yet represented in these initialization facts; Z3 coverage over the
-  collapsed facts does not repair that omission. A callee
-  handed `&p` through a `&mut T` parameter stores every field of `p`. Each
+- Definite initialization (SPEC.md, "Definite Initialization") still trusts
+  raw initialization assertions and compiler extraction. Scratch array facts
+  now name the selected slot/owner binding. Different selectors do not share
+  facts, and owner consumption, selector writes and rebinding invalidate
+  dependent facts. This does not prove an issuer returns unique fresh storage
+  or establish arbitrary alias equivalence. Each
   `unsafe { assume_init(...) }` states that bytes were written by means the
-  checker cannot see. Maintained `assume_init` sites would be listed here,
+  checker cannot see. Maintained `assume_init` sites are listed here,
   each named `path:function` (`scripts/check_assume_init_sites.py` refuses
-  an unlisted site and a stale entry, GitHub issue #764); there are none.
+  an unlisted site and a stale entry, GitHub issue #764). The native pool site is
+  `linux_user/intrusive_pool/intrusive_pool_lib.tkb:intrusive_pool_init_retaining`:
+  the preceding raw zero_fill writes exactly sizeof(Mutex) bytes at the
+  inline lock's address. The caller supplies unpublished storage with no
+  live guard or usable alias. The assertion covers that lock only, after
+  the write; all remaining pool fields are checked stores. This makes the
+  existing raw initialization premise explicit, not a new freshness proof.
   The four former sites now carry a `requires init(...)` checked at every
   call: `syscall_path_view_here` since GitHub issue #954, and execve's
   `file_buffer` staging helpers (`syscall_exec_argv_here`,
   `syscall_exec_path_here`, `syscall_script_line_here`) and every function
   between them and `syscall_execve_current`'s zero fill since GitHub issue
-  #974. A `requires` or
-  `ensures` clause on a scratch slot, `syscall_scratch[slot.index].f`, rests
-  on the same unverified same-slot premise. A held `SyscallSlot` excludes
-  another holder of that element, but does not make different indices or
-  successive acquisitions interchangeable. Linear use-after-release rejection
-  is separate from the missing initialization-fact invalidation. Uninitialized local
-  arrays are not tracked yet.
+  #974. Scratch-slot contracts now distinguish selector bindings/field paths
+  and constant indices. Selector writes, owner consumption and rebinding
+  invalidate dependent facts. Local arrays are tracked as initialized
+  intervals. These are compiler transfer rules, not solver-derived ownership
+  or freshness proofs; alias equivalence and external writers remain separate
+  proof boundaries. Ordinary mutable-reference calls require
+  initialized fields; their former implicit field-fill premise is gone.
+  Whole-record and record-array `init` contracts check padding as well as fields;
+  `init_fields` transfers only fields. Mutable aggregate calls discard
+  pre-call padding facts; whole-byte output contracts can restore them.
+  Z3 re-checks finite leaf coverage at tracked reads, whole-record contracts
+  and output returns, plus the existing interval goals. Its premises are
+  the flow checker's state facts and layout leaves, not an independently
+  derived source execution: extraction, alias tracking, transfer rules and
+  assumptions about untracked values still need compiler trust.
+  Body-derived stored-address and owner frames also remain compiler transfer
+  rules. They recognize checked growth, activation and insertion paths into
+  named static backing arrays, preserving fresh inline-local metadata only
+  across proven payload stores or writes to unrelated named globals. Unknown
+  writes, reset and unsupported aliases discard the derived facts. Static
+  object placement remains a backend premise; these rules do not prove page
+  uniqueness, general heap lifetime, concurrency or assembly instructions.
+- Audited assembly output wrappers in `user_entry_extern.tkb` export only
+  the output address and assert initialization after the assembly returns.
+  `kernel/arch/arm64/kernel/user_entry_extern.tkb:el1_resume_probe_checked`
+  trusts the landing's five register-pair stores
+  (ten usize words);
+  `kernel/arch/arm64/kernel/user_entry_extern.tkb:crash_snapshot_copy_leveled_frame`
+  trusts four usize
+  stores in `crash_snapshot_copy_saved_frame`. The resume probe retains a
+  private pointer during the invocation: no use after return, before a new
+  invocation overwrites it, is an audited premise. Neither the instructions
+  nor that lifetime premise are proved by Z3. Callers receive only the
+  specified initialized prefix; no runtime clearing or init flag is added.
+- Standalone EL0 syscall output contracts are audited cross-image premises.
+  They do not prove correspondence with the separately compiled kernel.
+  `kernel/arch/arm64/kernel/el0_getcpu.tkb:el0_getcpu_output` trusts successful
+  getcpu with a non-null CPU destination to write its four-byte prefix.
+  `kernel/arch/arm64/kernel/el0_read.tkb:el0_read` trusts a successful read to
+  write exactly the returned prefix; error and oversized returns grant none.
+  `kernel/arch/arm64/kernel/el0_clock.tkb:el0_clock_gettime` trusts successful
+  clock_gettime to write both u64 words of its timespec.
+  `kernel/arch/arm64/kernel/el0_affinity.tkb:el0_getaffinity` trusts the
+  eight-byte sched_getaffinity result to follow the complete mask copy.
+  `kernel/arch/arm64/kernel/el0_termios.tkb:el0_tcgets` trusts successful
+  TCGETS to follow all 36 termios-byte writes. These wrappers export borrowed
+  output addresses only for the synchronous syscall and assert initialization
+  only after the checked success result. They add no raw dereferences or
+  blanket clearing. Their callers retain checked reads and prefix contracts.
+- Additional ABI fixture assertions are deliberately syscall-specific.
+  `kernel/arch/arm64/kernel/user_payload.tkb:payload_getcpu_pair` trusts
+  successful getcpu to write two adjacent u32 outputs (eight bytes).
+  `kernel/arch/arm64/kernel/user_payload.tkb:payload_getrlimit` trusts
+  successful prlimit64 to copy the sixteen-byte old limit.
+  `kernel/arch/arm64/kernel/user_payload.tkb:payload_pipe` trusts successful
+  pipe2 to write both u32 descriptors (eight bytes).
+  `kernel/arch/arm64/kernel/user_payload.tkb:payload_clock_output` trusts
+  successful clock_gettime to write sixteen bytes; failure grants none.
+  `kernel/arch/arm64/kernel/user_payload.tkb:payload_stat` trusts successful
+  newfstatat to follow the kernel's 128-byte clearing and field writes.
+  `kernel/arch/arm64/kernel/user_payload.tkb:rusage_total` trusts successful
+  getrusage to follow the kernel's 144-byte clearing and timeval writes.
+  `kernel/arch/arm64/kernel/user_payload.tkb:payload_altstack_output` trusts
+  successful sigaltstack to write ss_sp and ss_size at byte ranges [0,8)
+  and [16,24). It grants no padding guarantee for bytes [12,16).
+  `kernel/arch/arm64/kernel/user_payload.tkb:payload_readv_probe` asserts
+  only eight output bytes after each of its two readv calls returns eight;
+  the second call must stop before its invalid next segment. Descriptor
+  construction and retention are separate obligations, not discharged by
+  this output assertion. Normal descriptors use compiler-owned borrowed
+  spans. The negative call uses `user_payload_readv_fixture.S`: an audited
+  leaf that builds two stack descriptors, invokes readv synchronously, and
+  retains no address. It is linked only with user_payload test images, not
+  the kernel or ordinary programs. Its instructions are not proved by Z3.
+  `kernel/arch/arm64/kernel/user_payload.tkb:payload_scheduler_probe`
+  trusts scheduler_probe_run's unconditional initial strb to write exactly
+  one byte before any return. Its address is borrowed for the invocation.
+  `kernel/arch/arm64/kernel/terminal_probe.tkb:terminal_probe_size` trusts
+  successful TIOCGWINSZ to clear all eight bytes before setting dimensions.
+  `kernel/arch/arm64/kernel/terminal_probe.tkb:terminal_probe_reap` trusts
+  wait4 without WNOHANG to write four status bytes before returning the
+  requested positive pid, in both immediate and resumed delivery paths.
+  `kernel/arch/arm64/kernel/signal_boundary_probe.tkb:interrupt_svc_output`
+  trusts the existing assembly's unconditional `str x21, [x5]` after svc
+  and before its sole normal return to initialize one handler-count word.
+  The borrowed address is saved only on that invocation's stack.
+  These output assertions are audited premises, not Z3 proofs of syscall
+  implementations or assembly instructions.
 - A RegionPool walked with no lock (`region_pool_first_unproven` and
   `region_pool_next_unproven`, GitHub issue #745) trusts that the pool's
   chunks are never shrunk while a walker may stand in one: the cursor reads

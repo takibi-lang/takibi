@@ -54,6 +54,25 @@ fn bounds_test_stored(extent_size: usize) {
 }
 
 fn app_main() {
+    // Distinct generic layouts exercise the computed store indices; no
+    // proof assertion or unchecked indexing is needed in the helper.
+    let mut a: ArithmeticSlots(2, 3, 6);
+    let mut b: ArithmeticSlots(3, 2, 6);
+    zero_fill(&a);
+    zero_fill(&b);
+    bounds_fill_chunk(&a, 2);
+    bounds_fill_chunk(&b, 1);
+    let mut sum_a: usize = 0;
+    let mut sum_b: usize = 0;
+    for i: usize in 0..<6 {
+        sum_a = sum_a + a.values[i];
+        sum_b = sum_b + b.values[i];
+    }
+    uart_puts("arithmetic slots: ");
+    uart_print(sum_a);
+    uart_puts(" ");
+    uart_print(sum_b);
+    uart_puts("\n");
     let limit: usize = 8;
     let index: usize = 3;
     if (index < limit) {

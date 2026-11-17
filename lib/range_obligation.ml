@@ -234,6 +234,10 @@ let fault_native_init_leaf = ref false
    refutes a wrong judgement. *)
 let fault_init_nowrap = ref false
 
+(* Historical whole-record contracts forgot to require initialized padding.
+   Coverage emission retains the full footprint when this control is on. *)
+let fault_init_padding = ref false
+
 (* Fault control only, same flag (GitHub issue #798): init_flow proves
    every slice index it can read as a term, so the control shows the index
    obligation refutes a wrong proof. *)

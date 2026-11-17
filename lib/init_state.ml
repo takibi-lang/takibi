@@ -27,6 +27,8 @@ let scratch : (string, unit) Hashtbl.t = Hashtbl.create 4
    against them and applies them at every call. *)
 type pred =
   | PInit of Ast.expr          (* init(P), init(P[lo..<hi]) *)
+  | PFields of Ast.expr        (* init_fields(P): record fields, not padding *)
+  | PLinked of Ast.expr * Ast.expr (* init_links(array, head) *)
   | PTrue
 
 type arm_pat = {

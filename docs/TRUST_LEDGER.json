@@ -4990,6 +4990,41 @@
         "range_obligations_qemu": "Range judge: the combined UART flow probe and refusal reporting add four initialization obligations.",
         "judge_obligations_init": "Range judge: the combined build checks four additional initialization obligations; no new trusted premise."
       }
+    },
+    {
+      "date": "2026-11-16",
+      "head": "e971bc2f",
+      "counts": {
+        "raw_mint_files": 15,
+        "frame_lines": 12962,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 80,
+        "raw_deref_io": 10,
+        "raw_deref_builtin_region": 113,
+        "raw_deref_generated": 0,
+        "unsafe_blocks": 178,
+        "extern_fns": 74,
+        "invariant_stop_sites": 137,
+        "static_assert_premises": 11,
+        "assembly_lines": 2864,
+        "per_cpu_ordinary_arrays": 50,
+        "per_cpu_stores": 13,
+        "raw_cpu_id_calls": 136,
+        "trust_build_checks": 25,
+        "tla_review_stamps": 174,
+        "judge_defects_range": 1,
+        "judge_defects_init": 0,
+        "judge_defects_region_overlay": 0,
+        "unprotected_globals": 22,
+        "frame_api_ratchet": 7
+      },
+      "changes": {
+        "assembly_lines": "#1508 approved user_payload-only negative readv fixture: eleven instructions plus assembler directives and audit comments; not linked into the kernel or terminal program",
+        "extern_fns": "#1508 borrowed entry for the approved user_payload-only invalid-tail readv fixture",
+        "frame_lines": "#1508 explicit checked initialization contracts, audited user_entry output wrappers, and prefix-safe diagnostic formatting in existing mint files",
+        "raw_mint_files": "#1508 user_entry_extern.tkb explicitly owns audited output-only exports for the ten-word resume probe and four-word crash frame",
+        "unsafe_blocks": "#1508 make syscall and assembly output premises explicit in narrow audited wrappers and mark synchronous vector submission as an external ABI boundary; no initialization flags or blanket clearing"
+      }
     }
   ]
 }

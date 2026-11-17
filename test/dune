@@ -13,3 +13,13 @@
  (name test_init_link)
  (modules test_init_link)
  (libraries takibi alcotest))
+
+(test
+ (name test_stored_prefix)
+ (modules test_stored_prefix)
+ (deps stored_prefix_case.tkb owner_prefix_case.tkb
+       ../linux_user/growable_pool/fake_page_provider.tkb
+       ../linux_user/growable_pool/growable_pool_lib.tkb
+       ../kernel/lib/execution_model.tkb ../kernel/lib/freelist.tkb
+       ../kernel/lib/slotmap.tkb)
+ (libraries takibi alcotest str))

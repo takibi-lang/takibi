@@ -1,4 +1,4 @@
-type declaration = Inferred | Required | Local_required | Trusted_extern
+type declaration = Inferred | Required | Local_required | Checked_noreturn
 
 type rule = {
   name : string;
@@ -293,7 +293,7 @@ let rules = [
     effect_free_forbidden = false; excludes_declared = [];
     excludes_reachable = []; rejects_unknown_indirect = false;
     forbids_reentry = false };
-  { name = "noreturn"; declaration = Trusted_extern; declaration_role = false;
+  { name = "noreturn"; declaration = Checked_noreturn; declaration_role = false;
     function_pointer = false; propagates = false; effect_free_forbidden = false;
     excludes_declared = []; excludes_reachable = [];
     rejects_unknown_indirect = false; forbids_reentry = false };
@@ -313,7 +313,7 @@ let declaration_text = function
   | Inferred -> "inferred"
   | Required -> "explicit"
   | Local_required -> "local explicit + inferred"
-  | Trusted_extern -> "trusted extern only"
+  | Checked_noreturn -> "checked body / trusted extern"
 let list_text = function [] -> "-" | xs -> String.concat ", " xs
 
 let markdown () =

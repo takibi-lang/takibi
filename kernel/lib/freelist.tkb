@@ -33,33 +33,12 @@
 // candidates for a follow-up issue rather than forced into this shape
 // (see issue #242 for the fd_table.tkb case specifically).
 //
-// Current limitations (2026-08-07). Keep this list current as call sites
-// change; a limitation that goes stale here is worse than none, since it
-// invites relying on a guarantee that quietly stopped holding.
-// - NOT SYNCHRONIZED. FreelistCore(N)/its callers (kernel/lib/slotmap.tkb's
-//   SlotMap(N)) do no locking of their own.
-//   Every current kernel/ instance (kernel/mm/page.tkb, kernel/kernel/
-//   process.tkb, kernel/mm/address_space.tkb, kernel/net/tcp.tkb's
-//   connection pool) is, as of this writing, reachable ONLY from
-//   syscall-dispatch context on core 0 -- never from an `!{interrupt}`
-//   handler, never from core 1 (which only proves PSCI/EL1 bring-up and
-//   parks, touching no shared kernel state). That is a fact about today's
-//   callers, not a property this file enforces or checks. The failure
-//   mode this guards against: a library that works by accident because
-//   every caller so far happened to be single-context gets adopted by a
-//   caller that isn't, and starts corrupting the free chain under
-//   concurrent access with no compiler diagnostic pointing at why --
-//   exactly the shape of bug issue #207 already found once (two
-//   sequential, single-threaded double frees silently corrupting the
-//   chain; see HISTORY.md). A genuinely concurrent caller (a future
-//   interrupt handler or core 2 user, see issue #242's design
-//   discussion) needs the SAME kind of hand-off this codebase already
-//   uses for cross-context shared state elsewhere: put the pool (or the
-//   specific field a concurrent caller touches) behind a lock/guard pair
-//   and a Place field, the pattern kernel/kernel/process.tkb's
-//   ScheduledProcessStore, kernel/net/tcp.tkb's TcpConnectionStore, and
-//   kernel/mm/process_image.tkb's ProcessCloneVmStore already establish
-//   -- not a change to this file itself.
+// Current limitations (2026-11-17). Keep this list current as call sites
+// change; a limitation that goes stale is worse than none.
+// - NOT SYNCHRONIZED. Callers must protect the entire allocation transaction,
+//   including payload/metadata updates, with their lock or other exclusive
+//   authority. The production bootstrap page pool uses its surrounding Mutex.
+//   Linked initialization checks neither concurrency nor allocation uniqueness.
 // - THE GENERATION BUDGET IS FINITE AND NEVER WRAPS (issue #1241). The
 //   counter is core-wide, not per slot, so the rule is #710's refusal rather
 //   than #709's per-slot retirement: a core issues generations 1 ..=
@@ -78,8 +57,8 @@
 // - The explicit probe begin/commit pair is `unsafe` and exists only so the
 //   two-core contention fixture can pause after reading free_head. A pending
 //   read must be committed against the same FreelistCore that produced it or
-//   cancelled; ordinary callers use freelist_core_insert, which performs the
-//   same private begin/commit immediately.
+//   cancelled; ordinary callers use freelist_core_insert, which keeps capture
+//   and consumption in one checked borrow.
 
 use "kernel/lib/execution_model.tkb";
 
@@ -168,7 +147,7 @@ generic struct FreelistCore(N: usize) {
     next_generation: usize;
 }
 
-fn freelist_core_init(core: &mut FreelistCore(N)) {
+fn freelist_core_init(core: borrow uninit &mut FreelistCore(N)) {
     // GitHub issue #217: core.next_free[i] indexes the struct-embedded
     // array field directly, through the same checked TArray/
     // emit_bounds_check codegen path a local array's own indexing
@@ -186,13 +165,17 @@ fn freelist_core_init(core: &mut FreelistCore(N)) {
 // Initialise with no allocatable entries. A caller whose storage is
 // discovered at runtime can then add exactly the indices backed by that
 // storage instead of briefly publishing every compile-time metadata slot.
-fn freelist_core_init_empty(core: &mut FreelistCore(N)) {
+fn freelist_core_init_empty(core: borrow uninit &mut FreelistCore(N))
+        ensures init_links(core.next_free, core.free_head)
+        ensures init(core.next_generation) {
     core.free_head = N;
     core.next_generation = 1;
 }
 
-fn freelist_core_add_index(core: &mut FreelistCore(N),
-                           index: usize) {
+fn freelist_core_add_index(core: borrow uninit &mut FreelistCore(N),
+                           index: usize)
+        requires init_links(core.next_free, core.free_head)
+        ensures init_links(core.next_free, core.free_head) {
     if (index < N) {
         core.next_free[index] = core.free_head;
         core.free_head = index;
@@ -230,16 +213,22 @@ private fn freelist_core_insert_commit(
     return FreelistPopResult::Empty;
 }
 
-fn freelist_core_insert(core: &mut FreelistCore(N)) -> FreelistPopResult
-        !{allocates} {
-    match freelist_core_insert_begin(core) {
-        FreelistPopProbeBeginResult::Empty => {
-            return FreelistPopResult::Empty;
-        }
-        FreelistPopProbeBeginResult::Pending(pending) => {
-            return freelist_core_insert_commit(core, pending);
-        }
+// Ordinary insertion keeps the head and its storage in one checked borrow.
+// Only the deliberate contention probe below splits capture from commit.
+fn freelist_core_insert(core: borrow uninit &mut FreelistCore(N)) -> FreelistPopResult
+        !{allocates}
+        requires init_links(core.next_free, core.free_head)
+        requires init(core.next_generation)
+        ensures init_links(core.next_free, core.free_head) {
+    let head: usize = core.free_head;
+    if (head < N) {
+        if (core.next_generation == 0) { return FreelistPopResult::Exhausted; }
+        core.free_head = core.next_free[head];
+        let generation: usize = core.next_generation;
+        core.next_generation = freelist_generation_after(generation);
+        return FreelistPopResult::Popped(freelist_owner_new(head, generation));
     }
+    return FreelistPopResult::Empty;
 }
 
 // Unsafe because holding a pending head read across another core's mutation
@@ -327,7 +316,9 @@ fn freelist_core_unlink_range(core: &mut FreelistCore(N), first: usize,
     return unlinked;
 }
 
-fn freelist_core_remove(core: &mut FreelistCore(N), owner: sink FreelistOwner[allocation]) {
+fn freelist_core_remove(core: borrow uninit &mut FreelistCore(N), owner: sink FreelistOwner[allocation])
+        requires init_links(core.next_free, core.free_head)
+        ensures init_links(core.next_free, core.free_head) {
     // The index is checked here rather than trusted (#637 stage 3: this
     // was an unsafe unchecked store). An owner rebuilt from parts
     // (freelist_owner_new) can carry any index; one at or past N was never

@@ -222,6 +222,7 @@ let array_index_proven_in_bounds_at : (Lexing.position, unit) Hashtbl.t =
   Hashtbl.create 64
 let runtime_slice_index_proven_at : (string * Lexing.position, unit) Hashtbl.t =
   Hashtbl.create 64
+let arithmetic_array_index_proven_at : (string * Lexing.position, unit) Hashtbl.t = Hashtbl.create 16
 let active_runtime_bounds_key = ref ""
 (* GitHub issue #797: why an index's range fact was not available, keyed
    like the proof tables (bounds key, index location). llvm_gen.ml appends
@@ -6049,6 +6050,33 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
      [k, k+1), a refined value its own range -- and the largest offset plus
      the largest length must fit the allocation's byte extent. Sync rule:
      llvm_gen.ml's dma_device_span computes the same address. *)
+  | Call (name, [source]) when Io_span.constructor name <> None ->
+      let source_ty = infer_expr senv eenv tyenv fenv source in
+      (match repr source_ty with
+       | TSlice (elem, _, access) when repr elem = TU8 ->
+           if name = "io_read_span" && access <> Ast.SliceWritable then
+             raise (TypeError (source.loc, "io_read_span needs writable byte storage"))
+       | _ -> raise (TypeError (source.loc, name ^ " expects a byte slice")));
+      TIndexedStruct (Option.get (Io_span.constructor name), [SConst 0])
+  | Call (("io_span_length" | "io_span_end") as name, [span]) ->
+      (match repr (infer_expr senv eenv tyenv fenv span) with
+       | TIndexedStruct (n, [_]) when Io_span.is_type n -> ()
+       | _ -> raise (TypeError (span.loc, name ^ " expects an I/O span")));
+      if name = "io_span_end" then TVoid else TUsize
+  | Call (("io_readv" | "io_writev") as name, fd :: spans) when spans <> [] ->
+      unify_at fd.loc TUsize (infer_expr senv eenv tyenv fenv fd);
+      let required = if name = "io_readv" then Io_span.read_type else Io_span.write_type in
+      List.iter (fun span ->
+        match repr (infer_expr senv eenv tyenv fenv span) with
+        | TIndexedStruct (n, [_]) when n = required -> ()
+        | _ -> raise (TypeError (span.loc, name ^ " expects " ^ required ^ " arguments"))) spans;
+      if !unsafe_depth = 0 then
+        raise (TypeError (e.loc, name ^ " crosses the synchronous syscall ABI; use unsafe"));
+      note_type_checker_unsafe_use ();
+      TUsize
+  | Call (name, _) when List.mem name Io_span.names ->
+      raise (TypeError (e.loc, "invalid arguments to " ^ name))
+
   | Call ("dma_device_span", [({ desc = Ast.Var _; _ } as owner);
                                { desc = Ast.Var record; _ };
                                offset_e; length_e]) ->
@@ -6104,7 +6132,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   | Call (("dma_span_address" | "dma_span_length") as operation, [span]) ->
       let span_ty = infer_expr senv eenv tyenv fenv span in
       (match repr span_ty with
-       | TStruct name when name = Dma_fixed_registry.span_type -> ()
+       | TStruct name when name = Dma_fixed_registry.span_type || Io_span.is_type name -> ()
        | _ -> raise (TypeError (span.loc, Printf.sprintf
            "%s expects a %s" operation Dma_fixed_registry.span_type)));
       if operation = "dma_span_address" then begin
@@ -9672,6 +9700,7 @@ let reset_compilation_state () =
   Hashtbl.reset owned_sites;
   owned_pending := [];
   Hashtbl.reset runtime_slice_index_proven_at;
+  Hashtbl.reset arithmetic_array_index_proven_at;
   Hashtbl.reset range_fact_unavailable_at;
   while_fact_drops := [];
   Hashtbl.reset refined_cast_proven_in_bounds_at;
@@ -10364,9 +10393,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         raise (TypeError (loc, Printf.sprintf
           "unknown effect '%s' on %s '%s'; supported effects are %s"
           eff kind name (String.concat ", " Effect_rules.names))) in
-      if rule.declaration = Effect_rules.Trusted_extern && not allow_noreturn then
+      if rule.declaration = Effect_rules.Checked_noreturn && not allow_noreturn then
         raise (TypeError (loc,
-          "'noreturn' is currently restricted to trusted extern function declarations"));
+          "'noreturn' requires a concrete function declaration"));
       if not rule.function_pointer && not allow_declaration_only then
         raise (TypeError (loc,
           Printf.sprintf "'%s' is a function declaration role, not a function-pointer call effect" eff));
@@ -10859,7 +10888,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     (* GitHub issue #623: a device span is tied to its device token, so a
        descriptor writer receives it as a nonretaining parameter. *)
     | Ast.TypeBorrow (Ast.TypeNamed name as inner)
-      when name = Dma_fixed_registry.span_type ->
+      when name = Dma_fixed_registry.span_type || Io_span.is_type name ->
         validate_complete_type loc false inner
     | Ast.TypeBorrow _ ->
         raise (TypeError (loc,
@@ -11090,7 +11119,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let rec validate_toplevel_def = function
     | Ast.FuncDef f ->
         Option.iter
-          (validate_effects ~allow_declaration_only:true ~allow_noreturn:false f.def_loc "function" f.name)
+          (validate_effects ~allow_declaration_only:true ~allow_noreturn:true f.def_loc "function" f.name)
           f.effects;
         let scope = Hashtbl.create 8 in
         validation_static_scope := Some scope;
@@ -12297,14 +12326,61 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   (* GitHub issue #779: every region identity and offset reaching a device
      protocol's P_init, now that the bodies' statics are solved. *)
   Line_owner.solve ();
+  let checked_noreturn_targets = List.fold_left (fun names -> function
+    | Ast.FuncDef f when Option.fold ~none:false ~some:(List.mem "noreturn") f.effects ->
+        StringSet.add (overload_key f.name f.params) names
+    | Ast.ExternFuncDef (name, params, _, Some effects, _) when List.mem "noreturn" effects ->
+        StringSet.add (overload_key name params) names
+    | _ -> names) StringSet.empty prog in
+  let checked_noreturn_call (e : Ast.expr) = match e.desc with
+    | Ast.Call _ -> (match StringMap.find_opt (loc_key e.loc) !resolved_call_targets with
+        | Some target -> StringSet.mem target checked_noreturn_targets
+        | None -> false)
+    | _ -> false in
+  List.iter (function
+    | Ast.FuncDef f when Option.fold ~none:false ~some:(List.mem "noreturn") f.effects ->
+        if not (Control_flow.never_returns ~noreturn:checked_noreturn_call f.body) then
+          raise (TypeError (f.def_loc,
+            "noreturn function has a reachable return or fallthrough path"))
+    | _ -> ()) prog;
   (* GitHub issue #203: definite initialization of field paths and of
      scratch globals (see Init_flow). Every independent error of every
      function is reported (#763). *)
   let init_callees = Hashtbl.create 64 in
   List.iter (function
     | Ast.FuncDef f ->
-        Hashtbl.replace init_callees f.name (f.params, f.def_loc)
+        Hashtbl.replace init_callees f.name ((f.params, f.def_loc), f)
     | _ -> ()) prog;
+  let init_signature name =
+    try Some (fst (Hashtbl.find init_callees name)) with Not_found -> None in
+  let init_write_definitions = lazy (List.fold_left (fun map -> function
+    | Ast.FuncDef f -> StringMap.add (overload_key f.name f.params) f map
+    | _ -> map) StringMap.empty prog) in
+  let init_struct_fields n = Option.map (fun (fields, _, _) -> fields)
+    (StringMap.find_opt n senv) in
+  let init_global_type =
+    let globals = List.fold_left (fun map -> function
+      | Ast.LetDef (name, Some ty, _, _, _, _, _) -> StringMap.add name ty map
+      | _ -> map) StringMap.empty prog in
+    fun name -> StringMap.find_opt name globals in
+  let init_definition key = match StringMap.find_opt key functions with
+    | None -> None
+    | Some info ->
+        let definition = match Hashtbl.find_opt init_callees key with
+          | Some (_, f) -> Some f
+          | None -> StringMap.find_opt key (Lazy.force init_write_definitions) in
+        Option.map (fun f -> (f, info)) definition in
+  let init_call_target e = StringMap.find_opt (loc_key e.Ast.loc) !resolved_call_targets in
+  let pointer_store_origins = Local_bindings.Expr_table.create 16 in
+  let init_origin = ref (fun _ _ _ -> None) in
+  let init_write_footprint = Init_writes.infer
+    ~global_view_origin:(fun info f e -> !init_origin info f e)
+    ~global_type:init_global_type ~struct_fields:init_struct_fields
+    ~definition:init_definition ~target:init_call_target () in
+  init_origin := Init_origin.infer ~definition:init_definition ~target:init_call_target
+    ~global_type:init_global_type ~no_writes:(fun e -> match init_write_footprint e with
+      | Init_writes.Writes paths -> Init_writes.Paths.is_empty paths
+      | Init_writes.Unknown -> false);
   (* GitHub issue #954: variant cases for `ensures match result`, and the
      linear owners that make a held slot capability. *)
   let init_variants = Hashtbl.create 32 in
@@ -12325,36 +12401,133 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.LetDef (name, Some ty, _, _, _, _, _) when Init_state.is_scratch name ->
         Some (name, ty)
     | _ -> None) prog in
+  let init_global_singleton name = match StringMap.find_opt name genv with
+    | Some (ty, false) -> (match repr ty with
+        | TRefinedInt (lo, hi, base) when repr base = TUsize
+            && lo >= 0 && lo < max_int && hi = lo + 1 -> Some lo
+        | _ -> None)
+    | _ -> None in
+  let init_variant_cases = Hashtbl.find_opt init_variants in
+  let init_global_byte_array_length name = match StringMap.find_opt name genv with
+    | Some (ty, _) -> (match repr ty with
+        | TArray (element, count) when repr element = TU8 -> Some count
+        | _ -> None)
+    | None -> None in
+  let init_linear_owner = Hashtbl.mem init_linear in
+  let init_variant_payload v c = Hashtbl.find_opt init_payloads (v, c) in
+  let run_init separated (fdef : Ast.func) (finfo : Types.func_info) = Init_flow.check
+    ~separated
+    ~write_footprint:init_write_footprint
+    ~pointer_store_origin:(fun e -> Local_bindings.Expr_table.find_opt pointer_store_origins e)
+    ~global_view_origin:(fun e -> !init_origin finfo fdef e)
+    ~noreturn:checked_noreturn_call
+    ~note_unsafe:(fun loc -> Hashtbl.replace type_checker_consumed_unsafe_at loc ())
+    ~struct_fields:init_struct_fields
+    ~callee:init_signature
+    ~global_singleton:init_global_singleton
+    ~global_byte_array_length:init_global_byte_array_length
+    ~scratch:init_scratch
+    ~variant_cases:init_variant_cases
+    ~variant_payload:init_variant_payload
+    ~linear_owner:init_linear_owner
+    ~decide_array_index:(fun loc reason ->
+      let key = (overload_key fdef.name fdef.params, loc) in
+      match reason with
+      | None -> Hashtbl.replace arithmetic_array_index_proven_at key ();
+          Hashtbl.remove range_fact_unavailable_at key
+      | Some r -> Hashtbl.remove arithmetic_array_index_proven_at key;
+          Hashtbl.replace range_fact_unavailable_at key r)
+    ~decide_index:(fun loc reason ->
+      let key = (overload_key fdef.name fdef.params, loc) in
+      match reason with
+      | None ->
+          Hashtbl.replace runtime_slice_index_proven_at key ();
+          Hashtbl.remove range_fact_unavailable_at key
+      | Some r ->
+          (* GitHub issue #1011: Init_flow alone decides this
+             shape (#1007), so its reason replaces any the
+             runtime order graph recorded. *)
+          Hashtbl.remove runtime_slice_index_proven_at key;
+          Hashtbl.replace range_fact_unavailable_at key
+            (r ^ " (#1007: an index into an immutable slice \
+                  binding is decided by the init-flow checker \
+                  alone)"))
+    finfo fdef in
+  if List.exists (function Ast.FuncDef f -> Growth_body.is_candidate f | _ -> false) prog then begin
+  let address_extents = Address_extent.run ~functions ~key_of:(fun f -> overload_key f.Ast.name f.params)
+    ~struct_fields:init_struct_fields ~global_type:init_global_type prog in
+  let growth_transfers = Growth_transfer.run ~functions ~key_of:(fun f -> overload_key f.Ast.name f.params)
+    ~target:init_call_target ~write_footprint:init_write_footprint ~address_extents prog in
+  let growth_bodies = Growth_body.run ~functions ~key_of:(fun f -> overload_key f.Ast.name f.params)
+    ~write_footprint:init_write_footprint ~view_origin:!init_origin ~growth_transfers prog in
+  let protected_globals = StringMap.fold (fun _ (_,globals) all -> Growth_body.S.union globals all) growth_bodies Growth_body.S.empty in
+  let constructors = Prefix_constructor.run ~functions ~key_of:(fun f -> overload_key f.Ast.name f.params)
+    ~growth_transfers prog in
+  let record_transfers = Record_transfer.run ~functions ~key_of:(fun f -> overload_key f.Ast.name f.params) ~struct_fields:init_struct_fields prog in
+  let finish_summaries = Finish_range.run ~functions ~key_of:(fun f -> overload_key f.Ast.name f.params) ~target:init_call_target ~struct_fields:init_struct_fields ~record_transfers prog in
+  let pop_summaries = Pop_range.run ~functions ~key_of:(fun f -> overload_key f.Ast.name f.params) ~target:init_call_target ~write_footprint:init_write_footprint ~struct_fields:init_struct_fields ~record_transfers prog in
+  let pop_finish_calls = Pop_finish.run ~functions ~key_of:(fun f -> overload_key f.Ast.name f.params) ~target:init_call_target ~pop_summaries ~finish_summaries prog in
+  let record_initializers = Record_init.run ~functions ~key_of:(fun f -> overload_key f.Ast.name f.params) ~struct_fields:init_struct_fields prog in
+  let activation_summaries = Activation_range.run ~functions ~key_of:(fun f -> overload_key f.Ast.name f.params) prog in
+  let activation_calls = Activation_call.run ~functions ~key_of:(fun f -> overload_key f.Ast.name f.params)
+    ~target:init_call_target ~growth_bodies ~activation_summaries prog in
+  let insert_summaries = Insert_body.run ~functions ~key_of:(fun f -> overload_key f.Ast.name f.params) ~target:init_call_target ~struct_fields:init_struct_fields ~growth_bodies ~pop_summaries ~pop_finish_calls ~activation_calls prog in
+  let owner_constructors = Owner_constructor.run ~functions ~record_initializers ~insert_summaries in
+  let owner_accessors = Owner_accessor.run ~functions ~key_of:(fun f -> overload_key f.Ast.name f.params) ~target:init_call_target ~insert_summaries ~record_transfers prog in
+  let owner_stores = Owner_flow.run ~protected_globals ~functions ~key_of:(fun f -> overload_key f.Ast.name f.params) ~target:init_call_target ~write_footprint:init_write_footprint ~owner_constructors ~insert_summaries ~owner_accessors prog in
+  Local_bindings.Expr_table.iter (fun e name -> Local_bindings.Expr_table.replace pointer_store_origins e name) owner_stores;
+  let loop_summaries = Loop_transfer.run ~functions ~key_of:(fun f -> overload_key f.Ast.name f.params)
+    ~target:init_call_target ~growth_transfers:(StringMap.map fst growth_bodies)
+    ~struct_fields:init_struct_fields prog in
+  let accessors = Accessor_prefix.run ~functions ~key_of:(fun f -> overload_key f.Ast.name f.params)
+    ~target:init_call_target ~loop_summaries prog in
+  let derived_stores = Read_prefix.run ~protected_globals ~functions ~key_of:(fun f -> overload_key f.Ast.name f.params)
+    ~target:init_call_target ~write_footprint:init_write_footprint ~constructors ~loop_summaries ~accessors prog in
+  Local_bindings.Expr_table.iter (fun e name -> Local_bindings.Expr_table.replace pointer_store_origins e name) derived_stores;
+  end;
+  let init_separation_requirements = ref StringMap.empty in
   List.iter (function
     | Ast.FuncDef fdef ->
         (match StringMap.find_opt (overload_key fdef.name fdef.params) functions with
          | Some finfo ->
              (try
-                Init_flow.check
-                  ~struct_fields:(fun n -> match StringMap.find_opt n senv with
-                    | Some (fields, _, _) -> Some fields
-                    | None -> None)
-                  ~callee:(Hashtbl.find_opt init_callees)
-                  ~scratch:init_scratch
-                  ~variant_cases:(Hashtbl.find_opt init_variants)
-                  ~variant_payload:(fun v c -> Hashtbl.find_opt init_payloads (v, c))
-                  ~linear_owner:(Hashtbl.mem init_linear)
-                  ~decide_index:(fun loc reason ->
-                    let key = (overload_key fdef.name fdef.params, loc) in
-                    match reason with
-                    | None ->
-                        Hashtbl.replace runtime_slice_index_proven_at key ();
-                        Hashtbl.remove range_fact_unavailable_at key
-                    | Some r ->
-                        (* GitHub issue #1011: Init_flow alone decides this
-                           shape (#1007), so its reason replaces any the
-                           runtime order graph recorded. *)
-                        Hashtbl.remove runtime_slice_index_proven_at key;
-                        Hashtbl.replace range_fact_unavailable_at key
-                          (r ^ " (#1007: an index into an immutable slice \
-                                binding is decided by the init-flow checker \
-                                alone)"))
-                  finfo fdef
+                (try run_init (fun _ _ -> false) fdef finfo with
+                 | (Types.TypeError _ | Types.MultiTypeError _) as original ->
+                     let open Init_separation_domain in
+                     let candidate = ref Conditions.empty in
+                     let root key =
+                       if String.starts_with ~prefix:"G" key then
+                         let name = String.sub key 1 (String.length key - 1) in
+                         (* Selected scratch elements also start with G, but
+                            rows[i] and rows[j] are not distinct declarations.
+                            Only an actual named global has an intrinsic root. *)
+                         Option.map (fun _ -> (Global name, [])) (init_global_type name)
+                       else
+                         let rec find i = function
+                           | [] -> None
+                           | id :: ids -> if key = "L" ^ string_of_int id then
+                               Some (Parameter i, []) else find (i + 1) ids in
+                         find 0 finfo.bindings.param_ids in
+                     let discover a b = match root a, root b with
+                       | Some a, Some b -> (match classify a b with
+                           | Proven -> true
+                           | Required pair -> candidate := Conditions.add pair !candidate; true
+                           | Overlap -> false)
+                       | _ -> false in
+                     (try
+                        run_init discover fdef finfo;
+                        (* Validate under a frozen set, not an oracle that can
+                           invent another requirement during re-execution. *)
+                        run_init (fun a b -> match root a, root b with
+                          | Some a, Some b -> (match classify a b with
+                              | Proven -> true
+                              | Required pair -> Conditions.mem pair !candidate
+                              | Overlap -> false)
+                          | _ -> false) fdef finfo;
+                        if not (Conditions.is_empty !candidate) then
+                          init_separation_requirements := StringMap.add
+                            (overload_key fdef.name fdef.params) !candidate !init_separation_requirements
+                      with Types.TypeError _ | Types.MultiTypeError _ -> raise original))
               with
               | Types.TypeError (loc, msg) ->
                   collected_type_errors := (loc, msg) :: !collected_type_errors
@@ -12363,6 +12536,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                     List.rev_append errs !collected_type_errors)
          | None -> ())
     | _ -> ()) prog;
+  let separation_conditions, separation_errors =
+    if StringMap.is_empty !init_separation_requirements then StringMap.empty, []
+    else Init_separation.check ~functions
+      ~key_of:(fun f -> overload_key f.Ast.name f.params)
+      ~target:(fun e -> StringMap.find_opt (loc_key e.Ast.loc) !resolved_call_targets)
+      ~function_values:!resolved_function_values ~global_type:init_global_type
+      ~struct_fields:init_struct_fields
+      ~initial:!init_separation_requirements prog in
+  collected_type_errors := List.rev_append separation_errors !collected_type_errors;
   (match List.rev !collected_type_errors with
    | [] -> ()
    | [(loc, msg)] -> raise (Types.TypeError (loc, msg))
@@ -12454,8 +12636,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          | Some ((Ast.TypeIndexed (name, _) | Ast.TypeView (name, _)), _, RegionGuard) ->
              StringSet.add name names
          | _ -> names)
-    | _ -> names) StringSet.empty prog in
+    | _ -> names) (StringSet.of_list [Io_span.read_type; Io_span.write_type]) prog in
   let rec is_scoped_guard_type = function
+    | Ast.TypeNamed n when Io_span.is_type n -> true
     | Ast.TypeIndexed (name, _) | Ast.TypeView (name, _) ->
         StringSet.mem name scoped_guard_names
     | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
@@ -12559,11 +12742,6 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           raise (TypeError (f.def_loc,
             "authority-derived return functions cannot be used as runtime function pointers"))
     | _ -> ()) prog;
-  let noreturn_functions = List.fold_left (fun names -> function
-    | Ast.ExternFuncDef (name, _, _, Some effects, _)
-      when List.mem "noreturn" effects -> StringSet.add name names
-    | _ -> names
-  ) StringSet.empty prog in
   (* Lock-order contracts (GitHub issue #466).  Acquisition annotations are
      transitive summaries: a caller acquires the lowest-ranked lock reachable
      from its body.  Guard annotations associate a returned linear type with
@@ -13735,6 +13913,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
            | _ -> None)
       | _ -> None in
     let rec expr_taint taints (e : Ast.expr) = match e.desc with
+      | Ast.Call (name, [source]) when Io_span.constructor name <> None ->
+          base_taint taints source
       | Ast.AddrOf place when returns_indexed_reference ->
           let rec address_origin place = match place.Ast.desc with
             | Ast.Var name when StringMap.mem name !var_types ->
@@ -13842,13 +14022,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     in
     let accepts_region_borrow = function
       | Some (Ast.TypeBorrow (Ast.TypeNamed name))
-        when name = Dma_fixed_registry.span_type -> true
+        when name = Dma_fixed_registry.span_type || Io_span.is_type name -> true
       | Some (Ast.TypeBorrow inner) -> ast_region_kind inner <> None
       | Some (Ast.TypeBorrowMut inner) | Some (Ast.TypeSink inner) ->
           is_scoped_guard_type inner
       | _ -> false
     in
     let rec expr_region_kind (e : Ast.expr) = match e.desc with
+      | Ast.Call (name, [_]) when Io_span.constructor name <> None -> Some RegionGuard
       | Ast.Var n -> Option.bind (StringMap.find_opt n !var_types) ast_region_kind
       | Ast.SliceOf _ -> Some RegionSlice
       | Ast.Unsafe x -> expr_region_kind x
@@ -14201,6 +14382,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                let moved = check_expr taints moved true value in
                mv_clear hp (mv_clear fp moved)
            | PField _ -> check_expr taints moved true value)
+      | Ast.Call (name, [source]) when Io_span.constructor name <> None ->
+          if not consume then raise (TypeError (e.loc,
+            "an I/O span must be bound and ended, not discarded"));
+          check_expr taints moved false source
+      | Ast.Call ("io_span_end", [span]) -> check_expr taints moved true span
+      | Ast.Call (("io_readv" | "io_writev" | "io_span_length"), args) ->
+          if List.exists (fun (arg : Ast.expr) -> match arg.desc with Ast.Var _ | Ast.IntLit _ -> false | _ -> true) args then
+            raise (TypeError (e.loc, "I/O submission and span access require named arguments"));
+          List.fold_left (fun state arg -> check_expr taints state false arg) moved args
       | Ast.Call ("publish_begin", args) ->
           if not consume then
             raise (TypeError (e.loc,
@@ -14816,8 +15006,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     let rec stmt_always_terminates ~loop_exit (s : Ast.stmt) = match s.desc with
       | Ast.Return _ -> true
       | Ast.Break | Ast.Continue -> loop_exit
-      | Ast.Expr { desc = Ast.Call (name, _); _ }
-        when StringSet.mem name noreturn_functions -> true
+      | Ast.Expr ({ desc = Ast.Call _; _ } as e)
+        when checked_noreturn_call e -> true
       | Ast.If (_, yes, no) ->
           always_terminates ~loop_exit yes && always_terminates ~loop_exit no
       | Ast.Match (_, arms) -> List.for_all (fun arm ->
@@ -16008,7 +16198,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             then StringSet.add key guards else guards),
            (if has_annotation f.effects Effect_rules.restores_saved_irq_annotation
             then StringSet.add key restorers else restorers),
-           noreturn,
+           (if has_annotation f.effects "noreturn"
+            then StringSet.add key noreturn else noreturn),
            (* GitHub issue #920: a `masks_irq` function masks, whatever its
               body does to DAIF; it is read as msr_daifset_irq is. *)
            (if has_annotation f.effects Effect_rules.masks_irq_annotation
@@ -16451,4 +16642,5 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     call_targets = !resolved_call_targets;
     function_values = !resolved_function_values;
     function_def_keys;
+    separation_conditions;
   }

@@ -130,7 +130,7 @@ let compiler_builtins = [
      It is reserved for the same reason as every builtin above -- infer_expr
      dispatches on the name before it consults fenv, so a user function of
      the same name would be silently unreachable. *)
-] @ Instr_spec.names (* GitHub issue #1005: the instruction table *)
+] @ Io_span.names @ Instr_spec.names (* GitHub issue #1005: the instruction table *)
   @ Atomic_spec.names @ List.map fst Atomic_spec.cell_ops @ [
   (* GitHub issue #299: the publication record's four operations. Reserved
      for the same reason -- and additionally because a user function named

@@ -58,7 +58,7 @@ generic struct RefcountSlotMap(N: usize) {
     double_release_count: usize;
 }
 
-fn refcount_pool_init(pool: &mut RefcountSlotMap(N)) {
+fn refcount_pool_init(pool: borrow uninit &mut RefcountSlotMap(N)) {
     freelist_core_init(&pool.core);
     // GitHub issue #217: pool.generation[i]/pool.refcount[i] index the
     // struct-embedded array fields directly and are checked/proven by
