@@ -3505,8 +3505,8 @@ The inference is a conservative proposal, not general heap alias inference.
 Unsupported storage and transfer shapes remain errors. In an inferred
 non-resource referent, reassigning or shadowing the local reference wrapper
 does not end the original referent lifetime; aliases retain their origins.
-Scalar element iteration of an alias-free inferred input copies values and
-retains no element alias. These facts do not relax owner consumption or the
+Scalar element iteration of an alias-free inferred input or known local
+storage view copies values and retains no element alias. These facts do not relax owner consumption or the
 explicit-contract loop/storage restrictions below.
 
 Inputs and result sources are distinct parameter names. Result sources must

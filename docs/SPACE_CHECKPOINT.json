@@ -2,11 +2,11 @@
   "date": "2026-11-17",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "e5ddb4e9e8a8b277f9f669e4f0c69a1e2fa3a2ea03399c25b8a37ecbda149dc7",
-  "workload": "Boot dynamic HTTPd/musl metadata validation and mapping, then ordinary exec/teardown using the existing four ExecWindowSlot windows. Compare normal/debug linked kernels and LLVM static frames with published da32b328; distinguish payload, section padding, reserved boundary and fixed pool capacity.",
+  "source_sha256": "e4c9131744bfd34079301664bd163cfd3c868f36b3134b3ab95e5809e9d70b66",
+  "workload": "Standard maintained boot and exec/teardown using the same four exec windows. Compare normal/debug QEMU and RPi5 object/ELF sections, named storage, reservation starts and LLVM static frames against published 52d4017b. Measure compiler process cost separately with three sequential source-identical baseline/candidate pairs per target.",
   "evidence": [
-    "docs/EXEC_METADATA_LIFETIME_REVIEW_2026-11-17.md"
+    "docs/INFERRED_REFERENCE_LIFETIMES_2026-11-17.md"
   ],
-  "assessment": "Accept text growth of 80/96 bytes normal and 128/64 debug (QEMU/RPi5), with only the boot driver frame growing by 64-80 bytes inside its existing ceiling. Remove the 2048-byte boot_exec_windows payload; no other named data/BSS symbol changes size. The existing 8192-byte pool and metadata stay fixed. Normal reservation starts stay unchanged; QEMU debug crosses a stack-alignment boundary and reserves 32768 fewer bytes. No occupancy, allocator or isolated timing benefit is claimed.",
-  "next_trigger": "A changed kernel allocation/reclamation path, pool/owner representation or retained-capacity workload, or completion of the next memory-safety consumer."
+  "assessment": "Accept static direct-call inference without maintained kernel/native annotation or runtime source changes. All allocated bytes/addresses, named storage, reservation starts and static frames are identical in four images. Normal artifacts match whole hashes; debug artifacts match after stripping working-directory DWARF. No pool, capacity, retained-page or occupancy benefit is claimed. Measured compile-time median growth is about 0.8/1.2 percent and allocation about 2.3 percent, within the unchanged compiler budget.",
+  "next_trigger": "A new reference/storage shape requiring a materially different inference domain, a changed kernel allocation/reclamation workload, or completion of the next memory-safety consumer."
 }
