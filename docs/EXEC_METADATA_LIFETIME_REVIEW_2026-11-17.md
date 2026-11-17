@@ -113,6 +113,15 @@ A second mutation restoring broad fresh-address taint rejects the legacy
 field-address positive; direct owned-data retention remains rejected in both.
 The paired maintained regression therefore detects the population overreach.
 
+The published da32b328 compiler also crashes with SIGSEGV while compiling
+`plan.image.len` for a record containing a slice. It passed the address of a
+fat-slice field to LLVM's value extraction instead of loading the fat value.
+The candidate uses the existing place/value boundary and explicit loads for
+nested field, indexed and dereferenced slice places. The maintained regression
+now invokes code generation and LLVM verification, rather than type checking
+alone; the safe reborrow positive also exercises generation. This is a
+compiler crash repair, not a runtime leak observed by executing bad code.
+
 The initialization integration's build-derived trust ledger is refreshed at
 this boundary. Its two user_entry_extern raw sites and 1008 additional
 initialization obligations were already published before this migration;

@@ -3729,7 +3729,7 @@ fn loan_use() {
 }
 |}) ());
   Alcotest.test_case "slice field len loads the fat value from nested places" `Quick
-    (expect_ok {|
+    (expect_codegen_ok {|
 struct SliceRecord { image: []u8; }
 let mut slice_records: [SliceRecord; 2];
 fn field_length(plan: SliceRecord) -> usize { return plan.image.len; }
@@ -3738,7 +3738,7 @@ fn reference_length(plan: &SliceRecord) -> usize { return plan.image.len; }
 |});
   Alcotest.test_case "borrows: reborrow preserves safe reference permissions" `Quick
     (fun () ->
-      expect_ok (nested_slot_fixture ^ {|
+      expect_codegen_ok (nested_slot_fixture ^ {|
 fn reborrow(row: &NestedRow) borrows(row) {
   let alias: &NestedRow = &*row;
   let copied = alias.bytes[0];
