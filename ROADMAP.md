@@ -118,7 +118,11 @@ padding, aliasing/provenance, lifetime/reuse and concurrency. Audit
 user-visible byte paths under #203. Then take the smallest concrete kernel
 consumer exposing a missing guarantee and close its dependency chain through
 the existing owners (#637, #954, #986, #132 and #638), following #1513's
-acceptance criteria. Compiler work required by this chain belongs to A;
+acceptance criteria. The 2026-11-17 acceptance re-audit and initial
+property/premise matrix are in `docs/MEMORY_SAFETY_CONTRACT.md`; continue
+from its incomplete export and real-consumer coverage rather than restarting
+the initialization integration. Compiler work required by this chain belongs
+to A;
 coordinate overlapping verification changes with B rather than duplicating
 its queue. Prefer inferred rules and API-boundary owners/contracts; measure
 annotation, unsafe, compile/solver and runtime costs. New design decisions,

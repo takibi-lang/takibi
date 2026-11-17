@@ -763,7 +763,7 @@ A tracked place splits into leaves. A scalar, pointer, slice, variant or
 array is one leaf. A struct is the leaves of its fields plus one padding leaf
 when its layout has bytes between or after its fields. Tracked places are:
 
-- a local declared without an initializer whose type is not an array: all of
+- a local declared without an initializer, including a fixed array: all of
   its leaves start `uninit`;
 - a local initialized by a struct literal: its fields are `init`, its padding
   `uninit`;

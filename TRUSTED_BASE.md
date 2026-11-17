@@ -10,6 +10,11 @@ to be a usable result, not a result that depends on somebody reading advisory
 diagnostics. This does not imply that every possible kernel fault is currently
 expressible or rejected by the type system.
 
+The source-pinned property/premise matrix and initialization acceptance
+re-audit are in [the scoped inventory](docs/MEMORY_SAFETY_CONTRACT.md). It
+separates language-subset obligations from maintained-kernel build evidence;
+unresolved obligations there are not additional trusted exemptions.
+
 ## Five outcomes
 
 | Outcome | Meaning |
