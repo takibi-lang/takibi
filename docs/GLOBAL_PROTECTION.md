@@ -552,7 +552,8 @@ entries below that date are history, left as written.
   `virtio_blk_base_get`), `rp1_gem.tkb`'s `gem_rx_ring_cpu_address`.
   An unset cell reads as 0, as before. `virtio_net.tkb`'s used-ring
   addresses stay listed: the native TX fixture reads them directly, and a
-  public accessor returning the address is refused by buildcheck_frame_api.py. test_driver's `boot_execution` stays listed because it is written in two steps.
+  public accessor returning the address is refused by buildcheck_frame_api.py.
+  At this stage, the two-step `boot_execution` record stayed listed.
   The boot loader uses the existing slot-owned exec windows; its checked
   argument/result provenance ends when the slot is released.
 - 2026-11-08 (#1159, the StopCell decision): words written only under the
@@ -1130,3 +1131,11 @@ pinning and teardown, and a timed-out round retains the pool for late
 workers. Both production compiler tables classify the cell as `set_once`,
 so its allowance row is removed. See PIN_SHARING_SET_ONCE_SPACE.md for the
 generated read path and the stack and linked-image measurements.
+
+### Boot execution context
+
+The boot driver and exec readers use the same SetOnce root filesystem
+descriptor as path syscalls. The boot image plan itself is local to the
+test driver, which consumes it when it maps PID 1. Its slice still refers
+to the permanent rootfs metadata window. There is no second writable mount
+descriptor or globally stored image plan.

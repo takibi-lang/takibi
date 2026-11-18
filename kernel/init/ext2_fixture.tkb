@@ -1453,10 +1453,6 @@ fn ext2_release_failure_check(guard: borrow Ext2MutationGuard[&ext2_mutation_loc
 
 fn kernel_ext2_fixture_run(mount: Ext2Mount, phase: borrow TestDriverPhase[driver])
         !{logs, unsafe} {
-    // GitHub issue #249: save the mount for
-    // the exec prepare (kernel_exec_resolve_ext2_exec), which runs later, from
-    // a syscall-return path outside fn main()'s own scope.
-    kernel_boot_mount_configure(mount);
     // This mount is the root filesystem every process runs
     // from. Configure the syscall path from it; otherwise
     // openat(2) observes an unconfigured filesystem and

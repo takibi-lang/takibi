@@ -287,7 +287,7 @@ const POLL_MAX: usize = 1024;
 private let mut syscall_filesystem: SetOnce(Ext2Mount);
 must_use variant SyscallFilesystemReady { Unconfigured; Configured(Ext2Mount); }
 
-private fn syscall_filesystem_lookup() -> SyscallFilesystemReady {
+fn syscall_filesystem_lookup() -> SyscallFilesystemReady {
     if (set_once_is_set(&syscall_filesystem) == false) {
         return SyscallFilesystemReady::Unconfigured;
     }

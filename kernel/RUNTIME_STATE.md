@@ -39,19 +39,17 @@ scratch, whose existing ownership and exclusion rules still apply.
 
 ## Boot mount and root image
 
-`kernel/init/test_driver.tkb` holds one private `BootExecutionContext`.
-Its mount is `Unconfigured` or `Mounted(Ext2Mount)`; its saved root image is
-`Unavailable` or `Ready(Ext2ExecImage)`. The image payload carries the plan,
-inode and file length together. A mounted filesystem may lack the root image,
-so these are independent closed states. Readers match before extracting a
-payload; an unresolved exec candidate carries no plan. Rootfs metadata stays
-in permanent static storage because the saved plan contains a slice into it.
+Boot publishes one root filesystem descriptor through
+`kernel_syscall_ext2_configure` before EL0 readers run. The driver,
+syscall-return exec preparation, and path syscalls all use the same
+`SetOnce(Ext2Mount)` lookup. Failed mount and lookup paths keep their
+unconfigured outcomes. The descriptor's publication is separate from
+filesystem mutation locking.
 
-Boot configures the mount through `kernel_boot_mount_configure` before EL0
-readers run. The type does not enforce write-once setup, publication or the
-metadata borrow's lifetime. Current callers rely on that boot ordering and
-the single mounted filesystem. No extra lock or general mount registry is
-needed for the current functionality.
+The test driver holds its PID 1 image plan until mapping, with
+`Unavailable` and `Ready(Ext2ExecImage)` cases. A mounted filesystem may
+lack that image. The plan refers to the permanent rootfs metadata window.
+Later execs use the published mount and resolve their own metadata.
 
 The FD service retains its live missing-release counter, but no unused shared
 fallback payload records. Checked lookups return their closed failure cases.

@@ -35,20 +35,8 @@ use "kernel/arch/arm64/kernel/exception_evidence.tkb";
 use "kernel/arch/arm64/kernel/vector_table.tkb";
 use "kernel/kernel/cpu_authority.tkb";
 
-// GitHub issue #249: the mounted ext2 filesystem, saved once at boot
-// (wherever fn main() already successfully mounts it) so
-// the exec prepare below -- which runs later, on a syscall's
-// own return path, not from fn main()'s scope -- can read the inode execve
-// resolved.
-variant BootMountState { Unconfigured; Mounted(Ext2Mount); }
-
-// Boot configures this before syscall-return readers can run. The closed
-// state couples presence to its mount; boot ordering remains trusted.
-fn kernel_boot_mount_configure(mount: Ext2Mount) {
-    boot_execution.mount = BootMountState::Mounted(mount);
-}
-// ELF validation needs only the header and program table. The rootfs image
-// keeps a persistent window because its saved plan outlives every child exec;
+// ELF validation needs only the header and program table. The PID 1 plan
+// borrows this permanent window until its mapping in the test driver;
 // ordinary exec has one reusable window, while a dynamic application/
 // interpreter pair needs two concurrent windows. PT_LOAD data itself always
 // streams from ext2.
@@ -128,13 +116,6 @@ fn exec_metadata_prefix(metadata: [u8; EXEC_METADATA_SIZE..],
     return metadata[0..<EXEC_METADATA_SIZE];
 }
 variant BootRootImageState { Unavailable; Ready(Ext2ExecImage); }
-// The plan borrows permanent rootfs_metadata, never a boot stack buffer.
-struct BootExecutionContext {
-    mount: BootMountState;
-    root_image: BootRootImageState;
-}
-private let mut boot_execution: BootExecutionContext;
-
 // GitHub issue #270: the boot-resource baselines were locals of
 // kernel_test_driver_run() while the end-of-fixture report ran inside it.
 // PID 1 is BusyBox init now and never returns there, so the report runs
@@ -374,9 +355,9 @@ fn kernel_exec_resolve_ext2_exec(mount: Ext2Mount,
 }
 
 fn kernel_exec_primary_is_busybox_extras(inode: usize) -> bool !{unsafe} {
-    let mount: Ext2Mount = match boot_execution.mount {
-        BootMountState::Unconfigured => { return false; }
-        BootMountState::Mounted(found) => { found }
+    let mount: Ext2Mount = match syscall_filesystem_lookup() {
+        SyscallFilesystemReady::Unconfigured => { return false; }
+        SyscallFilesystemReady::Configured(found) => { found }
     };
     match ext2_lookup_path(mount, bs"bin/busybox-extras") {
         Ext2LookupResult::Invalid => { return false; }
@@ -935,11 +916,11 @@ private fn kernel_process_child_exec_prepare_with(current_authority: borrow Proc
         kernel_syscall_persistent_shell_checkpoint_exec_prepare(
             kernel_process_current_pid());
     }
-    let mount: Ext2Mount = match boot_execution.mount {
-        BootMountState::Unconfigured => {
+    let mount: Ext2Mount = match syscall_filesystem_lookup() {
+        SyscallFilesystemReady::Unconfigured => {
             return KernelChildExecPrepareResult::NoImageResolved;
         }
-        BootMountState::Mounted(found) => { found }
+        SyscallFilesystemReady::Configured(found) => { found }
     };
     // GitHub issue #245: this used to always be root 1, the only root the
     // old two-process model's single forked child could ever occupy. A
@@ -1592,10 +1573,12 @@ fn kernel_test_driver_run(kernel_test_init_script: bool) {
     } else {
         kernel_boot_log("virtio blk: used length bounds failed\n");
     }
-    boot_execution.root_image = BootRootImageState::Unavailable;
-    match boot_execution.mount {
-        BootMountState::Unconfigured => {}
-        BootMountState::Mounted(mount) => {
+    // The plan stays in this driver until PID 1 is mapped. Its backing
+    // metadata is the permanent rootfs window.
+    let mut root_image: BootRootImageState = BootRootImageState::Unavailable;
+    match syscall_filesystem_lookup() {
+        SyscallFilesystemReady::Unconfigured => {}
+        SyscallFilesystemReady::Configured(mount) => {
             match kernel_exec_resolve_ext2_name_at(
                     mount, bs"bin/busybox.static",
                     rootfs_metadata as []u8) {
@@ -1606,7 +1589,7 @@ fn kernel_test_driver_run(kernel_test_init_script: bool) {
                     kernel_boot_log("rootfs image: /bin/busybox.static invalid\n");
                 }
                 ExecResolveResult::Resolved(image) => {
-                    boot_execution.root_image = BootRootImageState::Ready(image);
+                    root_image = BootRootImageState::Ready(image);
                     kernel_boot_log("rootfs image: ext2 /bin/busybox.static ready\n");
                 }
             }
@@ -1659,9 +1642,9 @@ irq_uart_rx_unmask();
     // second kernel-side launch of the persistent demo shell -- collapsing
     // to a single top-level launch removed that gap, since init.sh's own
     // run no longer returns in the normal case (see below).
-    match boot_execution.mount {
-        BootMountState::Unconfigured => {}
-        BootMountState::Mounted(mount) => {
+    match syscall_filesystem_lookup() {
+        SyscallFilesystemReady::Unconfigured => {}
+        SyscallFilesystemReady::Configured(mount) => {
             // The returned plans borrow this slot until their final map use.
             let boot_exec_slot = exec_window_slot_acquire();
             match kernel_exec_resolve_dynamic_ext2_images(
@@ -1761,10 +1744,10 @@ irq_uart_rx_unmask();
     process_run_unlock(rx_guard);
     kernel_process_execution_reset();
     kernel_syscall_connected_fixture_start();
-    match boot_execution.mount {
-        BootMountState::Unconfigured => { test_driver_phase_end(driver_phase); }
-        BootMountState::Mounted(mount) => {
-            match boot_execution.root_image {
+    match syscall_filesystem_lookup() {
+        SyscallFilesystemReady::Unconfigured => { test_driver_phase_end(driver_phase); }
+        SyscallFilesystemReady::Configured(mount) => {
+            match root_image {
                 BootRootImageState::Unavailable => {
                     test_driver_phase_end(driver_phase);
                 }
