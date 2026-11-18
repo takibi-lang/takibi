@@ -34997,6 +34997,11 @@ let production_uart_registration_tests =
       fn blocking(c: u8) !{unsafe, may_block} {}
       fn probe() { uart_set_rx_handler(blocking); }
     |};
+    bad "a transitively blocking callback cannot be registered" "may have effect may_block" {|
+      fn wait_helper() !{may_block} {}
+      fn blocking(c: u8) !{unsafe} { wait_helper(); }
+      fn probe() { uart_set_rx_handler(blocking); }
+    |};
     bad "a different cell guard cannot update the registration" "static value mismatch" {|
       let mut other: LockedCell(UartRxHandler);
       fn probe() {
