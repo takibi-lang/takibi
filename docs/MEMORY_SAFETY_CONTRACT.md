@@ -191,6 +191,12 @@ exports and scalar ABI writers. In particular, TCP RX still needs
 current-receive initialization evidence across reacquisition, and fresh
 COW publication still relies on the lifetime of the old copy source.
 
+Both normal kernel builds check the resolved callers of the physical PTE
+read and its raw descriptor helper. Only the reviewed VM paths and stopped
+crash translation read PTEs by physical table address. Raw descriptor
+reads are limited to the architecture's PTE read, PTE update and L3 link
+lookup.
+
 The kernel-only EL0 fixture checks successful scalar ABI output in the
 existing userspace view. For statfs, both the ext2 root and procfs overwrite
 a nonzero 32-byte reserved tail with zero. For sysinfo, all 104 bytes after
