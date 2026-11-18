@@ -36,8 +36,6 @@ RATCHET = {
     # owners.
     ("kernel/arch/arm64/mm/mmu.tkb", "mmu_user_l3_physical"):
         ("#637", "an L3 table's physical address; moves to a page-table owner"),
-    ("kernel/boot/fdt.tkb", "fdt_memory_first_base"):
-        ("#637", "a RAM bank base; moves to a memory-map region"),
 }
 
 ADDRESS_NAME = re.compile(

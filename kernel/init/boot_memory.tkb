@@ -32,7 +32,11 @@ fn kernel_boot_memory_apply() !{logs, unsafe} {
                 }
                 PageAllocatorMemoryResult::Applied => {}
             }
-            let mem_base: usize = fdt_memory_first_base(detected);
+            let mem_base: usize = match fdt_memory_region_at(detected, 0) {
+                FdtMemoryRegionResult::Found(region) => { region.base }
+                FdtMemoryRegionResult::Invalid => { 0 }
+                FdtMemoryRegionResult::OutOfRange => { 0 }
+            };
             let mem_size: usize = fdt_memory_total_size(detected);
             kernel_boot_log("memory: source=dtb base_bytes=");
             uart_put_udec(mem_base as usize);

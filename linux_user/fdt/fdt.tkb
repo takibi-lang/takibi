@@ -120,7 +120,12 @@ fn report_memory(result: FdtMemoryResult, blob: usize) !{unsafe} {
             uart_print_hex(fdt_memory_reservation_count(found) as i32);
             uart_puts("\n");
             uart_puts("memory base ");
-            println_hex64(fdt_memory_first_base(found));
+            let base: usize = match fdt_memory_region_at(found, 0) {
+                FdtMemoryRegionResult::Found(region) => { region.base }
+                FdtMemoryRegionResult::Invalid => { 0 }
+                FdtMemoryRegionResult::OutOfRange => { 0 }
+            };
+            println_hex64(base);
             uart_puts("memory size ");
             println_hex64(fdt_memory_total_size(found));
             // The enumeration this map exists for. Walking it is what says

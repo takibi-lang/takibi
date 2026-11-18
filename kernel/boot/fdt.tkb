@@ -2200,15 +2200,6 @@ fn fdt_blob_overlaps(map: FdtMemoryMap, base: usize, size: usize)
     return base < map.dtb + blob_size && map.dtb < base + size;
 }
 
-fn fdt_memory_first_base(map: FdtMemoryMap) -> usize !{unsafe} {
-    let result: FdtMemoryRegionResult = fdt_memory_region_at(map, 0);
-    match result {
-        FdtMemoryRegionResult::Invalid => { return 0; }
-        FdtMemoryRegionResult::OutOfRange => { return 0; }
-        FdtMemoryRegionResult::Found(region) => { return region.base; }
-    }
-}
-
 fn fdt_memory_total_size(map: FdtMemoryMap) -> usize !{unsafe} {
     let mut index: usize = 0;
     let mut total: usize = 0;
