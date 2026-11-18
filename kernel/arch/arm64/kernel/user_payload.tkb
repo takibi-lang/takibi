@@ -1881,7 +1881,7 @@ fn itimer_probe() !{unsafe} {
 // as Linux's vfs_create and vfs_mkdir do.
 fn statfs_umask_kernel_probe() !{unsafe} {
     let mut fs: [u8; 120];
-    for index: usize in 0..<120 { fs[index] = 0; }
+    for index: usize in 0..<120 { fs[index] = 0xFF; }
     let fs_base: *u8 = fs as *u8;
     fail_if(src_loc(), svc5(STATFS_SYSCALL, "/" as *u8 as usize, ptr_of(fs_base, 0), 0, 0, 0) != 0);
     fail_if(src_loc(), payload_read_u64(fs_base, 0) != 0xEF53);
@@ -1891,8 +1891,15 @@ fn statfs_umask_kernel_probe() !{unsafe} {
     fail_if(src_loc(), payload_read_u64(fs_base, 48) > payload_read_u64(fs_base, 40));
     fail_if(src_loc(), payload_read_u64(fs_base, 64) != 255);
     fail_if(src_loc(), payload_read_u64(fs_base, 72) != 1024);
+    for index: usize in 88..<120 {
+        fail_if(src_loc(), fs[index] != 0);
+        fs[index] = 0xFF;
+    }
     fail_if(src_loc(), svc5(STATFS_SYSCALL, "/proc" as *u8 as usize, ptr_of(fs_base, 0), 0, 0, 0) != 0);
     fail_if(src_loc(), payload_read_u64(fs_base, 0) != 0x9FA0);
+    for index: usize in 88..<120 {
+        fail_if(src_loc(), fs[index] != 0);
+    }
 
     fail_if(src_loc(), svc5(UMASK_SYSCALL, 0x3F, 0, 0, 0, 0) != 0x12);
     let file: usize = svc5(56, 0xFFFFFFFFFFFFFF9C, "/umask-file" as *u8 as usize,
