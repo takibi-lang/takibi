@@ -1052,6 +1052,7 @@ fn initial_user_payload() !{unsafe} {
         sigaltstack_probe();
         sigaltstack_autodisarm_probe();
         shared_mapping_probe();
+        sysinfo_kernel_probe();
         statfs_umask_kernel_probe();
         mmap_region_probe();
         mmap_region_kernel_probe();
@@ -1410,6 +1411,7 @@ const MMAP_SYSCALL: usize = 222;
 const MUNMAP_SYSCALL: usize = 215;
 const STATFS_SYSCALL: usize = 43;
 const GETRUSAGE_SYSCALL: usize = 165;
+const SYSINFO_SYSCALL: usize = 179;
 const UMASK_SYSCALL: usize = 166;
 const PROT_READ_WRITE: usize = 3;
 const MAP_SHARED_ANONYMOUS: usize = 0x21;
@@ -1873,6 +1875,18 @@ fn itimer_probe() !{unsafe} {
         bs"userspace itimer: ITIMER_REAL one-shot and interval SIGALRM, getitimer and old value, bad which and usec EINVAL, fork child unarmed, default SIGALRM ends a sleeper ok\n";
     fail_if(src_loc(), svc5(64, 1, (unsafe { message as *u8 }) as usize,
                             message.len, 0, 0) != message.len);
+}
+
+// The kernel reports uptime and clears the other fields. Keep sentinels
+// outside the 112-byte result to check the extent of that write.
+fn sysinfo_kernel_probe() !{unsafe} {
+    let mut output: [u8; 128];
+    for index: usize in 0..<128 { output[index] = 0xFF; }
+    let base: *u8 = output as *u8;
+    fail_if(src_loc(), svc5(SYSINFO_SYSCALL, ptr_of(base, 8), 0, 0, 0, 0) != 0);
+    for index: usize in 0..<8 { fail_if(src_loc(), output[index] != 0xFF); }
+    for index: usize in 16..<120 { fail_if(src_loc(), output[index] != 0); }
+    for index: usize in 120..<128 { fail_if(src_loc(), output[index] != 0xFF); }
 }
 
 // The half that needs this kernel's ext2 root and /proc: statfs reports
