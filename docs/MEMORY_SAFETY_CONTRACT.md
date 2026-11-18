@@ -197,6 +197,14 @@ crash translation read PTEs by physical table address. Raw descriptor
 reads are limited to the architecture's PTE read, PTE update and L3 link
 lookup.
 
+The process record's backing handle has two reviewed writers. Publication
+zeroes a fresh region slot and records its address and generation. Release
+tries to pin the named slot and clears the handle. A successful pin is
+retired, with slot reuse deferred while another pin remains. Both normal
+builds check the callers of publication, release and their shared setter.
+The lifetime of the backing record is distinct from the lifetime of the
+physical tables it names.
+
 The kernel-only EL0 fixture checks successful scalar ABI output in the
 existing userspace view. For statfs, both the ext2 root and procfs overwrite
 a nonzero 32-byte reserved tail with zero. For sysinfo, all 104 bytes after
