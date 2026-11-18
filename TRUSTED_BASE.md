@@ -126,7 +126,7 @@ file only the other target compiles is skipped). `--facts rawsites.tsv`
 writes per-file site counts, and `make raw-site-counts` prints both kernels'.
 The mint files' public API carries no raw pointer: no non-private function
 of a listed file returns a `*T`, and none returns a `usize` its name calls an
-address, except the exports `scripts/check_frame_api.py` lists with the issue
+address, except the exports `scripts/buildcheck_frame_api.py` lists with the issue
 that retires each (the trap-frame address the vector assembly takes, the DMA
 bus-address exports, and two physical addresses that move to owners under
 #637; GitHub issue #1018). The check scans signatures, so a public field or

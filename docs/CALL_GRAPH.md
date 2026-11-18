@@ -50,6 +50,16 @@ contracts in `effect_rules.ml` constrain those), anything about `extern`
 declarations or compiler builtins beyond their name, and a generic function that is never
 instantiated (it has no compiled body and no row).
 
+## Source signatures
+
+`--facts` also writes `source-signatures.tsv`. Its columns are `file`,
+`line`, `name`, `private` and `returns`. The inventory comes from the
+parsed source before generic instantiation, including templates with no
+compiled instance. Return spellings use the same compiler-token logic as
+the graph. The frame API ratchet uses both kernels' inventories: the
+resolved graph omits uninstantiated functions and cannot enforce a rule
+over their source declarations.
+
 ## Changing the format
 
 A column is added when a consumer needs it, and the version goes up with

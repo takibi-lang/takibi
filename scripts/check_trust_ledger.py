@@ -22,7 +22,7 @@ the check needs no kernel build:
   per_cpu stores, raw `cpu_id()` calls (check_raw_cpu_id_sites.py);
 - explicit `kernel_invariant_stop` call sites (#1031: containment, not trust
   removed, so a separate row);
-- the frame API ratchet (check_frame_api.py RATCHET, #1018), when present;
+- the frame API ratchet (buildcheck_frame_api.py RATCHET, #1018), when present;
 - the unprotected globals (scripts/global_protection_allowlist.tsv rows,
   which buildcheck_global_protection.py holds to the compiler's
   --facts globals.tsv tables, #1012);
@@ -89,7 +89,7 @@ CATEGORIES = {
     "per_cpu_ordinary_arrays": (TRUST, "[T; KERNEL_MAX_CORES] globals left ordinary (check_per_cpu_arrays LISTED)"),
     "raw_cpu_id_calls": (TRUST, "raw cpu_id() calls outside the CpuHere mint (check_raw_cpu_id_sites)"),
     "invariant_stop_sites": (TRUST, "kernel_invariant_stop call sites outside kernel/tests (#1031; containment)"),
-    "frame_api_ratchet": (TRUST, "check_frame_api.py RATCHET entries (#1018)"),
+    "frame_api_ratchet": (TRUST, "buildcheck_frame_api.py RATCHET entries (#1018)"),
     "unprotected_globals": (TRUST, "production let mut globals whose type shows no protection (scripts/global_protection_allowlist.tsv rows, #1012)"),
     "trust_build_checks": (TRUST, "scripts TRUSTED_BASE.md names as carrying trust (scripts/trust_checks.tsv)"),
     "tla_review_stamps": (TRUST, "review stamps in kernel/models/README.md"),
@@ -283,7 +283,7 @@ def measure_tree():
     counts["unprotected_globals"] = len(mint_list(
         ROOT / "scripts" / "global_protection_allowlist.tsv"))
 
-    frame_api = ROOT / "scripts" / "check_frame_api.py"
+    frame_api = ROOT / "scripts" / "buildcheck_frame_api.py"
     if frame_api.exists():
         value = literal_assignment(frame_api, "RATCHET")
         if isinstance(value, (ast.Dict, ast.Set, ast.List, ast.Tuple)):

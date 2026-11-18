@@ -57,7 +57,7 @@
 | `--internal-range-obligation-fault-control` | - | plant known-unsound range rules (z3 check's failing control) |
 | `--internal-allow-unused` | - | accept a function nothing reachable uses (rejected by default) |
 
-## Fact files (14)
+## Fact files (15)
 
 `--facts DIR` writes every one of these, under these names.
 
@@ -67,6 +67,7 @@
 | `rawderef.tsv` | every raw-pointer dereference (#639) |
 | `rawsites.tsv` | raw-authority site count per file (#739) |
 | `callgraph.tsv` | the resolved call graph (docs/CALL_GRAPH.md) |
+| `source-signatures.tsv` | source function return signatures, including unused generic templates (docs/CALL_GRAPH.md) |
 | `globals.tsv` | each mutable global's protection, then every use (docs/GLOBAL_PROTECTION.md) |
 | `fields.tsv` | each struct field, with reads and writes of that field name (docs/GLOBAL_PROTECTION.md) |
 | `heldguards.tsv` | the guards held at each call |

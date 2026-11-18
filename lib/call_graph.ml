@@ -241,7 +241,7 @@ let relative file =
 
 let cell = function [] -> "-" | items -> String.concat "," items
 
-let write_table (out : out_channel) (prog : toplevel list) (types : program_types) =
+let write_table ?source_signatures (out : out_channel) (prog : toplevel list) (types : program_types) =
   let definitions = List.filter_map (function FuncDef f -> Some f | _ -> None) prog in
   (* A row is a source definition; the instances of one generic function
      are one row, identified by their shared def_loc. *)
@@ -287,6 +287,21 @@ let write_table (out : out_channel) (prog : toplevel list) (types : program_type
   let tokens_of file = match Hashtbl.find_opt lexed file with
     | Some tokens -> tokens
     | None -> let tokens = lex_file file in Hashtbl.replace lexed file tokens; tokens in
+  (* The source inventory includes generic definitions with no compiled
+     instance. Keep them out of the resolved call graph. *)
+  Option.iter (fun (out, source_program) ->
+    output_string out "file\tline\tname\tprivate\treturns\n";
+    List.iter (function
+      | FuncDef f ->
+          let file = source_file_of_loc f.def_loc in
+          (match Def_extent.find f.def_loc, tokens_of file with
+           | Some stop, Some tokens ->
+               let returned = returns_of
+                   (slice tokens f.def_loc.pos_cnum stop.pos_cnum) in
+               Printf.fprintf out "%s\t%d\t%s\t%b\t%s\n"
+                 (relative file) f.def_loc.pos_lnum f.name f.is_private returned
+           | _ -> ())
+      | _ -> ()) source_program) source_signatures;
   Printf.fprintf out "# takibi call graph, format %d; see docs/CALL_GRAPH.md\n"
     format_version;
   output_string out (String.concat "\t" columns ^ "\n");

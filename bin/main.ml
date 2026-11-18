@@ -47,6 +47,7 @@ let fact_files = [
   ("rawderef.tsv", "every raw-pointer dereference (#639)");
   ("rawsites.tsv", "raw-authority site count per file (#739)");
   ("callgraph.tsv", "the resolved call graph (docs/CALL_GRAPH.md)");
+  ("source-signatures.tsv", "source function return signatures, including unused generic templates (docs/CALL_GRAPH.md)");
   ("globals.tsv", "each mutable global's protection, then every use (docs/GLOBAL_PROTECTION.md)");
   ("fields.tsv", "each struct field, with reads and writes of that field name (docs/GLOBAL_PROTECTION.md)");
   ("heldguards.tsv", "the guards held at each call");
@@ -463,7 +464,10 @@ let () =
 
     if facts_on then begin
       let out = open_out (fact "callgraph.tsv") in
-      Call_graph.write_table out prog prog_types;
+      let signatures = open_out (fact "source-signatures.tsv") in
+      Fun.protect ~finally:(fun () -> close_out signatures)
+        (fun () -> Call_graph.write_table
+          ~source_signatures:(signatures, source_prog) out prog prog_types);
       close_out out
     end;
 

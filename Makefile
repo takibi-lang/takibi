@@ -2380,8 +2380,13 @@ _model-map-restamp: $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O)
 model-map-restamp: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _model-map-restamp
 
+FRAME_API_STAMP = $(KERNEL_DIR)/build/frame_api.ok
+$(FRAME_API_STAMP): $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_DIR)/RAW_MINT_FILES scripts/buildcheck_frame_api.py
+	python3 scripts/buildcheck_frame_api.py $(KERNEL_QEMU_MAIN_O).facts/source-signatures.tsv $(KERNEL_RPI5_MAIN_O).facts/source-signatures.tsv
+	@touch $@
+
 .PHONY: _kernelbuild
-_kernelbuild: _kernelbuild-rpi5 _kernelbuild-qemu _kernelbuild-dma-qemu _kernelbuild-invariant-qemu _kernel-memory-map-check $(MODEL_MAP_STAMP) $(GLOBAL_PROTECTION_STAMP)
+_kernelbuild: _kernelbuild-rpi5 _kernelbuild-qemu _kernelbuild-dma-qemu _kernelbuild-invariant-qemu _kernel-memory-map-check $(MODEL_MAP_STAMP) $(GLOBAL_PROTECTION_STAMP) $(FRAME_API_STAMP)
 
 kernelbuild: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild
