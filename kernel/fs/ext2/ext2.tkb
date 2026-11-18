@@ -1587,8 +1587,9 @@ linear struct Ext2BitmapFill[unit: usize] {
 must_use variant Ext2BitmapFillResult { Invalid; Filled(Ext2BitmapFill[0]); }
 
 fn ext2_bitmap_fill(mount: Ext2Mount, inode_bitmap: bool,
-                    saved: borrow [u8; KERNEL_BLOCK_SIZE..])
-        -> Ext2BitmapFillResult !{unsafe} {
+                    saved: borrow uninit [u8; KERNEL_BLOCK_SIZE..])
+        -> Ext2BitmapFillResult !{unsafe}
+        ensures match result { Ext2BitmapFillResult::Filled(fill) => init(saved[0..<KERNEL_BLOCK_SIZE]), _ => true } {
     let mut bitmap_block: usize = mount.block_bitmap_block;
     let mut item_count: usize = mount.filesystem_blocks - 1;
     if (inode_bitmap) {
@@ -1631,7 +1632,7 @@ fn ext2_bitmap_fill(mount: Ext2Mount, inode_bitmap: bool,
         ext2_slot_release(slot);
         return Ext2BitmapFillResult::Filled(fill);
     }
-    match ext2_bitmap_fill_restore_with(slot, mount, fill, saved) {
+    match ext2_bitmap_fill_restore_with(slot, mount, fill, saved[0..<KERNEL_BLOCK_SIZE]) {
         Ext2OwnerReleaseResult::Invalid => { }
         Ext2OwnerReleaseResult::Released => { }
     }

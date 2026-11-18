@@ -396,7 +396,8 @@ private fn ext2_full_check_one(guard: borrow Ext2MutationGuard[&ext2_mutation_lo
 
 private fn ext2_full_check_in(guard: borrow Ext2MutationGuard[&ext2_mutation_lock], mount: Ext2Mount, inode_bitmap: bool,
                               blocks: usize, inodes: usize,
-                              saved: borrow [u8; KERNEL_BLOCK_SIZE..]) -> bool {
+                              saved: borrow uninit [u8; KERNEL_BLOCK_SIZE..]) -> bool
+        ensures init(saved[0..<KERNEL_BLOCK_SIZE]) if (result) {
     match ext2_block_bitmap_snapshot(
             mount, guarded_ref(guard, ext2_fixture_state.bitmap) as [u8; KERNEL_BLOCK_SIZE..]) {
         Ext2ReadResult::Invalid => { return false; }
@@ -428,7 +429,7 @@ private fn ext2_full_check_in(guard: borrow Ext2MutationGuard[&ext2_mutation_loc
                  ext2_counters_match_bitmaps(mount);
             if (inode_bitmap) { ok = ok && ext2_io_bitmap_matches(guard, mount); }
             match ext2_bitmap_fill_restore(mount, fill,
-                    saved) {
+                    saved[0..<KERNEL_BLOCK_SIZE]) {
                 Ext2OwnerReleaseResult::Invalid => { return false; }
                 Ext2OwnerReleaseResult::Released => { }
             }
