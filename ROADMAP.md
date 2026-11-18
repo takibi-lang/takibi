@@ -380,9 +380,10 @@ than noticed by whoever happens to be reading.
   preemption flip), on #1159 (the globals ratchet at zero, the flip's
   precondition); #1157 (the trusted-base ledger as a dated series, #986
   slice 1); #1160 (verification stage 2 complete, #954); #1158 (the
-  distribution-benchmark load recorded beside Linux, #742 stage 1). When
-  all are closed: the maintainer posts the kernel to Hacker News and starts
-  the first paper.
+  distribution-benchmark load recorded beside Linux, #742 stage 1).
+  The milestone also includes the scoped memory-safety contract (#1513)
+  and the settings-wake intermittent (#667). When all are closed, the
+  maintainer posts the kernel to Hacker News and starts the first paper.
 - **language settled** (milestone 2): #1010 (the lossless printer and
   `takibi fmt`), then #1009 (the syntax edition). When both are closed: the
   maintainer starts looking for co-authors and co-developers in earnest.
