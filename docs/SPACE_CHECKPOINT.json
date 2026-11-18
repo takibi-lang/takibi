@@ -1,12 +1,12 @@
 {
-  "date": "2026-11-17",
-  "event": "milestone",
+  "date": "2026-11-18",
+  "event": "incremental",
   "decision": "measured",
-  "source_sha256": "e4c9131744bfd34079301664bd163cfd3c868f36b3134b3ab95e5809e9d70b66",
-  "workload": "Standard maintained boot and exec/teardown using the same four exec windows. Compare normal/debug QEMU and RPi5 object/ELF sections, named storage, reservation starts and LLVM static frames against published 52d4017b. Measure compiler process cost separately with three sequential source-identical baseline/candidate pairs per target.",
+  "source_sha256": "9de3db0d60cac344521da34f9917509f4300b230870d751d73bc9c639abb65b7",
+  "workload": "Existing boot ext2 bitmap exhaustion and restore fixture; linked production image sections and bitmap-fill frame.",
   "evidence": [
-    "docs/INFERRED_REFERENCE_LIFETIMES_2026-11-17.md"
+    "docs/EXT2_BITMAP_INIT_REVIEW.md"
   ],
-  "assessment": "Accept static direct-call inference without maintained kernel/native annotation or runtime source changes. All allocated bytes/addresses, named storage, reservation starts and static frames are identical in four images. Normal artifacts match whole hashes; debug artifacts match after stripping working-directory DWARF. No pool, capacity, retained-page or occupancy benefit is claimed. Measured compile-time median growth is about 0.8/1.2 percent and allocation about 2.3 percent, within the unchanged compiler budget.",
-  "next_trigger": "A new reference/storage shape requiring a materially different inference domain, a changed kernel allocation/reclamation workload, or completion of the next memory-safety consumer."
+  "assessment": "Applies checked prefix initialization to the existing scratch page. QEMU text decreases 32 bytes; RPi5 text and both targets data and BSS are unchanged. The bitmap-fill frame decreases 16 bytes on both targets. No storage or allocation workload changes.",
+  "next_trigger": "Recheck when the bitmap save or restore work buffer size, allocations, or publication boundary changes."
 }
