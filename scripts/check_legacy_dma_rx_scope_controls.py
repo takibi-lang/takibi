@@ -36,6 +36,11 @@ def main() -> int:
         '\nfn planted() { log("http://device"); dma_finish_rx(buffer, 64); }\n')
     failures += check_case("call after quoted URL", after_string,
                            "use a dma_fixed allocation")
+    after_char = {
+        GEM: """\nfn planted() { let quote = '"'; dma_finish_rx(buffer, 64); }\n""",
+    }
+    failures += check_case("call after quote character", after_char,
+                           "use a dma_fixed allocation")
     regressed = dict(sources)
     regressed[GEM] += "\nfn planted() { dma_prepare_rx(other_buf, 2048); }\n"
     failures += check_case("GEM back on a legacy call", regressed,

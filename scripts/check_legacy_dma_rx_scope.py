@@ -13,6 +13,7 @@ import re
 import sys
 
 from pass_line import report_pass
+from source_scan import code_skeleton
 
 CALL = re.compile(r"\bdma_(?:prepare_rx|finish_rx)\s*\(")
 GEM = Path("kernel/drivers/net/rp1_gem.tkb")
@@ -21,53 +22,12 @@ GEM = Path("kernel/drivers/net/rp1_gem.tkb")
 ALLOWED: dict[str, int] = {}
 
 
-def code_only(source: str) -> str:
-    """Blank comments and strings without hiding code after a quoted `//`."""
-    result = list(source)
-    state = "code"
-    index = 0
-    while index < len(source):
-        char = source[index]
-        next_char = source[index + 1] if index + 1 < len(source) else ""
-        if state == "code":
-            if char == '"':
-                state = "string"
-                result[index] = " "
-            elif char == "/" and next_char in ("/", "*"):
-                state = "line" if next_char == "/" else "block"
-                result[index] = result[index + 1] = " "
-                index += 1
-        elif state == "string":
-            if char == "\\" and next_char:
-                result[index] = result[index + 1] = " "
-                index += 1
-            else:
-                if char == '"':
-                    state = "code"
-                if char != "\n":
-                    result[index] = " "
-        elif state == "line":
-            if char == "\n":
-                state = "code"
-            else:
-                result[index] = " "
-        else:
-            if char == "*" and next_char == "/":
-                state = "code"
-                result[index] = result[index + 1] = " "
-                index += 1
-            elif char != "\n":
-                result[index] = " "
-        index += 1
-    return "".join(result)
-
-
 def audit(sources: dict[Path, str]) -> tuple[list[str], int]:
     failures: list[str] = []
     found: dict[str, int] = {}
     calls = 0
     for path, source in sorted(sources.items()):
-        # code_only only blanks characters, so it cannot create a callee name
+        # code_skeleton only blanks characters, so it cannot create a callee name
         # the raw text lacks; a file without either name has no call. Not
         # CALL itself: blanking a comment between a name and its `(` can
         # create a match the raw text does not have. Skipping the per-char
@@ -75,7 +35,7 @@ def audit(sources: dict[Path, str]) -> tuple[list[str], int]:
         # bound on a loaded host (#703).
         if "dma_prepare_rx" not in source and "dma_finish_rx" not in source:
             continue
-        code = code_only(source)
+        code = code_skeleton(source)
         for match in CALL.finditer(code):
             calls += 1
             end = code.find(")", match.end())
