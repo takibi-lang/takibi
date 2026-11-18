@@ -1073,7 +1073,7 @@ must_use variant AddressSpacePteWriteResult {
     Written;
 }
 
-fn address_space_l3_physical_for_branch(root: AddressSpaceRoot, branch: usize) -> usize {
+private fn address_space_l3_physical_for_branch(root: AddressSpaceRoot, branch: usize) -> usize {
     let slot: usize = root.slot;
     if (address_space_root_key_valid(slot) == false || branch >= USER_L2_BRANCH_COUNT) {
         return 0;
@@ -1084,7 +1084,7 @@ fn address_space_l3_physical_for_branch(root: AddressSpaceRoot, branch: usize) -
                                 branch);
 }
 
-fn address_space_l3_physical_for_index(root: AddressSpaceRoot, index: usize) -> usize {
+private fn address_space_l3_physical_for_index(root: AddressSpaceRoot, index: usize) -> usize {
     let slot: usize = root.slot;
     if (index >= USER_SPACE_PAGE_COUNT) { return 0; }
     return address_space_l3_physical_for_branch(root,
@@ -1390,9 +1390,8 @@ fn address_space_user_window_is_clear(root: AddressSpaceRoot) -> bool !{unsafe} 
     return true;
 }
 
-fn address_space_l3_branch_physical(root: AddressSpaceRoot, branch: usize) -> usize {
-    let slot: usize = root.slot;
-    return address_space_l3_physical_for_branch(root, branch);
+fn address_space_l3_branch_present(root: AddressSpaceRoot, branch: usize) -> bool {
+    return address_space_l3_physical_for_branch(root, branch) != 0;
 }
 
 // Root 0 is the early-boot TTBR0_EL1 fallback and is deliberately retained
@@ -1635,11 +1634,11 @@ fn process_address_space_probe() -> bool !{unsafe} {
                             let high_address: usize = USER_TEXT_VA + 512 * PAGE_SIZE;
                             let mut mapped_ok: bool =
                                 filled_first_branch &&
-                                address_space_l3_branch_physical(root_a_root, 0) != 0 &&
-                                address_space_l3_branch_physical(root_a_root, 1) != 0 &&
-                                address_space_l3_branch_physical(root_a_root, 0) !=
-                                address_space_l3_branch_physical(root_a_root, 1) &&
-                                address_space_l3_branch_physical(root_b_root, 0) != 0 &&
+                                address_space_l3_physical_for_branch(root_a_root, 0) != 0 &&
+                                address_space_l3_physical_for_branch(root_a_root, 1) != 0 &&
+                                address_space_l3_physical_for_branch(root_a_root, 0) !=
+                                address_space_l3_physical_for_branch(root_a_root, 1) &&
+                                address_space_l3_physical_for_branch(root_b_root, 0) != 0 &&
                                 page_allocator_live_count() == before + 521;
                             if (mapped_ok == false) {
                                if (filled_first_branch) { kernel_boot_log("1"); }

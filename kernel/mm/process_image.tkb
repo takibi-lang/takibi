@@ -1195,7 +1195,7 @@ fn process_image_clone_vm_begin(source_space: AddressSpaceRoot,
     // reads per fork, and forks are what this kernel does most. Same
     // answer, same order (l3_index still ascends), ~200x less of it.
     for branch: usize in 0..<USER_L2_BRANCH_COUNT {
-      if (address_space_l3_branch_physical(source_space, branch) == 0) {
+      if (address_space_l3_branch_present(source_space, branch) == false) {
         continue;
       }
       for entry: usize in 0..<USER_L3_PAGE_COUNT {
@@ -3461,7 +3461,7 @@ fn mmap_region_resident_pages(target: AddressSpaceRoot) -> usize {
     for branch: usize in 0..<USER_L2_BRANCH_COUNT {
         if (branch >= MMAP_REGION_FIRST_PAGE / USER_L3_PAGE_COUNT &&
             branch < (MMAP_REGION_FIRST_PAGE + MMAP_REGION_PAGES) / USER_L3_PAGE_COUNT &&
-            address_space_l3_branch_physical(target, branch) != 0) {
+            address_space_l3_branch_present(target, branch)) {
             count = count + 1;
         }
     }
