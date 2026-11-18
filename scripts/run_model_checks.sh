@@ -212,6 +212,11 @@ check_model ConsoleTx Safety 10 \
     flowpauseoff:CInitFlowPauseOff:FlowNoStranded:violated:6 \
     flowhintonly:CInitFlowHintOnly:temporal:ok:4
 
+check_model CrashTraceSnapshot Coherent 13 \
+    fixed:CInitFixed:pass:ok \
+    no_commit:CInitNoCommit:Coherent:violated \
+    no_generation:CInitNoGeneration:Coherent:violated
+
 check_model ConsoleRoom Safety 8 \
     fixed:CInitFixed:pass:ok \
     nofence:CInitNoFence:NoFullStore:violated \

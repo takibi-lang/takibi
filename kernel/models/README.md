@@ -1469,3 +1469,30 @@ than virtio-net's 10; PacketReserve.tla covers 10/8 by counts. Control (2
 buffers, 1 descriptor, RESERVE 1, for a short trace): `skipempty`, a scan
 that does not count empty slots (claimed packets), undercounts
 (`ScanNeverLow`) and keeps past the reserve.
+
+## CrashTraceSnapshot.tla -- bounded crash trace copying
+
+One reader and one slot have distinct old and new records. The writer can
+overwrite the slot or reset before publishing a record with the same
+sequence. Two independently copied words expose mixed records. Removing
+the commit check allows an in-progress overwrite through. Removing the
+generation check allows an old sequence to name a different record after
+reset. The model interleaves word actions and checks the record identity
+and payload only for accepted copies. Boot serializes reset and writing.
+This model does not represent memory ordering or sequence wraparound.
+
+| Action | Kernel functions | Modelled ordering | Dropped | Stamp |
+| --- | --- | --- | --- | --- |
+| `BeginReset` | `kernel_process_crash_trace_reset` | mark the boot reset generation odd before clearing commits | counter reinitialization -- irrelevant to `Coherent`: only commit identity reaches the reader | `0a6bd407cf93` |
+| `Invalidate` | `kernel_process_crash_trace_reset`, `kernel_process_trace_record` | clear the commit before any new payload | slot selection -- irrelevant to `Coherent`: the model picks the same slot in advance | `e37be4e722e3` |
+| `EndReset` | `kernel_process_crash_trace_reset` | mark the cleared generation even | other slots -- irrelevant to `Coherent`: their commits cannot validate this slot | `0a6bd407cf93` |
+| `WriteFirst` | `kernel_process_trace_record` | store the first word after invalidation | other payload fields -- irrelevant to `Coherent`: two words can witness mixed payload | `73bbe57e2e20` |
+| `WriteSecond` | `kernel_process_trace_record` | store a second independently observable word | remaining payload fields -- irrelevant to `Coherent`: all words use the same publication order | `73bbe57e2e20` |
+| `Publish` | `kernel_process_trace_record` | publish the final sequence after payload | CPU and global ordering -- irrelevant to `Coherent`: the chosen slot alone can supply the examined record | `73bbe57e2e20` |
+| `ReadGeneration` | `kernel_process_crash_trace_copy` | sample the generation before the scan | search for the latest commit -- irrelevant to `Coherent`: the reader is already testing one selected sequence | `896aaa263e9b` |
+| `ReadCommit` | `kernel_process_crash_trace_copy` | read the selected slot's commit before copying | other slots -- irrelevant to `Coherent`: acceptance is per record | `896aaa263e9b` |
+| `ReadFirst` | `kernel_process_crash_trace_copy` | read the first payload word | unused destination words -- irrelevant to `Coherent`: only accepted payload is returned | `896aaa263e9b` |
+| `ReadSecond` | `kernel_process_crash_trace_copy` | read a second payload word | other payload words -- irrelevant to `Coherent`: two reads can witness mixing | `896aaa263e9b` |
+| `RecheckCommit` | `kernel_process_crash_trace_copy` | the ending sequence must equal the opening commit | skipped records -- irrelevant to `Coherent`: the invariant concerns accepted records only | `896aaa263e9b` |
+| `RecheckGeneration` | `kernel_process_crash_trace_copy` | discard the whole copy unless the opening generation was even and unchanged | zeroed destination tail -- irrelevant to `Coherent`: the count determines the returned prefix | `896aaa263e9b` |
+| `Done` | No kernel operation; a quiescent stutter | the reader has finished and the writer committed | later overwrites -- irrelevant to `Coherent`: the selected copy cannot run again | `e3b0c44298fc` |

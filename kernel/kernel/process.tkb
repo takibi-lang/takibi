@@ -6125,8 +6125,8 @@ const ProcessTraceSignalFrameFault: usize = 2; // frame unwritable: SIGSEGV
 // with per-CPU rings and issue #299's publication record.
 //
 // Each core writes only its own segment and its own slot counter, so the
-// only shared word is the sequence -- and that is an atomic fetch-add
-// rather than a lock, which is what #465 specifies for the same job.
+// only shared writer counter is the sequence, an atomic fetch-add. Readers
+// acquire each published word and validate the commit on both sides.
 //
 // WHY A GLOBAL SEQUENCE AND NOT A PER-CPU ONE. diagnostic_ring.tkb's
 // limitation says it "does not invent a global order between CPUs", and
@@ -6136,13 +6136,13 @@ const ProcessTraceSignalFrameFault: usize = 2; // frame unwritable: SIGSEGV
 // atomic counter buys the total order, and the reader reconstructs it by
 // sequence rather than by segment.
 private let mut kernel_crash_trace:
-    [usize; KERNEL_CRASH_TRACE_STORAGE_WORDS];
-// How many records THIS core has written. Per-core, so it needs no
-// atomic: one writer, and it selects a slot inside that core's own
-// segment.
-private let mut kernel_crash_trace_next: [usize; KERNEL_MAX_CORES];
-// The order. Shared, so it is the one word here that is an atomic.
+    [AtomicWord; KERNEL_CRASH_TRACE_STORAGE_WORDS];
+// Each writer advances its own slot counter. Reset clears them all.
+private let mut kernel_crash_trace_next: [AtomicWord; KERNEL_MAX_CORES];
+// Global record order and the boot-only reset generation. Odd means reset
+// is in progress. Readers reject across reset because sequence restarts.
 private let mut kernel_crash_trace_sequence: AtomicWord;
+private let mut kernel_crash_trace_reset_generation: AtomicWord;
 
 // Which segment this core writes. Bounded for the same reason
 // execution_state[cpu] bounds its index: cpu_id() reads a hardware affinity
@@ -6285,15 +6285,17 @@ private fn kernel_crash_trace_slot(cpu: {0..<KERNEL_MAX_CORES as usize},
 // issue #487 -- an integer literal assigned to an array is accepted, the
 // same hole issue #460 found for structs.
 private fn kernel_process_crash_trace_reset() !{unsafe} {
+    atomic_word_fetch_add(&kernel_crash_trace_reset_generation, 1);
     for core: usize in 0..<KERNEL_MAX_CORES {
-        kernel_crash_trace_next[core] = 0;
+        atomic_word_store(&kernel_crash_trace_next[core], 0);
     }
     atomic_word_store(&kernel_crash_trace_sequence, 0);
     for slot: usize in 0..<KERNEL_CRASH_TRACE_SLOTS {
-        kernel_crash_trace[
+        atomic_word_store(&kernel_crash_trace[
             slot * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT +
-            KERNEL_PROCESS_TRACE_SEQUENCE_WORD] = 0;
+            KERNEL_PROCESS_TRACE_SEQUENCE_WORD], 0);
     }
+    atomic_word_fetch_add(&kernel_crash_trace_reset_generation, 1);
 }
 
 fn kernel_process_trace_record(event: usize, pid: usize, generation: usize,
@@ -6315,9 +6317,8 @@ fn kernel_process_trace_record(event: usize, pid: usize, generation: usize,
     // last; zero means an exception observed an in-progress entry.
     //
     // GitHub issue #479 Group B: the slot counter is this core's own, so
-    // the interrupt-versus-thread reservation above still works unchanged
-    // and needs no atomic. The SEQUENCE is shared and does, and it is a
-    // fetch-add returning the previous value.
+    // the interrupt-versus-thread reservation above remains local. The
+    // global sequence fetch-add returns the previous value.
     //
     // GitHub issue #1316: callers include task context with IRQs on (exit,
     // exec commit). The mask holds the task on this CPU from choosing the
@@ -6327,27 +6328,24 @@ fn kernel_process_trace_record(event: usize, pid: usize, generation: usize,
     let cpu: {0..<KERNEL_MAX_CORES as usize} = kernel_crash_trace_cpu();
     let sequence: usize =
         atomic_word_fetch_add(&kernel_crash_trace_sequence, 1) + 1;
-    let local: usize = kernel_crash_trace_next[cpu] + 1;
-    kernel_crash_trace_next[cpu] = local;
+    let local: usize = atomic_word_load(&kernel_crash_trace_next[cpu]) + 1;
+    atomic_word_store(&kernel_crash_trace_next[cpu], local);
     let slot: {0..<KERNEL_CRASH_TRACE_SLOTS as usize} =
         kernel_crash_trace_slot(cpu, local);
     let base: usize = slot * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
-    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_SEQUENCE_WORD] = 0;
-    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_CPU_WORD] = cpu;
-    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_EVENT_WORD] = event;
-    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_PID_WORD] = pid;
-    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_GENERATION_WORD] =
-        generation;
-    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_PEER_PID_WORD] = peer_pid;
-    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_PEER_GENERATION_WORD] =
-        peer_generation;
-    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_STATE_WORD] = state;
-    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_WAIT_REASON_WORD] =
-        wait_reason;
-    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_ROOT_WORD] = root;
-    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_SAVED_SP_WORD] = saved_sp;
-    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_AUX_WORD] = aux;
-    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_SEQUENCE_WORD] = sequence;
+    atomic_word_store(&kernel_crash_trace[base + KERNEL_PROCESS_TRACE_SEQUENCE_WORD], 0);
+    atomic_word_store(&kernel_crash_trace[base + KERNEL_PROCESS_TRACE_CPU_WORD], cpu);
+    atomic_word_store(&kernel_crash_trace[base + KERNEL_PROCESS_TRACE_EVENT_WORD], event);
+    atomic_word_store(&kernel_crash_trace[base + KERNEL_PROCESS_TRACE_PID_WORD], pid);
+    atomic_word_store(&kernel_crash_trace[base + KERNEL_PROCESS_TRACE_GENERATION_WORD], generation);
+    atomic_word_store(&kernel_crash_trace[base + KERNEL_PROCESS_TRACE_PEER_PID_WORD], peer_pid);
+    atomic_word_store(&kernel_crash_trace[base + KERNEL_PROCESS_TRACE_PEER_GENERATION_WORD], peer_generation);
+    atomic_word_store(&kernel_crash_trace[base + KERNEL_PROCESS_TRACE_STATE_WORD], state);
+    atomic_word_store(&kernel_crash_trace[base + KERNEL_PROCESS_TRACE_WAIT_REASON_WORD], wait_reason);
+    atomic_word_store(&kernel_crash_trace[base + KERNEL_PROCESS_TRACE_ROOT_WORD], root);
+    atomic_word_store(&kernel_crash_trace[base + KERNEL_PROCESS_TRACE_SAVED_SP_WORD], saved_sp);
+    atomic_word_store(&kernel_crash_trace[base + KERNEL_PROCESS_TRACE_AUX_WORD], aux);
+    atomic_word_store(&kernel_crash_trace[base + KERNEL_PROCESS_TRACE_SEQUENCE_WORD], sequence);
     mutex_irq_restore(irq_was_masked);
 }
 
@@ -6586,11 +6584,12 @@ fn kernel_process_crash_trace_copy(output: borrow uninit [usize; KERNEL_CRASH_TR
     // Cost: EVENTS * (CORES * EVENTS) comparisons, both bounds static, which
     // is 512 today. A snapshot is taken once, while the machine is already
     // stopping.
+    let generation: usize = atomic_word_load(&kernel_crash_trace_reset_generation);
     let mut latest: usize = 0;
     for slot: usize in 0..<KERNEL_CRASH_TRACE_SLOTS {
         let slot_base: usize = slot * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT +
             KERNEL_PROCESS_TRACE_SEQUENCE_WORD;
-        let committed: usize = kernel_crash_trace[slot_base];
+        let committed: usize = atomic_word_load(&kernel_crash_trace[slot_base]);
         if (committed > latest) { latest = committed; }
     }
     let mut first: usize = 1;
@@ -6605,22 +6604,35 @@ fn kernel_process_crash_trace_copy(output: borrow uninit [usize; KERNEL_CRASH_TR
                 let source_base: usize =
                     slot * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
                 let destination: usize = written_words;
-                if (kernel_crash_trace[
-                        source_base + KERNEL_PROCESS_TRACE_SEQUENCE_WORD] ==
+                if (atomic_word_load(&kernel_crash_trace[
+                        source_base + KERNEL_PROCESS_TRACE_SEQUENCE_WORD]) ==
                         sequence &&
                     destination <= KERNEL_CRASH_TRACE_WORDS - KERNEL_PROCESS_TRACE_WORDS_PER_EVENT) {
                     let output_base: usize = destination;
                     let record_output = output[output_base..<output_base + KERNEL_PROCESS_TRACE_WORDS_PER_EVENT];
                     for word: usize in 0..<KERNEL_PROCESS_TRACE_WORDS_PER_EVENT {
                         record_output[word] =
-                            kernel_crash_trace[source_base + word];
+                            atomic_word_load(&kernel_crash_trace[source_base + word]);
                     }
-                    written_words = destination + KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
+                    // Reading a newer payload release also orders its prior
+                    // invalidation before this check. A rejected copy stays
+                    // outside the used prefix and will be overwritten or zeroed.
+                    if (atomic_word_load(&kernel_crash_trace[source_base +
+                            KERNEL_PROCESS_TRACE_SEQUENCE_WORD]) == sequence) {
+                        written_words = destination + KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
+                    }
                 }
             }
         }
     }
-    // Preserve the existing zeroed tail; the used prefix was copied above.
+    // Reset may reuse a sequence, so discard the whole batch if it crossed
+    // a reset. Boot reset and ordinary writers are already serialized by
+    // boot execution ordering; the crash reader can observe either phase.
+    if ((generation & 1) != 0 ||
+        atomic_word_load(&kernel_crash_trace_reset_generation) != generation) {
+        written_words = 0;
+    }
+    // Preserve the zeroed tail, including any rejected tentative copy.
     let tail_start: usize = written_words;
     zero_fill(output[tail_start..<KERNEL_CRASH_TRACE_WORDS]);
     return written_words / KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
