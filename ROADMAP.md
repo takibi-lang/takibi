@@ -163,10 +163,9 @@ held-span repair (#1500) is complete. Body-checked argument/result provenance
 now protects the real boot exec scratch API, direct references and reborrows;
 boot mapping uses the existing slot-owned windows (#1159). Ordinary direct
 reference/slice helpers now infer checked lifetime dependencies without new
-kernel annotations; continue the remaining export/alias consumers (#1513). The pin sharing handles migration
-uses one SetOnce publication for all 32 handles and reads one handle by
-value. Verify the generated copies and existing frame ceiling before
-removing the allowance.
+kernel annotations; continue the remaining export/alias consumers (#1513).
+The pin-sharing handle migration is published (#1159). Continue with the
+remaining global protection allowances.
 
 **Assigned queue (maintainer, 2026-10-23, pruned 2026-10-25).** Memory
 safety and multicore backbone only. Taken in order whenever the numbered
