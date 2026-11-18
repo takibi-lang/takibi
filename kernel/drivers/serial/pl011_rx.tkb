@@ -32,7 +32,7 @@ fn uart_rx_drain() -> bool !{interrupt, unsafe} {
             uart_break_clear();
             return true;
         }
-        uart_rx_handler(received as u8);
+        uart_rx_deliver(received as u8);
     }
     if (uart_break_flagged()) {
         diagnostic_trace_record_uart_break(1 << 10);

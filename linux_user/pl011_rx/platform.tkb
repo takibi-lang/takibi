@@ -1,0 +1,12 @@
+// Hosted definitions needed by unused portions of the shared UART/boot API.
+// The fixture exercises neither debug polling nor unwritten BootOnce reads;
+// reaching these platform boundaries exits with failure rather than supplying
+// a fake UART byte or continuing past an unwritten cell.
+fn uart_isr_getc() -> u8 {
+    linux_exit(1);
+    return 0;
+}
+
+fn boot_once_unwritten_stop() {
+    linux_exit(1);
+}

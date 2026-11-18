@@ -1,3 +1,10 @@
+ok     initial registration discards input
+ok     boot reinitialisation restores discard
+ok     a replaced snapshot can finish after boot
+ok     delivery selects the replacement
+ok     a callback registers after guard release
+ok     callback registration selects its successor
+ok     postboot discard replaces the handler
 ok     a 3-byte burst is all delivered by one interrupt
 ok     the burst arrives in order
 ok     a single byte is delivered

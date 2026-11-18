@@ -776,7 +776,11 @@ $(LINUX_USER_DIR)/uart_rx_ring/uart_rx_ring_exe.o: LINUX_USER_EXTRA_SRCS := kern
 # GitHub issue #868: the PL011 RX drain against a scripted FIFO. QEMU's
 # PL011 fixes its trigger level at one byte, so no QEMU lane can strand a
 # burst below the board's 1/8 trigger the way one-word-per-interrupt did.
-$(LINUX_USER_DIR)/pl011_rx/pl011_rx_exe.o: kernel/drivers/serial/pl011_rx.tkb
+# The same fixture also exercises the actual guarded registration boundary.
+# It enters its hosted interrupt root directly, rather than through the
+# ordinary runtime.main -> app_main call; the startup still calls main.
+$(LINUX_USER_DIR)/pl011_rx/pl011_rx_exe.o: COMMON_LINUX_PRINT := $(LINUX_USER_DIR)/common/print.tkb
+$(LINUX_USER_DIR)/pl011_rx/pl011_rx_exe.o: $(LINUX_USER_DIR)/pl011_rx/platform.tkb kernel/drivers/serial/pl011_rx.tkb kernel/arch/arm64/kernel/platform_uart_common.tkb kernel/lib/locked_cell.tkb kernel/lib/mutex.tkb kernel/lib/task_mutex.tkb kernel/lib/spinlock.tkb kernel/lib/atomic_word.tkb kernel/lib/boot_once.tkb kernel/lib/execution_model.tkb
 $(LINUX_USER_DIR)/pl011_rx/pl011_rx_exe.o: LINUX_USER_EXTRA_SRCS := kernel/drivers/serial/pl011_rx.tkb
 
 # GitHub issue #208: the kernel's own block read cache, with two simulated

@@ -6,7 +6,11 @@
        ../kernel/fs/elf64.tkb ../kernel/lib/peer_tick_window.tkb
        ../kernel/lib/boot_once.tkb ../kernel/lib/task_mutex.tkb ../kernel/printk/log.tkb
        ../kernel/drivers/serial/terminal.tkb
-       ../kernel/drivers/net/virtio_net.tkb ../kernel/drivers/net/rp1_gem.tkb)
+       ../kernel/drivers/net/virtio_net.tkb ../kernel/drivers/net/rp1_gem.tkb
+       ../kernel/arch/arm64/kernel/platform_uart_common.tkb
+       ../kernel/lib/atomic_word.tkb ../kernel/lib/spinlock.tkb
+       ../kernel/lib/mutex.tkb ../kernel/lib/locked_cell.tkb
+       ../kernel/lib/execution_model.tkb)
  (libraries takibi alcotest unix))
 
 (test

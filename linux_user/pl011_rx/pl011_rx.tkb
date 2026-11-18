@@ -7,6 +7,12 @@
 // this compiles kernel/drivers/serial/pl011_rx.tkb itself and counts what
 // ONE call delivers.
 
+// The actual registration/snapshot API is linked too. Sequential checks
+// establish replacement semantics and callback re-registration, not IRQ or
+// multicore exclusion; existing kernel UART lanes cover real IRQ delivery.
+use "kernel/arch/arm64/kernel/platform_uart_common.tkb";
+use "linux_user/pl011_rx/platform.tkb";
+
 private let mut fifo: [u32; 64];
 private let mut fifo_len: usize;
 private let mut fifo_next: usize;
@@ -40,12 +46,61 @@ fn uart_break_clear() !{interrupt} {
 fn diagnostic_trace_record_uart_break(data: usize) !{interrupt, unsafe} {
 }
 
-fn uart_rx_handler(c: u8) !{unsafe} {
+fn record_received(c: u8) !{unsafe} {
     let index: usize = delivered_len;
     if (index < 64) {
         delivered[index] = c;
         delivered_len = index + 1;
     }
+}
+
+// Hosted stand-ins for the platform boundary, not for the guarded API.
+fn mutex_irq_save() -> usize { return 0; }
+fn mutex_irq_restore(flags: usize) { }
+fn uart_rx_discard(discarded: u8) !{unsafe} { }
+
+private let mut old_callback_calls: usize;
+private let mut new_callback_calls: usize;
+
+fn replacement_received(c: u8) !{unsafe} {
+    new_callback_calls = new_callback_calls + 1;
+}
+
+fn reregister_received(c: u8) !{unsafe} {
+    old_callback_calls = old_callback_calls + 1;
+    uart_set_rx_handler(replacement_received);
+}
+
+fn registration_checks() !{unsafe} {
+    let mut phase = boot_phase_mint();
+    uart_rx_handler_reset_boot(phase);
+    uart_rx_deliver(0);
+    check("initial registration discards input", old_callback_calls == 0 && new_callback_calls == 0);
+    uart_set_rx_handler(replacement_received);
+    uart_rx_handler_reset_boot(phase);
+    uart_rx_deliver(0);
+    check("boot reinitialisation restores discard", new_callback_calls == 0);
+    boot_phase_end(phase);
+
+    // All following exchanges occur after the boot authority was consumed.
+    uart_set_rx_handler(reregister_received);
+    let mut old: UartRxHandler = uart_rx_handler_snapshot();
+    uart_set_rx_handler(replacement_received);
+    let old_handler = old.call;
+    old_handler(0);
+    check("a replaced snapshot can finish after boot", old_callback_calls == 1);
+    uart_rx_deliver(0);
+    check("delivery selects the replacement", new_callback_calls == 1);
+
+    uart_set_rx_handler(reregister_received);
+    uart_rx_deliver(0);
+    check("a callback registers after guard release", old_callback_calls == 2);
+    uart_rx_deliver(0);
+    check("callback registration selects its successor", new_callback_calls == 2);
+    uart_set_rx_handler(uart_rx_discard);
+    uart_rx_deliver(0);
+    check("postboot discard replaces the handler", old_callback_calls == 2 && new_callback_calls == 2);
+    uart_set_rx_handler(record_received);
 }
 
 fn check(label: *u8, ok: bool) {
@@ -80,26 +135,16 @@ private fn delivered_in_order() -> bool {
     return ok;
 }
 
-// GitHub issue #638 stage 4: the drain is an interrupt function, so it is
-// called masked. On the host nothing interrupts; this guard is the masked
-// context the compiler requires of a non-interrupt caller.
-linear struct HostIrqMask[unit: usize] { private held: usize; }
-
-fn host_irq_mask() -> HostIrqMask[0] !{irq_masking_guard} {
-    let mut guard: HostIrqMask[0] = { 1 };
-    return guard;
+// Hosted interrupt declaration root: Linux supplies no hardware IRQ state to
+// save or restore. Keep the actual drain's interrupt call contract without
+// inventing a masking guard across its opaque callback. This fixture checks
+// sequential delivery only; the maintained kernel lanes run real IRQ entry.
+fn drain_once() -> bool !{interrupt, unsafe} {
+    return uart_rx_drain();
 }
 
-fn host_irq_unmask(guard: sink HostIrqMask[0]) { }
-
-fn drain_once() -> bool !{unsafe} {
-    let mask: HostIrqMask[0] = host_irq_mask();
-    let more: bool = uart_rx_drain();
-    host_irq_unmask(mask);
-    return more;
-}
-
-fn app_main() !{unsafe} {
+fn main() !{interrupt, unsafe} {
+    registration_checks();
     // Three bytes: below the 1/8 trigger (4 of 32), the burst #868 stranded.
     load(3);
     let first: bool = drain_once();

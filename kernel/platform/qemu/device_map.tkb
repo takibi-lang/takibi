@@ -235,7 +235,7 @@ fn qemu_boot_devices_apply_dtb(phase: borrow BootPhase[boot]) -> QemuBootDevices
                                             return QemuBootDevicesResult::Invalid;
                                         }
                                     }
-                                    uart_init();
+                                    uart_init(phase);
                                     return QemuBootDevicesResult::Applied;
                                 }
                             }

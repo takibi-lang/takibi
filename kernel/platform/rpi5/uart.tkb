@@ -71,8 +71,8 @@ use "kernel/platform/rpi5/device_map.tkb";
 // kernel/platform/rpi5/device_map.tkb attaches.
 let mut rpi5_uart_base: BootOnce(usize);
 let mut rpi5_uart_dtb_status: BootOnce(usize);
-fn uart_init() {
-    uart_rx_handler = uart_rx_discard;
+fn uart_init(phase: borrow BootPhase[boot]) {
+    uart_rx_handler_reset_boot(phase);
     uart.cr = 0; // disable UART before reconfiguring it
 
     // 115200 baud from the bare-metal 50MHz XOSC-backed uartclk:
@@ -156,7 +156,7 @@ fn platform_init(phase: borrow BootPhase[boot]) {
     rpi5_pcie_windows_attach(phase);
     if (pcie2_init()) {
         pcie2_rp1_endpoint_setup();
-        uart_init();
+        uart_init(phase);
     }
 }
 

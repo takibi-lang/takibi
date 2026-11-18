@@ -1,7 +1,13 @@
 // Platform-independent UART interrupt glue. Each platform supplies the
 // MMIO-specific uart_rx_ready() and uart_isr_getc() primitives.
 
-let mut uart_rx_handler: fn !{locks, requires_mmu, requires_devices, unsafe}(u8) -> void;
+use "kernel/lib/locked_cell.tkb";
+use "kernel/lib/boot_once.tkb";
+
+// The record is copied under its IRQ-safe guard; calling it never retains
+// the guard or an alias into the cell.
+struct UartRxHandler { call: fn !{locks, requires_mmu, requires_devices, unsafe}(u8) -> void; }
+private let mut uart_rx_handler: LockedCell(UartRxHandler);
 
 // Terminal fail-stop diagnostics run with IRQ delivery masked, so they must
 // consume the platform FIFO by polling rather than through uart_rx_handler.
@@ -11,13 +17,37 @@ fn uart_debug_getc() -> u8 !{unsafe} {
     return uart_isr_getc();
 }
 
-fn uart_set_rx_handler(handler: fn !{locks, requires_mmu, requires_devices, unsafe}(u8) -> void) !{} {
-    uart_rx_handler = handler;
+fn uart_set_rx_handler(handler: fn !{locks, requires_mmu, requires_devices, unsafe}(u8) -> void) !{locks} {
+    let guard = locked_cell_take(&uart_rx_handler);
+    let mut registration: UartRxHandler = { handler };
+    locked_cell_store(guard, &uart_rx_handler, registration);
+    locked_cell_give(&uart_rx_handler, guard);
 }
 
-// This shared callback does not depend on KERNEL_ACTIVE_CORES. The boot
-// fixture installs the handler on CPU0 before it unmasks the peripheral RX
-// source, and no later path replaces it, so it is immutable while any core's
-// UART interrupt can observe it (the interrupt goes to every online core
-// since GitHub issue #830; kernel/kernel/uart_irq_affinity.tkb serves it on
-// one core at a time).
+// Initialisation precedes secondary startup and peripheral RX unmasking.
+// Only the value is reset: the global lock word is never re-initialised.
+// This path is MMU-off compatible; both normal entries currently enable the
+// MMU before main reaches platform_init. BootPhase retains the existing
+// trusted boot-order premise without acquiring an exclusive-access lock.
+fn uart_rx_handler_reset_boot(phase: borrow BootPhase[boot]) !{unsafe} {
+    let mut registration: UartRxHandler = { uart_rx_discard };
+    locked_cell_store_boot(&uart_rx_handler, registration);
+}
+
+fn uart_rx_handler_snapshot() -> UartRxHandler {
+    let guard = locked_cell_take(&uart_rx_handler);
+    let mut registration: UartRxHandler = locked_cell_load(guard, &uart_rx_handler);
+    locked_cell_give(&uart_rx_handler, guard);
+    return registration;
+}
+
+// Re-registration is allowed after boot. A snapshot selected before an
+// exchange may finish afterwards: callback code and all resources it uses
+// must remain live. This is no dynamic-context reclamation or code-unload
+// boundary. No callback runs while the registration guard is held, so it may
+// itself register a successor without re-entering that lock.
+fn uart_rx_deliver(received: u8) !{unsafe} {
+    let mut registration: UartRxHandler = uart_rx_handler_snapshot();
+    let handler = registration.call;
+    handler(received);
+}

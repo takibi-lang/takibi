@@ -34941,7 +34941,98 @@ let init_link_tests = [
 
 ]
 
+(* #1159: compile the real UART registration boundary and its real cell API.
+   Only the platform primitives are hosted stubs; these are static contracts,
+   not evidence for IRQ delivery, ordering between CPUs, or resource recovery. *)
+let production_uart_registration_files code =
+  let common = "kernel/arch/arm64/kernel/platform_uart_common.tkb" in
+  let sources = [
+    "kernel/lib/atomic_word.tkb"; "kernel/lib/spinlock.tkb";
+    "kernel/lib/mutex.tkb"; "kernel/lib/task_mutex.tkb";
+    "kernel/lib/locked_cell.tkb"; "kernel/lib/execution_model.tkb";
+    "kernel/lib/boot_once.tkb"; common;
+  ] in
+  let files = List.map (fun file ->
+    let path = List.find Sys.file_exists ["../" ^ file; file] in
+    let source = In_channel.with_open_bin path In_channel.input_all in
+    (file, source ^ (if file = common then "\n" ^ code else ""))) sources in
+  ("uart-platform-stubs.tkb", {|
+    fn mutex_irq_save() -> usize { return 0; }
+    fn mutex_irq_restore(flags: usize) {}
+    fn uart_rx_ready() -> bool { return false; }
+    fn uart_isr_getc() -> u8 { return 0; }
+    fn uart_rx_discard(c: u8) !{unsafe} {}
+    fn boot_once_unwritten_stop() {}
+  |}) :: files
+
+let production_uart_registration_tests =
+  let good name code = Alcotest.test_case name `Quick (fun () ->
+    ignore (infer_files (production_uart_registration_files code))) in
+  let bad name message code = Alcotest.test_case name `Quick (fun () ->
+    expect_type_error_files message (production_uart_registration_files code) ()) in
+  [
+    good "postboot exchange, old snapshot, and reentrant registration" {|
+      fn successor(c: u8) !{unsafe} {}
+      fn reentrant(c: u8) !{unsafe} { uart_set_rx_handler(successor); }
+      fn irq_probe() !{interrupt, unsafe} { uart_rx_deliver(0); }
+      fn probe() !{unsafe} {
+        let mut phase = boot_phase_mint();
+        uart_rx_handler_reset_boot(phase);
+        boot_phase_end(phase);
+        uart_set_rx_handler(reentrant);
+        let mut old: UartRxHandler = uart_rx_handler_snapshot();
+        uart_set_rx_handler(successor);
+        let callback = old.call;
+        callback(0);
+        uart_rx_deliver(0);
+        uart_set_rx_handler(uart_rx_discard);
+      }
+    |};
+    good "boot reset needs no MMU-dependent lock" {|
+      fn probe(phase: borrow BootPhase[boot]) !{mmu_off, unsafe} {
+        uart_rx_handler_reset_boot(phase);
+      }
+    |};
+    bad "a blocking callback cannot be registered" "may have effect may_block" {|
+      fn blocking(c: u8) !{unsafe, may_block} {}
+      fn probe() { uart_set_rx_handler(blocking); }
+    |};
+    bad "a different cell guard cannot update the registration" "static value mismatch" {|
+      let mut other: LockedCell(UartRxHandler);
+      fn probe() {
+        let guard = locked_cell_take(&other);
+        let mut value: UartRxHandler = { uart_rx_discard };
+        locked_cell_store(guard, &uart_rx_handler, value);
+        locked_cell_give(&other, guard);
+      }
+    |};
+    bad "a released guard cannot load the registration" "already consumed" {|
+      fn probe() {
+        let guard = locked_cell_take(&uart_rx_handler);
+        locked_cell_give(&uart_rx_handler, guard);
+        let mut value: UartRxHandler = locked_cell_load(guard, &uart_rx_handler);
+      }
+    |};
+    bad "callback invocation cannot retain the registration guard" "call through a function pointer" {|
+      fn probe() !{unsafe} {
+        let guard = locked_cell_take(&uart_rx_handler);
+        let mut value: UartRxHandler = locked_cell_load(guard, &uart_rx_handler);
+        let callback = value.call;
+        callback(0);
+        locked_cell_give(&uart_rx_handler, guard);
+      }
+    |};
+    bad "boot reset cannot follow phase consumption" "already consumed" {|
+      fn probe() !{unsafe} {
+        let mut phase = boot_phase_mint();
+        boot_phase_end(phase);
+        uart_rx_handler_reset_boot(phase);
+      }
+    |};
+  ]
+
 let named_groups_unisolated = [
+  "uart-registration", production_uart_registration_tests;
   "linked-init-domain", init_link_tests;
   "function-value-effects", function_value_effect_tests;
   "operator-kinds", operator_kind_tests;

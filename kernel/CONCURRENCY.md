@@ -810,6 +810,17 @@ which value comes next, so `.bss` zero is already the correct initial state and
 no initializer is needed. That is not tidiness: the alternative is a lazy
 initializer, and a lazy initializer is what raced before the lock existed.
 
+The UART receive registration is a `LockedCell(UartRxHandler)`. Registration
+and snapshot selection take its IRQ-safe rank-40 guard; delivery calls the
+copied function after releasing it. A callback can therefore register a
+successor. Replacement does not wait for a previously selected callback to
+finish: its code and referenced resources must remain live. Current callbacks
+use permanent code and kernel storage; no dynamic reclamation or code unload
+is provided. Initial discard resets borrow `BootPhase`, before secondary
+startup and RX unmasking, and change only the value, never the lock word.
+The boot accessor needs no exclusives and remains MMU-off compatible; normal
+platform entry currently enables the MMU before calling `main`.
+
 ## Liveness proofs for pooled objects
 
 Every kernel pool is the built-in `RegionPool`. A process record is Held for

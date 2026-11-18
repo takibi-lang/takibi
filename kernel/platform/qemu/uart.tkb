@@ -24,8 +24,8 @@ use "kernel/platform/qemu/device_map.tkb";
 let mut uart_base: BootOnce(usize);
 // Attached by kernel/platform/qemu/device_map.tkb: first the fixed platform
 // window, then the one the DTB names.
-fn uart_init() {
-    uart_rx_handler = uart_rx_discard;
+fn uart_init(phase: borrow BootPhase[boot]) {
+    uart_rx_handler_reset_boot(phase);
     uart.cr = 0; // disable UART before reconfiguring it
 
     // QEMU's PL011 model is pre-clocked; IBRD/FBRD values are irrelevant to
@@ -48,7 +48,7 @@ fn platform_init(phase: borrow BootPhase[boot]) {
     // common memory reader has validated the whole boot blob. init.tkb then
     // replaces it with the compatible/reg result before IRQs and workloads.
     qemu_uart_attach_bootstrap(phase);
-    uart_init();
+    uart_init(phase);
 }
 
 fn platform_shutdown() {
