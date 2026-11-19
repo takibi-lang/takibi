@@ -243,26 +243,32 @@ fn initial_user_payload() !{unsafe} {
      * The two u64s are read a byte at a time for the same reason the
      * kernel side writes them that way: a *usize cast onto a u8 array
      * assumes an alignment the array does not promise. */
-    let mut rlimit_buf: [u8; 16];
-    payload_getrlimit(src_loc(), 7, rlimit_buf as []u8);
-    let rlimit_base: *u8 = rlimit_buf as *u8;
+    // Prefill the result and its neighbors so the initial read checks every
+    // returned byte and preserves the bytes outside the 16-byte record.
+    let mut rlimit_buf: [u8; 32];
+    for index: usize in 0..<32 { rlimit_buf[index] = 0xFF; }
+    payload_getrlimit(src_loc(), 7, rlimit_buf[8..<24]);
+    for index: usize in 0..<8 { fail_if(src_loc(), rlimit_buf[index] != 0xFF); }
+    for index: usize in 24..<32 { fail_if(src_loc(), rlimit_buf[index] != 0xFF); }
+    let rlimit_base: *u8 = rlimit_buf[8..<24] as *u8;
+    let rlimit_addr: usize = rlimit_base as usize;
     fail_if(src_loc(), payload_read_u64(rlimit_base, 0) != 1024);
     fail_if(src_loc(), payload_read_u64(rlimit_base, 8) != 4096);
     payload_write_u64(rlimit_base, 0, 64);
     payload_write_u64(rlimit_base, 8, 4096);
-    fail_if(src_loc(), svc5(261, 0, 7, ptr_of(rlimit_base, 0), 0, 0) != 0);
+    fail_if(src_loc(), svc5(261, 0, 7, rlimit_addr, 0, 0) != 0);
     payload_write_u64(rlimit_base, 0, 0);
     payload_write_u64(rlimit_base, 8, 0);
-    fail_if(src_loc(), svc5(261, 0, 7, 0, ptr_of(rlimit_base, 0), 0) != 0);
+    fail_if(src_loc(), svc5(261, 0, 7, 0, rlimit_addr, 0) != 0);
     fail_if(src_loc(), payload_read_u64(rlimit_base, 0) != 64);
     payload_write_u64(rlimit_base, 0, 1024);
     payload_write_u64(rlimit_base, 8, 4096);
-    fail_if(src_loc(), svc5(261, 0, 7, ptr_of(rlimit_base, 0), 0, 0) != 0);
+    fail_if(src_loc(), svc5(261, 0, 7, rlimit_addr, 0, 0) != 0);
 
     /* The two refusals, which the happy path above cannot show. A resource
      * number Linux does not have (RLIM_NLIMITS is 16) is EINVAL rather
      * than a reported limit for a resource that does not exist... */
-    fail_if(src_loc(), svc5(261, 0, 999, 0, ptr_of(rlimit_base, 0), 0) != EINVAL_RC);
+    fail_if(src_loc(), svc5(261, 0, 999, 0, rlimit_addr, 0) != EINVAL_RC);
 
     /* ...and RLIMIT_NOFILE cannot be raised past what the machine could
      * back. A descriptor NUMBER sizes this kernel's fd block chain, so
@@ -273,10 +279,10 @@ fn initial_user_payload() !{unsafe} {
      * unchanged afterwards. */
     payload_write_u64(rlimit_base, 0, 4294967296);
     payload_write_u64(rlimit_base, 8, 4294967296);
-    fail_if(src_loc(), svc5(261, 0, 7, ptr_of(rlimit_base, 0), 0, 0) != EINVAL_RC);
+    fail_if(src_loc(), svc5(261, 0, 7, rlimit_addr, 0, 0) != EINVAL_RC);
     payload_write_u64(rlimit_base, 0, 0);
     payload_write_u64(rlimit_base, 8, 0);
-    fail_if(src_loc(), svc5(261, 0, 7, 0, ptr_of(rlimit_base, 0), 0) != 0);
+    fail_if(src_loc(), svc5(261, 0, 7, 0, rlimit_addr, 0) != 0);
     fail_if(src_loc(), payload_read_u64(rlimit_base, 0) != 1024);
     fail_if(src_loc(), payload_read_u64(rlimit_base, 8) != 4096);
 
