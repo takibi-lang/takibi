@@ -1,8 +1,8 @@
 (* Body-derived write footprints for initialization certificates. Paths name
-   inline storage relative to a reference parameter or a named global.
-   Unknown calls, raw
-   addresses and unresolved aliases remain conservative. No effect annotation
-   is trusted as a write set, and no runtime instrumentation is emitted. *)
+   storage relative to a reference or slice parameter or a named global.
+   Unknown calls, raw addresses and unresolved aliases remain conservative.
+   No effect annotation is trusted as a write set, and no runtime
+   instrumentation is emitted. *)
 module StringMap = Map.Make (String)
 type root = Parameter of int | Global of string
 module Paths = Set.Make (struct
@@ -37,8 +37,8 @@ let builtin_has_no_writes name =
   match Atomic_spec.find atomic_name, Instr_spec.find name with
   | Some { Atomic_spec.operation = Atomic_spec.Load; _ }, _ -> true
   | _, Some { Instr_spec.shape = Instr_spec.Read; _ } -> true
-  | _ -> false
-(* After indexing, retain the whole array rather than a fictional field
+  | _ -> name = "slice_eq"
+(* After indexing, retain the whole array or slice rather than a field
    path below its leaf. This deliberately overapproximates element writes. *)
 type place = { root : root; path : string list; ty : Ast.type_expr; indexed : bool }
 type context = { info : Types.func_info; fdef : Ast.func; aliases : Ast.expr Types.IntMap.t ref }
@@ -63,6 +63,8 @@ let infer ?(global_view_origin = fun _ _ _ -> None) ~definition ~target ~struct_
               (match Option.map strip (Types.IntMap.find_opt id info.binding_types) with
                | Some (Ast.TypeRef ty | Ast.TypeRefMut ty) ->
                    Some {root = Parameter param; path = []; ty; indexed = false}
+               | Some (Ast.TypeSlice _ as ty) ->
+                   Some {root = Parameter param; path = []; ty; indexed = false}
                | _ -> None)
           | None when not (List.mem id seen) ->
               (match Option.map strip (Types.IntMap.find_opt id info.binding_types) with
@@ -82,7 +84,8 @@ let infer ?(global_view_origin = fun _ _ _ -> None) ~definition ~target ~struct_
           | _ -> None)
     | Ast.Index (base, _) ->
         Option.bind (place ~seen ctx base) (fun p -> match strip p.ty with
-          | Ast.TypeArray (ty, _) -> Some {p with ty; indexed = true}
+          | Ast.TypeArray (ty, _) | Ast.TypeSlice (ty, _, _) ->
+              Some {p with ty; indexed = true}
           | _ -> None)
     (* &p addresses the local reference slot, not the object p refers to.
        Treating it as p would miss mutations after rebinding that slot. *)
