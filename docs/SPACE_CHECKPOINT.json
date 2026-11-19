@@ -2,11 +2,11 @@
   "date": "2026-11-19",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "4595fbce37c6b39cb6fe9c7733b87afbfa0d55c3a1a76095d2b18a3d5538d708",
-  "workload": "Normal linked QEMU and RPi5 kernels with the existing Pipe allocation, full slot initialization and handle publication.",
+  "source_sha256": "a6fb26122d92b232f2dc74acb5da226db37c2f24ad064c0ad09a0f8d3056dbb2",
+  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 4be5e13d: this branch's review, rebound to the merged sources (upstream's record was 2026-11-19 milestone/measured). Normal linked QEMU and RPi5 kernels after typing CPU-local log staging, compared with fc86f604c. The existing log storm and DDB inspect staged and published records.",
   "evidence": [
-    "docs/PIPE_SLOT_PUBLICATION.md"
+    "docs/LOG_STAGING_SPACE.md"
   ],
-  "assessment": "Text decreases by 4 bytes on both targets. Data, BSS, allocator capacities and image reservation remain unchanged. The existing writes, slot layout and allocation calls are preserved.",
-  "next_trigger": "Measure when Pipe slot capacity, layout, initialization, or publication workloads change."
+  "assessment": "Adopt CPU-authorized staging and complete-stop scalar reads. Text grows 248 bytes on QEMU and 232 bytes on RPi5. Data grows 8 bytes on each. BSS, reserved image end, and the measured ordinary logging frames are unchanged. The emitted capture helper adds two instructions on the taken staging path. Isolated physical byte timing was not measured.",
+  "next_trigger": "Measure again when the staging layout, emergency polling ownership, or ordinary log capture path changes."
 }
