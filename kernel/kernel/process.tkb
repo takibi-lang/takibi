@@ -5950,11 +5950,11 @@ fn kernel_process_stack_idle_blocked() {
 // Probe-only stand-ins for the two saved exception frames.  The real UART
 // wake path writes x0 into the blocked child's frame, so using valid fixed
 // storage here proves that path without touching a raw numeric address.
-const KERNEL_PROCESS_TRACE_PROBE_FRAME_WORDS: usize = 128;
+const KERNEL_PROCESS_TRACE_PROBE_FRAME_WORDS: usize = EXC_CONTEXT_SIZE / 8;
 private let mut kernel_process_trace_probe_parent_frame:
-    [usize; KERNEL_PROCESS_TRACE_PROBE_FRAME_WORDS];
+    [usize; KERNEL_PROCESS_TRACE_PROBE_FRAME_WORDS] align(16);
 private let mut kernel_process_trace_probe_child_frame:
-    [usize; KERNEL_PROCESS_TRACE_PROBE_FRAME_WORDS];
+    [usize; KERNEL_PROCESS_TRACE_PROBE_FRAME_WORDS] align(16);
 
 // GitHub issue #992: the scheduler probe's two parked frames. They used to
 // be the bare numbers 0x1000 and 0x2000, never read; a saved frame's level
