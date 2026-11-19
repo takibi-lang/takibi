@@ -60,7 +60,9 @@ struct PoolWalkItem {
 
 private let mut pool_walk_pool: RegionPool(PoolWalkItem);
 private let mut pool_walk_ready: AtomicWord;
-private let mut pool_walk_floor: RegionHeld(PoolWalkItem);
+// The published address identifies the permanent floor. Walkers still
+// obtain the current Held reference under the pool guard.
+private let mut pool_walk_floor: AtomicWord;
 
 private let mut pool_walk_armed: AtomicWord;
 // The rendezvous, as round numbers (GitHub issue #510): core 0 publishes
@@ -157,9 +159,11 @@ private fn pool_walk_release(held: RegionHeld(PoolWalkItem)) -> bool !{unsafe} {
 // Core 0, before arming: the one chunk and the floor record. The chunk is
 // kept for the rest of the boot (a walked pool is never shrunk).
 private fn pool_walk_init() -> bool !{unsafe} {
-    if (atomic_word_load(&pool_walk_ready) != 0) { return region_held_address(pool_walk_floor) != 0; }
+    if (atomic_word_load(&pool_walk_ready) != 0) {
+        return atomic_word_load(&pool_walk_floor) != 0;
+    }
     atomic_word_store(&pool_walk_ready, 1);
-    pool_walk_floor = region_held_none__PoolWalkItem();
+    atomic_word_store(&pool_walk_floor, 0);
     match page_alloc_contiguous(POOL_WALK_CHUNK_PAGES, PageOwnerTag::PoolChunk) {
         PageRunAllocResult::OutOfMemory => { return false; }
         PageRunAllocResult::Allocated(run_owner) => {
@@ -178,8 +182,9 @@ private fn pool_walk_init() -> bool !{unsafe} {
             if (grown == false) { return false; }
         }
     }
-    pool_walk_floor = pool_walk_hold();
-    return region_held_address(pool_walk_floor) != 0;
+    let floor: usize = region_held_address(pool_walk_hold());
+    atomic_word_store(&pool_walk_floor, floor);
+    return floor != 0;
 }
 
 // -- The walking core --------------------------------------------------
@@ -202,7 +207,7 @@ private fn pool_walk_once(cpu: usize) !{unsafe} {
     while (cursor != 0 && budget != 0 && crossed == false) {
         budget = budget - 1;
         atomic_word_fetch_add(pool_walk_steps_address(), 1);
-        if (cursor == region_held_address(pool_walk_floor)) {
+        if (cursor == atomic_word_load(&pool_walk_floor)) {
             if (pool_walk_read(pool_walk_held_at(cursor)) != POOL_WALK_SENTINEL) {
                 atomic_word_fetch_add(pool_walk_floor_bad_address(), 1);
             }
