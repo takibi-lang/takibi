@@ -3,7 +3,7 @@
   "event": "milestone",
   "decision": "measured",
   "source_sha256": "b0117df6abc2e0716f63bf3b1887aeaeb6b173b566ea2c4bbd543c7364960796",
-  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto dc4e4a92: this branch's review, rebound to the merged sources (upstream's record was 2026-11-19 milestone/measured). Normal linked QEMU and RPi5 kernels with guarded UART registration, compared with 8f1dbc934. The native PL011 fixture exercises sequential replacement and callback reentry.",
+  "workload": "Normal linked QEMU and RPi5 kernels with guarded UART registration, compared with dc4e4a927. The native PL011 fixture exercises sequential replacement and callback reentry.",
   "evidence": [
     "docs/UART_REGISTRATION_SPACE.md"
   ],

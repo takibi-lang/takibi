@@ -1,13 +1,13 @@
 # UART callback registration space review
 
 Measured the normal linked kernels with and without guarded registration on
-the 2026-11-19 main baseline, 8f1dbc934. The existing native PL011 FIFO fixture
+the 2026-11-19 main baseline, dc4e4a927. The existing native PL011 FIFO fixture
 exercises the real registration code, including replacement after BootPhase,
 calling a snapshot after replacement, and registering from inside a callback.
 
 | Boundary | QEMU baseline to candidate | RPi5 baseline to candidate |
 | --- | --- | --- |
-| Text (llvm-size) | 828148 to 828764 B (+616) | 4221360 to 4221944 B (+584) |
+| Text (llvm-size) | 829804 to 830420 B (+616) | 4223176 to 4223760 B (+584) |
 | Data | 4608 B unchanged | 5584 B unchanged |
 | BSS | 1310720 B unchanged | 1916928 B unchanged |
 | uart_rx_handler symbol | 8 to 16 B | 8 to 16 B |
