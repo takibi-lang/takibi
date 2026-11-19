@@ -63,10 +63,11 @@ kernel/printk/log.tkb (see "As built, slice 4" and "As built, slice 5").
   kernel_log_peer_drain became kernel_log_console_poll (the input-flow
   request only), which #830 later removed: the reader that drains the
   receive ring sends that request itself.
-- Line state: `KernelLogCoreState` per CPU holds emergency, capturing,
-  active, continued, length, tick and a 640-byte stage, reached by a checked
-  index (no raw pointer; log.tkb's raw-deref budget fell from 46 to 21).
-  Core 0's former global stage is the core-0 entry. Static, not stack.
+- Line state: the static `per_cpu KernelLogCoreState` holds the capture flags,
+  owner, length, tick, and 640-byte stage. Writers reach their row with
+  `CpuHere` inside `preempt_off`. DDB copies scalar fields under
+  `MachineStopped`. The separate emergency polling bit retains the
+  terminal fallback.
 - UART: after commit, the writer admits its whole line to the TX queue under
   one console-lock hold (kernel_log_emit_line), with a boundary newline when
   the wire is mid-line (#611). It waits with the lock released until the
@@ -288,7 +289,7 @@ Not expressible in the types, and where it lives instead:
 | No silent loss (every sequence returned or reported) | LogRing.tla NoSilentLoss; at run time the end-of-boot `discarded=` line and log_storm_evidence (all CPUs, every sequence accounted) | A global counting property over all writers |
 | Memory ordering of claim, commit, text stores, recheck | herd7 litmus tests in kernel/models/litmus (Never for fixed, Sometimes for unfixed controls) | Ordering is a comment on AtomicWord, not part of a type (atomic_word.tkb, first limitation) |
 | The litmus tests describe the emitted code | scripts/run_litmus_checks.py with emitted_map.txt (disassembly lint, CASAL/STLR/LDAR classes per function) | The compiler does not expose per-access ordering to check against; the lint follows addresses only through moves, adds and two call levels |
-| Per-CPU line stage not handed to another thread | the owner word (`kernel_log_cut_line`); `static_assert(KERNEL_PREEMPTIBLE == 0)` in kernel_log_execution_model_assumption remains for the storm fixture | The stage lives across the caller's fragments, outside any preempt_off region (#638) |
+| Per-CPU line stage and thread separation | `CpuHere` in each staging region and the owner word (`kernel_log_cut_line`) between regions | The stage lives across the caller's fragments, and a new writer must still cut the retained piece |
 
 Slice 7 (#720's protocol declaration generator) would need, to replace the
 hand-written tokens:
@@ -310,8 +311,6 @@ Open items:
 - #819: AtomicWord acq_rel compare-swap and plain (relaxed) store cell ops,
   so log.tkb leaves the raw allowlist and the text stores may become plain
   (LogRingRecheck+plain-text shows the claim's acquire suffices).
-- Per-CPU line stage under preemption: still relies on no preemption; the
-  options are parked on #613 for the maintainer (#638).
 - #656: retarget LogReader replay to LogRing.tla (serialization point = the
   slot-word CAS) or close as superseded (decision 5).
 - #813: continuous trace checking of the real kernel against LogRing.tla;

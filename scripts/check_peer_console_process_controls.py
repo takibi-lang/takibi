@@ -162,13 +162,13 @@ def problems(tree: dict[str, str]) -> list[str]:
     # the ring commit, whole, under one console-lock hold.
     retain = log.split("private fn kernel_log_retain_line(", 1)[1].split("\nfn ", 1)[0]
     if "kernel_log_commit(token);" not in retain or \
-            "if (wire) { kernel_log_emit_line(core); }" not in retain or \
-            retain.index("kernel_log_commit(token);") > retain.index("kernel_log_emit_line(core)"):
+            "if (wire) { kernel_log_emit_line(cpu); }" not in retain or \
+            retain.index("kernel_log_commit(token);") > retain.index("kernel_log_emit_line(cpu)"):
         result.append("a kernel line does not reach the UART after its ring commit")
     emit = log.split("private fn kernel_log_emit_line(", 1)[1].split("private fn kernel_log_emit_byte_locked(", 1)[0]
     if "KERNEL_LOG_TX_QUEUE_BYTES - count >= required" not in emit:
         result.append("kernel line admission does not reserve the whole line")
-    if "kernel_log_emit_byte_locked(guard, kernel_log_core_state[core].line[index]);" not in emit:
+    if "kernel_log_emit_byte_locked(guard, kernel_log_core_state[cpu].line[index]);" not in emit:
         result.append("kernel line bytes do not borrow one console guard")
     probe = tree["kernel/kernel/console_contention_evidence.tkb"]
     release = "atomic_word_store(&console_ddb_release_reason, reason);\n" \
@@ -276,14 +276,14 @@ def main() -> int:
     })
     mutations.update({
         "line before commit": ("kernel/printk/log.tkb",
-                               "    if (wire) { kernel_log_emit_line(core); }\n",
+                               "    if (wire) { kernel_log_emit_line(cpu); }\n",
                                ""),
         "kernel line reservation": ("kernel/printk/log.tkb",
                                     "KERNEL_LOG_TX_QUEUE_BYTES - count >= required",
                                     "KERNEL_LOG_TX_QUEUE_BYTES - count != 0"),
         "one kernel line guard": ("kernel/printk/log.tkb",
-                                  "kernel_log_emit_byte_locked(guard, kernel_log_core_state[core].line[index]);",
-                                  "uart_wire_byte(kernel_log_core_state[core].line[index]);"),
+                                  "kernel_log_emit_byte_locked(guard, kernel_log_core_state[cpu].line[index]);",
+                                  "uart_wire_byte(kernel_log_core_state[cpu].line[index]);"),
     })
     mutations.update({
         "early idle terminal probe": ("kernel/printk/log.tkb",

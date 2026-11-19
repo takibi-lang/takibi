@@ -364,10 +364,8 @@ private fn kernel_log_reserve(span: usize) -> KernelLogReserve !{unsafe} {
 // Each CPU's line being assembled, and when it began (GitHub issue #465:
 // the tick is the writer's own, taken at its first byte). One per CPU,
 // static rather than on the stack (DECISIONS: static over stack), selected
-// by cpu_id() like the other per-CPU arrays, each byte in a preempt_off region;
-// the owner word keeps one CPU's line from being continued by another thread.
-//
-// - emergency: this CPU writes straight to the device until the next boot.
+// by CpuHere in a preempt_off region. The owner word keeps one CPU's line
+// from being continued by another thread.
 // - capturing: a kernel_boot_log fragment on this CPU is building a line;
 //   it lasts until the line's newline, so uart_put_udec digits between
 //   fragments are part of it, and a fragment that leaves no line open ends
@@ -379,10 +377,9 @@ private fn kernel_log_reserve(span: usize) -> KernelLogReserve !{unsafe} {
 //   tasks' fragments are never mixed. An interrupt on a task's stack has that
 //   task's owner, so its bytes still join an open line.
 // - cut: the piece being retained is a cut one.
-struct KernelLogCoreState {
+struct per_cpu KernelLogCoreState {
     owner: usize;
     cut: bool;
-    emergency: bool;
     capturing: bool;
     active: bool;
     continued: bool;
@@ -392,8 +389,11 @@ struct KernelLogCoreState {
 }
 private let mut kernel_log_core_state: [KernelLogCoreState; KERNEL_MAX_CORES];
 
-// This CPU's entry, by index rather than by pointer, so the state is reached
-// through checked indexing and not a raw dereference.
+// Emergency output also runs on terminal paths where CPU authority may be
+// unavailable. It retains the existing polling-mode fallback.
+private let mut kernel_log_emergency: [bool; KERNEL_MAX_CORES];
+
+// The emergency mode index preserves the fault-path fallback to core 0.
 private fn kernel_log_core_here() -> {0..<KERNEL_MAX_CORES as usize} {
     let raw: usize = cpu_id();
     if (raw >= KERNEL_MAX_CORES) { return 0; }
@@ -405,8 +405,8 @@ private fn kernel_log_core_here() -> {0..<KERNEL_MAX_CORES as usize} {
 // the first slot's tick and metadata. Each store is a release (see the top of
 // this file); nothing here is visible until kernel_log_commit.
 private fn kernel_log_write(token: borrow LogReservation[0],
-                            core: {0..<KERNEL_MAX_CORES as usize}) !{unsafe} {
-    let length: usize = kernel_log_core_state[core].length;
+                            cpu: CpuHere) !{unsafe} {
+    let length: usize = kernel_log_core_state[cpu].length;
     // LogRing.tla Write is per slot; the last slot's Write ends with the
     // tick and metadata stores.
     let mut last_at: usize = 0;
@@ -427,7 +427,7 @@ private fn kernel_log_write(token: borrow LogReservation[0],
                     let offset: usize = index * KERNEL_LOG_SLOT_BYTES + word * 8 + byte;
                     if (offset < length && offset < KERNEL_LOG_LINE_BYTES) {
                         let safe_offset: {0..<KERNEL_LOG_LINE_BYTES as usize} = offset;
-                        let byte_value: u8 = kernel_log_core_state[core].line[safe_offset];
+                        let byte_value: u8 = kernel_log_core_state[cpu].line[safe_offset];
                         value = value | ((byte_value as usize) << (byte * 8));
                     }
                 }
@@ -442,9 +442,9 @@ private fn kernel_log_write(token: borrow LogReservation[0],
     let first: {0..<KERNEL_LOG_SLOT_COUNT as usize} = kernel_log_slot_of(token.seq);
     let mut meta: usize = (length & KERNEL_LOG_META_LENGTH_MASK) |
         ((token.cpu & KERNEL_LOG_CPU_MASK) << KERNEL_LOG_META_CPU_SHIFT);
-    if (kernel_log_core_state[core].continued) { meta = meta | KERNEL_LOG_META_CONTINUED; }
-    if (kernel_log_core_state[core].cut) { meta = meta | KERNEL_LOG_META_CUT; }
-    kernel_log_publish(&kernel_log_ticks[first], kernel_log_core_state[core].tick as usize);
+    if (kernel_log_core_state[cpu].continued) { meta = meta | KERNEL_LOG_META_CONTINUED; }
+    if (kernel_log_core_state[cpu].cut) { meta = meta | KERNEL_LOG_META_CUT; }
+    kernel_log_publish(&kernel_log_ticks[first], kernel_log_core_state[cpu].tick as usize);
     kernel_log_publish(&kernel_log_meta[first], meta);
     log_ring_trace_writer(last_at, LOG_RING_TRACE_WRITE, token.seq, token.span,
                           last_index, 0);
@@ -491,19 +491,19 @@ private fn kernel_log_discard(token: sink LogReservation[0]) !{unsafe} {
 // The staged line becomes one record, and then, when `wire`, goes to the UART
 // (kernel_log_emit_line). A refusal is already counted, and the UART still
 // gets the text: losing a record never loses console output.
-private fn kernel_log_retain_line(core: {0..<KERNEL_MAX_CORES as usize}, wire: bool) !{unsafe} {
-    let length: usize = kernel_log_core_state[core].length;
+private fn kernel_log_retain_line(cpu: CpuHere, wire: bool) !{unsafe} {
+    let length: usize = kernel_log_core_state[cpu].length;
     if (length == 0) { return; }
     let span: usize = (length + KERNEL_LOG_SLOT_BYTES - 1) / KERNEL_LOG_SLOT_BYTES;
     match kernel_log_reserve(span) {
         KernelLogReserve::Reserved(token) => {
-            kernel_log_write(token, core);
+            kernel_log_write(token, cpu);
             kernel_log_commit(token);
         }
         KernelLogReserve::Refused => { }
     }
-    if (wire) { kernel_log_emit_line(core); }
-    kernel_log_core_state[core].length = 0;
+    if (wire) { kernel_log_emit_line(cpu); }
+    kernel_log_core_state[cpu].length = 0;
 }
 
 fn kernel_log_init(phase: borrow BootPhase[boot]) {
@@ -513,12 +513,14 @@ fn kernel_log_init(phase: borrow BootPhase[boot]) {
     let tx = console_lock();
     kernel_log_tx_claim(tx);
     console_unlock(tx);
-    for core: usize in 0..<KERNEL_MAX_CORES {
-        kernel_log_core_state[core].emergency = false;
-        kernel_log_core_state[core].capturing = false;
-        kernel_log_core_state[core].active = false;
-        kernel_log_core_state[core].continued = false;
-        kernel_log_core_state[core].length = 0;
+    for core: usize in 0..<KERNEL_MAX_CORES { kernel_log_emergency[core] = false; }
+    // On boot only this CPU can have staged a line. Other entries still
+    // have their BSS values, including after the destructive local probe.
+    preempt_off (cpu) {
+        kernel_log_core_state[cpu].capturing = false;
+        kernel_log_core_state[cpu].active = false;
+        kernel_log_core_state[cpu].continued = false;
+        kernel_log_core_state[cpu].length = 0;
     }
     atomic_word_store(&kernel_log_boot_tick, read_cntpct() as usize);
     atomic_word_store(&kernel_log_frequency, read_cntfrq() as usize);
@@ -538,16 +540,15 @@ fn kernel_log_init(phase: borrow BootPhase[boot]) {
 // uart_put_udec/uart_put_hex output between fragments in the same line.
 fn kernel_log_begin_fragment() {
     preempt_off (cpu) {
-        kernel_log_begin_fragment_here();
+        kernel_log_begin_fragment_here(cpu);
     } else {
-        kernel_log_begin_fragment_here();
+        // Byte capture already falls back to direct output here.
     }
 }
 
-private fn kernel_log_begin_fragment_here() {
-    if (kernel_log_core_is_emergency()) { return; }
-    let core: {0..<KERNEL_MAX_CORES as usize} = kernel_log_core_here();
-    kernel_log_core_state[core].capturing = true;
+private fn kernel_log_begin_fragment_here(cpu: CpuHere) {
+    if (kernel_log_emergency[cpu_here_index(cpu)]) { return; }
+    kernel_log_core_state[cpu].capturing = true;
 }
 
 // A fragment ends here. Capture lasts until the line is complete, so a line
@@ -556,17 +557,16 @@ private fn kernel_log_begin_fragment_here() {
 // this CPU's later bare bytes go straight to the UART again.
 fn kernel_log_end_fragment() {
     preempt_off (cpu) {
-        kernel_log_end_fragment_here();
+        kernel_log_end_fragment_here(cpu);
     } else {
-        kernel_log_end_fragment_here();
+        // Byte capture already falls back to direct output here.
     }
 }
 
-private fn kernel_log_end_fragment_here() {
-    if (kernel_log_core_is_emergency()) { return; }
-    let core: {0..<KERNEL_MAX_CORES as usize} = kernel_log_core_here();
-    if (kernel_log_core_state[core].active == false) {
-        kernel_log_core_state[core].capturing = false;
+private fn kernel_log_end_fragment_here(cpu: CpuHere) {
+    if (kernel_log_emergency[cpu_here_index(cpu)]) { return; }
+    if (kernel_log_core_state[cpu].active == false) {
+        kernel_log_core_state[cpu].capturing = false;
     }
 }
 
@@ -576,33 +576,33 @@ private fn kernel_log_end_fragment_here() {
 // capturing, so "\nlabel: " still retains "label: ..." (GitHub issue #9).
 // A line that fills the stage is retained as it stands and continues in the
 // next record, marked as a continuation, so nothing is truncated.
-private fn kernel_log_stage_byte(core: {0..<KERNEL_MAX_CORES as usize}, owner: usize, value: u8,
+private fn kernel_log_stage_byte(cpu: CpuHere, owner: usize, value: u8,
                                  wire: bool) -> bool !{unsafe} {
-    if (kernel_log_core_state[core].active && kernel_log_core_state[core].owner != owner) {
-        kernel_log_cut_line(core, wire);
+    if (kernel_log_core_state[cpu].active && kernel_log_core_state[cpu].owner != owner) {
+        kernel_log_cut_line(cpu, wire);
     }
-    if (kernel_log_core_state[core].active == false) {
+    if (kernel_log_core_state[cpu].active == false) {
         if (value == 10) { return true; }
-        kernel_log_core_state[core].tick = read_cntpct() - (atomic_word_load(&kernel_log_boot_tick) as i64);
-        kernel_log_core_state[core].length = 0;
-        kernel_log_core_state[core].continued = false;
-        kernel_log_core_state[core].owner = owner;
-        kernel_log_core_state[core].active = true;
+        kernel_log_core_state[cpu].tick = read_cntpct() - (atomic_word_load(&kernel_log_boot_tick) as i64);
+        kernel_log_core_state[cpu].length = 0;
+        kernel_log_core_state[cpu].continued = false;
+        kernel_log_core_state[cpu].owner = owner;
+        kernel_log_core_state[cpu].active = true;
     }
-    if (kernel_log_core_state[core].length >= KERNEL_LOG_LINE_BYTES) {
-        kernel_log_retain_line(core, wire);
-        kernel_log_core_state[core].continued = true;
+    if (kernel_log_core_state[cpu].length >= KERNEL_LOG_LINE_BYTES) {
+        kernel_log_retain_line(cpu, wire);
+        kernel_log_core_state[cpu].continued = true;
     }
-    let length: usize = kernel_log_core_state[core].length;
+    let length: usize = kernel_log_core_state[cpu].length;
     if (length < KERNEL_LOG_LINE_BYTES) {
         let safe_length: {0..<KERNEL_LOG_LINE_BYTES as usize} = length;
-        kernel_log_core_state[core].line[safe_length] = value;
-        kernel_log_core_state[core].length = length + 1;
+        kernel_log_core_state[cpu].line[safe_length] = value;
+        kernel_log_core_state[cpu].length = length + 1;
     }
     if (value == 10) {
-        kernel_log_retain_line(core, wire);
-        kernel_log_core_state[core].active = false;
-        kernel_log_core_state[core].capturing = false;
+        kernel_log_retain_line(cpu, wire);
+        kernel_log_core_state[cpu].active = false;
+        kernel_log_core_state[cpu].capturing = false;
     }
     return false;
 }
@@ -610,17 +610,17 @@ private fn kernel_log_stage_byte(core: {0..<KERNEL_MAX_CORES as usize}, owner: u
 // The staged piece goes out as a record of its own, ending in a newline, so
 // nothing the next writer stages joins it (#1159, as Linux's pr_cont). Its
 // writer, if it comes back, starts a new record.
-private fn kernel_log_cut_line(core: {0..<KERNEL_MAX_CORES as usize}, wire: bool) !{unsafe} {
-    let length: usize = kernel_log_core_state[core].length;
+private fn kernel_log_cut_line(cpu: CpuHere, wire: bool) !{unsafe} {
+    let length: usize = kernel_log_core_state[cpu].length;
     if (length < KERNEL_LOG_LINE_BYTES) {
         let safe_length: {0..<KERNEL_LOG_LINE_BYTES as usize} = length;
-        kernel_log_core_state[core].line[safe_length] = 10;
-        kernel_log_core_state[core].length = length + 1;
+        kernel_log_core_state[cpu].line[safe_length] = 10;
+        kernel_log_core_state[cpu].length = length + 1;
     }
-    kernel_log_core_state[core].cut = true;
-    kernel_log_retain_line(core, wire);
-    kernel_log_core_state[core].cut = false;
-    kernel_log_core_state[core].active = false;
+    kernel_log_core_state[cpu].cut = true;
+    kernel_log_retain_line(cpu, wire);
+    kernel_log_core_state[cpu].cut = false;
+    kernel_log_core_state[cpu].active = false;
 }
 
 // The stack's owner for a line on this core.
@@ -1663,17 +1663,17 @@ fn kernel_log_capture_uart_byte(value: u8) -> bool !{unsafe} {
 
 private fn kernel_log_capture_here(cpu: CpuHere, value: u8, wire: bool) -> bool !{unsafe} {
     let core: {0..<KERNEL_MAX_CORES as usize} = cpu_here_index(cpu);
-    if (kernel_log_core_state[core].emergency ||
-        kernel_log_core_state[core].capturing == false) {
+    if (kernel_log_emergency[core] ||
+        kernel_log_core_state[cpu].capturing == false) {
         return true;
     }
-    return kernel_log_stage_byte(core, kernel_log_owner_here(cpu), value, wire);
+    return kernel_log_stage_byte(cpu, kernel_log_owner_here(cpu), value, wire);
 }
 
 // Read-only per-core mode query, through the one checked selection of the
 // current core. Writes remain at the explicit fragment and emergency sites.
 private fn kernel_log_core_is_emergency() -> bool {
-    return kernel_log_core_state[kernel_log_core_here()].emergency;
+    return kernel_log_emergency[kernel_log_core_here()];
 }
 
 // A retained line onto the wire, whole: one console-lock hold carries the
@@ -1684,14 +1684,14 @@ private fn kernel_log_core_is_emergency() -> bool {
 // Otherwise the hold waits, with the lock let go, until the queue has room
 // for the whole line or is empty; only a line longer than the queue then
 // waits out the FIFO inside the hold, for the part that does not fit.
-private fn kernel_log_emit_line(core: {0..<KERNEL_MAX_CORES as usize}) !{unsafe} {
-    let length: usize = kernel_log_core_state[core].length;
+private fn kernel_log_emit_line(cpu: CpuHere) !{unsafe} {
+    let length: usize = kernel_log_core_state[cpu].length;
     if (kernel_log_tx_is_live() == false || terminal_output_paused()) {
         let guard = console_lock();
         if (kernel_log_wire_last(guard) != 10) { uart_tx_spin_store_locked(guard, 10); }
         for index: usize in 0..<KERNEL_LOG_LINE_BYTES {
             if (index < length) {
-                uart_tx_spin_store_locked(guard, kernel_log_core_state[core].line[index]);
+                uart_tx_spin_store_locked(guard, kernel_log_core_state[cpu].line[index]);
             }
         }
         console_unlock(guard);
@@ -1707,7 +1707,7 @@ private fn kernel_log_emit_line(core: {0..<KERNEL_MAX_CORES as usize}) !{unsafe}
             if (kernel_log_wire_last(guard) != 10) { kernel_log_emit_byte_locked(guard, 10); }
             for index: usize in 0..<KERNEL_LOG_LINE_BYTES {
                 if (index < length) {
-                    kernel_log_emit_byte_locked(guard, kernel_log_core_state[core].line[index]);
+                    kernel_log_emit_byte_locked(guard, kernel_log_core_state[cpu].line[index]);
                 }
             }
             uart_tx_drain_into_fifo(guard);
@@ -1847,9 +1847,10 @@ fn kernel_log_enter_emergency() {
     // one written (#638 stage 9). A stopping path that cannot mint one has
     // IRQs masked, so no task switches there.
     preempt_off (cpu) {
-        kernel_log_enter_emergency_here();
+        kernel_log_emergency[cpu_here_index(cpu)] = true;
+        kernel_log_core_state[cpu].capturing = false;
     } else {
-        kernel_log_enter_emergency_here();
+        kernel_log_emergency[kernel_log_core_here()] = true;
     }
     // Terminal stack guards can park without entering crash_console_run.
     // Take the console at emergency priority, from whichever core this is
@@ -1863,12 +1864,6 @@ fn kernel_log_enter_emergency() {
         KernelLogTxStandDown::Took(found) => { }
         KernelLogTxStandDown::Outranked => { }
     }
-}
-
-private fn kernel_log_enter_emergency_here() {
-    let core: {0..<KERNEL_MAX_CORES as usize} = kernel_log_core_here();
-    kernel_log_core_state[core].emergency = true;
-    kernel_log_core_state[core].capturing = false;
 }
 
 private fn kernel_log_snapshot_push(snapshot: borrow &mut KernelLogSnapshot, value: u8) {
@@ -2319,15 +2314,17 @@ fn kernel_log_raw_slot(seq: usize) -> KernelLogRawSlot !{unsafe} {
 
 // How much of a line CPU `core` has staged and not yet retained: 0 unless a
 // line is open there. The debugger reads it under the world stop.
-fn kernel_log_raw_staged_length(core: {0..<KERNEL_MAX_CORES as usize}) -> usize {
-    if (kernel_log_core_state[core].active == false) { return 0; }
-    return kernel_log_core_state[core].length;
+fn kernel_log_raw_staged_length(stopped: borrow MachineStopped[&kernel_world_stop],
+        core: {0..<KERNEL_MAX_CORES as usize}) -> usize {
+    if (stopped_read(stopped, kernel_log_core_state[core].active) == false) { return 0; }
+    return stopped_read(stopped, kernel_log_core_state[core].length);
 }
 
-fn kernel_log_raw_staged_byte(core: {0..<KERNEL_MAX_CORES as usize}, index: usize) -> u8 {
+fn kernel_log_raw_staged_byte(stopped: borrow MachineStopped[&kernel_world_stop],
+        core: {0..<KERNEL_MAX_CORES as usize}, index: usize) -> u8 {
     if (index >= KERNEL_LOG_LINE_BYTES) { return 0; }
     let safe_index: {0..<KERNEL_LOG_LINE_BYTES as usize} = index;
-    return kernel_log_core_state[core].line[safe_index];
+    return stopped_read(stopped, kernel_log_core_state[core].line[safe_index]);
 }
 
 // Byte `index` of the record that begins at `seq`; 0 past the slots.
@@ -2511,26 +2508,27 @@ private fn kernel_log_probe_line(byte: u8, count: usize) {
 // first piece must be its own record, marked cut and ended by a newline, and
 // the second writer's line must hold only its own text.
 private fn kernel_log_second_writer_probe() -> bool !{unsafe} {
-    let core: {0..<KERNEL_MAX_CORES as usize} = kernel_log_core_here();
-    kernel_log_begin_fragment();
-    let start: usize = kernel_log_observe(&kernel_log_head);
-    let first_p: bool = kernel_log_stage_byte(core, 1, 112, false);
-    let first_q: bool = kernel_log_stage_byte(core, 1, 113, false);
-    if (kernel_log_observe(&kernel_log_head) != start) { return false; }
-    let second_r: bool = kernel_log_stage_byte(core, 2, 114, false);
-    let second_end: bool = kernel_log_stage_byte(core, 2, 10, false);
-    if (kernel_log_observe(&kernel_log_head) != start + 2) { return false; }
-    let cut: usize = kernel_log_probe_meta(start);
-    let whole: usize = kernel_log_probe_meta(start + 1);
-    return (cut & KERNEL_LOG_META_LENGTH_MASK) == 3 &&
-        (cut & KERNEL_LOG_META_CUT) != 0 &&
-        kernel_log_raw_text_byte(start, 0) == 112 &&
-        kernel_log_raw_text_byte(start, 1) == 113 &&
-        kernel_log_raw_text_byte(start, 2) == 10 &&
-        (whole & KERNEL_LOG_META_LENGTH_MASK) == 2 &&
-        (whole & KERNEL_LOG_META_CUT) == 0 &&
-        kernel_log_raw_text_byte(start + 1, 0) == 114 &&
-        kernel_log_raw_text_byte(start + 1, 1) == 10;
+    preempt_off (cpu) {
+        kernel_log_begin_fragment_here(cpu);
+        let start: usize = kernel_log_observe(&kernel_log_head);
+        let first_p: bool = kernel_log_stage_byte(cpu, 1, 112, false);
+        let first_q: bool = kernel_log_stage_byte(cpu, 1, 113, false);
+        if (kernel_log_observe(&kernel_log_head) != start) { return false; }
+        let second_r: bool = kernel_log_stage_byte(cpu, 2, 114, false);
+        let second_end: bool = kernel_log_stage_byte(cpu, 2, 10, false);
+        if (kernel_log_observe(&kernel_log_head) != start + 2) { return false; }
+        let cut: usize = kernel_log_probe_meta(start);
+        let whole: usize = kernel_log_probe_meta(start + 1);
+        return (cut & KERNEL_LOG_META_LENGTH_MASK) == 3 &&
+            (cut & KERNEL_LOG_META_CUT) != 0 &&
+            kernel_log_raw_text_byte(start, 0) == 112 &&
+            kernel_log_raw_text_byte(start, 1) == 113 &&
+            kernel_log_raw_text_byte(start, 2) == 10 &&
+            (whole & KERNEL_LOG_META_LENGTH_MASK) == 2 &&
+            (whole & KERNEL_LOG_META_CUT) == 0 &&
+            kernel_log_raw_text_byte(start + 1, 0) == 114 &&
+            kernel_log_raw_text_byte(start + 1, 1) == 10;
+    }
 }
 
 // Destructive API coverage at the existing pre-IRQ, pre-secondary boot point.
@@ -2869,8 +2867,8 @@ fn kernel_log_bounds_probe(phase: borrow BootPhase[boot]) -> bool !{unsafe} {
     for byte_index: usize in 0..<3 {
         let staged_byte: bool = kernel_log_probe_byte(119);
     }
-    let here: {0..<KERNEL_MAX_CORES as usize} = kernel_log_core_here();
-    let staged: usize = kernel_log_core_state[here].length;
+    let mut staged: usize = 0;
+    preempt_off (cpu) { staged = kernel_log_core_state[cpu].length; }
     let head: usize = kernel_log_observe(&kernel_log_head);
     // Arrange the live-queue case without emitting artificial bytes. A
     // terminal writer must leave polling selected even without the later
@@ -2879,10 +2877,12 @@ fn kernel_log_bounds_probe(phase: borrow BootPhase[boot]) -> bool !{unsafe} {
     kernel_log_enter_emergency();
     kernel_log_begin_fragment();
     let visible: bool = kernel_log_capture_uart_byte(122);
-    return flow_ok && visible && kernel_log_core_state[here].capturing == false &&
-        kernel_log_tx_is_live() == false && staged == 3 &&
-        kernel_log_core_state[here].length == staged &&
-        kernel_log_observe(&kernel_log_head) == head;
+    preempt_off (cpu) {
+        return flow_ok && visible && kernel_log_core_state[cpu].capturing == false &&
+            kernel_log_tx_is_live() == false && staged == 3 &&
+            kernel_log_core_state[cpu].length == staged &&
+            kernel_log_observe(&kernel_log_head) == head;
+    }
 }
 
 // GitHub issue #613 slice 5: the all-CPU writer storm's two halves inside
@@ -2914,22 +2914,22 @@ private fn kernel_log_storm_digits(value: usize, width: usize) !{unsafe} {
 // line of its own or reporting a fatal error; nothing is staged then.
 // One CPU's whole storm line inside one preempt_off region, so the element
 // chosen at the top is the one every byte lands in (#638 stage 9: this was the
-// file's KERNEL_PREEMPTIBLE assert). The else arm (no region available, as
-// in the fragment pair above) writes the same line.
+// file's KERNEL_PREEMPTIBLE assert). The fixture reports refusal if the
+// CPU has no authority.
 fn kernel_log_storm_write(round: usize, index: usize) -> bool !{unsafe} {
     preempt_off (cpu) {
-        return kernel_log_storm_write_here(round, index);
+        return kernel_log_storm_write_here(cpu, round, index);
     } else {
-        return kernel_log_storm_write_here(round, index);
+        return false;
     }
 }
 
-private fn kernel_log_storm_write_here(round: usize, index: usize) -> bool !{unsafe} {
-    let core: {0..<KERNEL_MAX_CORES as usize} = kernel_log_core_here();
-    if (kernel_log_core_state[core].emergency || kernel_log_core_state[core].active) {
+private fn kernel_log_storm_write_here(cpu: CpuHere, round: usize, index: usize) -> bool !{unsafe} {
+    let core: {0..<KERNEL_MAX_CORES as usize} = cpu_here_index(cpu);
+    if (kernel_log_emergency[core] || kernel_log_core_state[cpu].active) {
         return false;
     }
-    kernel_log_core_state[core].capturing = true;
+    kernel_log_core_state[cpu].capturing = true;
     let prefix = bs"storm c";
     for byte: usize in 0..<7 { let staged: bool = kernel_log_probe_byte(prefix[byte]); }
     kernel_log_storm_digits(core, 1);
@@ -3107,12 +3107,8 @@ fn kernel_boot_log_resource_exhausted(resource: *u8, capacity: usize) {
 // KERNEL_PREEMPTIBLE any more, so its assert is retired and
 // kernel/EXECUTION_MODEL exempts the file. The four raw CPU-id reads
 // (scripts/check_raw_cpu_id_sites.py, now a reviewed row):
-// - kernel_log_core_here picks this CPU's KernelLogCoreState. Its writers run
-//   in a preempt_off region (the fragment pair, the capture byte, the storm
-//   writer, the emergency entry) or in the boot probes, before any process
-//   exists. Its one unlocked reader outside a region, uart_putc's emergency
-//   test, can only find another CPU's mode set if that CPU stopped with IRQs
-//   masked, where no task runs.
+// - kernel_log_core_here selects the emergency polling bit. This retains
+//   the terminal fallback, separate from the stage indexed by CpuHere.
 // - kernel_log_reserve tags the record with the reserving CPU. The tag
 //   travels in the LogReservation token, and every later compare-swap uses
 //   the token's copy, so a move only makes the tag name where the record

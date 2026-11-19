@@ -1802,7 +1802,7 @@ private fn ddb_render_log_slot(seq: usize, slot: KernelLogRawSlot) -> usize !{un
     return 1;
 }
 
-private fn ddb_render_log() !{unsafe} {
+private fn ddb_render_log(stopped: borrow MachineStopped[&kernel_world_stop]) !{unsafe} {
     let head: usize = kernel_log_raw_head();
     let slots: usize = kernel_log_raw_slot_count();
     let mut seq: usize = 0;
@@ -1814,14 +1814,14 @@ private fn ddb_render_log() !{unsafe} {
     // A line a CPU was building when the world stopped is in neither the
     // ring nor the UART yet (#613 slice 5); show it, by CPU.
     for cpu: usize in 0..<KERNEL_MAX_CORES {
-        let length: usize = kernel_log_raw_staged_length(cpu);
+        let length: usize = kernel_log_raw_staged_length(stopped, cpu);
         if (length != 0) {
             ddb_puts("ddb: log staged cpu="); ddb_put_udec(cpu);
             ddb_puts(" length="); ddb_put_udec(length);
             ddb_puts(" text=");
             for index: usize in 0..<640 {
                 if (index < length) {
-                    let byte: u8 = kernel_log_raw_staged_byte(cpu, index);
+                    let byte: u8 = kernel_log_raw_staged_byte(stopped, cpu, index);
                     if (byte >= 32 && byte < 127) { uart_debug_putc(byte); }
                     else if (byte != 10) { uart_debug_putc(46); }
                 }
@@ -2979,7 +2979,7 @@ private fn kernel_ddb_enter_stopped(
         } else if (ddb_command_is(line as []u8, length, bs"unimpl")) {
             ddb_render_unimpl();
         } else if (ddb_command_is(line as []u8, length, bs"log")) {
-            ddb_render_log();
+            ddb_render_log(stopped_world);
         } else {
             match ddb_parse_backtrace(line as []u8, length) {
                 DdbBacktraceCommand::Current => {

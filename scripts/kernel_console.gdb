@@ -71,7 +71,8 @@ class TakibiConsole(gdb.Command):
                 length = field("length")
                 active = bool(field("active", 1))
                 emit("peer", cpu=cpu, capturing=bool(field("capturing", 1)),
-                     emergency=bool(field("emergency", 1)), active=active,
+                     emergency=bool(integer(address("kernel_log_emergency") + cpu, 1)),
+                     active=active,
                      continued=bool(field("continued", 1)), partial_length=length,
                      partial=((repr(memory(base + layout("KernelLogCoreState", "line"), length))
                                if active else "b''")
