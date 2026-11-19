@@ -3,7 +3,7 @@
   "event": "incremental",
   "decision": "measured",
   "source_sha256": "60e31894c71623959376532b0eabf6ebfdc176ac0340f24c49cf1c487311d01c",
-  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 3faa0664: this branch's review, rebound to the merged sources (upstream's record was 2026-11-19 incremental/measured). Both normal linked kernels, the boot process probe frame symbols and their generated exception ABI, compared with 0a36c6b20.",
+  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 3faa0664: this branch's review, rebound to the merged sources (upstream's record was 2026-11-19 incremental/measured). Both normal linked kernels, the boot process probe frame symbols and their generated exception ABI, compared with 3faa06648.",
   "evidence": [
     "docs/PROCESS_PROBE_FRAME_SPACE.md"
   ],
