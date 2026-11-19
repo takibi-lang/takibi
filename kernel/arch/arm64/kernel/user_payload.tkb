@@ -495,6 +495,8 @@ fn initial_user_payload() !{unsafe} {
     for i in 0..<LARGE_LEN {
         user_payload_large_buf[i] = 0x5a;
     }
+    // A rejected destination must leave the newly received segment unread.
+    fail_if(src_loc(), svc5(63, 6, 0, 1460, 0, 0) != EFAULT_RC);
     fail_if(src_loc(), svc5(63, 6, ptr_of(large_base, 0), 1460, 0, 0) != RX_STALE_SHORT_LEN);
     for i in 0..<LARGE_LEN {
         if (i < RX_STALE_SHORT_LEN) {

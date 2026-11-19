@@ -2392,7 +2392,8 @@ fn kernel_syscall_socket_evidence() -> bool !{unsafe} {
            // #846 one more of each: A's unread byte and B's read.
            // #1121 five more reads: three EOF reads on B after its FIN,
            // and ECONNRESET then EOF on A after its reset.
-           syscall_test_evidence_connected_read_calls() == 13 &&
+           // B's rejected destination adds one more read before its retry.
+           syscall_test_evidence_connected_read_calls() == 14 &&
            // #1112 one more write: the zero-length one on A. #1121 three
            // more: the trigger bytes on B and A, and the EPIPE one on A.
            syscall_test_evidence_connected_write_calls() == 11 &&
@@ -3524,7 +3525,9 @@ fn syscall_read_segment_with(slot: borrow SyscallSlot[0],
                 KernelTcpReceiveResult::Received(next) => {
                     let received: usize =
                         kernel_tcp_received_length(owner);
-                    tcp_connection_of(owner).socket_buffer_length = received;
+                    let published: &mut TcpConnection = tcp_connection_of(owner);
+                    published.socket_buffer_length = received;
+                    published.socket_buffer_offset = 0;
                     let mut amount: usize = received;
                     if (amount > requested) { amount = requested; }
                     let Place::Full(received_rx) =
@@ -3560,7 +3563,6 @@ fn syscall_read_segment_with(slot: borrow SyscallSlot[0],
                                     // the next read.
                                     tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
                                                                 received_rx);
-                                    tcp_connection_of(owner).socket_buffer_offset = 0;
                                     match network_capability_put(next) {
                                         NetworkCapabilityPutResult::Stored => {
                                             tcp_connection_put(owner);
