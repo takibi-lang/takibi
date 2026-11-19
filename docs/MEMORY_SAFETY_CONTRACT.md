@@ -70,8 +70,10 @@ coverage. Existing source tests are in test/test_takibi.ml unless named.
 
 Bounded protocol checks are evidence only at their stated bounds and code
 ties (kernel/models/README.md). The matrix does not promote a modeled
-protocol to global race freedom. The Rust property comparison is unresolved;
-#1043's defect log is not a whole-language comparison.
+protocol to global race freedom. The [scoped Rust 1.91.0
+comparison](RUST_MEMORY_SAFETY_COMPARISON.md) records property-level
+evidence and unresolved boundaries. Whole-language equivalence remains
+unresolved.
 
 ## Original initialization acceptance re-audit
 
