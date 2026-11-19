@@ -3,10 +3,10 @@
   "event": "milestone",
   "decision": "measured",
   "source_sha256": "b2bd2db653aea9782d862d0ec2e61521dd559af5a7bdcdf27d2dd8fdb1396bea",
-  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto df592492: this branch's review, rebound to the merged sources (upstream's record was 2026-11-19 milestone/measured). Linked normal QEMU and RPi5 kernels exercising the two-phase boot-only freelist fixture, compared with d78156045.",
+  "workload": "Normal linked kernels with test-only freelist phase quiescence and the same-connection TCP copyout retry fixture, compared with 29325085f.",
   "evidence": [
     "docs/FREELIST_QUIESCENCE_SPACE.md"
   ],
-  "assessment": "The fixture adds one eight-byte BSS word and one GOT entry per target, plus 1200 QEMU and 1168 RPi5 text-class bytes. The usable RAM start and checked allocator capacities stay fixed. Physical timing was not measured.",
+  "assessment": "Combined text-class bytes grow 1200 on QEMU and 1168 on RPi5. Data grows 8 bytes on both. QEMU BSS is unchanged; RPi5 BSS starts one page later and ends at the same address. Usable RAM starts and allocator capacities do not move. The TCP cursor correction adds no storage or allocation. The boot fixture retains its existing stress bounds.",
   "next_trigger": "Measure again when registration storage, the boot contention workload, or the linked reservation boundary changes."
 }

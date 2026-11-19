@@ -34,3 +34,12 @@ was not measured.
 Adopt the fixed image cost for this fixture-only synchronization. Measure
 again when registration storage, the boot contention workload, or the
 linked reservation boundary changes.
+
+On release base 29325085f, the combined freelist and TCP retry candidate
+has 831912 text-class bytes on QEMU and 4225220 on RPi5, increases of
+1200 and 1168, respectively. Data increases by 8 bytes on each target;
+the only additional data/BSS symbol is the eight-byte admission word.
+QEMU BSS remains 1310720 bytes. RPi5 BSS begins one 4096-byte page later
+at 0x60a000 and ends at the same 0x77d000, so the linked section is
+4096 bytes smaller. The usable RAM start and the verified allocator
+capacities do not change on either target.
