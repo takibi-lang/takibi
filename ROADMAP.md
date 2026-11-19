@@ -11,11 +11,33 @@ queues is the HISTORY.md entry of 2026-10-25.
 
 Live intermittents are listed in `docs/KNOWN_INTERMITTENTS.md`, not here.
 
-## Territories, re-cut 2026-10-25
+## Territories and milestone execution
 
 A territory is a role, not a set of directories and not a particular agent
 (`AGENTS.md`); which agent holds which is the maintainer's per-session
 decision.
+
+### Milestone work allocation
+
+Finish Milestone 1 before starting Milestone 2 implementation. Run one
+active work item per territory. Give each shared issue one integrating
+territory. When a dependency, decision, or hardware step
+blocks an issue, preserve the handoff on that issue and advance independent
+work from the current milestone. Land finished branches one at a time.
+
+| Milestone | Territory A | Territory B | Integration dependencies |
+| --- | --- | --- | --- |
+| 1: kernel landed | Complete the scoped memory-safety contract (#1513), then the remaining globals ratchet (#1159) and preemption integration (#638). | Complete the approved TaskMutex sequence (#1481). Triage #667 when a qualifying capture is available. Prepare the matched cold-boot comparison (#1158) without the board and run the RPi5 benchmark at the final stage of Milestone 1. | #638 flips after #1159 and #1481 meet their gates. Coordinate shared scheduler interfaces and four-core RPi5 regression evidence at these boundaries. |
+| 2: language settled | Implement the lossless printer and formatter entry point (#1010). | Develop round-trip and linked-kernel equivalence checks (#1010) against the agreed printer interface. Prepare source inventories and acceptance controls for #1009. | Integrate the printer and its checks before #1009. Use one branch for the syntax migration in the approved order, with the other territory reviewing round-trip and generated-code evidence. Review #1514 before finalizing the relevant syntax. |
+
+This allocation takes precedence over the standing queues. Publish shared
+interfaces before dependent work adopts them. The RPi5 lease serializes
+regression and benchmark runs. Required regression evidence stays with
+each change. Run the #1158 comparison on the final Milestone 1 candidate
+and record its revision and configuration. Repeat affected measurements
+if a later change alters the measured workload or performance path.
+
+### Standing queue background
 
 **Roles (maintainer, 2026-10-16, #753).** The pillars are multicore
 support and memory safety. Territory A takes pillar work that comes as
@@ -236,8 +258,9 @@ owners are TaskMutex, the spare stack stays masked). #980
 
 ### Territory B: supporting the pillars, by priority
 
-**Priority update, 2026-11-11.** Implement the approved Linux cold handoff
-and matched raw ext2 USB root comparison (#1158). The LLVM static frame
+Prepare the approved Linux cold handoff and matched raw ext2 USB root
+comparison without the board (#1158). Run the comparison on RPi5 at the
+final stage of Milestone 1. The LLVM static frame
 gate now requires stack-size metadata for normal and debug kernel objects
 on both targets, with the 2048 B ordinary ceiling.
 The board-free RPi5 reset and loader controls now distinguish OpenOCD
