@@ -11,9 +11,12 @@
 
 let enabled = ref false
 
-let ends : (string * int, Lexing.position) Hashtbl.t = Hashtbl.create 0
+let ends : (string * int * int, Lexing.position) Hashtbl.t = Hashtbl.create 0
 
-let key (pos : Lexing.position) = (Ast.source_file_of_loc pos, pos.Lexing.pos_cnum)
+(* Region definitions from separate generated fragments have distinct line
+   ranges even when their byte offsets restart at the same position. *)
+let key (pos : Lexing.position) =
+  (Ast.source_file_of_loc pos, pos.Lexing.pos_lnum, pos.Lexing.pos_cnum)
 
 let record (start : Lexing.position) (stop : Lexing.position) =
   if !enabled then Hashtbl.replace ends (key start) stop

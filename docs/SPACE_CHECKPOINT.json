@@ -2,11 +2,11 @@
   "date": "2026-11-19",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "60e31894c71623959376532b0eabf6ebfdc176ac0340f24c49cf1c487311d01c",
-  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 3faa0664: this branch's review, rebound to the merged sources (upstream's record was 2026-11-19 incremental/measured). Both normal linked kernels, the boot process probe frame symbols and their generated exception ABI, compared with 3faa06648.",
+  "source_sha256": "f7f4d42f5e7350034e5cc4169f1aa89d03dc8da80857d5e0694e0c9a1b72f1a5",
+  "workload": "Normal QEMU and RPi5 objects, linked kernels and host call graph files, compared with 10257b670.",
   "evidence": [
-    "docs/PROCESS_PROBE_FRAME_SPACE.md"
+    "docs/CALL_GRAPH_IDENTITY_SPACE.md"
   ],
-  "assessment": "The two aligned ABI spans use 416 fewer bytes in total. Linked text, data, BSS and usable RAM starts are unchanged on both targets.",
-  "next_trigger": "Remeasure when the exception ABI, the probe storage or the linked reservation boundary changes."
+  "assessment": "Normal objects and linked kernels are byte-identical and retain the same memory map. Host call graph files grow because distinct generated definitions each have a row, with less than 0.05 percent additional cumulative compiler allocation on either target.",
+  "next_trigger": "Remeasure when generated definition identity, graph output format or the normal kernel build changes."
 }

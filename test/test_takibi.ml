@@ -85,7 +85,7 @@ let unused_errors ?(external_entries = ["main"]) src =
 (* GitHub issue #987: the --facts callgraph.tsv table for one source, written
    to a real file because the body hash re-lexes the definition from disk.
    Rows are (name, [(column, cell)]). *)
-let call_graph_rows src =
+let call_graph_rows ?(regions = false) src =
   let file = Filename.temp_file "call_graph" ".tkb" in
   let table = Filename.temp_file "call_graph" ".tsv" in
   Out_channel.with_open_bin file (fun oc -> output_string oc src);
@@ -96,9 +96,11 @@ let call_graph_rows src =
       In_channel.with_open_bin file (fun ic ->
         let lexbuf = Lexing.from_channel ic in
         Lexing.set_filename lexbuf file;
-        Parser.program Lexer.read lexbuf)) in
+        Parser.program Lexer.read lexbuf
+        |> Region_builtin.run ~enabled:regions)) in
+  let prog = Monomorphize.run (Dma_fixed_record.run (Publish_record.run parsed)) in
   let prog = Declared_type_resolver.run
-      (Monomorphize.run (Dma_fixed_record.run (Publish_record.run parsed))) in
+      (if regions then Region_builtin.lower prog else prog) in
   let types = Type_inf.infer_program prog in
   Out_channel.with_open_bin table (fun oc -> Call_graph.write_table oc prog types);
   let lines = In_channel.with_open_bin table In_channel.input_all
@@ -3822,6 +3824,38 @@ let infer_tests = [
         (field "bounded" "returns");
       Alcotest.(check bool) "function value" true
         (String.starts_with ~prefix:"callback@" (field "main" "values")));
+
+  Alcotest.test_case "call graph keeps generated RegionPool definitions distinct" `Quick
+    (fun () ->
+      let rows = call_graph_rows ~regions:true {|
+        struct A { value: usize; }
+        struct B { value: usize; }
+        let mut pool_a: RegionPool(A);
+        let mut pool_b: RegionPool(B);
+        fn take_a() !{unsafe} {
+          let guard = region_pool_lock(&pool_a);
+          region_pool_unlock(guard);
+        }
+        fn take_b() !{unsafe} {
+          let guard = region_pool_lock(&pool_b);
+          region_pool_unlock(guard);
+        }
+      |} in
+      let check_lock caller =
+        let callees = List.assoc "callees" (List.assoc caller rows) in
+        let lock = List.find (String.starts_with ~prefix:"region_pool_lock@<builtin region>:")
+            (String.split_on_char ',' callees) in
+        let row = List.find (fun (name, cells) ->
+          name ^ "@" ^ List.assoc "file" cells ^ ":" ^ List.assoc "line" cells = lock) rows
+          |> snd in
+        Alcotest.(check bool) "only the matching caller" true
+          (String.starts_with ~prefix:(caller ^ "@") (List.assoc "callers" row)
+           && not (String.contains (List.assoc "callers" row) ','));
+        Alcotest.(check int) "extent stays in the generated fragment" 2
+          (int_of_string (List.assoc "end_line" row) - int_of_string (List.assoc "line" row));
+        lock in
+      Alcotest.(check bool) "different RegionPool lock rows" true
+        (check_lock "take_a" <> check_lock "take_b"));
 
   (* GitHub issue #1012: --facts globals.tsv classifies each `let mut` global by
      the protection its type shows; the ratchet reads this column. *)

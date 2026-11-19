@@ -245,8 +245,7 @@ let write_table ?source_signatures (out : out_channel) (prog : toplevel list) (t
   let definitions = List.filter_map (function FuncDef f -> Some f | _ -> None) prog in
   (* A row is a source definition; the instances of one generic function
      are one row, identified by their shared def_loc. *)
-  let row_id (f : func) =
-    (source_file_of_loc f.def_loc, f.def_loc.Lexing.pos_cnum) in
+  let row_id (f : func) = Def_extent.key f.def_loc in
   let row_of_key = Hashtbl.create 1024 in
   let rows = Hashtbl.create 1024 in
   let order = ref [] in
@@ -261,7 +260,7 @@ let write_table ?source_signatures (out : out_channel) (prog : toplevel list) (t
   let label id = match Hashtbl.find_opt rows id with
     | Some (f :: _) ->
         Printf.sprintf "%s@%s:%d" (base_name f.name)
-          (relative (fst id)) f.def_loc.Lexing.pos_lnum
+          (relative (source_file_of_loc f.def_loc)) f.def_loc.Lexing.pos_lnum
     | _ -> assert false in
   let empty = StringSet.empty in
   let add table id item =
@@ -308,7 +307,7 @@ let write_table ?source_signatures (out : out_channel) (prog : toplevel list) (t
   List.iter (fun id ->
     let instances = Hashtbl.find rows id in
     let f = List.hd instances in
-    let file = fst id in
+    let file = source_file_of_loc f.def_loc in
     let extent = Def_extent.find f.def_loc in
     let span = match extent, tokens_of file with
       | Some stop, Some tokens ->
