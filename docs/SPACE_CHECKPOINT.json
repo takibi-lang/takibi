@@ -2,12 +2,11 @@
   "date": "2026-11-19",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "a6fb26122d92b232f2dc74acb5da226db37c2f24ad064c0ad09a0f8d3056dbb2",
-  "workload": "Normal linked QEMU and RPi5 kernels with the existing Pipe slot allocation and initialization and the CPU-local log staging workload, compared with fc86f604c.",
+  "source_sha256": "2da7f900dbfedd40408ac4ec98e6c71ffd6e5c99d6088ae64a72fa70c2804b89",
+  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto aae4cc73: this branch's review, rebound to the merged sources (upstream's record was 2026-11-19 milestone/measured). Normal and debug QEMU and RPi5 linked kernels and generated frames for the counted short retransmit guard, compared with fc86f604c.",
   "evidence": [
-    "docs/PIPE_SLOT_PUBLICATION.md",
-    "docs/LOG_STAGING_SPACE.md"
+    "docs/TCP_RETX_GUARD_SPACE.md"
   ],
-  "assessment": "Combined linked text grows by 252 bytes on QEMU and 236 bytes on RPi5; data grows by 8 bytes on both. BSS, reserved image limits and allocator capacities are unchanged. The existing Pipe writes and allocation workload are preserved. Ordinary log capture adds two instructions in the log-only review, with unchanged sampled frames. Physical per-byte latency was not measured.",
-  "next_trigger": "Review a change to the Pipe slot allocation or initialization, the staging or emergency layout, or the normal log capture path."
+  "assessment": "Adopt the checked preemption span. Text grows 32 bytes in all four modes. Data, BSS, usable RAM starts, the guard representation and all seven direct caller frames are unchanged. The lock frame grows 16 bytes in each mode and the debug unlock frame grows 16 bytes. Physical contention was not measured.",
+  "next_trigger": "Measure again when the retransmit guard, lock backend, call path, or reserved image span changes."
 }
