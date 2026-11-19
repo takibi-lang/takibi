@@ -30984,8 +30984,11 @@ let stopped_diagnostic_tests =
    with their production filenames. Spin primitives and storage preparation are
    stubs: this is a static API/lifetime test, not lock or storage execution. *)
 let infer_production_boot_snapshot code =
+  (* Parsing the full log file registers its per_cpu stage even though
+     this slice only type-checks snapshot declarations. *)
   let primitives = parse {|
     const KERNEL_MAX_CORES: usize = 4;
+    struct cpu_authority CpuHere { private id: {0..<KERNEL_MAX_CORES as usize}; }
     struct no_copy AtomicWord { private value: usize; }
     fn spin_lock(word: borrow *AtomicWord) !{locks, unsafe} {}
     fn spin_unlock(word: borrow *AtomicWord) !{locks, unsafe} {}
