@@ -156,8 +156,9 @@ with typed guards, owners or phases, without a live-fixture exemption.
 Actual function-value effect checking is complete (#1493). UART input-flow
 requests use the existing TX IRQ, and complete debugger returns rearm
 retained TX work. Busy/Partial refusals serialize UART output or retain a
-diagnostic record (#1494). Next, complete typed UART registration under
-#1159. The wider DDB safety review (#1286) remains open.
+diagnostic record (#1494). Typed UART callback registration under #1159
+now snapshots under its IRQ-safe guard and invokes after release.
+The wider DDB safety review (#1286) remains open.
 Investigate explicit linear ownership for CPU-independent exec reservations
 using existing types first; add no reservation workaround. Continue
 independent raw-CPU reader review while a concrete new decision is parked.
