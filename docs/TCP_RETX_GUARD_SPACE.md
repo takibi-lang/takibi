@@ -7,26 +7,24 @@ The mutex identity, rank 30 and handler prohibition remain checked.
 
 ## Measurement boundary
 
-The baseline is published be0d0601. All four complete normal/debug closures
-were compiled with the maintained QEMU and RPi5 arguments, including unused
-checks. The paired baseline restores that commit's TCP source; all other
-sources, toolchain, embedded image, assembly objects and linker inputs match.
-The maintained link commands link each resulting object. Debug compiles add
-`-g` to the same target arguments. These are
-linked-image and per-function static-frame observations.
+The baseline is published fc86f604c. The normal measurement uses the
+maintained space-delta runner and both complete target closures. The debug
+baseline artifacts are from the clean allcheck on 1c30a1667, which has
+identical production sources. The maintained normal and debug build
+targets generated the candidate. These are linked-image and per-function
+static-frame observations.
 
 | Target | Text before / after (B) | Data (B) | BSS (B) | Usable RAM start |
 | --- | ---: | ---: | ---: | --- |
-| QEMU normal | 828112 / 828144 | 4616 | 1314816 | `0x40210000` |
-| QEMU debug | 905380 / 905420 | 4616 | 1314816 | `0x40228000` |
-| RPi5 normal | 4215820 / 4215852 | 5592 | 1921024 | `0x7e0000` |
-| RPi5 debug | 4301968 / 4302008 | 5592 | 1839104 | `0x7e0000` |
+| QEMU normal | 830420 / 830452 | 4608 | 1310720 | `0x40210000` |
+| QEMU debug | 906860 / 906892 | 4608 | 1310720 | `0x40220000` |
+| RPi5 normal | 4223760 / 4223792 | 5584 | 1916928 | `0x7e0000` |
+| RPi5 debug | 4308872 / 4308904 | 5584 | 1830912 | `0x7e0000` |
 
 Every data/BSS symbol retains its size. RetxGuard retains one eight-byte
 member at offset zero. The chain, entries, pools and allocation inputs retain
-their representation. Adopt the measured 32-byte normal and 40-byte debug
-text cost on each target. Data, BSS and reservation comparisons are within
-each mode; normal and debug have different image boundaries.
+their representation. Adopt the measured 32-byte text cost in each mode
+on each target. Data, BSS and reservation comparisons are within each mode.
 
 | Function and mode, both targets | Symbol bytes before / after | Static frame before / after (B) |
 | --- | ---: | ---: |
