@@ -22,6 +22,10 @@ SETTERS = {
     'execution_stack_set_handle': ('stack_handle', 'execution_stack_publish'),
     'execution_stack_set_live': ('stack_live', 'execution_stack_publish'),
 }
+PUBLICATION_FUNCTIONS = {
+    'execution_current_publish', 'execution_stack_publish',
+    'execution_observed_current_pid', 'execution_observed_stack_pid',
+}
 FIELDS = '|'.join(field for field, _ in SETTERS.values())
 WRITE = re.compile(r'\.\s*(' + FIELDS + r')\s*(?:[-+*/%|&^]|<<|>>)?=(?!=)')
 HEADER = function_header()
@@ -46,10 +50,8 @@ def functions(text):
 def problems(text):
     bodies = dict(functions(text))
     errors = []
-    publication_functions = {'execution_current_publish', 'execution_stack_publish',
-                             'execution_observed_current_pid', 'execution_observed_stack_pid'}
     for name, body in bodies.items():
-        if re.search(r'\bexecution_observation\s*\.', body) and name not in publication_functions:
+        if re.search(r'\bexecution_observation\s*\.', body) and name not in PUBLICATION_FUNCTIONS:
             errors.append(f'{name}: publication storage is private to its publishers/readers')
         writes = tuple(hit[1] for hit in WRITE.finditer(body))
         expected = (SETTERS[name][0],) if name in SETTERS else ()
@@ -82,6 +84,12 @@ def problems(text):
 
 
 def controls(text):
+    # The full source is checked once in main. Run each mutation on the
+    # actual functions it exercises without rescanning unrelated bodies.
+    control_names = SETTERS.keys() | PUBLICATION_FUNCTIONS
+    text = '\n\n'.join(body for name, body in functions(text) if name in control_names)
+    if problems(text):
+        raise ValueError('unmodified control functions were refused')
     cases = [
         ('foreign writer', text + '\nfn foreign() { execution_state[index].current_live = false; }'),
         ('alias writer', text + '\nfn foreign() { state.stack_live = false; }'),
