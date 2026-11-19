@@ -439,21 +439,9 @@ private fn address_space_backing_grow(
     }
 }
 
-// Root 0's backing is a plain static, NOT a pool slot.
-//
-// kernel_mmu_init creates root 0 with the MMU still OFF -- entry.S calls
-// it before main() -- and that window cannot take the stores pooled
-// storage needs. This file already carries the reason a few lines down:
-// "Rewriting this aggregate while the MMU is off permits LLVM to use an
-// unaligned 128-bit store on RPi5, which faults before the bootstrap root
-// exists." Allocating a page, carving a chunk and zeroing a payload is a
-// great deal more of exactly that, and it cost one hardware boot with
-// zero UART output to rediscover.
-//
-// It is not a wart on the pooling: root 0 is the permanent bootstrap root
-// everywhere else in this kernel too -- never released, named as a bare 0
-// by a dozen call sites. Being the one backing that exists before the
-// allocator does is the same fact, one layer down.
+// Root 0 is permanent and has a plain static backing. The primary builds
+// its tables with translation off, enables translation from the local L1
+// address and ASID, and publishes this record before any secondary starts.
 private let mut address_space_backing_root0: AddressSpaceBacking;
 
 // A root's backing. It no longer allocates on a miss: the root carries the
@@ -788,7 +776,7 @@ fn address_space_allocate_root(evidence: borrow AddressSpaceBackingExists[slot])
 // from exclusives, which AArch64 does not support on Device-typed memory.
 // Nothing to exclude here anyway: PSCI has not been asked to start a second
 // core yet.
-private fn address_space_allocate_boot_root()
+private fn address_space_initialize_boot_root()
         -> AddressSpaceAllocateResult !{mmu_off} {
     match page_alloc_boot(PageOwnerTag::PageTable) {
         PageAllocResult::OutOfMemory => {
@@ -810,6 +798,7 @@ private fn address_space_allocate_boot_root()
                     let (numeric_asid, generation) = asid_assign_boot();
                     mmu_init_kernel_identity_tables();
                     mmu_init_root(l1_physical, l2_physical);
+                    kernel_mmu_activate(l1_physical, numeric_asid);
                     address_space_backing_root0.l1_physical = l1_physical;
                     address_space_backing_root0.l2_physical = l2_physical;
                     address_space_backing_root0.asid = numeric_asid;
@@ -828,18 +817,6 @@ must_use variant AddressSpaceEnsureResult {
     SlotOutOfRange;
     OutOfMemory;
     Ok;
-}
-
-private fn address_space_ensure_boot_root() -> AddressSpaceEnsureResult {
-    if (address_space_backing_root0.live) {
-        return AddressSpaceEnsureResult::Ok;
-    }
-    match address_space_allocate_boot_root() {
-        AddressSpaceAllocateResult::OutOfMemory => {
-            return AddressSpaceEnsureResult::OutOfMemory;
-        }
-        AddressSpaceAllocateResult::Ok => { return AddressSpaceEnsureResult::Ok; }
-    }
 }
 
 // Idempotent because root 0 is first made real before any ProcessHandle
@@ -1442,16 +1419,13 @@ fn address_space_release_root(root: AddressSpaceRoot) {
 fn kernel_mmu_init() !{mmu_off} {
     page_allocator_init();
     asid_init();
-    // entry.S cleared .bss before entering this function. Rewriting this
-    // aggregate while the MMU is off permits LLVM to use an unaligned
-    // 128-bit store on RPi5, which faults before the bootstrap root exists.
-    match address_space_ensure_boot_root() {
-        AddressSpaceEnsureResult::SlotOutOfRange => {}
-        AddressSpaceEnsureResult::OutOfMemory => {}
-        AddressSpaceEnsureResult::Ok => {}
+    match address_space_initialize_boot_root() {
+        AddressSpaceAllocateResult::OutOfMemory => {
+            // Translation is still off. Park before entering main.
+            while (true) { wfi(); }
+        }
+        AddressSpaceAllocateResult::Ok => {}
     }
-    kernel_mmu_activate(address_space_backing_root0.l1_physical,
-                        address_space_backing_root0.asid);
 }
 
 fn kernel_mmu_init_secondary() !{mmu_off} {

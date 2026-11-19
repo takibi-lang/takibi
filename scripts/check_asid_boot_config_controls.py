@@ -74,6 +74,21 @@ def main():
         (BOOT, replace_in_function(sources[BOOT], 'fn kernel_mmu_init(',
                                   'page_allocator_init();\n    asid_init();',
                                   'asid_init();\n    page_allocator_init();')),
+        (BOOT, replace_in_function(sources[BOOT], 'fn kernel_mmu_init(',
+                                  'while (true) { wfi(); }', 'return;')),
+        (BOOT, replace_in_function(sources[BOOT], 'fn address_space_initialize_boot_root(',
+                                  'PageAllocResult::OutOfMemory => {\n            return AddressSpaceAllocateResult::OutOfMemory;',
+                                  'PageAllocResult::OutOfMemory => {\n            return AddressSpaceAllocateResult::Ok;')),
+        (BOOT, replace_in_function(sources[BOOT], 'fn address_space_initialize_boot_root(',
+                                  'page_free_boot(l1);', '')),
+        (BOOT, replace_in_function(sources[BOOT], 'fn address_space_initialize_boot_root(',
+                                  'page_free_boot(l1);\n                    return AddressSpaceAllocateResult::OutOfMemory;',
+                                  'page_free_boot(l1);\n                    return AddressSpaceAllocateResult::Ok;')),
+        (BOOT, replace_in_function(sources[BOOT], 'fn address_space_initialize_boot_root(',
+                                  'kernel_mmu_activate(l1_physical, numeric_asid);\n                    '
+                                  'address_space_backing_root0.l1_physical = l1_physical;',
+                                  'address_space_backing_root0.l1_physical = l1_physical;\n                    '
+                                  'kernel_mmu_activate(l1_physical, numeric_asid);')),
     ]
     for path in ENTRIES:
         changes.extend([

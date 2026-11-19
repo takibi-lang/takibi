@@ -54,15 +54,45 @@ INITIALIZER = '''{
 BOOT_BODY = '''{
     page_allocator_init();
     asid_init();
-    match address_space_ensure_boot_root() {
-        AddressSpaceEnsureResult::SlotOutOfRange => {}
-        AddressSpaceEnsureResult::OutOfMemory => {}
-        AddressSpaceEnsureResult::Ok => {}
+    match address_space_initialize_boot_root() {
+        AddressSpaceAllocateResult::OutOfMemory => {
+            while (true) { wfi(); }
+        }
+        AddressSpaceAllocateResult::Ok => {}
     }
-    kernel_mmu_activate(address_space_backing_root0.l1_physical,
-                        address_space_backing_root0.asid);
 }'''
-
+BOOT_CONSTRUCTION = '''private fn address_space_initialize_boot_root()
+        -> AddressSpaceAllocateResult !{mmu_off} {
+    match page_alloc_boot(PageOwnerTag::PageTable) {
+        PageAllocResult::OutOfMemory => {
+            return AddressSpaceAllocateResult::OutOfMemory;
+        }
+        PageAllocResult::Allocated(l1) => {
+            match page_alloc_boot(PageOwnerTag::PageTable) {
+                PageAllocResult::OutOfMemory => {
+                    page_free_boot(l1);
+                    return AddressSpaceAllocateResult::OutOfMemory;
+                }
+                PageAllocResult::Allocated(l2) => {
+                    let l1_physical: usize = page_physical_address(l1);
+                    let l2_physical: usize = page_physical_address(l2);
+                    let (numeric_asid, generation) = asid_assign_boot();
+                    mmu_init_kernel_identity_tables();
+                    mmu_init_root(l1_physical, l2_physical);
+                    kernel_mmu_activate(l1_physical, numeric_asid);
+                    address_space_backing_root0.l1_physical = l1_physical;
+                    address_space_backing_root0.l2_physical = l2_physical;
+                    address_space_backing_root0.asid = numeric_asid;
+                    address_space_backing_root0.asid_generation = generation;
+                    address_space_backing_root0.live = true;
+                    page_owner_transfer_index(l1);
+                    page_owner_transfer_index(l2);
+                    return AddressSpaceAllocateResult::Ok;
+                }
+            }
+        }
+    }
+}'''
 
 def compact(source):
     return re.sub(r'\s+', '', code_skeleton(source))
@@ -89,6 +119,12 @@ def problems(path, source):
     h, body = bodies[0]
     if compact(h) != header or compact(body) != compact(expected):
         return (f'{name}: retain the exact single initializer and existing MMU-off order',)
+    if path == BOOT:
+        constructors = [(h, b) for n, h, b in functions(source)
+                        if n == 'address_space_initialize_boot_root']
+        if (len(constructors) != 1 or
+                compact(''.join(constructors[0])) != compact(BOOT_CONSTRUCTION)):
+            return ('root 0 must roll back a partial allocation and publish backing only after activation',)
     return ()
 
 
