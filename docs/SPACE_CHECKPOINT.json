@@ -1,12 +1,14 @@
 {
-  "date": "2026-11-18",
+  "date": "2026-11-19",
   "event": "incremental",
-  "decision": "measured",
-  "source_sha256": "9de3db0d60cac344521da34f9917509f4300b230870d751d73bc9c639abb65b7",
-  "workload": "Existing boot ext2 bitmap exhaustion and restore fixture; linked production image sections and bitmap-fill frame.",
+  "decision": "reuse",
+  "source_sha256": "e964593a003addb4990b963168c5eed696afe0ae30a36fcbdcff8a7ed5661545",
+  "workload": "Existing boot ext2 read/write workload with the existing fixed virtio DMA buffers and the storage-view response-length boundary controls.",
   "evidence": [
-    "docs/EXT2_BITMAP_INIT_REVIEW.md"
+    "docs/EXT2_BITMAP_INIT_REVIEW.md",
+    "kernel/models/README.md",
+    "kernel/tests/qemu/views/storage.expected"
   ],
-  "assessment": "Applies checked prefix initialization to the existing scratch page. QEMU text decreases 32 bytes; RPi5 text and both targets data and BSS are unchanged. The bitmap-fill frame decreases 16 bytes on both targets. No storage or allocation workload changes.",
-  "next_trigger": "Recheck when the bitmap save or restore work buffer size, allocations, or publication boundary changes."
+  "assessment": "Reuse the allocation evidence: reading the existing used-ring entry and rejecting a short response does not change DMA buffer sizes, allocator calls, or retained pages. The completion length is a scalar. The allcheck model job cap changes host-side scheduling only.",
+  "next_trigger": "Measure anew when the block receive allocation, queue depth, or extent-sharing policy changes."
 }
