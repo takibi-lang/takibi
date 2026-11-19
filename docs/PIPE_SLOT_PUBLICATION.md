@@ -42,3 +42,11 @@ Median process user plus system time was 12.87 to 12.54 seconds on QEMU
 and 13.95 to 13.16 seconds on RPi5. Median peak RSS was 546488 to
 544284 KiB and 602236 to 601828 KiB, respectively. The run-to-run
 samples vary and do not establish a compiler speedup.
+
+In the integration candidate with CPU-local log staging, the same base
+(fc86f604c) gives 830672 text bytes on QEMU and 4223996 on RPi5, increases
+of 252 and 236. Data increases by 8 bytes on each target. BSS, usable RAM
+starts and allocator expectations are unchanged. Per-function symbol
+size changes compose; the total linked text includes layout effects.
+The only additional data/BSS symbol is the four-byte emergency polling
+array described in the log staging review.
