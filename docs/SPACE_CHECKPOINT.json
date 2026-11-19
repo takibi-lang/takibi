@@ -2,11 +2,11 @@
   "date": "2026-11-19",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "7f19bf6ba046bfb9f5defc4035224677c225ef086912b3bb4b7694a1b9e26e6f",
-  "workload": "Both normal linked kernels, ordered crash trace record/copy/reset frames and retained storage, compared with 16a659b5e.",
+  "source_sha256": "71bce9893a376f2c5fc2dada950da68594bac9fe634d0a012e7fa099499c8761",
+  "workload": "Both normal linked kernels and the existing EL0 scalar ABI fixture, compared with 0a36c6b20.",
   "evidence": [
-    "docs/CRASH_TRACE_WORDS_SPACE.md"
+    "docs/SCALAR_ABI_TAIL_FIXTURE_SPACE.md"
   ],
-  "assessment": "Text adds 208 bytes on QEMU and 192 on RPi5. The added generation uses eight bytes. BSS, capacity, usable RAM and static trace frames are unchanged. Physical trace-on and trace-off costs remain unmeasured.",
-  "next_trigger": "Remeasure when trace event geometry, ordering, writer cost or the linked reservation boundary changes."
+  "assessment": "The normal QEMU kernel ELF is byte-identical. RPi5 text shrinks by 80 bytes with the embedded test image. Data, BSS, usable RAM and allocator reservations remain unchanged.",
+  "next_trigger": "Measure again when the fixture stack, embedded image or linked reservation boundary changes."
 }

@@ -147,6 +147,14 @@ chain and its alias/lifetime transfer, followed by the ring/frame consumers.
 It must also enumerate allocation-backed exports and scalar ABI writers;
 closing only the nine copying call sites would weaken the required claim.
 
+The kernel-only EL0 fixture checks successful scalar ABI output in the
+existing userspace view. For statfs, both the ext2 root and procfs overwrite
+a nonzero 32-byte reserved tail with zero. For sysinfo, all 104 bytes after
+uptime overwrite a nonzero pattern with zero, while eight sentinel bytes on
+each side of the 112-byte result are preserved. These checks cover the
+observed tail and extent. They do not add any claim about uptime, other
+record fields, or faulting destinations.
+
 ## Refreshed trust measurement
 
 `make trustedbasecheck` passed on 2026-11-17. The depfile-derived inventory
