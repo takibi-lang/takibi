@@ -140,7 +140,8 @@ This is a source-backed entry inventory, not complete export certification.
 | prlimit64 | copy_to_user from constructed scratch bytes; the initial RLIMIT_NOFILE read checks both words and adjacent sentinels | Scratch source lifetime and output cases beyond the initial successful read |
 | uname | copy_to_user from constructed scratch bytes; successful field tails and adjacent sentinels checked by the peer TTY fixture | Source initialization and lifetime proof across scratch reacquisition; other field values and faulting destinations |
 | user_write_byte/u16/u32/u64 and user_zero_fill | Typed scalar inputs or constant zero; range/COW checks and access windows | All callers and all padding/holes of user ABI records; untouched user bytes are not kernel disclosure |
-| New mappings, exec/stack construction, fork/COW, signal frames, shared backing | Separate page/ABI paths, not implied by copy_to_user's source signature | Allocation freshness, zero/scrub/export ordering and teardown/shared lifetime controls |
+| Fresh user pages, including exec/stack and COW copies | [User page publication](PAGE_PUBLICATION.md) checks full initialization of the incoming `PageOwner` at `address_space_map_page` | Allocator and frame identity, COW source lifetime, descriptor visibility and TLB ordering |
+| Retained fork/COW mappings, signal frames, shared backing | Existing-page reference or ABI paths | Reference and teardown lifetimes, and record-specific initialization |
 | Raw/assembly/device output paths | Named mint files and external contracts | Audit bypasses of the typed entry set; confinement is not initialization proof |
 
 The next consumer review starts with the selected scratch-to-procfs output
