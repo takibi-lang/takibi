@@ -7,7 +7,8 @@
 // two observations, and nowhere else:
 //   - virtio_blk_receive_settle_used: a snapshot of the used ring
 //     (kernel/drivers/virtio_used.tkb) showed its idx past the driver's
-//     shadow, so the device has written the request's data and status
+//     shadow, so the device has stopped writing the request; the used
+//     entry's length bounds which response bytes the driver can read.
 //     (virtio 1.x, 2.7.8);
 //   - virtio_blk_receive_settle_reset: the status register read back zero
 //     after a reset, so the device no longer touches the queue (virtio
@@ -266,7 +267,7 @@ fn virtio_blk_reset(guard: borrow BlockDeviceGuard[&block_device_lock])
 }
 
 must_use variant VirtioBlkReceiveUsed {
-    Observed;
+    Observed(u32);
     Pending(*VirtioBlkReceiveDevice);
 }
 
@@ -275,18 +276,23 @@ must_use variant VirtioBlkReceiveUsed {
 fn virtio_blk_receive_settle_used(guard: borrow BlockDeviceGuard[&block_device_lock],
                                   device: sink *VirtioBlkReceiveDevice)
         -> VirtioBlkReceiveUsed !{unsafe} {
-    if (virtio_blk_used_pending(guard)) {
+    let VirtioUsedSeen::Seen(ring) = virtio_used_snapshot(VIRTIO_USED_BLK) else {
+        VirtioUsedSeen::Unavailable => { return VirtioBlkReceiveUsed::Pending(device); }
+    };
+    let mut status: VirtioBlkStatus = virtio_blk_status(guard);
+    if (status.used_seen == ring.idx) {
         return VirtioBlkReceiveUsed::Pending(device);
     }
+    let slot: {0..<8 as usize} = ((status.used_seen as u16) as usize) % 8;
+    let written: u32 = ring.ring[slot].len;
     dma_consume();
-    let mut status: VirtioBlkStatus = virtio_blk_status(guard);
     status.used_seen = virtio_ring_index_next(status.used_seen);
     virtio_blk_status_store(guard, status);
     let restored = dma_finish_owned_rx(device, VirtioBlkReceive);
     virtio_blk_receive_put(VirtioBlkReceiveAuthority::Cpu(restored));
     virtio_blk_request_settle();
     virtio_blk_data_settle();
-    return VirtioBlkReceiveUsed::Observed;
+    return VirtioBlkReceiveUsed::Observed(written);
 }
 
 // A failed reset keeps every device token in its slot, so no range is

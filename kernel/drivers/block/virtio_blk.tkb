@@ -210,6 +210,20 @@ fn virtio_blk_index_wrap_probe() -> bool {
            virtio_ring_index_next(last) == virtio_ring_index_zero();
 }
 
+// A write exposes only status; a read exposes data followed by status.
+private inline fn virtio_blk_used_length_covers_response(write: bool, written: u32) -> bool {
+    if (write) { return written >= 1; }
+    return written >= (VIRTIO_BLK_TRANSFER_BYTES as u32) + 1;
+}
+
+fn virtio_blk_used_length_probe() -> bool {
+    return virtio_blk_used_length_covers_response(true, 0) == false &&
+           virtio_blk_used_length_covers_response(true, 1) &&
+           virtio_blk_used_length_covers_response(false, 1) == false &&
+           virtio_blk_used_length_covers_response(false, 1024) == false &&
+           virtio_blk_used_length_covers_response(false, 1025);
+}
+
 // Queue 0 at its three addresses; false when the device offers fewer than
 // VIRTIO_QNUM entries or the used ring is not Ready.
 private fn virtio_blk_setup_queue(guard: borrow BlockDeviceGuard[&block_device_lock]) -> bool !{unsafe} {
@@ -431,8 +445,9 @@ private fn virtio_blk_submit_owned(guard: borrow BlockDeviceGuard[&block_device_
     while (read_cntpct() - completion_start < completion_ticks &&
            virtio_blk_used_pending(guard)) {
     }
+    let mut written: u32 = 0;
     match virtio_blk_receive_settle_used(guard, receive_device) {
-        VirtioBlkReceiveUsed::Observed => {}
+        VirtioBlkReceiveUsed::Observed(count) => { written = count; }
         VirtioBlkReceiveUsed::Pending(pending_device) => {
             // No used entry was observed. Only a completed reset, not the
             // timeout, returns the receive range to the CPU.
@@ -479,6 +494,11 @@ private fn virtio_blk_submit_owned(guard: borrow BlockDeviceGuard[&block_device_
     atomic_word_fetch_add(&virtio_blk_completion_total_ticks, waited);
     match virtio_blk_receive_take() {
         VirtioBlkReceiveAuthority::Cpu(restored_cpu) => {
+            // The used length covers the writable prefix of the descriptor chain.
+            if (virtio_blk_used_length_covers_response(write, written) == false) {
+                virtio_blk_receive_put(VirtioBlkReceiveAuthority::Cpu(restored_cpu));
+                return false;
+            }
             let restored_view = dma_cpu_slice(restored_cpu, VirtioBlkReceive);
             let status_ok: bool = restored_view[1024] == 0;
             if (status_ok && write == false) {

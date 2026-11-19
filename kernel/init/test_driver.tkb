@@ -1587,6 +1587,11 @@ fn kernel_test_driver_run(kernel_test_init_script: bool) {
     } else {
         kernel_boot_log("virtio blk: used index wrap failed\n");
     }
+    if (virtio_blk_used_length_probe()) {
+        kernel_boot_log("virtio blk: used length bounds ok\n");
+    } else {
+        kernel_boot_log("virtio blk: used length bounds failed\n");
+    }
     boot_execution.root_image = BootRootImageState::Unavailable;
     match boot_execution.mount {
         BootMountState::Unconfigured => {}

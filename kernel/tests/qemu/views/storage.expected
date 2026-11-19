@@ -1,3 +1,4 @@
 virtio blk: ext2 backend ready
 rootfs: ext2 on virtio
 virtio blk: used index wrap ok
+virtio blk: used length bounds ok
