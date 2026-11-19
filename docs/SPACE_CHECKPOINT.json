@@ -2,11 +2,11 @@
   "date": "2026-11-19",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "b91b3469c41907319fec6f5793f7758829fa98447aba99f36fa351a4756d454e",
-  "workload": "Normal linked QEMU and RPi5 kernels and normal/debug compiler frames at boot and exec mount readers, compared with 4586b164f.",
+  "source_sha256": "4553ee6e192edeb8e8124fe68df0d122c9b6be97fa5841d1d364073707a17bc7",
+  "workload": "Normal QEMU and RPi5 linked images and event-writer frames for the existing busy-pair profile timeline, against 5df5e6ee6.",
   "evidence": [
-    "docs/BOOT_EXECUTION_CONTEXT_SPACE.md"
+    "docs/PROFILE_TIMELINE_SPACE.md"
   ],
-  "assessment": "The 184-byte boot context is removed and permanent rootfs metadata stays at 1024 bytes. The largest boot driver frame is 1424 bytes, below its existing 2048-byte ceiling. Text and data shrink. Usable RAM start and the reserved image span stay unchanged.",
-  "next_trigger": "Measure again if boot metadata lifetime, mount lookup, boot driver stack or linked reservation changes."
+  "assessment": "The capacity, data, BSS and usable RAM boundaries stay fixed. Local counted authority increases active writer code and static frame cost.",
+  "next_trigger": "Remeasure image and writer frames when timeline storage, event format or the active CPU-authority path changes."
 }

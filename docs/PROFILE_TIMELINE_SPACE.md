@@ -1,13 +1,13 @@
 # Profile timeline storage review
 
-Normal linked QEMU and RPi5 kernels compared with 4586b164f. The existing
+Normal linked QEMU and RPi5 kernels compared with 5df5e6ee6. The existing
 busy-pair profile uses the same 512 event slots per CPU.
 
 | Boundary | QEMU baseline to candidate | RPi5 baseline to candidate |
 | --- | --- | --- |
-| Text | 831892 to 832084 B | 4225504 to 4225664 B |
-| Data | 4624 B unchanged | 5600 B unchanged |
-| BSS | 1310720 B unchanged | 1912832 B unchanged |
+| Text | 831844 to 832044 B | 4225440 to 4225608 B |
+| Data | 4616 B unchanged | 5592 B unchanged |
+| BSS | 1310720 B unchanged | 1908736 B unchanged |
 | Timeline BSS symbol | 98400 B unchanged | 98400 B unchanged |
 | usable_ram_start | 0x40210000 unchanged | 0x7e0000 unchanged |
 
