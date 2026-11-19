@@ -2,11 +2,11 @@
   "date": "2026-11-19",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "d2512a0c2a86208cc55b817f2f002235e0b871f519a63ebdcc7a089e40fc1997",
-  "workload": "Normal linked QEMU and RPi5 kernels with lazy user L3 allocation and owner-relative initialization, compared with d78156045.",
+  "source_sha256": "b2bd2db653aea9782d862d0ec2e61521dd559af5a7bdcdf27d2dd8fdb1396bea",
+  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto df592492: this branch's review, rebound to the merged sources (upstream's record was 2026-11-19 milestone/measured). Linked normal QEMU and RPi5 kernels exercising the two-phase boot-only freelist fixture, compared with d78156045.",
   "evidence": [
-    "docs/MMU_L3_PUBLICATION.md"
+    "docs/FREELIST_QUIESCENCE_SPACE.md"
   ],
-  "assessment": "Release baseline linked text increases 8 bytes on QEMU and 24 bytes on RPi5. Data, BSS, usable RAM starts and checked allocator capacities are unchanged. The 512 word stores replace the old per-entry calls, with one setup accessor call and a shorter install frame. Physical time was not measured.",
-  "next_trigger": "Measure when the table storage layout, clear loop or dynamic page-table allocation and publication workload changes."
+  "assessment": "The fixture adds one eight-byte BSS word and one GOT entry per target, plus 1200 QEMU and 1168 RPi5 text-class bytes. The usable RAM start and checked allocator capacities stay fixed. Physical timing was not measured.",
+  "next_trigger": "Measure again when registration storage, the boot contention workload, or the linked reservation boundary changes."
 }
