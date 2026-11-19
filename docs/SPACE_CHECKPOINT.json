@@ -2,11 +2,11 @@
   "date": "2026-11-19",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "0f046a94323411a0bfa72cca3ffcb3513ef346816192f049b9b8a574d7adbf24",
-  "workload": "Normal linked QEMU and RPi5 kernels with the existing user-page mapping, COW, replacement and boot allocator workloads.",
+  "source_sha256": "b0117df6abc2e0716f63bf3b1887aeaeb6b173b566ea2c4bbd543c7364960796",
+  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto dc4e4a92: this branch's review, rebound to the merged sources (upstream's record was 2026-11-19 milestone/measured). Normal linked QEMU and RPi5 kernels with guarded UART registration, compared with 8f1dbc934. The native PL011 fixture exercises sequential replacement and callback reentry.",
   "evidence": [
-    "docs/PAGE_PUBLICATION.md"
+    "docs/UART_REGISTRATION_SPACE.md"
   ],
-  "assessment": "Adopt the common checked mapping entry. Linked text grows by 1656 bytes on QEMU and 1816 bytes on RPi5. Data, BSS, usable RAM start and checked allocator capacities are unchanged. Boot fixtures write their input pages before publication and keep their allocation and release workload. Rechecked the linked sizes and allocator expectations after the compiler-only saved-outcome fix.",
-  "next_trigger": "Measure again when the published user-page, owner, frame or page-table allocation workload or image reservation changes."
+  "assessment": "The registration symbol grows by 8 bytes. Text grows by 616 bytes on QEMU and 584 bytes on RPi5. Linked data, BSS and usable_ram_start stay fixed. Registration adds no allocation or pool use.",
+  "next_trigger": "Review the next completed stage or a change to the registration lock backend, callback resource lifetime, allocation workload, or reserved image span."
 }
