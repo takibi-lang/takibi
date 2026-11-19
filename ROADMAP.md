@@ -1,10 +1,11 @@
 # Takibi roadmap
 
-The current work split, and nothing else. It is rewritten when priorities
-move and is expected to go stale. Findings belong on the GitHub issue they
-concern, reasoning and past events in `HISTORY.md`, current behavior in
-`kernel/README.md`. Do not add an investigation record here: this file is for
-who does what next. The version before 2026-09-23, with every queue's
+This file records priorities, work order, territory assignments, and the
+reasons or dependencies that determine them. GitHub issues own their scope,
+implementation decisions, acceptance criteria, and findings. Link to the
+issue when scheduling work. Record past decisions and events in
+`HISTORY.md` and current kernel behavior in `kernel/README.md`.
+The version before 2026-09-23, with every queue's
 history, is archived in `HISTORY.md`; the done record of the 2026-10-23
 queues is the HISTORY.md entry of 2026-10-25.
 
@@ -108,29 +109,13 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
 
 ### Territory A: the trunk, in this order
 
-**Highest priority, maintainer update 2026-11-17: memory-safety contract
-after the Z3 pilot (#1513).** Take this before the existing trunk queue,
-including the remaining preemption review and flip. The published #1508
-integration is the baseline. First re-run the original #1511/#1512
-acceptance controls and reconcile their issue states; define the supported
-safe subset and a property/premise matrix covering bounds, initialization,
-padding, aliasing/provenance, lifetime/reuse and concurrency. Audit
-user-visible byte paths under #203. Then take the smallest concrete kernel
-consumer exposing a missing guarantee and close its dependency chain through
-the existing owners (#637, #954, #986, #132 and #638), following #1513's
-acceptance criteria. The 2026-11-17 acceptance re-audit and initial
-property/premise matrix are in `docs/MEMORY_SAFETY_CONTRACT.md`; continue
-from its incomplete export and real-consumer coverage rather than restarting
-the initialization integration. Compiler work required by this chain belongs
-to A;
-coordinate overlapping verification changes with B rather than duplicating
-its queue. Prefer inferred rules and API-boundary owners/contracts; measure
-annotation, unsafe, compile/solver and runtime costs. New design decisions,
-runtime fallbacks or broader trust premises return to the maintainer. Keep
-Z3 arithmetic re-checking, bounded protocol evidence and audited external
-boundaries distinct, and complete the scoped Rust comparison before claiming
-equivalence. A red allcheck retains its always-on precedence. Resume the
-older trunk order after this work, or at an explicit maintainer decision.
+**Highest priority, maintainer update 2026-11-19: kernel memory safety
+(#1513).** Start with page publication, then follow the remaining kernel
+coverage in #1513. This is a Milestone 1 gate and takes precedence over the
+remaining preemption review and flip. Territory A takes its dependency
+chain through #203, #637, #954, #986, #132 and #638, coordinating shared
+verification work with Territory B. A red allcheck takes precedence.
+Resume the trunk queue after this work or on maintainer direction.
 
 **Priority update, 2026-11-10.** ExecutionState uses existing per_cpu/CpuHere
 authority; its runtime and four-core RPi5 cost review are complete. RootHeld
@@ -256,22 +241,10 @@ gate now requires stack-size metadata for normal and debug kernel objects
 on both targets, with the 2048 B ordinary ceiling.
 The board-free RPi5 reset and loader controls now distinguish OpenOCD
 commands from checkout paths (#1503).
-The network queue boundary under #1159 is published, preserving nonblocking
-receive and pending IRQ/capability bookkeeping. The approved guard-lifetime and synchronous borrowed-callback
-compiler foundation for #1481 is published with RootHeld, and the real
-BootPhase-bound log snapshot foundation is published. Review bounded
-Place/metadata lock pairs under the existing counted short contract before
-changing the ordinary backend. Actual private kernel-stack admission needs
-review; Running/RootHeld alone does not establish that premise. Integrate the real
-waiting Mutex scheduler and consumer work on that combination before the
-preemption flip. Carry actual boot/driver authority to acquisition and use
-explicit try acquisition in secondary boot probes. Retain pin/stack and
-waiter lifecycle guarantees, measure actual contended scheduling and cost,
-and review the ext2 reader-drain premise separately from lock acquisition.
-Preserve non-sleeping paths and add no dedicated bootstrap stack. For boot
-mount, implement per-command acquisition with explicit driver-phase and Busy
-outcomes, preserving cache/read-ahead and publication order. Measure the RPi5
-path before proposing optimization; retain no change as an option.
+**Waiting Mutex order, 2026-11-19.** Complete #1481 before the #638
+preemption flip. Within #1481, sequence EL1 continuation save and resume,
+ext2 reader-drain wait and wake, then sleeping ext2 readers. The drain
+must support progress before a reader can sleep while registered.
 
 **Assigned queue (maintainer, 2026-10-23, re-cut 2026-10-25).**
 Low-dependency issues A does not hold, in this order; compiler work in
@@ -328,12 +301,9 @@ next one taken. The done record of the previous queue is in HISTORY.md
    DIR` for the `--emit-*` family) and step 3 (strict defaults with
    opt-outs) done 2026-10-30, steps 4-5 wait on #1006 and #1009;
    #1005 (one instruction table, `lib/instr_spec.ml`) done 2026-10-30.
-4. **Fixed DMA lifecycle, finishing the drivers.** #720's remaining xHCI
-   item (the DCBAA stays legacy until sub-region authority; #783, the
-   batched TD write path, done 2026-10-30), #740's step 3 (a socket's receive queue keeping
-   the packet, after the profiler's copy-cost measurement); #779 (line
-   ownership of split or converted regions, option (c)) done 2026-10-30; #790 (size review) done
-   2026-10-30, docs/DEVICE_PROTOCOL_SIZE_REVIEW_2026-10-30.md.
+4. **Fixed DMA lifecycle, finishing the drivers.** Take the remaining xHCI
+   work in #720, then #740 step 3 when the profiler's copy-cost measurement
+   is available.
 5. **Independent pillar issues, moved from A (2026-10-16).** #789 (lock
    order as ranked capability tokens, absorbing `acquires_lock_<rank>_<name>`,
    after the syntax review); with it, #850's migration of the IRQ words to
