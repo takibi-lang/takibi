@@ -1,12 +1,12 @@
 {
   "date": "2026-11-19",
-  "event": "milestone",
+  "event": "incremental",
   "decision": "measured",
-  "source_sha256": "b2bd2db653aea9782d862d0ec2e61521dd559af5a7bdcdf27d2dd8fdb1396bea",
-  "workload": "Normal linked kernels with test-only freelist phase quiescence and the same-connection TCP copyout retry fixture, compared with 29325085f.",
+  "source_sha256": "5f4c8a3f65e2225e2ab49e2bf6838af6007bcb7b0188dfcb967eca2dcdfd6bff",
+  "workload": "Compare both normal linked kernels against 888bdcea2 and inspect the root 0 construction and activation order.",
   "evidence": [
-    "docs/FREELIST_QUIESCENCE_SPACE.md"
+    "docs/ROOT0_BOOTSTRAP_SPACE.md"
   ],
-  "assessment": "Combined text-class bytes grow 1200 on QEMU and 1168 on RPi5. Data grows 8 bytes on both. QEMU BSS is unchanged; RPi5 BSS starts one page later and ends at the same address. Usable RAM starts and allocator capacities do not move. The TCP cursor correction adds no storage or allocation. The boot fixture retains its existing stress bounds.",
-  "next_trigger": "Measure again when registration storage, the boot contention workload, or the linked reservation boundary changes."
+  "assessment": "Normal text falls 72 bytes on QEMU and 88 bytes on RPi5. Data, BSS, usable RAM starts and allocator expectations are unchanged. Root 0 still retains two allocator pages and uses the existing shared identity tables. Boot-chain stack high water and physical timing are unmeasured.",
+  "next_trigger": "Measure again if root 0's tables, retained pages, primary activation path or reserved image span changes."
 }
