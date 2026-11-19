@@ -1,22 +1,29 @@
 # Boot execution context space review
 
-Normal linked QEMU and RPi5 kernels compared with ddf96089. Both use the
-same boot workloads and permanent rootfs metadata storage.
+Both normal linked kernels were measured against `4586b164f`. Both use
+the same boot workloads and permanent rootfs metadata storage.
 
-| Boundary | QEMU baseline to candidate | RPi5 baseline to candidate |
-| --- | --- | --- |
-| Text | 827848 to 827800 B | 4221044 to 4220980 B |
-| Data | 4608 to 4600 B | 5584 to 5576 B |
-| Linked BSS | 1310720 B unchanged | 1916928 to 1912832 B |
-| boot_execution symbol | 184 B removed | 184 B removed |
-| rootfs_metadata symbol | 1024 B unchanged | 1024 B unchanged |
-| usable_ram_start | 0x40210000 unchanged | 0x7e0000 unchanged |
-| kernel_test_driver_run normal static frame | 1120 to 1376 B | 1120 to 1376 B |
+| Boundary | QEMU before | QEMU after | RPi5 before | RPi5 after |
+| --- | ---: | ---: | ---: | ---: |
+| Text (bytes) | 831892 | 831844 | 4225504 | 4225440 |
+| Data (bytes) | 4624 | 4616 | 5600 | 5592 |
+| Linked BSS (bytes) | 1310720 | 1310720 | 1912832 | 1908736 |
+| Boot execution context (bytes) | 184 | 0 | 184 | 0 |
+| Rootfs metadata (bytes) | 1024 | 1024 | 1024 | 1024 |
+| Usable RAM start | 0x40210000 | 0x40210000 | 0x7e0000 | 0x7e0000 |
+| Boot driver normal frame (bytes) | 1120 | 1376 | 1120 | 1376 |
+| Boot driver debug frame (bytes) | 1152 | 1424 | 1136 | 1424 |
+| Child exec preparation normal frame (bytes) | 1040 | 1104 | 1056 | 1136 |
+| BusyBox inode matcher normal frame (bytes) | 64 | 144 | 64 | 144 |
 
-Boot exec shares the published syscall mount descriptor. Keeping the image
-plan in its only reader, the boot driver, removes the global and adds 256
-bytes to that function's normal frame, below the 2048-byte function ceiling.
-The linked BSS change includes alignment and is distinct from the removed
-184-byte symbol. The allocator start and reserved image span stay fixed.
-The plan still refers to the same permanent window; there is no change to
-its allocation workload. The stack sizes describe individual functions.
+Boot and exec readers share the syscall mount descriptor. The existing
+lookup checks its publication state and acquires the descriptor before
+returning the configured case. The compiled configured path uses two
+acquire reads of the same state word. Path syscalls already used this
+lookup. Physical latency was outside this review.
+
+The boot driver's image plan refers to the same permanent window. The
+largest measured boot driver frame is 1424 bytes, below the existing
+2048-byte per-function ceiling. The frame sizes are individual functions.
+The RPi5 linked BSS change includes alignment. The reserved image span and
+allocator start are unchanged.

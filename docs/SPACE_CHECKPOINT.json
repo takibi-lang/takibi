@@ -2,11 +2,11 @@
   "date": "2026-11-19",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "742aac7c137d02a11312206b2ba9a306346d9914e31443063461ee951aa3c669",
-  "workload": "Normal linked QEMU and RPi5 kernels, including pool walk floor storage, initialization and walker instructions, compared with 8bac2590d.",
+  "source_sha256": "b91b3469c41907319fec6f5793f7758829fa98447aba99f36fa351a4756d454e",
+  "workload": "Normal linked QEMU and RPi5 kernels and normal/debug compiler frames at boot and exec mount readers, compared with 4586b164f.",
   "evidence": [
-    "docs/POOL_WALK_FLOOR_SPACE.md"
+    "docs/BOOT_EXECUTION_CONTEXT_SPACE.md"
   ],
-  "assessment": "The floor uses one fewer word. QEMU text grows 16 bytes overall and the walker frame shrinks 16 bytes. RPi5 text and walker frame are unchanged. Data, BSS, usable RAM boundaries and the pool reservation are unchanged.",
-  "next_trigger": "Measure again if the floor representation, pool allocation or linked reservation boundary changes."
+  "assessment": "The 184-byte boot context is removed and permanent rootfs metadata stays at 1024 bytes. The largest boot driver frame is 1424 bytes, below its existing 2048-byte ceiling. Text and data shrink. Usable RAM start and the reserved image span stay unchanged.",
+  "next_trigger": "Measure again if boot metadata lifetime, mount lookup, boot driver stack or linked reservation changes."
 }
