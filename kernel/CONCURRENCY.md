@@ -369,6 +369,11 @@ Symmetric now:
   records. Both run in core order (each peer's log lines after the core
   below it has committed its own; the console turns given by core 0), so
   the `dmesg` and `peer_console` views can enumerate them.
+  The freelist fixture keeps the primary admission bit and registered peer
+  bits in one atomic word. The primary closes admission and waits on each
+  registered peer's own tick window. A phase consumes a private linear
+  quiescence witness to reset the fixture. A failed drain yields no witness
+  and fails the boot fixture.
 - The console cost counters (`console: tx spin` in the boot report, #454):
   every core's spun and sent bytes are counted, in atomic words (#775).
   They counted core 0's alone, as "the TX interrupt owner", which stopped

@@ -55,6 +55,36 @@ must_use variant FreelistProbeRendezvousResult {
 
 private let mut freelist_probe: FreelistCore(FREELIST_CONTENTION_SLOTS);
 private let mut freelist_probe_ready: AtomicWord;
+// Bit zero opens admission; each other bit records a registered peer.
+// The zero-initialized gate starts closed and empty.
+private let mut freelist_probe_admission: AtomicWord;
+
+private linear struct FreelistProbeQuiesced[gate: addr] {
+    private ready: bool;
+}
+private linear struct FreelistProbeVisit[gate: addr] {
+    private bit: usize;
+}
+must_use variant FreelistProbeAdmission {
+    Registered(FreelistProbeVisit[&freelist_probe_admission]);
+    Closed;
+}
+must_use variant FreelistProbeDrain {
+    Quiesced(FreelistProbeQuiesced[&freelist_probe_admission]);
+    ClosureBusy;
+    TimedOut;
+}
+must_use variant FreelistProbePhaseResult {
+    Complete(FreelistProbeQuiesced[&freelist_probe_admission]);
+    Failed;
+}
+
+enum FreelistProbeProgress {
+    Complete;
+    MissingEntry;
+    RendezvousTimeout;
+    MissingFinish;
+}
 
 // One word per slot: 1 while some core believes it exclusively holds that
 // index. Two cores handed the same index find it already 1, which is the
@@ -124,13 +154,76 @@ private fn freelist_probe_held_address(
     return &freelist_probe_held[index];
 }
 
-private fn freelist_probe_init() {
-    if (atomic_word_load(&freelist_probe_ready) != 0) { return; }
-    atomic_word_store(&freelist_probe_ready, 1);
-    freelist_core_init(&freelist_probe);
-    // No mutex_init: a global Mutex is free from .bss, and initialising it
-    // behind this `ready` flag would be the same lazy-init race the tag
-    // counter's version was. See kernel/lib/mutex.tkb.
+// A peer can own its bit only after a successful compare-exchange that
+// observed admission open. The idle loop's earlier check is just a hint.
+private fn freelist_probe_register(cpu: {0..<KERNEL_MAX_CORES as usize})
+        -> FreelistProbeAdmission {
+    // core-role: core 0 runs the boot fixture and owns the admission bit.
+    if (cpu == 0) { return FreelistProbeAdmission::Closed; }
+    let bit: usize = 1 << cpu;
+    let mut gate: usize = atomic_word_load(&freelist_probe_admission);
+    while ((gate & 1) != 0 && (gate & bit) == 0) {
+        match atomic_word_compare_swap_acq_rel(&freelist_probe_admission, gate, gate | bit) {
+            CasResult::Swapped => {
+                let mut visit: FreelistProbeVisit[&freelist_probe_admission] = { bit };
+                return FreelistProbeAdmission::Registered(visit);
+            }
+            CasResult::Observed(seen) => { gate = seen; }
+        }
+    }
+    return FreelistProbeAdmission::Closed;
+}
+
+private fn freelist_probe_unregister(
+        visit: sink FreelistProbeVisit[&freelist_probe_admission]) {
+    let bit: usize = visit.bit;
+    // Release the fixture accesses before retiring the registration. The
+    // compare-exchange leaves the admission bit and other peers intact.
+    let mut gate: usize = atomic_word_load(&freelist_probe_admission);
+    while (true) {
+        match atomic_word_compare_swap_acq_rel(&freelist_probe_admission, gate, gate & ~bit) {
+            CasResult::Swapped => { return; }
+            CasResult::Observed(seen) => { gate = seen; }
+        }
+    }
+}
+
+private fn freelist_probe_release_quiesced(proof: sink FreelistProbeQuiesced[&freelist_probe_admission]) {}
+
+// Only the primary closes admission. A compare-exchange can change only
+// the open bit. Repeating this closure cannot reopen it.
+private fn freelist_probe_close_admission() -> bool {
+    let mut gate: usize = atomic_word_load(&freelist_probe_admission);
+    for attempt: usize in 0..<KERNEL_MAX_CORES * 2 {
+        if ((gate & 1) == 0) { return true; }
+        match atomic_word_compare_swap_acq_rel(&freelist_probe_admission, gate, gate & ~1) {
+            CasResult::Swapped => { return true; }
+            CasResult::Observed(seen) => { gate = seen; }
+        }
+    }
+    return (gate & 1) == 0;
+}
+
+private fn freelist_probe_close() -> FreelistProbeDrain !{unsafe} {
+    atomic_word_store(freelist_probe_armed_address(), 0);
+    if (freelist_probe_close_admission() == false) {
+        return FreelistProbeDrain::ClosureBusy;
+    }
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        let bit: usize = 1 << cpu;
+        if ((atomic_word_load(&freelist_probe_admission) & bit) != 0) {
+            let mut window = peer_tick_window_policy(cpu, PeerTickPolicy::Entry);
+            while (peer_tick_window_open(window) &&
+                   (atomic_word_load(&freelist_probe_admission) & bit) != 0) {
+            }
+            peer_tick_window_end(window);
+        }
+    }
+    if (atomic_word_load(&freelist_probe_admission) != 0) {
+        return FreelistProbeDrain::TimedOut;
+    }
+    let mut proof: FreelistProbeQuiesced[&freelist_probe_admission] = { true };
+    return FreelistProbeDrain::Quiesced(proof);
 }
 
 // Take an index, mark it held, give it back. Every online core runs this.
@@ -250,7 +343,15 @@ fn freelist_contention_is_armed(cpu: usize) -> bool !{unsafe} {
 
 // Every online peer runs this from its idle loop while the probe is armed.
 fn freelist_contention_secondary_run(cpu: usize) !{unsafe} {
-    if (peer_tally_is_peer(&freelist_probe_tally, cpu) == false) { return; }
+    if (cpu >= KERNEL_MAX_CORES) { return; }
+    let peer: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    let FreelistProbeAdmission::Registered(visit) = freelist_probe_register(peer) else {
+        FreelistProbeAdmission::Closed => { return; }
+    };
+    if (peer_tally_is_peer(&freelist_probe_tally, cpu) == false) {
+        freelist_probe_unregister(visit);
+        return;
+    }
     peer_tally_enter(&freelist_probe_tally, cpu);
     // The idle loop may enter again before the primary disarms this phase.
     // Keep the round in the phase's published count, not a fresh local loop:
@@ -264,6 +365,7 @@ fn freelist_contention_secondary_run(cpu: usize) !{unsafe} {
         }
     }
     peer_tally_leave(&freelist_probe_tally, cpu);
+    freelist_probe_unregister(visit);
 }
 
 private fn freelist_contention_report(stage: *u8) !{unsafe} {
@@ -281,10 +383,11 @@ private fn freelist_contention_report(stage: *u8) !{unsafe} {
     kernel_boot_log("\n");
 }
 
-// One phase: arm, wait for every peer, every online core cycles, wait for
-// them to finish. Returns the duplicate count, or a negative-shaped failure through
-// `ok`.
-private fn freelist_contention_phase(locked: bool) -> bool !{unsafe} {
+// Only this test opens admission. The proof was produced before any peer
+// registration or returned after the preceding phase's last peer left.
+private fn freelist_probe_open(proof: sink FreelistProbeQuiesced[&freelist_probe_admission],
+                                locked: bool) !{unsafe} {
+    freelist_probe_release_quiesced(proof);
     peer_tally_reset(&freelist_probe_tally, kernel_online_core_count());
     atomic_word_store(freelist_probe_duplicates_address(), 0);
     atomic_word_store(freelist_probe_empty_address(), 0);
@@ -298,21 +401,15 @@ private fn freelist_contention_phase(locked: bool) -> bool !{unsafe} {
         atomic_word_store(freelist_probe_locked_phase_address(), 0);
     }
     atomic_word_store(freelist_probe_armed_address(), 1);
+    atomic_word_store(&freelist_probe_admission, 1);
+}
 
-    // Every peer remains inside its first per-round rendezvous until core 0
-    // arrives, so `active` can no longer be a pulse that a long QEMU vCPU
-    // timeslice misses. In the unlocked phase each core has already read
-    // the same freelist head before that rendezvous completes. The gate is
-    // each peer's own entry count, each wait bounded by that
-    // peer's own ticks.
-    let entered: bool = peer_tally_peers_entered(&freelist_probe_tally,
-                                                 PeerTickPolicy::Entry);
-    if (entered == false) {
-        atomic_word_store(freelist_probe_armed_address(), 0);
-        freelist_contention_report("secondary-never-entered" as *u8);
-        return false;
+private fn freelist_contention_run() -> FreelistProbeProgress !{unsafe} {
+    // A peer's entry count survives its first rendezvous timing out, unlike
+    // the active flag. Wait on each peer's own tick window.
+    if (peer_tally_peers_entered(&freelist_probe_tally, PeerTickPolicy::Entry) == false) {
+        return FreelistProbeProgress::MissingEntry;
     }
-
 
     for round: usize in 0..<FREELIST_CONTENTION_ROUNDS {
         if (freelist_probe_cycle(0, round + 1)) {
@@ -321,8 +418,7 @@ private fn freelist_contention_phase(locked: bool) -> bool !{unsafe} {
     }
 
     if (atomic_word_load(freelist_probe_armed_address()) == 0) {
-        freelist_contention_report("rendezvous-timeout" as *u8);
-        return false;
+        return FreelistProbeProgress::RendezvousTimeout;
     }
 
     // With per-round rendezvous this is the slowest peer's completion count
@@ -331,30 +427,60 @@ private fn freelist_contention_phase(locked: bool) -> bool !{unsafe} {
     atomic_word_store(freelist_probe_overlap_address(),
         peer_tally_peers_least(&freelist_probe_tally));
 
-    let finished: bool = peer_tally_peers_reached(
-        &freelist_probe_tally, FREELIST_CONTENTION_ROUNDS,
-        PeerTickPolicy::Finish);
-    atomic_word_store(freelist_probe_armed_address(), 0);
-    if (finished == false) {
-        freelist_contention_report("secondary-never-finished" as *u8);
-        return false;
+    if (peer_tally_peers_reached(&freelist_probe_tally,
+            FREELIST_CONTENTION_ROUNDS, PeerTickPolicy::Finish) == false) {
+        return FreelistProbeProgress::MissingFinish;
     }
-    // Disarming is a request, not an acknowledgement. Wait for the last
-    // secondary invocation to leave before the next phase resets its state.
-    if (peer_tally_peers_left(&freelist_probe_tally,
-                              PeerTickPolicy::Entry) == false) {
-        freelist_contention_report("secondary-never-left" as *u8);
-        return false;
+    return FreelistProbeProgress::Complete;
+}
+
+private fn freelist_contention_phase(proof: sink FreelistProbeQuiesced[&freelist_probe_admission],
+                                      locked: bool) -> FreelistProbePhaseResult !{unsafe} {
+    freelist_probe_open(proof, locked);
+    let progress = freelist_contention_run();
+    // Every outcome closes admission and drains exactly once. A failed
+    // drain never yields permission to reset the fixture for another phase.
+    match freelist_probe_close() {
+        FreelistProbeDrain::ClosureBusy => {
+            freelist_contention_report("admission-never-closed" as *u8);
+            return FreelistProbePhaseResult::Failed;
+        }
+        FreelistProbeDrain::TimedOut => {
+            freelist_contention_report("secondary-never-left" as *u8);
+            return FreelistProbePhaseResult::Failed;
+        }
+        FreelistProbeDrain::Quiesced(next) => {
+            // Invoke the same registrar an idle peer would reach after a
+            // stale arming hint. A closed gate must refuse it.
+            match freelist_probe_register(1) {
+                FreelistProbeAdmission::Closed => {}
+                FreelistProbeAdmission::Registered(late) => {
+                    freelist_probe_unregister(late);
+                    freelist_probe_release_quiesced(next);
+                    freelist_contention_report("admission-reopened" as *u8);
+                    return FreelistProbePhaseResult::Failed;
+                }
+            }
+            if (progress == FreelistProbeProgress::MissingEntry) {
+                freelist_contention_report("secondary-never-entered" as *u8);
+            } else if (progress == FreelistProbeProgress::RendezvousTimeout) {
+                freelist_contention_report("rendezvous-timeout" as *u8);
+            } else if (progress == FreelistProbeProgress::MissingFinish) {
+                freelist_contention_report("secondary-never-finished" as *u8);
+            } else {
+                let primary: usize = peer_tally_count(&freelist_probe_tally, 0);
+                let peers_least: usize = peer_tally_peers_least(&freelist_probe_tally);
+                let empty: usize = atomic_word_load(freelist_probe_empty_address());
+                if (primary == FREELIST_CONTENTION_ROUNDS &&
+                    peers_least == FREELIST_CONTENTION_ROUNDS && empty == 0) {
+                    return FreelistProbePhaseResult::Complete(next);
+                }
+                freelist_contention_report("incomplete" as *u8);
+            }
+            freelist_probe_release_quiesced(next);
+            return FreelistProbePhaseResult::Failed;
+        }
     }
-    let primary: usize = peer_tally_count(&freelist_probe_tally, 0);
-    let peers_least: usize = peer_tally_peers_least(&freelist_probe_tally);
-    let empty: usize = atomic_word_load(freelist_probe_empty_address());
-    if (primary != FREELIST_CONTENTION_ROUNDS ||
-        peers_least != FREELIST_CONTENTION_ROUNDS || empty != 0) {
-        freelist_contention_report("incomplete" as *u8);
-        return false;
-    }
-    return true;
 }
 
 fn freelist_contention_duplicates() -> usize !{unsafe} {
@@ -371,13 +497,23 @@ fn freelist_contention_duplicates() -> usize !{unsafe} {
 // about whether its contention control still exercised the vulnerable
 // read/update window.
 fn freelist_contention_probe() -> bool !{unsafe} {
-    freelist_probe_init();
-
-    if (freelist_contention_phase(false) == false) { return false; }
+    // This one-shot boot fixture is the only source of the initial proof.
+    if (atomic_word_compare_exchange(&freelist_probe_ready, 0, 1) == false) {
+        return false;
+    }
+    let mut initial: FreelistProbeQuiesced[&freelist_probe_admission] = { true };
+    let FreelistProbePhaseResult::Complete(between) =
+        freelist_contention_phase(initial, false) else {
+        FreelistProbePhaseResult::Failed => { return false; }
+    };
     let unlocked_duplicates: usize = freelist_contention_duplicates();
     freelist_contention_report("unlocked" as *u8);
 
-    if (freelist_contention_phase(true) == false) { return false; }
+    let FreelistProbePhaseResult::Complete(final) =
+        freelist_contention_phase(between, true) else {
+        FreelistProbePhaseResult::Failed => { return false; }
+    };
+    freelist_probe_release_quiesced(final);
     let locked_duplicates: usize = freelist_contention_duplicates();
     freelist_contention_report("locked" as *u8);
 
