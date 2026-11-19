@@ -137,7 +137,7 @@ This is a source-backed entry inventory, not complete export certification.
 | Pipe reads (two wrap segments) | copy_to_user_span from pipe_of(owner).buffer | Stored-owner lifetime and written ring ranges across wrap/reuse |
 | TCP reads (buffered and freshly received) | copy_to_user_span from tcp_frame_bytes | Frame ownership, received extent, publication and DMA completion |
 | procfs rendering, ext2 file reads, getrandom | copy_to_user_span from the selected syscall scratch file_buffer | Producer prefix, cursor/count transfer, partial/failure paths and reacquisition |
-| prlimit64 | copy_to_user from constructed scratch byte ranges | Complete output/tail coverage and helper mutation controls |
+| prlimit64 | copy_to_user from constructed scratch bytes; the initial RLIMIT_NOFILE read checks both words and adjacent sentinels | Scratch source lifetime and output cases beyond the initial successful read |
 | uname | copy_to_user from constructed scratch bytes; successful field tails and adjacent sentinels checked by the peer TTY fixture | Source initialization and lifetime proof across scratch reacquisition; other field values and faulting destinations |
 | user_write_byte/u16/u32/u64 and user_zero_fill | Typed scalar inputs or constant zero; range/COW checks and access windows | All callers and all padding/holes of user ABI records; untouched user bytes are not kernel disclosure |
 | New mappings, exec/stack construction, fork/COW, signal frames, shared backing | Separate page/ABI paths, not implied by copy_to_user's source signature | Allocation freshness, zero/scrub/export ordering and teardown/shared lifetime controls |

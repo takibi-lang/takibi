@@ -2,11 +2,11 @@
   "date": "2026-11-19",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "40c955a9c7dddb6626e9a6abe3a888291562bcf8ef5ada085a6c705825b11d48",
-  "workload": "Both normal linked kernels and the existing peer TTY uname success fixture, compared with 78e2068e4.",
+  "source_sha256": "899ef7c191274317fe605875ed5f38a1223365bf619c39fab814d8a13f8eefc1",
+  "workload": "Both normal linked kernels and the existing EL0 prlimit64 success fixture, compared with 434a8c58d.",
   "evidence": [
-    "docs/UNAME_ABI_FIXTURE_SPACE.md"
+    "docs/PRLIMIT_ABI_FIXTURE_SPACE.md"
   ],
-  "assessment": "The QEMU ELF is byte-identical. RPi5 linked text shrinks by 304 bytes with the compressed fixture. Data, BSS, usable RAM and allocator expectations are unchanged. The existing user fixture grows its identity frame by 32 bytes.",
-  "next_trigger": "Remeasure when the peer TTY fixture stack, embedded image or linked reservation boundary changes."
+  "assessment": "The QEMU kernel ELF is byte-identical. RPi5 linked text grows by 32 bytes with the compressed fixture. Data, BSS, usable RAM and allocator expectations are unchanged. The existing EL0 entry frame grows by 16 bytes.",
+  "next_trigger": "Remeasure when the EL0 payload stack, embedded image or linked reservation boundary changes."
 }
