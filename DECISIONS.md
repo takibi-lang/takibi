@@ -739,3 +739,15 @@ condition below applies, and reports the land afterwards.
 - 2026-11-16 Prevention placement: compiler acceptance rules in OCaml in the compiler; repository checks needing Takibi analysis in standalone OCaml reusing compiler analysis; external-fact checks without Takibi interpretation may stay Python. Classify responsibilities before adding or extending checks; no blanket script rewrite. [active] #567
 
 - 2026-11-17 #1513 ordinary reference lifetimes: proceed with inference of direct-call argument/result dependencies, with finite termination and measured compile time, memory and annotation impact. If inference is impractical, propose concrete annotation additions to the maintainer before switching; no automatic annotation migration. Keep legacy @ contracts separately reviewed. [active] #1513 #1159
+
+- 2026-11-19 #638: keep the general EL1 preemption switch gated while checking CPU affinity at the migration consumer, exec reservation at the allocator debit, and the boot-thread CPU sample under its own entry conditions. Continue preemption implementation and validation while the switch is gated. [active] #638
+
+- 2026-11-19 #1513 page publication: identify the publication boundaries and infer allocation, zeroing and copy facts for the same ownership interval. Bring any additional explicit contract back with its spelling and occurrence count. Validate MMU-table scope and the three-way initialization result independently. [active] #1513
+
+- 2026-11-19 #1513 block completion: require the modern virtio used length to cover the writable data and status before reporting success. A short final completion returns DMA ownership but fails the request. [active] #1513
+
+- 2026-11-19 #1491: lower the allcheck-only default model job cap from 16 to 8. Retain explicit overrides, standalone and CI defaults, the HTTP idle wait and lane budgets. [active] #1491
+
+- 2026-11-19 #1159: prototype a typed FD probe reference while retaining real retain/release operations. Test a narrow PID 1 metadata lifetime contract and measure stack usage, retaining permanent storage if the frame does not fit. Establish the diagnostic ring ordering locally before considering a shared builtin. Use the existing guard for protocol trace report state and row copies, answer concurrent open/close with Busy, and print outside the guard. For the freelist fixture, keep intentional race controls and require test-scoped quiescence for setup and cleanup. [active] #1159
+
+- 2026-11-19 #637 saved_sp: first test retaining the storage format while tying the save/restore API to the process generation and stack owner. Include cross-process and old-generation rejection controls. [active] #637
