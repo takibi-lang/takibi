@@ -2,11 +2,11 @@
   "date": "2026-11-19",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "38b03a75b67b84e6b97dfa89838058e7a815da714b10df155660fc2195d00d9e",
+  "source_sha256": "0f046a94323411a0bfa72cca3ffcb3513ef346816192f049b9b8a574d7adbf24",
   "workload": "Normal linked QEMU and RPi5 kernels with the existing user-page mapping, COW, replacement and boot allocator workloads.",
   "evidence": [
     "docs/PAGE_PUBLICATION.md"
   ],
-  "assessment": "Adopt the common checked mapping entry. Linked text grows by 1656 bytes on QEMU and 1816 bytes on RPi5. Data, BSS, usable RAM start and checked allocator capacities are unchanged. Boot fixtures write their input pages before publication and keep their allocation and release workload.",
+  "assessment": "Adopt the common checked mapping entry. Linked text grows by 1656 bytes on QEMU and 1816 bytes on RPi5. Data, BSS, usable RAM start and checked allocator capacities are unchanged. Boot fixtures write their input pages before publication and keep their allocation and release workload. Rechecked the linked sizes and allocator expectations after the compiler-only saved-outcome fix.",
   "next_trigger": "Measure again when the published user-page, owner, frame or page-table allocation workload or image reservation changes."
 }
