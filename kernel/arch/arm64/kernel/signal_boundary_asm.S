@@ -2,6 +2,12 @@
  * The handler uses the Linux arm64 rt_sigframe ABI, not kernel frame offsets.
  * No shared state or writable globals; AAPCS callee state is saved on stack.
  */
+/* Linux arm64 rt_sigframe offsets. Takibi clears the uc_stack padding
+ * between the 32-bit ss_flags and the 64-bit ss_size. */
+.equ BOUNDARY_SIGFRAME_SIZE, 4688
+.equ BOUNDARY_UC_STACK_PADDING, 156
+.equ BOUNDARY_FPSIMD_END, 592 + 528
+
 .section .text, "ax"
 .global signal_boundary_run
 .type signal_boundary_run, %function
@@ -77,6 +83,16 @@ signal_boundary_run:
     msr fpcr, x9
     mov x9, #1
     msr fpsr, x9
+    cbnz x19, .Lboundary_prepare_suspend
+    // SIGUSR1 is still blocked. Reserve the delivery area on the ordinary
+    // mapped stack, seed only the checked bytes, then restore the caller SP.
+    sub sp, sp, #(BOUNDARY_SIGFRAME_SIZE >> 12), lsl #12
+    sub sp, sp, #(BOUNDARY_SIGFRAME_SIZE & 0xfff)
+    mov x9, #-1
+    str w9, [sp, #BOUNDARY_UC_STACK_PADDING]
+    str x9, [sp, #BOUNDARY_FPSIMD_END]
+    mov sp, x20
+.Lboundary_prepare_suspend:
     add x0, sp, #168
     mov x1, #8
     cmp x19, #5
@@ -197,6 +213,13 @@ signal_boundary_handler:
     ldr x9, [x1, #168]
     cmp x9, #512
     b.ne .Lboundary_handler_done
+    cbnz x19, .Lboundary_handler_witness
+    ldr w9, [x1, #BOUNDARY_UC_STACK_PADDING]
+    cbnz w9, .Lboundary_handler_done
+    // Both 32-bit aarch64_ctx terminator fields must be zero.
+    ldr x9, [x1, #BOUNDARY_FPSIMD_END]
+    cbnz x9, .Lboundary_handler_done
+.Lboundary_handler_witness:
     // Signal return restores x21 from mcontext, so store the verdict there.
     mov x9, #1
     str x9, [x1, #480]
