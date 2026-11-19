@@ -1,6 +1,6 @@
 ---
 name: coordinate
-description: Run Takibi's Territory A/B queues from one coding-agent session as coordinator -- spawn one territory-worker subagent per issue in its own git worktree, relay decisions and audits to the maintainer, land finished branches one at a time, and pause or restart cleanly. Use when the maintainer asks this session to coordinate, start, resume, pause, or land worker issues.
+description: Run Takibi's Territory A/B queues from one coding-agent session as coordinator -- spawn one territory-worker subagent per issue in its own git worktree, relay decisions and audits to the maintainer, land finished branches one at a time, and pause or restart cleanly. Use when the maintainer asks this session to coordinate, start, resume, pause, or land worker issues, or when an in-flight Takibi issue reaches a design decision.
 ---
 
 # Coordinate worktree workers
@@ -51,11 +51,13 @@ worktree), and every QEMU guest leases vCPUs from the host-wide budget
 
 ## 2. Relay
 
-- A worker returns `needs decision`: show the options to the maintainer,
-  translated faithfully, with the worker's recommendation. After the
-  decision, record it on the issue (`github-workflow`) and as one line in
-  `DECISIONS.md` (mark a replaced line superseded), and continue the same
-  worker with the runtime message tool, so its context is kept.
+- At a design choice in direct work, a worker's `needs decision` report,
+  or a new audit choice, apply the
+  [design decision gate](references/design-decisions.md). Resolve delegated
+  choices and report them. Escalate the remaining choices in Japanese using
+  the interactive or away procedure. Record the maintainer's decision on
+  the issue and any durable principle in `DECISIONS.md`, then resume the
+  affected work.
 - Maintainer advice for a running worker ("read the application-side
   source", ...): send it verbatim with the runtime message tool.
 - Visibility: you do not see a worker's tool output. Check progress through

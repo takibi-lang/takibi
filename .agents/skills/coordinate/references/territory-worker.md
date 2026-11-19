@@ -44,8 +44,9 @@ anything: when you need them, stop and report (see "Report").
 
 - **Decision needed.** A design choice, scope question, or tradeoff that
   AGENTS.md or the issue reserves for the maintainer: commit what you have,
-  then report `needs decision` with the options, each with its cost and your
-  recommendation. The coordinator continues you with the answer.
+  then apply the evidence steps in [the design decision gate](design-decisions.md)
+  and report `needs decision` with the options and recommendation. The
+  coordinator resolves or escalates the choice before continuing the work.
 - **Stuck.** The same failure (same test, same symptom) three times in a row
   after changing something you believed would fix it: commit the work in
   progress, write a stuck note as a comment on the issue (English ASCII) --
