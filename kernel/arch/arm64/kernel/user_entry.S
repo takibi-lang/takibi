@@ -16,18 +16,29 @@
     .section .text, "ax"
     .global user_code_sync
 user_code_sync:
+    /* Both CTR_EL0 fields encode log2 of the line size in words.
+     * Keep the original bounds and align independently for each cache. */
     mov     x3, x0
     add     x2, x0, x1
+    mrs     x4, ctr_el0
+    mov     x5, #4
+    ubfx    x6, x4, #16, #4
+    lsl     x6, x5, x6
+    sub     x7, x6, #1
+    bic     x0, x3, x7
 .Ldcache_sync:
     dc      cvau, x0
-    add     x0, x0, #64
+    add     x0, x0, x6
     cmp     x0, x2
     b.lo    .Ldcache_sync
     dsb     ish
-    mov     x0, x3
+    and     x6, x4, #0xf
+    lsl     x6, x5, x6
+    sub     x7, x6, #1
+    bic     x0, x3, x7
 .Licache_sync:
     ic      ivau, x0
-    add     x0, x0, #64
+    add     x0, x0, x6
     cmp     x0, x2
     b.lo    .Licache_sync
     dsb     ish
