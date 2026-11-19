@@ -2,11 +2,11 @@
   "date": "2026-11-19",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "4fb0685ebddfec7f4c422185ccd3e6cbc465d5a20b1d0b0cbd334e4544ef1c28",
-  "workload": "Both normal linked kernels and the ELF cache maintenance leaf compared with 4cbf4ef80; executable mapping and allocator workload are preserved.",
+  "source_sha256": "37e7c3e694cc31e92d178080d4ccfebe294dcc848a907a1e6e54304e0514d26e",
+  "workload": "Normal QEMU and RPi5 production objects and linked ELFs for frame export build-check migration, compared with exact integration base 1c2fde3ea.",
   "evidence": [
-    "docs/ELF_CACHE_GEOMETRY_SPACE.md"
+    "docs/FRAME_API_SPACE_REVIEW.md"
   ],
-  "assessment": "Text grows 36 bytes on each target. Initialized data, BSS, usable RAM boundaries and the allocator expectations are unchanged. The leaf has no frame or calls. Physical timing and remote first execution remain unmeasured.",
-  "next_trigger": "Measure again when the ELF cache helper, publication workload or linked reservation boundary changes."
+  "assessment": "Both normal objects and linked ELFs are byte-identical. Usable RAM boundaries and allocator expectations stay fixed. Inventory sizes and QEMU compilation allocation are build costs.",
+  "next_trigger": "Remeasure when fact generation affects kernel code or the frame capabilities change their storage workload."
 }
