@@ -46,7 +46,11 @@ const SYSINFO_SYSCALL: usize = 179;
 // struct utsname is six 65-byte fields; `machine` is the fifth, so it starts
 // at 4 * 65. struct sysinfo is 112 bytes on aarch64 and this kernel fills
 // only its first word, the uptime.
-const PEER_IDENT_UTSNAME_BYTES: usize = 390;
+const UTSNAME_FIELD_BYTES: usize = 65;
+const PEER_IDENT_UTSNAME_BYTES: usize = 6 * UTSNAME_FIELD_BYTES;
+const PEER_IDENT_UTSNAME_SENTINEL_BYTES: usize = 8;
+const PEER_IDENT_UTSNAME_END: usize = PEER_IDENT_UTSNAME_SENTINEL_BYTES + PEER_IDENT_UTSNAME_BYTES;
+const PEER_IDENT_UTSNAME_BUFFER_BYTES: usize = PEER_IDENT_UTSNAME_END + PEER_IDENT_UTSNAME_SENTINEL_BYTES;
 const PEER_IDENT_MACHINE_OFFSET: usize = 260;
 const PEER_IDENT_MACHINE_BYTES: usize = 7;
 const PEER_IDENT_SYSINFO_BYTES: usize = 112;
@@ -380,6 +384,14 @@ fn peer_console() !{unsafe} {
     svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
 }
 
+private fn peer_uname_field_tail_zero(
+        field: borrow [u8; UTSNAME_FIELD_BYTES..], prefix_bytes: usize) -> bool {
+    for index: usize in 0..<UTSNAME_FIELD_BYTES {
+        if (index >= prefix_bytes && field[index] != 0) { return false; }
+    }
+    return true;
+}
+
 // GitHub issue #9 phase B entry 6: the calls admitted to a peer so far, run
 // on one.
 //
@@ -396,14 +408,33 @@ fn peer_console() !{unsafe} {
 // one number carries the whole verdict to the kernel.
 private fn peer_identity(peer_cpu: usize)
         -> usize {
-    let mut uts: [u8; PEER_IDENT_UTSNAME_BYTES];
+    let mut uts: [u8; PEER_IDENT_UTSNAME_BUFFER_BYTES];
     let mut info: [u8; PEER_IDENT_SYSINFO_BYTES];
-    for index: usize in 0..<PEER_IDENT_UTSNAME_BYTES { uts[index] = 0; }
+    for index: usize in 0..<PEER_IDENT_UTSNAME_BUFFER_BYTES { uts[index] = 0xFF; }
     for index: usize in 0..<PEER_IDENT_SYSINFO_BYTES { info[index] = 0; }
-    if (svc5(UNAME_SYSCALL, uts as *u8 as usize, 0, 0, 0, 0) != 0) {
+    if (svc5(UNAME_SYSCALL, (uts[PEER_IDENT_UTSNAME_SENTINEL_BYTES..<PEER_IDENT_UTSNAME_END] as *u8) as usize,
+             0, 0, 0, 0) != 0) {
         return 0;
     }
     if (peer_read_cpu() != peer_cpu) { return 0; }
+    for index: usize in 0..<PEER_IDENT_UTSNAME_SENTINEL_BYTES {
+        if (uts[index] != 0xFF) { return 0; }
+    }
+    for index: usize in PEER_IDENT_UTSNAME_END..<PEER_IDENT_UTSNAME_BUFFER_BYTES {
+        if (uts[index] != 0xFF) { return 0; }
+    }
+    // The terminator and unused bytes in every field must replace the
+    // nonzero fill. The surrounding bytes are outside the ABI record.
+    // Prefix lengths are for Linux, takibi, 6.1.0-takibi, #1, aarch64, (none).
+    let fields = uts[PEER_IDENT_UTSNAME_SENTINEL_BYTES..<PEER_IDENT_UTSNAME_END];
+    if (peer_uname_field_tail_zero(fields[0..<UTSNAME_FIELD_BYTES], 5) == false ||
+        peer_uname_field_tail_zero(fields[UTSNAME_FIELD_BYTES..<2 * UTSNAME_FIELD_BYTES], 6) == false ||
+        peer_uname_field_tail_zero(fields[2 * UTSNAME_FIELD_BYTES..<3 * UTSNAME_FIELD_BYTES], 12) == false ||
+        peer_uname_field_tail_zero(fields[3 * UTSNAME_FIELD_BYTES..<4 * UTSNAME_FIELD_BYTES], 2) == false ||
+        peer_uname_field_tail_zero(fields[4 * UTSNAME_FIELD_BYTES..<5 * UTSNAME_FIELD_BYTES], PEER_IDENT_MACHINE_BYTES) == false ||
+        peer_uname_field_tail_zero(fields[5 * UTSNAME_FIELD_BYTES..<6 * UTSNAME_FIELD_BYTES], 6) == false) {
+        return 0;
+    }
     if (svc5(SYSINFO_SYSCALL, info as *u8 as usize, 0, 0, 0, 0) != 0) {
         return 0;
     }
@@ -537,7 +568,7 @@ private fn peer_identity(peer_cpu: usize)
     for index: usize in 0..<PEER_IDENT_UTSNAME_BYTES {
         if (index >= PEER_IDENT_MACHINE_OFFSET &&
                 index < PEER_IDENT_MACHINE_OFFSET + PEER_IDENT_MACHINE_BYTES) {
-            digest = digest + (uts[index] as usize) *
+            digest = digest + (fields[index] as usize) *
                 (index - PEER_IDENT_MACHINE_OFFSET + 1);
         }
     }
