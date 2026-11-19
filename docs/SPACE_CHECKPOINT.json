@@ -2,11 +2,11 @@
   "date": "2026-11-19",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "5f4c8a3f65e2225e2ab49e2bf6838af6007bcb7b0188dfcb967eca2dcdfd6bff",
-  "workload": "Compare both normal linked kernels against 888bdcea2 and inspect the root 0 construction and activation order.",
+  "source_sha256": "4fb0685ebddfec7f4c422185ccd3e6cbc465d5a20b1d0b0cbd334e4544ef1c28",
+  "workload": "Both normal linked kernels and the ELF cache maintenance leaf compared with 4cbf4ef80; executable mapping and allocator workload are preserved.",
   "evidence": [
-    "docs/ROOT0_BOOTSTRAP_SPACE.md"
+    "docs/ELF_CACHE_GEOMETRY_SPACE.md"
   ],
-  "assessment": "Normal text falls 72 bytes on QEMU and 88 bytes on RPi5. Data, BSS, usable RAM starts and allocator expectations are unchanged. Root 0 still retains two allocator pages and uses the existing shared identity tables. Boot-chain stack high water and physical timing are unmeasured.",
-  "next_trigger": "Measure again if root 0's tables, retained pages, primary activation path or reserved image span changes."
+  "assessment": "Text grows 36 bytes on each target. Initialized data, BSS, usable RAM boundaries and the allocator expectations are unchanged. The leaf has no frame or calls. Physical timing and remote first execution remain unmeasured.",
+  "next_trigger": "Measure again when the ELF cache helper, publication workload or linked reservation boundary changes."
 }
