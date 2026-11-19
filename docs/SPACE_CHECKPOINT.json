@@ -3,10 +3,10 @@
   "event": "milestone",
   "decision": "measured",
   "source_sha256": "2da7f900dbfedd40408ac4ec98e6c71ffd6e5c99d6088ae64a72fa70c2804b89",
-  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto aae4cc73: this branch's review, rebound to the merged sources (upstream's record was 2026-11-19 milestone/measured). Normal and debug QEMU and RPi5 linked kernels and generated frames for the counted short retransmit guard, compared with fc86f604c.",
+  "workload": "Normal linked QEMU and RPi5 kernels for the counted retransmit guard, compared with aae4cc731. Debug and static-frame evidence is retained from the separately measured fc86f604c candidate.",
   "evidence": [
     "docs/TCP_RETX_GUARD_SPACE.md"
   ],
-  "assessment": "Adopt the checked preemption span. Text grows 32 bytes in all four modes. Data, BSS, usable RAM starts, the guard representation and all seven direct caller frames are unchanged. The lock frame grows 16 bytes in each mode and the debug unlock frame grows 16 bytes. Physical contention was not measured.",
+  "assessment": "On the release baseline, normal text increases 32 bytes on both targets. Data, BSS, usable RAM starts and allocator expectations are unchanged. Earlier normal/debug measurements record guard and frame sizes. Physical contention and whole-chain stack use were not measured.",
   "next_trigger": "Measure again when the retransmit guard, lock backend, call path, or reserved image span changes."
 }

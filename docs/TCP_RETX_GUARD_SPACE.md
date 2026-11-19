@@ -47,3 +47,9 @@ modes; the debug unlock frame also grows by sixteen bytes. The existing
 count-underflow invariant check remains in the span-end path. Linker
 alignment accounts for the net text delta. Physical hold time, spin latency
 and full call-path stack use require separate measurements.
+
+After rebasing the same implementation onto aae4cc731, the normal-image
+text comparison was 830672 to 830704 bytes on QEMU and 4223996 to 4224028
+on RPi5. Data and BSS sizes, all data/BSS symbols, usable RAM starts and
+checked allocator expectations remain unchanged on this release baseline.
+The earlier debug figures above are from the fc86f604c comparison.
