@@ -198,6 +198,13 @@ fn pipe_alloc() -> PipeAllocResult !{unsafe} {
     return PipeAllocResult::Full;
 }
 
+private inline fn pipe_publish_slot(opening: borrow RegionPoolGuard(Pipe)[p],
+                                    slot: sink RegionSlot(Pipe)[p, k])
+        -> RegionHandle(Pipe) !{unsafe}
+        requires init_fields(region_slot_record(slot)) {
+    return region_give(opening, slot);
+}
+
 // Zeroed (a recycled slot holds its last occupant's bytes, and a zero
 // TaskMutex is a free one), both ends open, then published.
 private fn pipe_open_slot(pool: *RegionPool(Pipe) @ pipes,
@@ -208,7 +215,7 @@ private fn pipe_open_slot(pool: *RegionPool(Pipe) @ pipes,
     pipe.reader_open = true;
     pipe.writer_open = true;
     let opening = pipe_pool_lock(pool);
-    let mut handle: RegionHandle(Pipe) = region_give(opening, slot);
+    let mut handle: RegionHandle(Pipe) = pipe_publish_slot(opening, slot);
     pipe_pool_unlock(opening);
     return PipeAllocResult::Allocated(
         (region_handle_address(handle), region_handle_generation(handle)));

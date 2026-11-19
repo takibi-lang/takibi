@@ -987,6 +987,16 @@ fn path_view(slot: borrow SyscallSlot[0]) -> [u8; 256..]
   specific Boolean or variant outcomes. A direct forwarding wrapper
   inherits the condition. A function value or external entry cannot
   erase the condition.
+- An entry can require initialized fields of a live region slot as
+  `requires init_fields(region_slot_record(slot))`. The generated record
+  accessor names the storage of the current `RegionSlot` parameter. The
+  condition has no runtime evaluation. One slot specialization may opt in
+  per program. Direct calls to its generated `region_give` also require
+  the same fact. The existing generated `region_slot_zero` establishes
+  it through the trusted slot address and write recipe. Allocation or
+  reacquisition starts without the fact, and consumption ends it.
+  Unknown writes through the slot or its direct aliases discard the fact.
+  This condition covers the stored fields and carries no padding claim.
 - Parameter field contracts can name nested inline fields, such as
   `init(pool.core.free_head)` or `init(pool.flags[0..<n])`. Field ranges
   require a fixed array; they cannot initialize a slice descriptor by

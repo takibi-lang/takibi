@@ -2736,6 +2736,77 @@ fn check746(arr: borrow places(Frame746)[b, n], ready: bool) !{unsafe} {
 }
 |}
 
+let slot_publication_1513 body = {|
+struct Pipe1513 { buffer: [u8; 64]; }
+private let mut pool1513: RegionPool(Pipe1513);
+fn publish1513(g: borrow RegionPoolGuard(Pipe1513)[b],
+               slot: sink RegionSlot(Pipe1513)[b, k]) -> RegionHandle(Pipe1513) !{unsafe}
+        requires init_fields(region_slot_record(slot)) {
+    return region_give(g, slot);
+}
+fn check1513() !{unsafe} {
+    let g = region_pool_lock(&pool1513);
+    match region_alloc(g) {
+        RegionPoolAlloc(Pipe1513)::Full => { region_pool_unlock(g); return; }
+        RegionPoolAlloc(Pipe1513)::Exhausted => { region_pool_unlock(g); return; }
+        RegionPoolAlloc(Pipe1513)::Allocated(slot) => {
+|} ^ body ^ {|
+            region_pool_unlock(g);
+        }
+    }
+}
+|}
+
+let slot_publication_tests = [
+  Alcotest.test_case "initialized current slot and its move" `Quick
+    (fun () -> ignore (infer_regions (slot_publication_1513 {|
+    region_slot_zero(slot);
+    let current = slot;
+    let p = region_slot_record(current);
+    p.buffer[0] = 1;
+    let mut h: RegionHandle(Pipe1513) = publish1513(g, current);
+|})));
+  Alcotest.test_case "missing slot initialization" `Quick
+    (expect_region_error "required initialized by 'publish1513'" (slot_publication_1513 {|
+    let mut h: RegionHandle(Pipe1513) = publish1513(g, slot);
+|}));
+  Alcotest.test_case "direct publication also needs initialization" `Quick
+    (expect_region_error "publication requires initialization" (slot_publication_1513 {|
+    let mut h: RegionHandle(Pipe1513) = region_give(g, slot);
+|}));
+  Alcotest.test_case "different initialized slot" `Quick
+    (expect_region_error "required initialized by 'publish1513'" (slot_publication_1513 {|
+    match region_alloc(g) {
+        RegionPoolAlloc(Pipe1513)::Allocated(other) => {
+            region_slot_zero(other);
+            region_free(g, other);
+            let mut h: RegionHandle(Pipe1513) = publish1513(g, slot);
+        }
+        RegionPoolAlloc(Pipe1513)::Full => { region_free(g, slot); }
+        RegionPoolAlloc(Pipe1513)::Exhausted => { region_free(g, slot); }
+    }
+|}));
+  Alcotest.test_case "reacquired slot needs a fresh proof" `Quick
+    (expect_region_error "required initialized by 'publish1513'" (slot_publication_1513 {|
+    region_slot_zero(slot);
+    let mut handle: RegionHandle(Pipe1513) = publish1513(g, slot);
+    match region_take(g, handle) {
+        RegionTake(Pipe1513)::Taken(again) => {
+            let mut h: RegionHandle(Pipe1513) = publish1513(g, again);
+        }
+        RegionTake(Pipe1513)::Stale => {}
+    }
+|}));
+  Alcotest.test_case "unknown write through slot record alias" `Quick
+    (expect_region_error "required initialized by 'publish1513'" (
+      "extern fn opaque1513(p: &mut Pipe1513);" ^ slot_publication_1513 {|
+    region_slot_zero(slot);
+    let alias = region_slot_record(slot);
+    opaque1513(alias);
+    let mut h: RegionHandle(Pipe1513) = publish1513(g, slot);
+|}));
+]
+
 (* A copy of kernel/net/tcp.tkb's frame access (GitHub issue #677): `late`
    runs after the permission is given back. *)
 let frame_hold_use late =
@@ -35076,6 +35147,7 @@ let named_groups_unisolated = [
   "production-machine-boundary", production_machine_boundary_tests;
   "production-nic-rx-look", production_nic_rx_look_tests;
   "region-inspection", region_inspection_tests;
+  "slot-publication", slot_publication_tests;
   "protocol-declarations", protocol_tests;
   "device-protocols", device_protocol_tests;
   "protocol-snapshots", snapshot_tests;

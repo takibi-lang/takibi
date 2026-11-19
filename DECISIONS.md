@@ -753,3 +753,5 @@ condition below applies, and reports the land afterwards.
 - 2026-11-19 #637 saved_sp: first test retaining the storage format while tying the save/restore API to the process generation and stack owner. Include cross-process and old-generation rejection controls. [active] #637
 
 - 2026-11-19 #1513: use one requires init(page_bytes(page)[0..<PAGE_SIZE]) clause on the common address_space_map_page entry. Interpret the accessor as a body-checked owner projection without runtime evaluation. Infer allocation, zeroing and copy facts in the same ownership interval. [active] #1513
+
+- 2026-11-19 #1513 Pipe publication: pilot one initialized-fields precondition for the current RegionSlot at the Pipe publication boundary. Keep the existing initialization write and its trusted slot-address correspondence. Confine the pilot to Pipe; ring-length checks and other RegionPool consumers remain separate. [active] #1513

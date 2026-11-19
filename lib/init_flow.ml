@@ -160,6 +160,12 @@ type guarded =
   | GCase of string option * string option * (view * Init_pred.interval) list
       (* case (None: any other case), payload binder atom, facts *)
 
+type owner_storage = OwnerBytes of int | SlotFields
+
+let owner_leaf_type = function
+  | OwnerBytes size -> Ast.TypeArray (Ast.TypeU8, size)
+  | SlotFields -> Ast.TypeBool
+
 let check
     ~(struct_fields : string -> (string * Ast.type_expr) list option)
     ~(callee : string -> Ast.expr -> ((Ast.ident * Ast.type_expr option) list * Ast.loc) option)
@@ -173,11 +179,12 @@ let check
     ?(noreturn : Ast.expr -> bool = fun _ -> false)
     ?(write_footprint : Ast.expr -> Init_writes.t = fun _ -> Init_writes.Unknown)
     ?(pointer_store_origin : Ast.expr -> string option = fun _ -> None)
-    ?(projected_size = 0)
     ?(owner_view_call : Ast.expr -> int option = fun _ -> None)
-    ?(owner_type : Ast.type_expr -> bool = fun _ -> false)
+    ?(owner_type : Ast.type_expr -> owner_storage option = fun _ -> None)
     ?(inferred_owner_requirement : Ast.expr -> int option option = fun _ -> None)
     ?(projected_contract_owner : Ast.expr -> string option = fun _ -> None)
+    ?(slot_contract_owner : Ast.expr -> string option = fun _ -> None)
+    ?(slot_record_call : Ast.expr -> int option = fun _ -> None)
     ?(owner_call_facts : Ast.expr -> (int * string) list = fun _ -> [])
     ?(owner_parameters = [])
     ?(initialized_owner_parameters = [])
@@ -536,13 +543,13 @@ let check
     | Some ty when numeric_field ty field -> Some (Init_pred.atom (field_name st id field))
     | _ -> None in
   let aliases : (int, view) Hashtbl.t = Hashtbl.create 8 in
-  let entry_owners = List.fold_left (fun owners name ->
+  let entry_owners = List.fold_left (fun owners (name, storage) ->
     match List.assoc_opt name param_ids with
     | None -> owners
     | Some id ->
         let root = "owner-param:" ^ string_of_int id in
         Hashtbl.replace roots root
-          { display = name; leaves = [[], Ast.TypeArray (Ast.TypeU8, projected_size)];
+          { display = name; leaves = [[], owner_leaf_type storage];
             array_root = false; out_param = false };
         Types.IntMap.add id root owners) Types.IntMap.empty owner_parameters in
   let with_owners st owners = { st with extras = { st.extras with owners } } in
@@ -563,8 +570,41 @@ let check
       iv = List.filter (fun (location, _) -> location <> leaf) st.iv } in
   let projected_view st id = Option.map (fun root ->
     { vp = { root; path = []; inside = false };
-      off = Init_pred.const 0; len = Some (Init_pred.const projected_size) })
+      off = Init_pred.const 0; len = leaf_len {root; path = []; inside = false} })
     (Types.IntMap.find_opt id st.extras.owners) in
+  (* Keep possible record aliases for the opaque-write check. A rebind
+     adds a possibility, so a branch or loop cannot erase an older alias. *)
+  let slot_aliases = Hashtbl.create 8 in
+  let rec slot_alias_roots st (e : Ast.expr) =
+    match slot_record_call e with
+    | Some id ->
+        (match Types.IntMap.find_opt id st.extras.owners with
+         | Some root -> StringSet.singleton root
+         | None -> StringSet.empty)
+    | None ->
+        match e.desc with
+        | Ast.Var _ ->
+            Option.fold ~none:StringSet.empty ~some:(fun id ->
+              let aliases = Option.value ~default:StringSet.empty
+                (Hashtbl.find_opt slot_aliases id) in
+              match Types.IntMap.find_opt id st.extras.owners with
+              | Some root when (Hashtbl.find roots root).leaves = [[], Ast.TypeBool] ->
+                  StringSet.add root aliases
+              | _ -> aliases) (Local_bindings.id_for_expr bindings e)
+        | Ast.Call (_, args) | Ast.StructLit args | Ast.TupleLit args ->
+            List.fold_left (fun roots arg -> StringSet.union roots (slot_alias_roots st arg))
+              StringSet.empty args
+        | Ast.VariantCtor (_, _, inner) -> slot_alias_roots st inner
+        | Ast.AddrOf inner | Ast.Deref inner | Ast.Cast (_, inner)
+        | Ast.Unsafe inner | Ast.Index (inner, _) | Ast.SliceOf (inner, _, _)
+        | Ast.FieldGet (inner, _) -> slot_alias_roots st inner
+        | _ -> StringSet.empty in
+  let note_slot_alias st id rhs =
+    let roots = slot_alias_roots st rhs in
+    if not (StringSet.is_empty roots) then
+      Hashtbl.replace slot_aliases id
+        (StringSet.union roots (Option.value ~default:StringSet.empty
+          (Hashtbl.find_opt slot_aliases id))) in
   let observe_param_return st tag loc =
     if not !in_trial then
       Types.IntMap.iter (fun _ root ->
@@ -992,8 +1032,8 @@ let check
   in
   (* The place a contract names, split into its root and optional bounds:
      `x`, `x[lo..<hi]`, `G[s.index].f`, `G[s.index].f[lo..<hi]`. *)
-  let rec split_target (e : Ast.expr) =
-    match projected_contract_owner e with
+  let rec split_target ?(fields = false) (e : Ast.expr) =
+    match (if fields then slot_contract_owner e else projected_contract_owner e) with
     | Some owner -> Some (`OwnerProjection owner, None)
     | None -> match e.desc with
     | Ast.SliceOf (b, lo, hi) ->
@@ -1023,7 +1063,7 @@ let check
     | _ -> None in
   let ret_is_bool = match Option.map strip fdef.Ast.ret_type with
     | Some Ast.TypeBool -> true | _ -> false in
-  let validate_target loc (e : Ast.expr) ~binders =
+  let validate_target ?(fields = false) loc (e : Ast.expr) ~binders =
     let env x kind =
       let ty = if x = "result" then fdef.Ast.ret_type else
         match List.assoc_opt x binders with
@@ -1035,7 +1075,7 @@ let check
           | _ -> None)
       | _ -> if x = "result" || List.mem_assoc x binders || List.mem_assoc x param_ids
              then Some (Init_pred.atom x) else None in
-    match split_target e with
+    match split_target ~fields e with
     | None ->
         error loc "init(...) names a parameter, `p[lo..<hi]`, or a scratch \
                    slot `G[s.index].f`"
@@ -1059,9 +1099,11 @@ let check
                error loc (Printf.sprintf
                  "initialization contract: '%s' is not `borrow uninit`; use a tracked output parameter to check its initialization clauses" x)
          | `OwnerProjection x ->
-             if not (Option.fold ~none:false ~some:(fun id ->
-               Types.IntMap.mem id entry_owners) (List.assoc_opt x param_ids)) then
-               error loc "initialization projection needs a tracked owner parameter"
+             if not (match List.assoc_opt x owner_parameters with
+               | Some SlotFields -> fields
+               | Some (OwnerBytes _) -> not fields
+               | None -> false) then
+               error loc "initialization projection needs a matching tracked owner parameter"
          | `Global (g, idx, _) ->
              let ok_idx = match idx.desc with
                | Ast.FieldGet ({ desc = Ast.Var s; _ }, _) ->
@@ -1099,6 +1141,10 @@ let check
       | Init_state.PInit e when not c.requires && projected_contract_owner e <> None ->
           error c.cloc "owner storage projections are supported in requires init clauses"
       | Init_state.PInit e -> validate_target c.cloc e ~binders
+      | Init_state.PFields e when slot_contract_owner e <> None ->
+          (match c.requires, c.body with
+           | true, Init_state.CPlain _ -> validate_target ~fields:true c.cloc e ~binders
+           | _ -> error c.cloc "slot field projections are supported in plain requires init_fields clauses")
       | Init_state.PFields e ->
           let rec record_reference t = match strip t with
             | Ast.TypeBorrow t | Ast.TypeBorrowMut t -> record_reference t
@@ -1202,7 +1248,7 @@ let check
         resolve_pred ~strengthen ~owner_view ~arg_view ~index_expr ~env (Init_state.PInit head)
     | Init_state.PInit e | Init_state.PFields e ->
         let endpoint = match p with Init_state.PFields _ -> -2 | _ -> -1 in
-        (match split_target e with
+        (match split_target ~fields:(endpoint = -2) e with
          | None -> [None]
          | Some (target, bounds) ->
              let v = match target with
@@ -1217,7 +1263,12 @@ let check
                     | v when path = [] -> v
                     | Some `Untracked -> Some `Untracked
                     | _ -> None)
-               | `OwnerProjection name -> Option.map (fun v -> `View v) (owner_view name)
+               | `OwnerProjection name ->
+                   Option.bind (owner_view name) (fun v ->
+                     match endpoint, v.len with
+                     | -2, None -> Some (`Whole v.vp)
+                     | -1, Some _ -> Some (`View v)
+                     | _ -> None)
                | `Global (g, idx, path) ->
                    if StringMap.mem g scratch_names then
                      let p = scratch_element g (index_expr idx) in
@@ -1655,7 +1706,10 @@ let check
     | _ -> result
   and expr_inner st (e : Ast.expr) : state =
     let st = match e.desc with
-      | Ast.Assign (lhs, _) -> invalidate_place st lhs
+      | Ast.Assign (lhs, rhs) ->
+          Option.iter (fun id -> note_slot_alias st id rhs)
+            (Local_bindings.id_for_expr bindings lhs);
+          invalidate_place st lhs
       | _ -> st in
     cur_vers := st.vers;
     (match e.desc with
@@ -2118,8 +2172,11 @@ let check
                          | Ast.Unsafe inner | Ast.Index (inner, _)
                          | Ast.SliceOf (inner, _, _) | Ast.FieldGet (inner, _) -> owner_of_arg inner
                          | _ -> None) in
-              let affected = List.filter_map owner_of_arg args in
-              List.fold_left invalidate_owner st affected in
+              let affected = List.fold_left (fun roots arg ->
+                let roots = StringSet.union roots (slot_alias_roots st arg) in
+                Option.fold ~none:roots ~some:(fun root -> StringSet.add root roots)
+                  (owner_of_arg arg)) StringSet.empty args in
+              StringSet.fold (fun root st -> invalidate_owner st root) affected st in
         let st = List.fold_left (fun st (i, arg) ->
           match arg.Ast.desc with
           | Ast.AddrOf target -> invalidate_place st target
@@ -2155,7 +2212,8 @@ let check
           match projected_view st id with
           | None -> (st, gs)
           | Some view ->
-              let fact = (view, (Init_pred.const 0, Init_pred.const projected_size)) in
+              let high = Option.value ~default:(Init_pred.const (-2)) view.len in
+              let fact = (view, (Init_pred.const 0, high)) in
               match outcome with
               | "always" -> (apply_fact st fact, gs)
               | "true" | "false" -> (st, GBool (outcome = "true", [fact]) :: gs)
@@ -2558,6 +2616,9 @@ let check
       | Ast.Let _ | Ast.LetTuple _ | Ast.LetMatch _ ->
           List.fold_left invalidate_selector st (Local_bindings.ids_for_stmt bindings s)
       | _ -> st in
+    (match s.desc, Local_bindings.ids_for_stmt bindings s with
+     | Ast.Let (_, _, _, Some rhs, _), [id] -> note_slot_alias st id rhs
+     | _ -> ());
     let before = !unsafe_uses in
     let r = stmt_inner st s in
     let r = if not linked_contract && Init_link.Values.is_empty (fst r).extras.links then r
@@ -2830,12 +2891,16 @@ let check
                 apply_case st gs case value
             | _ -> st in
           let run () = stmts st (arm_body a) in
-          match a, Local_bindings.id_for_arm bindings s.loc i with
-          | Ast.ArmVariant (vname, case, Some (Ast.PayloadBind (name, false)), _), Some id
-            when Option.fold ~none:false ~some:owner_type (variant_payload vname case) ->
+          let storage = match a with
+            | Ast.ArmVariant (vname, case, Some (Ast.PayloadBind (name, false)), _) ->
+                Option.map (fun storage -> name, storage)
+                  (Option.bind (variant_payload vname case) owner_type)
+            | _ -> None in
+          match storage, Local_bindings.id_for_arm bindings s.loc i with
+          | Some (name, storage), Some id ->
               let root = "owner-local:" ^ string_of_int id in
               Hashtbl.replace roots root
-                { display = name; leaves = [[], Ast.TypeArray (Ast.TypeU8, projected_size)];
+                { display = name; leaves = [[], owner_leaf_type storage];
                   array_root = false; out_param = false };
               let st = with_owners (forget_owner_guards st root)
                 (Types.IntMap.add id root st.extras.owners) in

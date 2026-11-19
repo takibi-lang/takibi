@@ -12498,8 +12498,50 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               | _ -> None)
          | _ -> None)
     | _ -> None in
-  let track_projected_owners = Option.is_some projection in
-  let projected_size = match projection with Some (_, _, _, size) -> size | None -> 0 in
+  let slot_expr (e : Ast.expr) = match e.desc with
+    | Ast.Call ("region_slot_record", [{desc = Ast.Var owner; _}]) -> Some owner
+    | _ -> None in
+  let rec owner_name ty =
+    match Init_writes.strip ty with
+    | Ast.TypeExists (_, _, ty) | Ast.TypeSink ty -> owner_name ty
+    | Ast.TypeIndexed (name, _) -> Some name
+    | _ -> None in
+  let named_slot params name =
+    Option.bind (List.assoc_opt name params) (fun ty -> Option.bind ty owner_name) in
+  let generated_region name (f : Ast.func) =
+    f.Ast.name = name && f.def_loc.pos_fname = Ast.builtin_region_file in
+  let slot_record_keys = StringMap.filter_map (fun key _ ->
+    match init_definition key with
+    | Some (f, _) when generated_region "region_slot_record" f ->
+        (match f.params with
+         | [_, Some (Ast.TypeBorrow ty)] -> owner_name ty
+         | _ -> None)
+    | _ -> None) functions in
+  let requested_slots = List.fold_left (fun names -> function
+    | Ast.FuncDef f ->
+        List.fold_left (fun names (clause : Init_state.clause) ->
+          match clause.requires, clause.body with
+          | true, Init_state.CPlain (Init_state.PFields e) ->
+              (match Option.bind (slot_expr e) (named_slot f.params) with
+               | Some name -> StringSet.add name names
+               | None -> names)
+          | _ -> names) names (Init_state.contracts_of f.def_loc)
+    | _ -> names) StringSet.empty prog in
+  let slot_type =
+    if StringSet.cardinal requested_slots <> 1 then None
+    else
+      let name = StringSet.choose requested_slots in
+      if StringMap.exists (fun _ owner -> owner = name) slot_record_keys then Some name
+      else None in
+  let slot_contract_owner e =
+    match slot_type with Some _ -> slot_expr e | None -> None in
+  let track_projected_owners = Option.is_some projection || Option.is_some slot_type in
+  let slot_builtin_parameter name (f : Ast.func) =
+    if not (generated_region name f) || slot_type = None then None
+    else
+      List.find_map (fun (i, (_, ty)) ->
+        if Option.bind ty owner_name = slot_type then Some i else None)
+        (List.mapi (fun i param -> i, param) f.params) in
   let projected_contract_owner (f : Ast.func) e =
     match projection, projection_expr e with
     | Some (accessor, _, _, size), Some (name, owner, high) when name = accessor ->
@@ -12517,12 +12559,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | _ -> None in
   let explicit_publication (f : Ast.func) =
     List.find_map (fun (clause : Init_state.clause) ->
-      match clause.requires, clause.body with
-      | true, Init_state.CPlain (Init_state.PInit e) ->
-          Option.bind (projected_contract_owner f e) (fun owner ->
-            List.find_map (fun (i, (name, _)) -> if name = owner then Some i else None)
-              (List.mapi (fun i parameter -> i, parameter) f.params))
-      | _ -> None) (Init_state.contracts_of f.def_loc) in
+      let owner = match clause.requires, clause.body with
+        | true, Init_state.CPlain (Init_state.PInit e) -> projected_contract_owner f e
+        | true, Init_state.CPlain (Init_state.PFields e) -> slot_contract_owner e
+        | _ -> None in
+      Option.bind owner (fun owner ->
+        List.find_map (fun (i, (name, _)) -> if name = owner then Some i else None)
+          (List.mapi (fun i parameter -> i, parameter) f.params)))
+      (Init_state.contracts_of f.def_loc) in
   (* A wrapper that immediately forwards a parameter to a checked entry
      has the same requirement on that parameter. Stop at recursive calls. *)
   let rec projected_requirement seen key =
@@ -12530,6 +12574,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     Option.bind (init_definition key) (fun (f, info) ->
       match explicit_publication f with
       | Some i -> Some i
+      | None when Option.is_some (slot_builtin_parameter "region_give" f) ->
+          slot_builtin_parameter "region_give" f
       | None ->
           let call = match f.body with
             | [{desc = Ast.Match (({desc = Ast.Call _; _} as call), _); _}]
@@ -12545,19 +12591,19 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   if bound = Some id then Some i else None)
                   (List.mapi (fun i id -> i, id) info.bindings.param_ids)
             | _ -> None)) in
-  let rec projected_owner_type ty =
-      match Init_writes.strip ty with
-      | Ast.TypeExists (_, _, ty) -> projected_owner_type ty
-      | Ast.TypeIndexed (name, _) ->
-          (match projection with Some (_, _, owner_type, _) -> name = owner_type | None -> false)
-      | _ -> false in
-  let rec parameter_is_owner ty =
-    match Init_writes.strip ty with
-    | Ast.TypeBorrow ty | Ast.TypeBorrowMut ty | Ast.TypeSink ty -> parameter_is_owner ty
-    | ty -> projected_owner_type ty in
+  let projected_owner_type ty =
+    match owner_name ty with
+    | Some name when slot_type = Some name -> Some Init_flow.SlotFields
+    | Some name ->
+        (match projection with
+         | Some (_, _, owner_type, size) when name = owner_type ->
+             Some (Init_flow.OwnerBytes size)
+         | _ -> None)
+    | _ -> None in
   let owner_params (f : Ast.func) =
     List.filter_map (fun (name, ty) ->
-      if Option.fold ~none:false ~some:parameter_is_owner ty then Some name else None) f.params in
+      Option.map (fun storage -> name, storage) (Option.bind ty projected_owner_type))
+      f.params in
   let projected_init_requirements =
     if not track_projected_owners then StringMap.empty else
     StringMap.filter_map (fun key _ ->
@@ -12584,9 +12630,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       let track = match !owner_scope with
         | None -> true
         | Some scope -> StringSet.mem key scope in
-      if track || StringMap.mem key projected_init_requirements then owner_params fdef
-      else [])
-    ~projected_size
+      let params = owner_params fdef in
+      if track || StringMap.mem key projected_init_requirements then params
+      else List.filter (fun (_, storage) -> storage = Init_flow.SlotFields) params)
     ~initialized_owner_parameters:(if not track_projected_owners || explicit_publication fdef <> None then [] else
       match Option.bind (projected_requirement StringSet.empty (overload_key fdef.name fdef.params))
           (List.nth_opt fdef.params) with
@@ -12595,17 +12641,27 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     ~note_owner_return:(fun parameter tag _ ready ->
       if !discovering_owner_facts then owner_returns := (parameter, tag, ready) :: !owner_returns)
     ~projected_contract_owner:(projected_contract_owner fdef)
+    ~slot_contract_owner
+    ~slot_record_call:(fun call ->
+      match slot_type, init_call_target call, call.Ast.desc with
+      | Some name, Some key, Ast.Call (_, [owner])
+        when StringMap.find_opt key slot_record_keys = Some name ->
+          Local_bindings.id_for_expr finfo.bindings owner
+      | _ -> None)
     ~owner_call_facts:(fun call ->
       match init_call_target call, call.Ast.desc with
       | Some key, Ast.Call (_, args) ->
-          let summaries = Option.value ~default:[] (StringMap.find_opt key !owner_summaries) in
+          let summaries = match Option.bind (init_definition key)
+              (fun (f, _) -> slot_builtin_parameter "region_slot_zero" f) with
+            | Some i -> [i, "always"]
+            | None -> Option.value ~default:[] (StringMap.find_opt key !owner_summaries) in
           List.filter_map (fun (i, outcome) ->
             Option.bind (List.nth_opt args i) (fun owner ->
               Option.map (fun id -> id, outcome) (Local_bindings.id_for_expr finfo.bindings owner)))
             summaries
       | _ -> [])
     ~owner_view_call:(owner_view_call finfo)
-    ~owner_type:(fun ty -> track_projected_owners && projected_owner_type ty)
+    ~owner_type:projected_owner_type
     ~inferred_owner_requirement:(fun call ->
       match init_call_target call, call.Ast.desc with
       | Some key, Ast.Call (_, args) ->
