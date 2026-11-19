@@ -5684,10 +5684,41 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         | TypeSingleton (t, _) | TypeRefined (_, _, t) -> strip t
         | t -> t in
       (match strip dt with
-       | TypeSlice (elem_ty, _, _) ->
+       | TypeSlice (elem_ty, min_len, access) ->
            let usz = usize_lltype () in
-           let el = ltype_of_ast elem_ty in
-           let dptr = slice_ptr dv and n = slice_len dv in
+           let dptr = slice_ptr dv in
+           (* Recover the exact length from the emitted slice, never from
+              a source name or the type's lower bound alone. A named bound
+              can still be a load of an initialized LLVM constant global
+              before optimization. A shadowing local is a different value. *)
+           let constant_bound value =
+             match classify_value value with
+             | ValueKind.Instruction Opcode.Load when not (is_volatile value) ->
+                 let source = operand value 0 in
+                 if classify_value source = ValueKind.GlobalVariable &&
+                    is_global_constant source then
+                   Option.bind (global_initializer source) int64_of_const
+                 else None
+             | _ -> int64_of_const value in
+           let exact_length value =
+             match classify_value value with
+             | ValueKind.Instruction Opcode.Sub ->
+                 (match constant_bound (operand value 0), constant_bound (operand value 1) with
+                  | Some hi, Some lo when lo >= 0L && hi >= lo -> Some (Int64.sub hi lo)
+                  | _ -> None)
+             | _ -> constant_bound value in
+           let words =
+             match elem_ty, access, d_e.desc, classify_value dv with
+             | TypeU8, SliceWritable, SliceOf _, ValueKind.Instruction Opcode.InsertValue
+               when !unsafe_depth = 0 &&
+                    starts_with (target_triple !the_module) "aarch64" &&
+                    min_len > 0 && min_len mod 8 = 0 && indices dv = [|1|] &&
+                    exact_length (operand dv 1) = Some (Int64.of_int min_len) ->
+                 Some (min_len / 8)
+             | _ -> None in
+           let el, n = match words with
+             | Some count -> i64_type context, const_int usz count
+             | None -> ltype_of_ast elem_ty, slice_len dv in
            let cur_f   = block_parent (insertion_block builder) in
            let pre_bb  = insertion_block builder in
            let cond_bb = append_block context "zf_cond" cur_f in
@@ -5700,7 +5731,10 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            ignore (build_cond_br cmp body_bb exit_bb builder);
            position_at_end body_bb builder;
            let dp = build_gep el dptr [| i_phi |] "zf_dp" builder in
-           ignore (build_store (const_null el) dp builder);
+           let zero_store = build_store (const_null el) dp builder in
+           (* Slicing makes no new alignment promise. The backend can
+              split the store in the existing MMU-off strict-align closure. *)
+           if Option.is_some words then set_alignment 1 zero_store;
            let i_next = build_add i_phi (const_int usz 1) "zf_next" builder in
            add_incoming (i_next, insertion_block builder) i_phi;
            ignore (build_br cond_bb builder);

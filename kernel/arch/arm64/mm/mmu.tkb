@@ -88,7 +88,7 @@ fn mmu_user_l3_physical(l2_physical: usize, l2_index: usize) -> usize {
 // These operations only construct and dismantle resolved physical links.
 fn mmu_user_l3_install(l2_physical: usize, l2_index: usize,
                        l3_physical: usize) {
-    mmu_table_clear(l3_physical);
+    // The caller has checked full initialization of this L3 page.
     mmu_table_entry_write(l2_physical, l2_index, l3_physical | 3);
     dsb_ishst();
 }
@@ -249,8 +249,8 @@ fn mmu_init_kernel_identity_tables() {
 
 // A reused physical page contains arbitrary old page-table contents, unlike
 // the old growable pools' zero-on-grow pages. Clear the fixed L1/L2 backing
-// before publishing the root; lazily allocated L3 pages are cleared by
-// mmu_user_l3_install before their L2 descriptor becomes visible.
+// before publishing the root. Lazily allocated L3 pages are initialized
+// through their page owner before the L2 descriptor is written.
 fn mmu_init_root(l1_physical: usize, l2_physical: usize) {
     mmu_table_clear(l1_physical);
     mmu_table_clear(l2_physical);

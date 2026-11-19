@@ -1114,6 +1114,15 @@ fn address_space_l3_physical_for_index(root: AddressSpaceRoot, index: usize) -> 
                                                 index / USER_L3_PAGE_COUNT);
 }
 
+// Derive the physical descriptor from the same live, initialized owner.
+private inline fn address_space_publish_l3(l2_physical: usize, branch: usize,
+                                           l3: borrow PageOwner[page]) -> usize !{unsafe}
+        requires init(page_bytes(l3)[0..<PAGE_SIZE]) {
+    let physical: usize = page_physical_address(l3);
+    mmu_user_l3_install(l2_physical, branch, physical);
+    return physical;
+}
+
 // This function is intentionally the only owner of lazy L3-table
 // allocation. A caller keeps its PageOwner until Written is returned, so an
 // L3-allocation failure cannot silently discard a mapped user page.
@@ -1141,8 +1150,9 @@ fn address_space_pte_write(root: AddressSpaceRoot, index: usize, value: usize)
                 return AddressSpacePteWriteResult::OutOfMemory;
             }
             PageAllocResult::Allocated(l3) => {
-                l3_physical = page_physical_address(l3);
-                mmu_user_l3_install(l2_physical, branch, l3_physical);
+                let bytes = page_bytes(l3);
+                zero_fill(bytes[0..<PAGE_SIZE]);
+                l3_physical = address_space_publish_l3(l2_physical, branch, l3);
                 page_owner_transfer_index(l3);
             }
         }

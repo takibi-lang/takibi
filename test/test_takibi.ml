@@ -12904,6 +12904,12 @@ fn use745(held: RegionHeld(Rec745)) -> usize !{unsafe} {
                 release746(o);
             }
 |})));
+  Alcotest.test_case "owner publication: exact zero_fill initializes the current owner" `Quick
+    (fun () -> ignore (infer_regions (owner_publication_1513 {|
+            let bytes = bytes746(o);
+            zero_fill(bytes[0..<64]);
+            publish746(o);
+|})));
   Alcotest.test_case "owner publication: refuse partial initialization" `Quick
     (expect_region_error "required initialized by 'publish746'" (owner_publication_1513 {|
             let bytes = bytes746(o);
@@ -17494,6 +17500,34 @@ let codegen_tests = [
          (contains_substring ir "@_TK_codegen_overload__i32");
        Alcotest.(check bool) "calls u32 overload" true
          (contains_substring ir "@_TK_codegen_overload__u32"));
+
+  Alcotest.test_case "zero_fill widens exact AArch64 byte subslices only" `Quick
+    (fun () ->
+       ignore (Llvm_gen.setup_target ~triple:"aarch64-none-elf" ());
+       ignore (gen_codegen {|
+         const ZF_END: usize = 33;
+         fn fixed(dst: [u8; 64..]) { zero_fill(dst[1..<ZF_END]); }
+         fn tail(dst: [u8; 64..]) { zero_fill(dst[1..<32]); }
+         fn dynamic(dst: [u8; 64..], n: {1..<64 as usize}) { zero_fill(dst[0..<n]); }
+         let ZF_SHADOW: usize = 33;
+         fn shadow(dst: [u8; 64..], ZF_SHADOW: {1..<64 as usize}) {
+           zero_fill(dst[0..<ZF_SHADOW]);
+         }
+       |});
+       let ir name =
+         match Hashtbl.find_opt Llvm_gen.functions name with
+         | Some (_, fn) -> Llvm.string_of_llvalue fn
+         | None -> Alcotest.failf "missing zero_fill function %s" name in
+       let fixed = ir "fixed" in
+       Alcotest.(check bool) fixed true
+         (contains_substring fixed "store i64 0" &&
+          contains_substring fixed "align 1" &&
+          contains_substring fixed ", 4");
+       List.iter (fun name ->
+         let body = ir name in
+         Alcotest.(check bool) name true
+           (contains_substring body "store i8 0" &&
+            not (contains_substring body "store i64 0"))) ["tail"; "dynamic"; "shadow"]);
 
   Alcotest.test_case
     "offsetof uses the target DataLayout for normal and packed structs"
