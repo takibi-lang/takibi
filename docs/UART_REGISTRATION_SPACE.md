@@ -1,13 +1,13 @@
 # UART callback registration space review
 
 Measured the normal linked kernels with and without guarded registration on
-the 2026-11-18 main baseline, ddf96089. The existing native PL011 FIFO fixture
+the 2026-11-19 main baseline, 8f1dbc934. The existing native PL011 FIFO fixture
 exercises the real registration code, including replacement after BootPhase,
 calling a snapshot after replacement, and registering from inside a callback.
 
 | Boundary | QEMU baseline to candidate | RPi5 baseline to candidate |
 | --- | --- | --- |
-| Text (llvm-size) | 827848 to 828464 B (+616) | 4221044 to 4221628 B (+584) |
+| Text (llvm-size) | 828148 to 828764 B (+616) | 4221360 to 4221944 B (+584) |
 | Data | 4608 B unchanged | 5584 B unchanged |
 | BSS | 1310720 B unchanged | 1916928 B unchanged |
 | uart_rx_handler symbol | 8 to 16 B | 8 to 16 B |
@@ -15,7 +15,10 @@ calling a snapshot after replacement, and registering from inside a callback.
 
 The callback payload is one 8-byte function pointer. The IRQ-safe cell adds
 an 8-byte lock word, absorbed by padding in the linked images. Registration
-does not allocate or retain pages or change pool sizes. The host test measures
+does not allocate or retain pages or change pool sizes. Normal linked
+objects on both targets report 32-byte delivery, 48-byte snapshot and
+setter, and 16-byte boot-reset frames. These are individual frames and
+exclude nested lock operations and callback bodies. The host test measures
 sequential behavior. IRQ scheduling, timing and cache behavior are outside
 its scope.
 
