@@ -74,3 +74,9 @@ the observed RPi5-target compiler-time spread to the change alone.
 | --- | ---: | ---: | ---: | ---: |
 | CPU seconds | 12.25 | 12.73 | 18.39 | 20.86 |
 | Peak RSS (KiB) | 545872 | 545512 | 598964 | 599488 |
+
+On the release base d78156045, the linked normal text sizes change from
+830704 to 830712 bytes on QEMU and 4224028 to 4224052 bytes on RPi5.
+Data, BSS, usable RAM starts, and the checked allocator capacities are
+unchanged. The compilation process measurements above use the original
+aae4cc731 comparison.
