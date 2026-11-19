@@ -2,11 +2,11 @@
   "date": "2026-11-19",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "2da7f900dbfedd40408ac4ec98e6c71ffd6e5c99d6088ae64a72fa70c2804b89",
-  "workload": "Normal linked QEMU and RPi5 kernels for the counted retransmit guard, compared with aae4cc731. Debug and static-frame evidence is retained from the separately measured fc86f604c candidate.",
+  "source_sha256": "d2512a0c2a86208cc55b817f2f002235e0b871f519a63ebdcc7a089e40fc1997",
+  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto d7815604: this branch's review, rebound to the merged sources (upstream's record was 2026-11-19 milestone/measured). Normal linked QEMU and RPi5 kernels with lazy user L3 table allocation, clearing, publication and teardown, compared with aae4cc731.",
   "evidence": [
-    "docs/TCP_RETX_GUARD_SPACE.md"
+    "docs/MMU_L3_PUBLICATION.md"
   ],
-  "assessment": "On the release baseline, normal text increases 32 bytes on both targets. Data, BSS, usable RAM starts and allocator expectations are unchanged. Earlier normal/debug measurements record guard and frame sizes. Physical contention and whole-chain stack use were not measured.",
-  "next_trigger": "Measure again when the retransmit guard, lock backend, call path, or reserved image span changes."
+  "assessment": "Adopt the owner-checked publication and typed clear. Linked text increases by 8 bytes on QEMU and 24 bytes on RPi5, with data, BSS, usable RAM starts and allocator expectations unchanged. Normal AArch64 clear emits 512 eight-byte stores without a per-entry helper call. The parent descriptor store and subsequent barrier remain.",
+  "next_trigger": "Measure when the table storage layout, clear loop or dynamic page-table allocation and publication workload changes."
 }
