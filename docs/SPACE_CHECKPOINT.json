@@ -2,13 +2,14 @@
   "date": "2026-11-19",
   "event": "incremental",
   "decision": "reuse",
-  "source_sha256": "e964593a003addb4990b963168c5eed696afe0ae30a36fcbdcff8a7ed5661545",
+  "source_sha256": "a5cf5a243fd8d61f39af3cc737ee6e64914d71ebf5cf18b739380bf62a6105a2",
   "workload": "Existing boot ext2 read/write workload with the existing fixed virtio DMA buffers and the storage-view response-length boundary controls.",
   "evidence": [
     "docs/EXT2_BITMAP_INIT_REVIEW.md",
     "kernel/models/README.md",
-    "kernel/tests/qemu/views/storage.expected"
+    "kernel/tests/qemu/views/storage.expected",
+    "kernel/tests/qemu/dma/virtio_blk_fixture.tkb"
   ],
-  "assessment": "Reuse the allocation evidence: reading the existing used-ring entry and rejecting a short response does not change DMA buffer sizes, allocator calls, or retained pages. The completion length is a scalar. The allcheck model job cap changes host-side scheduling only.",
+  "assessment": "Reuse the allocation evidence: reading the existing used-ring entry and rejecting a short response does not change DMA buffer sizes, allocator calls, or retained pages. The completion length is a scalar. The allcheck model job cap changes host-side scheduling only. The isolated QEMU DMA fixture now publishes complete used entries and exercises a short completion. It is not linked into the production kernels and changes no production allocation.",
   "next_trigger": "Measure anew when the block receive allocation, queue depth, or extent-sharing policy changes."
 }
