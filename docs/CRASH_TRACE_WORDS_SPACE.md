@@ -26,3 +26,25 @@ The reset runs in the existing boot fixture sequence, serialized with
 normal writers. No repeated snapshot or retry is added. The measurements
 cover fixed linked space and static frames. Trace-on/off elapsed costs
 still require measurements on Raspberry Pi 5.
+
+## RPi5 trace cost
+
+On the same board and shell ELF (SHA-256
+`955c9dc58c1201b1cac282ee2821306a1ef47e0b80431b42265fafb134537cd0`),
+four fresh runs used the maintained 100-round churn workload without
+trace filters. DDB confirmed live state before and after each run.
+The elapsed host monotonic interval spans the shell command through
+its completion verdict and excludes boot and debugger setup.
+
+| Run | Trace | Seconds | Latest sequence before / after |
+| --- | --- | ---: | ---: |
+| 1 | Off | 11.221 | 0 / 0 |
+| 2 | On | 11.267 | 0 / 8757 |
+| 3 | On | 11.317 | 0 / 8609 |
+| 4 | Off | 11.211 | 0 / 0 |
+
+The matching on arms took about 46 and 107 ms longer, respectively
+(0.41% and 0.95%). All 400 rounds returned the expected verdict.
+Two pairs estimate the effect on this complete workload. The timing
+includes shell and serial delivery and does not isolate per-event CPU
+cycles. The sequence is a snapshot witness, not an event count.
