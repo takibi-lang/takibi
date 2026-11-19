@@ -751,3 +751,5 @@ condition below applies, and reports the land afterwards.
 - 2026-11-19 #1159: prototype a typed FD probe reference while retaining real retain/release operations. Test a narrow PID 1 metadata lifetime contract and measure stack usage, retaining permanent storage if the frame does not fit. Establish the diagnostic ring ordering locally before considering a shared builtin. Use the existing guard for protocol trace report state and row copies, answer concurrent open/close with Busy, and print outside the guard. For the freelist fixture, keep intentional race controls and require test-scoped quiescence for setup and cleanup. [active] #1159
 
 - 2026-11-19 #637 saved_sp: first test retaining the storage format while tying the save/restore API to the process generation and stack owner. Include cross-process and old-generation rejection controls. [active] #637
+
+- 2026-11-19 #1513: use one requires init(page_bytes(page)[0..<PAGE_SIZE]) clause on the common address_space_map_page entry. Interpret the accessor as a body-checked owner projection without runtime evaluation. Infer allocation, zeroing and copy facts in the same ownership interval. [active] #1513
