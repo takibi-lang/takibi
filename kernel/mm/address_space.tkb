@@ -1205,7 +1205,7 @@ fn address_space_pte_cow_value(pte: usize) -> usize {
 // Installs the first mapping of a freshly allocated page. PageOwner stays
 // linear until the fallible lazy-L3 allocation has succeeded; after that
 // point page.tkb records one runtime mapping reference for the PTE.
-fn address_space_map_page(root: AddressSpaceRoot, index: usize,
+inline fn address_space_map_page(root: AddressSpaceRoot, index: usize,
                           page: sink PageOwner[page_id],
                           flags: usize) -> AddressSpacePteWriteResult {
     let slot: usize = root.slot;
@@ -1263,19 +1263,10 @@ fn address_space_replace_with_copy(root: AddressSpaceRoot, index: usize,
                 page_free(page);
                 return false;
             }
-            let new_physical: usize = page_physical_address(page);
-            match address_space_pte_write(
-                    root, index, new_physical | USER_RW_XN_FLAGS) {
-                AddressSpacePteWriteResult::Invalid => {
-                    page_free(page);
-                    return false;
-                }
-                AddressSpacePteWriteResult::OutOfMemory => {
-                    page_free(page);
-                    return false;
-                }
+            match address_space_map_page(root, index, page, USER_RW_XN_FLAGS) {
+                AddressSpacePteWriteResult::Invalid => { return false; }
+                AddressSpacePteWriteResult::OutOfMemory => { return false; }
                 AddressSpacePteWriteResult::Written => {
-                    page_mapping_install(page);
                     page_mapping_release_physical(old_physical);
                     return true;
                 }
@@ -1315,18 +1306,10 @@ fn address_space_replace_with_zero(root: AddressSpaceRoot, index: usize) -> bool
         PageAllocResult::Allocated(page) => {
             let bytes = page_bytes(page);
             for i: usize in 0..<4096 { bytes[i] = 0; }
-            let new_physical: usize = page_physical_address(page);
-            match address_space_pte_write(root, index, new_physical | flags) {
-                AddressSpacePteWriteResult::Invalid => {
-                    page_free(page);
-                    return false;
-                }
-                AddressSpacePteWriteResult::OutOfMemory => {
-                    page_free(page);
-                    return false;
-                }
+            match address_space_map_page(root, index, page, flags) {
+                AddressSpacePteWriteResult::Invalid => { return false; }
+                AddressSpacePteWriteResult::OutOfMemory => { return false; }
                 AddressSpacePteWriteResult::Written => {
-                    page_mapping_install(page);
                     page_mapping_release_physical(old_pte & USER_PAGE_PHYS_MASK);
                     return true;
                 }
