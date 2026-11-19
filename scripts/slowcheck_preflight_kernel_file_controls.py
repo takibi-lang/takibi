@@ -119,7 +119,7 @@ def main() -> int:
         (root / "kernel/kernel/planted.tkb").write_text(
             NEW_TKB + "\nfn planted_takibi_target() {\n}\n")
         status, output = preflight(root, "kernel/arch/arm64/kernel/planted.S")
-        expect(output, status, 1, ["MISSING  check_kernel_asm_entries.py"],
+        expect(output, status, 1, ["MISSING  buildcheck_kernel_asm_entries.py"],
                "a new assembly file")
 
         (root / "scripts/run_kernel_planted_qemutest.sh").write_text(NEW_RUNNER)

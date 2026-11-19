@@ -361,7 +361,7 @@ LINUX_USER_DIR           := linux_user
 LINUX_UNUSED_CHECK       := --external-entry main
 # GitHub issue #540: a function nothing reads is a build error. Assembly
 # reaches KERNEL_ASM_ENTRIES by name, which the compiler cannot see;
-# scripts/check_kernel_asm_entries.py keeps that list equal to the set the
+# scripts/buildcheck_kernel_asm_entries.py keeps that list equal to the set the
 # kernel .S files name. GDB calls KERNEL_DEBUGGER_ENTRIES by name: the oops
 # lane's trace report, and kernel/MEMORY_MAP.md's page-owner lookup.
 #
@@ -2387,6 +2387,7 @@ $(FRAME_API_STAMP): $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_DIR)/RA
 
 .PHONY: _kernelbuild
 _kernelbuild: _kernelbuild-rpi5 _kernelbuild-qemu _kernelbuild-dma-qemu _kernelbuild-invariant-qemu _kernel-memory-map-check $(MODEL_MAP_STAMP) $(GLOBAL_PROTECTION_STAMP) $(FRAME_API_STAMP)
+	python3 scripts/buildcheck_kernel_asm_entries.py $(KERNEL_QEMU_MAIN_O).facts/source-signatures.tsv $(KERNEL_RPI5_MAIN_O).facts/source-signatures.tsv
 
 kernelbuild: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild

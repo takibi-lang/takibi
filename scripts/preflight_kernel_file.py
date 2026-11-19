@@ -35,12 +35,12 @@ from measure_trusted_base import read_raw_deref_budget  # noqa: E402
 from source_scan import function_header
 
 # Tree checks that name a kernel source file, a function in one, or a runner
-# when it is missing from their registry. Each is a langcheck member, so each
-# runs in well under a second.
+# when it is missing from their registry. The assembly check runs here
+# in source-only mode so preflight works before the kernel is built.
 TKB_CHECKS = ("check_kernel_lib_limitations_header.py",
              "check_platform_file_parity.py",
              "check_wall_clock_bounds.py")
-ASM_CHECKS = ("check_kernel_asm_entries.py",)
+ASM_CHECKS = ("buildcheck_kernel_asm_entries.py",)
 RUNNER_CHECKS = ("check_lane_artifact_root.py", "check_qemu_lane_ports.py")
 CHECKS_BY_KIND = dict(tkb=TKB_CHECKS, asm=ASM_CHECKS, runner=RUNNER_CHECKS)
 
