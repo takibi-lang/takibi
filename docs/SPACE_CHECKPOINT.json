@@ -2,11 +2,11 @@
   "date": "2026-11-19",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "ae61db1b9208982ebe7712c2b8bbccdc1e71619b7559306dce4014c112c94750",
-  "workload": "Normal linked QEMU and RPi5 kernels and the existing EL0 signal boundary fixture, compared with 6e07bd000.",
+  "source_sha256": "9554b88560565e094c9eb9231889060a1e972b3a1f392257bf648856c7a7addc",
+  "workload": "Normal QEMU and RPi5 production objects and linked ELFs for assembly-entry inventory migration, compared with exact base 767e19d51.",
   "evidence": [
-    "docs/SIGNAL_FRAME_FIXTURE_SPACE.md"
+    "docs/ASM_ENTRY_FACTS_SPACE.md"
   ],
-  "assessment": "QEMU text is unchanged. Pi text grows 336 bytes with the embedded test image. Data, BSS and usable RAM boundaries are unchanged. Mode zero can grow its ordinary stack earlier within the existing delivery extent.",
-  "next_trigger": "Measure again when the signal fixture stack extent, embedded image workload or linked reservation boundary changes."
+  "assessment": "Both normal objects and linked ELFs are byte-identical. Usable RAM boundaries and allocator expectations stay fixed.",
+  "next_trigger": "Remeasure if kernel code, link inputs, or the entry inventory changes."
 }
