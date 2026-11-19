@@ -2,11 +2,11 @@
   "date": "2026-11-19",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "b0117df6abc2e0716f63bf3b1887aeaeb6b173b566ea2c4bbd543c7364960796",
-  "workload": "Normal linked QEMU and RPi5 kernels with guarded UART registration, compared with dc4e4a927. The native PL011 fixture exercises sequential replacement and callback reentry.",
+  "source_sha256": "4595fbce37c6b39cb6fe9c7733b87afbfa0d55c3a1a76095d2b18a3d5538d708",
+  "workload": "Normal linked QEMU and RPi5 kernels with the existing Pipe allocation, full slot initialization and handle publication.",
   "evidence": [
-    "docs/UART_REGISTRATION_SPACE.md"
+    "docs/PIPE_SLOT_PUBLICATION.md"
   ],
-  "assessment": "The registration symbol grows by 8 bytes. Text grows by 616 bytes on QEMU and 584 bytes on RPi5. Linked data, BSS and usable_ram_start stay fixed. Registration adds no allocation or pool use.",
-  "next_trigger": "Review the next completed stage or a change to the registration lock backend, callback resource lifetime, allocation workload, or reserved image span."
+  "assessment": "Text decreases by 4 bytes on both targets. Data, BSS, allocator capacities and image reservation remain unchanged. The existing writes, slot layout and allocation calls are preserved.",
+  "next_trigger": "Measure when Pipe slot capacity, layout, initialization, or publication workloads change."
 }
