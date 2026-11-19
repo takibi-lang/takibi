@@ -2,11 +2,11 @@
   "date": "2026-11-19",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "4553ee6e192edeb8e8124fe68df0d122c9b6be97fa5841d1d364073707a17bc7",
-  "workload": "Normal QEMU and RPi5 linked images and event-writer frames for the existing busy-pair profile timeline, against 5df5e6ee6.",
+  "source_sha256": "7f19bf6ba046bfb9f5defc4035224677c225ef086912b3bb4b7694a1b9e26e6f",
+  "workload": "Both normal linked kernels, ordered crash trace record/copy/reset frames and retained storage, compared with 16a659b5e.",
   "evidence": [
-    "docs/PROFILE_TIMELINE_SPACE.md"
+    "docs/CRASH_TRACE_WORDS_SPACE.md"
   ],
-  "assessment": "The capacity, data, BSS and usable RAM boundaries stay fixed. Local counted authority increases active writer code and static frame cost.",
-  "next_trigger": "Remeasure image and writer frames when timeline storage, event format or the active CPU-authority path changes."
+  "assessment": "Text adds 208 bytes on QEMU and 192 on RPi5. The added generation uses eight bytes. BSS, capacity, usable RAM and static trace frames are unchanged. Physical trace-on and trace-off costs remain unmeasured.",
+  "next_trigger": "Remeasure when trace event geometry, ordering, writer cost or the linked reservation boundary changes."
 }

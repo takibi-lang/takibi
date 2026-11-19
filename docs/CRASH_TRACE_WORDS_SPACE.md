@@ -1,13 +1,13 @@
 # Crash trace word protection space review
 
-Normal linked kernels compared with ddf96089. The trace keeps the same
+Normal linked kernels compared with 16a659b5e. The trace keeps the same
 per-CPU slots, record fields, sequence order and caller-visible output.
 
 | Boundary | QEMU baseline to candidate | RPi5 baseline to candidate |
 | --- | --- | --- |
-| Text | 827848 to 828056 B | 4221044 to 4221236 B |
-| Data | 4608 to 4616 B | 5584 to 5592 B |
-| BSS | 1310720 B unchanged | 1916928 B unchanged |
+| Text | 832044 to 832252 B | 4225608 to 4225800 B |
+| Data | 4616 to 4624 B | 5592 to 5600 B |
+| BSS | 1310720 B unchanged | 1908736 B unchanged |
 | Trace buffer and next counters | 6144 and 32 B unchanged | 6144 and 32 B unchanged |
 | Reset generation | adds 8 B | adds 8 B |
 | usable_ram_start | 0x40210000 unchanged | 0x7e0000 unchanged |
