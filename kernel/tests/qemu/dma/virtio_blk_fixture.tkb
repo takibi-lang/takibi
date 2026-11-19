@@ -27,20 +27,34 @@ fn dma_fixture_register_address(word: {0..<127 as usize}) -> usize {
     return low | (high << 32);
 }
 
+fn dma_fixture_publish_used(used: *io VirtqUsedRing, index: VirtioRingIndex,
+                            written: u32) !{unsafe} {
+    let slot: {0..<8 as usize} = ((index as u16) as usize) % 8;
+    used.ring[slot].id = 0;
+    used.ring[slot].len = written;
+    dma_publish();
+    used.idx = virtio_ring_index_next(index);
+}
+
 // This simulates the device side only, including status publication before
 // used.idx. It never mints, finishes, or exchanges DMA authority.
 fn dma_fixture_notify() !{unsafe} {
     dma_fixture_submissions = dma_fixture_submissions + 1;
-    if (dma_fixture_mode == 0 || dma_fixture_mode == 3) {
+    if (dma_fixture_mode == 0 || dma_fixture_mode == 3 || dma_fixture_mode == 4) {
         // Like a device, find the rings from the queue address registers.
         let descs: *VirtioBlkDesc = unsafe {
             dma_fixture_register_address(0x80 / 4) as *VirtioBlkDesc };
         let status: *io u8 = unsafe { descs[2].addr as *io u8 };
-        if (dma_fixture_mode == 0) { *status = 1; }
-        else { *status = 0; }
+        let mut response: u8 = 0;
+        if (dma_fixture_mode == 0) { response = 1; }
+        *status = response;
         let used_address: usize = dma_fixture_register_address(0xa0 / 4);
         let used: *io VirtqUsedRing = unsafe { used_address as *io VirtqUsedRing };
-        used.idx = virtio_ring_index_next(used.idx);
+        // The write request has one device-writable byte. Mode 4 plants
+        // a short report despite the successful status in that byte.
+        let mut written: u32 = 1;
+        if (dma_fixture_mode == 4) { written = 0; }
+        dma_fixture_publish_used(used, used.idx, written);
     }
 }
 
@@ -126,9 +140,7 @@ fn dma_fixture_net_contention() !{unsafe} {
     let guard = block_device_take_unaccounted();
     let address: usize = atomic_word_load(&virtio_net_used_addr[0]);
     let used: *io VirtqUsedRing = unsafe { address as *io VirtqUsedRing };
-    used.ring[0].id = 0;
-    used.ring[0].len = 74;
-    used.idx = virtio_ring_index_next(before.rx_used_seen);
+    dma_fixture_publish_used(used, before.rx_used_seen, 74);
     dma_publish();
     atomic_word_store(&virtio_rx_irq_flag, 1);
     let ready = match net_rx_acquire(ready) {
@@ -188,6 +200,12 @@ fn dma_fixture_run() !{unsafe} {
     dma_fixture_authority(true);
     dma_fixture_require(virtio_blk_completion_count() == 1 &&
                         virtio_blk_timeout_count() == 0, "error completion evidence");
+    dma_fixture_mode = 4;
+    dma_fixture_require(virtio_blk_write_block(guard, 0, dma_fixture_buffer[0..<1024]) == false,
+                        "short completion accepted");
+    dma_fixture_authority(true);
+    dma_fixture_require(virtio_blk_completion_count() == 2 &&
+                        virtio_blk_timeout_count() == 0, "short completion evidence");
     dma_fixture_print("PASS dma: completed error returns all CPU authority\n");
 
     dma_fixture_mode = 1;
@@ -200,7 +218,7 @@ fn dma_fixture_run() !{unsafe} {
     dma_fixture_mode = 3;
     dma_fixture_require(virtio_blk_write_block(guard, 0, dma_fixture_buffer[0..<1024]), "reset reuse");
     dma_fixture_authority(true);
-    dma_fixture_require(virtio_blk_completion_count() == 2, "reuse completion");
+    dma_fixture_require(virtio_blk_completion_count() == 3, "reuse completion");
     dma_fixture_print("PASS dma: timeout and confirmed reset permit reuse\n");
 
     dma_fixture_mode = 2;

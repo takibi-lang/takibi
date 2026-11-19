@@ -64,9 +64,9 @@ def main():
     if control == "error":
         replace_once(mint, "    virtio_blk_request_settle();\n"
                      "    virtio_blk_data_settle();\n"
-                     "    return VirtioBlkReceiveUsed::Observed;",
+                     "    return VirtioBlkReceiveUsed::Observed(written);",
                      "    virtio_blk_data_settle();\n"
-                     "    return VirtioBlkReceiveUsed::Observed;")
+                     "    return VirtioBlkReceiveUsed::Observed(written);")
     elif control == "reset":
         replace_once(mint, "    virtio_blk_request_settle();\n"
                      "    virtio_blk_data_settle();\n    return true;",
