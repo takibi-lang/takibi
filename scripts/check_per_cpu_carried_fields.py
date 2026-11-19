@@ -107,6 +107,11 @@ def scan_file(code, path=None):
     starts = function_starts(body)
     start_offsets = tuple(start for start, _, _ in starts)
     blocks = blocks_of(body)
+    # The compiler requires a bare MachineStopped parameter before the place.
+    # Index its destination offsets once. The value operand remains a read.
+    stopped_destinations = {
+        match.end() for match in re.finditer(r"\bstopped_store\s*\(\s*\w+\s*,\s*", body)
+    }
     for store, element in stores.items():
         shape = re.compile(
             # Skip non-candidates before entering the optional address prefix.
@@ -138,9 +143,12 @@ def scan_file(code, path=None):
             if re.search(r"\breturn\s+$", body[max(0, match.start() - 16):match.start()]):
                 entry[3].add(function)
             assign = match.group(4)
-            if assign or borrow_mode == 'write':
+            stopped_destination = match.start() in stopped_destinations
+            if assign or stopped_destination or borrow_mode == 'write':
                 entry[0].add(function)
-            if borrow_mode == 'read' or (borrow_mode is None and (not assign or assign.strip() != "=")):
+            if borrow_mode == 'read' or (borrow_mode is None and
+                                         not stopped_destination and
+                                         (not assign or assign.strip() != "=")):
                 entry[1].add(function)
     return frozen_scan(fields, uses, problems)
 
@@ -238,7 +246,13 @@ def controls():
         sys.exit("ERROR per-cpu-carried-fields: control: a comment was refused")
     split = source.replace("g[c].x = 1; } }",
                            "g[c].x = 1; } preempt_off (c) { g[c].x = 2; } }")
+    stopped = source + ("fn stop_put(stopped: borrow MachineStopped[s]) {"
+                        " stopped_store(stopped,\n   g[0].x, g[0].x); }\n")
+    stopped_row = dict(row, regions="3", writers="put,stop_put", readers="get,stop_put")
+    if problems_of({"a": stopped}, [stopped_row]):
+        sys.exit("ERROR per-cpu-carried-fields: stopped destination and value were not distinguished")
     cases = {
+        "new stopped writer": ({"a": stopped}, [row]),
         "no row": ({"a": source}, []),
         "new reader": ({"a": source + "fn o() -> usize { preempt_off (c) { return g[c].x; } }\n"}, [row]),
         "new caller of a returning reader": ({"a": source + "fn o() -> usize { return get(); }\n"}, [row]),
@@ -254,7 +268,7 @@ def controls():
     for label, (texts, rows) in cases.items():
         if not problems_of(texts, rows):
             sys.exit(f"ERROR per-cpu-carried-fields: control '{label}' was not refused")
-    return len(cases) + 2
+    return len(cases) + 3
 
 
 def snapshot_controls(texts):

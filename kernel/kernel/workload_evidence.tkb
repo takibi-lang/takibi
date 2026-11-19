@@ -2420,7 +2420,7 @@ fn workload_busy_record_progress(
                     stopped, finish_guard, atomic_word_load(&workload_busy_pair.end_ticks));
                 atomic_word_store(&workload_busy_pair.reported, 1);
                 atomic_word_store(&workload_busy_pair.finish_requested, 0);
-                workload_busy_pair_report();
+                workload_busy_pair_report(stopped);
             }
             process_run_unlock(finish_guard);
             machine_stop_release(stopped, &kernel_world_stop);
@@ -2512,7 +2512,7 @@ private fn workload_busy_report_restart(guard: borrow ProcessRunGuard[lock]) {
 // the measurements, which are machine- and load-dependent and therefore
 // belong in the capture for a person (and for the one-core versus
 // two-core comparison) rather than in a fixture's expected output.
-private fn workload_busy_pair_report() !{unsafe} {
+private fn workload_busy_pair_report(stopped: borrow MachineStopped[&kernel_world_stop]) !{unsafe} {
     let online: usize = kernel_online_core_count();
     if (atomic_word_load(&workload_busy_pair.a_pid) != atomic_word_load(&workload_busy_pair.b_pid)) {
         kernel_boot_log("workload: busy pair two pids under init, ");
@@ -2607,7 +2607,7 @@ private fn workload_busy_pair_report() !{unsafe} {
         kernel_boot_log("\n");
         }
     }
-    profile_timeline_report(
+    profile_timeline_report(stopped,
         atomic_word_load(&workload_busy_pair.start_ticks), atomic_word_load(&workload_busy_pair.end_ticks));
     if (atomic_word_load(&workload_busy_pair.refused) != 0) {
         kernel_boot_log("workload: busy pair REFUSED reports=");

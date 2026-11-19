@@ -565,8 +565,9 @@ entries below that date are history, left as written.
   `profile_timeline_start/_finish` take the interval's `borrow
   MachineStopped`, which their one caller already held. While the stop is
   held every other CPU is in the pen and this CPU has IRQs masked, so no
-  read is concurrent with the write. `profile_timeline_cores` stays listed
-  (an own-element partition, a per_cpu store candidate).
+  read is concurrent with the write. The timeline buffer uses `per_cpu`.
+  Live events use the current CPU's counted authority under its IRQ mask.
+  Reset, interval marks and reporting use the existing complete stop.
 
 - 2026-11-08 (#1159, the guarded_ref decision): ext2.tkb's `ext2_undo_rows`,
   `ext2_fence_pending` and `ext2_fence_pending_count` become the

@@ -46,7 +46,7 @@ struct ProfileTimelineEvent {
     arg: usize;
 }
 
-struct ProfileTimelineCore {
+struct per_cpu ProfileTimelineCore {
     stored: usize;
     lost: usize;
     next_sequence: usize;
@@ -68,10 +68,11 @@ private fn profile_timeline_pid_relevant(pid: usize) -> bool {
 }
 
 private fn profile_timeline_core_reset(
+        stopped: borrow MachineStopped[&kernel_world_stop],
         cpu: {0..<KERNEL_MAX_CORES as usize}) {
-    profile_timeline_cores[cpu].stored = 0;
-    profile_timeline_cores[cpu].lost = 0;
-    profile_timeline_cores[cpu].next_sequence = 0;
+    stopped_store(stopped, profile_timeline_cores[cpu].stored, 0);
+    stopped_store(stopped, profile_timeline_cores[cpu].lost, 0);
+    stopped_store(stopped, profile_timeline_cores[cpu].next_sequence, 0);
 }
 
 private fn profile_timeline_note(kind: ProfileTimelineKind, pid: usize,
@@ -87,12 +88,16 @@ private fn profile_timeline_note(kind: ProfileTimelineKind, pid: usize,
         mutex_irq_restore(irq_was_masked);
         return;
     }
-    let raw_cpu: usize = cpu_id();
-    if (raw_cpu >= kernel_online_core_count() || raw_cpu >= KERNEL_MAX_CORES) {
-        mutex_irq_restore(irq_was_masked);
-        return;
+    preempt_off (cpu) {
+        if (cpu_here_index(cpu) < kernel_online_core_count()) {
+            profile_timeline_note_here(cpu, kind, pid, peer, arg);
+        }
     }
-    let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
+    mutex_irq_restore(irq_was_masked);
+}
+
+private fn profile_timeline_note_here(cpu: CpuHere, kind: ProfileTimelineKind,
+                                      pid: usize, peer: usize, arg: usize) {
     let sequence: usize =
         profile_timeline_cores[cpu].next_sequence + 1;
     profile_timeline_cores[cpu].next_sequence = sequence;
@@ -100,7 +105,6 @@ private fn profile_timeline_note(kind: ProfileTimelineKind, pid: usize,
     if (stored >= PROFILE_TIMELINE_EVENTS) {
         profile_timeline_cores[cpu].lost =
             profile_timeline_cores[cpu].lost + 1;
-        mutex_irq_restore(irq_was_masked);
         return;
     }
     let slot: {0..<PROFILE_TIMELINE_EVENTS as usize} = stored;
@@ -112,13 +116,12 @@ private fn profile_timeline_note(kind: ProfileTimelineKind, pid: usize,
     profile_timeline_cores[cpu].events[slot].peer = peer;
     profile_timeline_cores[cpu].events[slot].arg = arg;
     profile_timeline_cores[cpu].stored = stored + 1;
-    mutex_irq_restore(irq_was_masked);
 }
 
 fn profile_timeline_start(stopped: borrow MachineStopped[&kernel_world_stop],
                           pid_a: usize, pid_b: usize) {
     for cpu: usize in 0..<KERNEL_MAX_CORES {
-        profile_timeline_core_reset(cpu);
+        profile_timeline_core_reset(stopped, cpu);
     }
     stop_cell_set(&profile_timeline_pid_a, stopped, pid_a);
     stop_cell_set(&profile_timeline_pid_b, stopped, pid_b);
@@ -133,42 +136,43 @@ fn profile_timeline_interval_start_cpu(
         stopped: borrow MachineStopped[&kernel_world_stop],
         cpu: {0..<KERNEL_MAX_CORES as usize}, pid: usize, timestamp: usize) {
     if (profile_timeline_pid_relevant(pid) == false) { return; }
-    let slot: usize = profile_timeline_cores[cpu].stored;
+    let slot: usize = stopped_read(stopped, profile_timeline_cores[cpu].stored);
     if (slot >= PROFILE_TIMELINE_EVENTS) { return; }
     let safe_slot: {0..<PROFILE_TIMELINE_EVENTS as usize} = slot;
-    profile_timeline_cores[cpu].next_sequence = slot + 1;
-    profile_timeline_cores[cpu].events[safe_slot].sequence = slot + 1;
-    profile_timeline_cores[cpu].events[safe_slot].timestamp = timestamp;
-    profile_timeline_cores[cpu].events[safe_slot].kind =
-        ProfileTimelineKind::ScheduleIn;
-    profile_timeline_cores[cpu].events[safe_slot].pid = pid;
-    profile_timeline_cores[cpu].events[safe_slot].peer = 0;
-    profile_timeline_cores[cpu].events[safe_slot].arg = 0;
-    profile_timeline_cores[cpu].stored = slot + 1;
+    stopped_store(stopped, profile_timeline_cores[cpu].next_sequence, slot + 1);
+    stopped_store(stopped, profile_timeline_cores[cpu].events[safe_slot].sequence, slot + 1);
+    stopped_store(stopped, profile_timeline_cores[cpu].events[safe_slot].timestamp, timestamp);
+    stopped_store(stopped, profile_timeline_cores[cpu].events[safe_slot].kind,
+        ProfileTimelineKind::ScheduleIn);
+    stopped_store(stopped, profile_timeline_cores[cpu].events[safe_slot].pid, pid);
+    stopped_store(stopped, profile_timeline_cores[cpu].events[safe_slot].peer, 0);
+    stopped_store(stopped, profile_timeline_cores[cpu].events[safe_slot].arg, 0);
+    stopped_store(stopped, profile_timeline_cores[cpu].stored, slot + 1);
 }
 
 fn profile_timeline_interval_finish_cpu(
         stopped: borrow MachineStopped[&kernel_world_stop],
         cpu: {0..<KERNEL_MAX_CORES as usize}, pid: usize, timestamp: usize) {
     if (profile_timeline_pid_relevant(pid) == false) { return; }
-    let slot: usize = profile_timeline_cores[cpu].stored;
+    let slot: usize = stopped_read(stopped, profile_timeline_cores[cpu].stored);
     if (slot >= PROFILE_TIMELINE_EVENTS) {
-        profile_timeline_cores[cpu].lost = profile_timeline_cores[cpu].lost + 1;
-        profile_timeline_cores[cpu].next_sequence =
-            profile_timeline_cores[cpu].next_sequence + 1;
+        stopped_store(stopped, profile_timeline_cores[cpu].lost,
+            stopped_read(stopped, profile_timeline_cores[cpu].lost) + 1);
+        stopped_store(stopped, profile_timeline_cores[cpu].next_sequence,
+            stopped_read(stopped, profile_timeline_cores[cpu].next_sequence) + 1);
         return;
     }
     let safe_slot: {0..<PROFILE_TIMELINE_EVENTS as usize} = slot;
-    let sequence: usize = profile_timeline_cores[cpu].next_sequence + 1;
-    profile_timeline_cores[cpu].next_sequence = sequence;
-    profile_timeline_cores[cpu].events[safe_slot].sequence = sequence;
-    profile_timeline_cores[cpu].events[safe_slot].timestamp = timestamp;
-    profile_timeline_cores[cpu].events[safe_slot].kind =
-        ProfileTimelineKind::ScheduleOut;
-    profile_timeline_cores[cpu].events[safe_slot].pid = pid;
-    profile_timeline_cores[cpu].events[safe_slot].peer = 0;
-    profile_timeline_cores[cpu].events[safe_slot].arg = 0;
-    profile_timeline_cores[cpu].stored = slot + 1;
+    let sequence: usize = stopped_read(stopped, profile_timeline_cores[cpu].next_sequence) + 1;
+    stopped_store(stopped, profile_timeline_cores[cpu].next_sequence, sequence);
+    stopped_store(stopped, profile_timeline_cores[cpu].events[safe_slot].sequence, sequence);
+    stopped_store(stopped, profile_timeline_cores[cpu].events[safe_slot].timestamp, timestamp);
+    stopped_store(stopped, profile_timeline_cores[cpu].events[safe_slot].kind,
+        ProfileTimelineKind::ScheduleOut);
+    stopped_store(stopped, profile_timeline_cores[cpu].events[safe_slot].pid, pid);
+    stopped_store(stopped, profile_timeline_cores[cpu].events[safe_slot].peer, 0);
+    stopped_store(stopped, profile_timeline_cores[cpu].events[safe_slot].arg, 0);
+    stopped_store(stopped, profile_timeline_cores[cpu].stored, slot + 1);
 }
 
 fn profile_timeline_finish(stopped: borrow MachineStopped[&kernel_world_stop]) {
@@ -252,7 +256,8 @@ private fn profile_timeline_put_kind(kind: ProfileTimelineKind) {
     }
 }
 
-fn profile_timeline_report(start: usize, finish: usize) {
+fn profile_timeline_report(stopped: borrow MachineStopped[&kernel_world_stop],
+                           start: usize, finish: usize) {
     let online: usize = kernel_online_core_count();
     kernel_boot_log(
         "profile: timeline name=busy-pair start_cycles=");
@@ -268,35 +273,35 @@ fn profile_timeline_report(start: usize, finish: usize) {
     kernel_boot_log("\n");
     for cpu: usize in 0..<KERNEL_MAX_CORES {
         if (cpu < online) {
-        let stored: usize = profile_timeline_cores[cpu].stored;
+        let stored: usize = stopped_read(stopped, profile_timeline_cores[cpu].stored);
         kernel_boot_log("profile: timeline-cpu name=busy-pair cpu=");
         uart_put_udec(cpu);
         kernel_boot_log(" stored=");
         uart_put_udec(stored);
         kernel_boot_log(" lost=");
-        uart_put_udec(profile_timeline_cores[cpu].lost);
+        uart_put_udec(stopped_read(stopped, profile_timeline_cores[cpu].lost));
         kernel_boot_log(" attempted=");
-        uart_put_udec(stored + profile_timeline_cores[cpu].lost);
+        uart_put_udec(stored + stopped_read(stopped, profile_timeline_cores[cpu].lost));
         kernel_boot_log("\n");
         for slot: usize in 0..<PROFILE_TIMELINE_EVENTS {
             if (slot < stored) {
                 kernel_boot_log("profile: event name=busy-pair sequence=");
                 uart_put_udec(
-                    profile_timeline_cores[cpu].events[slot].sequence);
+                    stopped_read(stopped, profile_timeline_cores[cpu].events[slot].sequence));
                 kernel_boot_log(" timestamp=");
                 uart_put_udec(
-                    profile_timeline_cores[cpu].events[slot].timestamp);
+                    stopped_read(stopped, profile_timeline_cores[cpu].events[slot].timestamp));
                 kernel_boot_log(" cpu=");
                 uart_put_udec(cpu);
                 kernel_boot_log(" kind=");
                 profile_timeline_put_kind(
-                    profile_timeline_cores[cpu].events[slot].kind);
+                    stopped_read(stopped, profile_timeline_cores[cpu].events[slot].kind));
                 kernel_boot_log(" pid=");
-                uart_put_udec(profile_timeline_cores[cpu].events[slot].pid);
+                uart_put_udec(stopped_read(stopped, profile_timeline_cores[cpu].events[slot].pid));
                 kernel_boot_log(" peer=");
-                uart_put_udec(profile_timeline_cores[cpu].events[slot].peer);
+                uart_put_udec(stopped_read(stopped, profile_timeline_cores[cpu].events[slot].peer));
                 kernel_boot_log(" arg=");
-                uart_put_udec(profile_timeline_cores[cpu].events[slot].arg);
+                uart_put_udec(stopped_read(stopped, profile_timeline_cores[cpu].events[slot].arg));
                 kernel_boot_log("\n");
             }
         }
