@@ -1207,7 +1207,8 @@ fn address_space_pte_cow_value(pte: usize) -> usize {
 // point page.tkb records one runtime mapping reference for the PTE.
 inline fn address_space_map_page(root: AddressSpaceRoot, index: usize,
                           page: sink PageOwner[page_id],
-                          flags: usize) -> AddressSpacePteWriteResult {
+                          flags: usize) -> AddressSpacePteWriteResult
+        requires init(page_bytes(page)[0..<PAGE_SIZE]) {
     let slot: usize = root.slot;
     let physical: usize = page_physical_address(page);
     match address_space_pte_write(root, index, physical | flags) {
@@ -1467,6 +1468,8 @@ fn process_address_space_probe_written(result: UserWriteResult) -> bool {
 
 fn process_address_space_probe_map(
         root: AddressSpaceRoot, index: usize, page: sink PageOwner[page_id]) -> bool {
+    let bytes = page_bytes(page);
+    for i: usize in 0..<4096 { bytes[i] = 0; }
     match address_space_map_page(root, index, page, USER_RW_XN_FLAGS) {
         AddressSpacePteWriteResult::Invalid => {
             return false;

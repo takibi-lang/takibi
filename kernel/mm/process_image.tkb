@@ -1424,6 +1424,8 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
             return false;
         }
         PageAllocResult::Allocated(stack_page) => {
+            let bytes = page_bytes(stack_page);
+            for i: usize in 0..<4096 { bytes[i] = 0; }
             match address_space_map_page(
                     address_space_boot_root(), process_stack_top_page(), stack_page, USER_RW_XN_FLAGS) {
                 AddressSpacePteWriteResult::Invalid => {

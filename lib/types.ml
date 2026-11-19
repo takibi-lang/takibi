@@ -1157,6 +1157,7 @@ type program_types = {
   function_values : string StringMap.t;
   function_def_keys : string StringMap.t;
   separation_conditions : Init_separation_domain.Conditions.t StringMap.t;
+  projected_init_requirements : unit StringMap.t;
   (* struct name -> ordered field list [(field_name, field_type)] *)
   (* enum name  -> underlying type + variant list                 *)
 }

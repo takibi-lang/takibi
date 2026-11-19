@@ -2705,6 +2705,31 @@ let expect_region_error fragment src () =
       then Alcotest.failf "no entry contains %S: %s" fragment
           (String.concat " | " (List.map snd errors))
 
+let owner_publication_1513 body = put_back_746 ^ {|
+fn release746(o: sink Owner746[page]) !{unsafe} {
+    region_release(o.frame);
+}
+fn publish746(o: sink Owner746[page]) !{unsafe}
+        requires init(bytes746(o)[0..<64]) {
+    release746(o);
+}
+fn fill746(o: borrow Owner746[page], ready: bool) -> bool !{unsafe} {
+    if (ready == false) { return false; }
+    let bytes = bytes746(o);
+    for i: usize in 0..<64 { bytes[i] = 0; }
+    return true;
+}
+extern fn opaque746(bytes: borrow [u8; 64..]);
+fn check746(arr: borrow places(Frame746)[b, n], ready: bool) !{unsafe} {
+    match alloc746(arr, 2) {
+        Alloc746::Out => {}
+        Alloc746::Got(o) => {
+|} ^ body ^ {|
+        }
+    }
+}
+|}
+
 (* A copy of kernel/net/tcp.tkb's frame access (GitHub issue #677): `late`
    runs after the permission is given back. *)
 let frame_hold_use late =
@@ -12791,6 +12816,52 @@ fn use745(held: RegionHeld(Rec745)) -> usize !{unsafe} {
     region_pool_unlock(g);
     return v;
 }|}));
+
+  (* Checked owner-relative initialization at publication. *)
+  Alcotest.test_case "owner publication: inferred success follows the moved owner" `Quick
+    (fun () -> ignore (infer_regions (owner_publication_1513 {|
+            if (fill746(o, ready)) {
+                let moved = o;
+                publish746(moved);
+            } else {
+                release746(o);
+            }
+|})));
+  Alcotest.test_case "owner publication: refuse partial initialization" `Quick
+    (expect_region_error "required initialized by 'publish746'" (owner_publication_1513 {|
+            let bytes = bytes746(o);
+            for i: usize in 0..<63 { bytes[i] = 0; }
+            publish746(o);
+|}));
+  Alcotest.test_case "owner publication: refuse initialization of a different owner" `Quick
+    (expect_region_error "required initialized by 'publish746'" (owner_publication_1513 {|
+            match alloc746(arr, 3) {
+                Alloc746::Out => { release746(o); }
+                Alloc746::Got(other) => {
+                    let bytes = bytes746(other);
+                    for i: usize in 0..<64 { bytes[i] = 0; }
+                    release746(other);
+                    publish746(o);
+                }
+            }
+|}));
+  Alcotest.test_case "owner publication: reacquisition starts uninitialized" `Quick
+    (expect_region_error "required initialized by 'publish746'" (owner_publication_1513 {|
+            let bytes = bytes746(o);
+            for i: usize in 0..<64 { bytes[i] = 0; }
+            release746(o);
+            match alloc746(arr, 2) {
+                Alloc746::Out => {}
+                Alloc746::Got(reacquired) => { publish746(reacquired); }
+            }
+|}));
+  Alcotest.test_case "owner publication: opaque writes discard the proof" `Quick
+    (expect_region_error "required initialized by 'publish746'" (owner_publication_1513 {|
+            let bytes = bytes746(o);
+            for i: usize in 0..<64 { bytes[i] = 0; }
+            opaque746(bytes);
+            publish746(o);
+|}));
 
   (* GitHub issue #746: give-back by address. *)
   Alcotest.test_case "places_put_back: an owner's permission goes back by address" `Quick

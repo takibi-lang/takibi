@@ -974,6 +974,19 @@ fn path_view(slot: borrow SyscallSlot[0]) -> [u8; 256..]
   one level deep for these returned numerical values. The body must relate the actual writes to the returned
   field value; caller facts use a stable record snapshot. A mutated record
   does not retain a prior field-based initialization guarantee.
+- A plain entry condition can name the complete byte view of a linear
+  owner as `requires init(bytes(owner)[0..<N])`. The public accessor
+  must borrow that owner and return a fixed byte range beginning at zero
+  in one element of a region held in its field. The checker resolves
+  the accessor and checks that projection against its body. It does not
+  execute the contract expression. A program currently supports one
+  such accessor. The endpoint must be a literal or a constant equal to
+  the extent of the view. Initialization facts track the live owner
+  through a direct immutable move and are discarded on consumption.
+  Direct, checked helpers can establish the fact unconditionally or on
+  specific Boolean or variant outcomes. A direct forwarding wrapper
+  inherits the condition. A function value or external entry cannot
+  erase the condition.
 - Parameter field contracts can name nested inline fields, such as
   `init(pool.core.free_head)` or `init(pool.flags[0..<n])`. Field ranges
   require a fixed array; they cannot initialize a slice descriptor by

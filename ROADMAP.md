@@ -110,8 +110,9 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
 ### Territory A: the trunk, in this order
 
 **Highest priority, maintainer update 2026-11-19: kernel memory safety
-(#1513).** Start with page publication, then follow the remaining kernel
-coverage in #1513. This is a Milestone 1 gate and takes precedence over the
+(#1513).** Fresh user payload page publication checks full initialization at
+the common mapping entry. Continue the remaining kernel coverage in #1513.
+This is a Milestone 1 gate and takes precedence over the
 remaining preemption review and flip. Territory A takes its dependency
 chain through #203, #637, #954, #986, #132 and #638, coordinating shared
 verification work with Territory B. A red allcheck takes precedence.

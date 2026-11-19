@@ -82,3 +82,29 @@ let infer ~definition ~target ~global_type ~no_writes =
         results := StringMap.add key result !results;
         result in
   fun info f e -> origin [] (context info f) e
+
+(* An exact view of storage owned by one parameter. This describes geometry
+   only: callers must independently establish the live allocation identity. *)
+type owner_projection = {
+  parameter : int;
+  lo : int64;
+  hi : int64;
+}
+
+let owner_projection ~checked_region_at (info : Types.func_info) (f : Ast.func) =
+  match Init_writes.strip info.ret_type, f.body with
+  | Ast.TypeSlice (Ast.TypeU8, _, Ast.SliceWritable),
+    [{desc = Ast.Return (Some {desc = Ast.SliceOf
+        ({desc = Ast.FieldGet
+            (({desc = Ast.Call (_, [
+                {desc = Ast.FieldGet (({desc = Ast.Var _; _} as owner), _); _};
+                {desc = Ast.IntLit element; _}]); _} as projection), payload_field); _},
+         {desc = Ast.IntLit lo; _}, {desc = Ast.IntLit hi; _}); _}); _}]
+    when element >= 0L && lo >= 0L && hi >= lo &&
+         checked_region_at projection payload_field hi ->
+      Option.bind (Local_bindings.id_for_expr info.bindings owner) (fun id ->
+        List.find_map (fun (parameter, arg) ->
+          if arg = id then Some {parameter; lo; hi}
+          else None)
+          (List.mapi (fun i arg -> (i, arg)) info.bindings.param_ids))
+  | _ -> None

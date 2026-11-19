@@ -73,11 +73,11 @@ fn memory_map_frames(base: usize, count: usize) -> RegionTyped(PageFrame) !{unsa
 // that `source_physical` names one) into a page the caller owns.
 fn memory_map_copy_managed_page(source_physical: usize,
                                 destination: borrow PageOwner[page]) !{unsafe} {
+    static_assert(PAGE_SIZE == 4096, "the managed copy covers one page");
     let source_base: *u8 = unsafe { source_physical as *u8 };
-    let source = unsafe {
-        source_base[0 as isize..<PAGE_SIZE as isize]
-    };
-    slice_copy(page_bytes(destination), source);
+    unsafe {
+        slice_copy(page_bytes(destination), source_base[0..<4096]);
+    }
 }
 
 // page_run_probe only: every page of a run it was just given is payload to

@@ -9370,6 +9370,8 @@ fn kernel_syscall_cow_read_probe() -> SyscallCowReadReport !{unsafe} {
     let shared_physical: usize = match page_alloc(PageOwnerTag::UserPage) {
         PageAllocResult::OutOfMemory => { return SyscallCowReadReport::Failed; }
         PageAllocResult::Allocated(page) => {
+            let bytes = page_bytes(page);
+            for i: usize in 0..<4096 { bytes[i] = 0; }
             let physical: usize = page_physical_address(page);
             match address_space_map_page(root, probe_index, page,
                                          USER_RW_XN_FLAGS) {
@@ -9503,6 +9505,8 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
     match page_alloc(PageOwnerTag::UserPage) {
         PageAllocResult::OutOfMemory => { return false; }
         PageAllocResult::Allocated(page) => {
+            let bytes = page_bytes(page);
+            for i: usize in 0..<4096 { bytes[i] = 0; }
             match address_space_map_page(
                     address_space_boot_root(), probe_index, page, USER_RW_XN_FLAGS) {
                 AddressSpacePteWriteResult::Invalid => {

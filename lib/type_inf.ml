@@ -12399,6 +12399,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           | None -> StringMap.find_opt key (Lazy.force init_write_definitions) in
         Option.map (fun f -> (f, info)) definition in
   let init_call_target e = StringMap.find_opt (loc_key e.Ast.loc) !resolved_call_targets in
+  let owner_summaries = ref StringMap.empty in
+  let owner_scope = ref None in
+  let discovering_owner_facts = ref false in
+  let owner_returns = ref [] in
   let pointer_store_origins = Local_bindings.Expr_table.create 16 in
   let init_origin = ref (fun _ _ _ -> None) in
   let init_write_footprint = Init_writes.infer
@@ -12443,13 +12447,180 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | None -> None in
   let init_linear_owner = Hashtbl.mem init_linear in
   let init_variant_payload v c = Hashtbl.find_opt init_payloads (v, c) in
-  let run_init separated (fdef : Ast.func) (finfo : Types.func_info) = Init_flow.check
+  (* A projected contract names the complete byte view returned by one
+     body-checked accessor. The expression denotes storage, and is not
+     evaluated by a caller. *)
+  let projection_expr (e : Ast.expr) =
+    match e.desc with
+    | Ast.SliceOf
+        ({desc = Ast.Call (name, [{desc = Ast.Var owner; _}]); _},
+         {desc = Ast.IntLit 0L; _}, high) -> Some (name, owner, high)
+    | _ -> None in
+  let requested_accessors = List.fold_left (fun names -> function
+    | Ast.FuncDef f ->
+        List.fold_left (fun names (clause : Init_state.clause) ->
+          match clause.requires, clause.body with
+          | true, Init_state.CPlain (Init_state.PInit e) ->
+              (match projection_expr e with
+               | Some (name, _, _) -> StringSet.add name names
+               | None -> names)
+          | _ -> names) names (Init_state.contracts_of f.def_loc)
+    | _ -> names) StringSet.empty prog in
+  let projection = if StringSet.cardinal requested_accessors <> 1 then None else
+    let name = StringSet.choose requested_accessors in
+    let named = StringMap.fold (fun key _ named ->
+      match init_definition key with
+      | Some (f, info) when f.Ast.name = name -> (key, f, info) :: named
+      | _ -> named) functions [] in
+    match named with
+    | [key, f, info] when not f.Ast.is_private ->
+        (match f.params with
+         | [_, Some (Ast.TypeBorrow ty)] ->
+             (match Init_writes.strip ty with
+              | Ast.TypeIndexed (owner_type, _) when init_linear_owner owner_type ->
+                  let checked_region_at call field endpoint =
+                    match Option.bind (init_call_target call) init_definition with
+                    | Some (region, info) when region.Ast.name = "region_at" &&
+                        region.def_loc.pos_fname = Ast.builtin_region_file ->
+                        (match Init_writes.strip info.ret_type with
+                         | Ast.TypeRefMut (Ast.TypeNamed element | Ast.TypeIndexed (element, _)) ->
+                             (match Option.bind (init_struct_fields element) (List.assoc_opt field) with
+                              | Some (Ast.TypeArray (Ast.TypeU8, count)) ->
+                                  endpoint <= Int64.of_int count
+                              | _ -> false)
+                         | _ -> false)
+                    | _ -> false in
+                  (match Init_origin.owner_projection ~checked_region_at info f with
+                   | Some {parameter = 0; lo = 0L; hi; _}
+                     when hi > 0L && hi <= Int64.of_int max_int ->
+                       Some (name, key, owner_type, Int64.to_int hi)
+                   | _ -> None)
+              | _ -> None)
+         | _ -> None)
+    | _ -> None in
+  let track_projected_owners = Option.is_some projection in
+  let projected_size = match projection with Some (_, _, _, size) -> size | None -> 0 in
+  let projected_contract_owner (f : Ast.func) e =
+    match projection, projection_expr e with
+    | Some (accessor, _, _, size), Some (name, owner, high) when name = accessor ->
+        let full_extent = match high.Ast.desc with
+          | Ast.IntLit n -> n = Int64.of_int size
+          | Ast.Var name when not (List.mem_assoc name f.params) ->
+              Const_env.find name = Some size
+          | _ -> false in
+        if full_extent then Some owner else None
+    | _ -> None in
+  let owner_view_call (info : Types.func_info) call =
+    match projection, init_call_target call, call.Ast.desc with
+    | Some (_, accessor, _, _), Some resolved, Ast.Call (_, [owner]) when accessor = resolved ->
+        Local_bindings.id_for_expr info.bindings owner
+    | _ -> None in
+  let explicit_publication (f : Ast.func) =
+    List.find_map (fun (clause : Init_state.clause) ->
+      match clause.requires, clause.body with
+      | true, Init_state.CPlain (Init_state.PInit e) ->
+          Option.bind (projected_contract_owner f e) (fun owner ->
+            List.find_map (fun (i, (name, _)) -> if name = owner then Some i else None)
+              (List.mapi (fun i parameter -> i, parameter) f.params))
+      | _ -> None) (Init_state.contracts_of f.def_loc) in
+  (* A wrapper that immediately forwards a parameter to a checked entry
+     has the same requirement on that parameter. Stop at recursive calls. *)
+  let rec projected_requirement seen key =
+    if StringSet.mem key seen then None else
+    Option.bind (init_definition key) (fun (f, info) ->
+      match explicit_publication f with
+      | Some i -> Some i
+      | None ->
+          let call = match f.body with
+            | [{desc = Ast.Match (({desc = Ast.Call _; _} as call), _); _}]
+            | [{desc = Ast.Return (Some ({desc = Ast.Call _; _} as call)); _}] -> Some call
+            | _ -> None in
+          Option.bind call (fun call ->
+            let forwarded = Option.bind (init_call_target call)
+                (projected_requirement (StringSet.add key seen)) in
+            match forwarded, call.desc with
+            | Some i, Ast.Call (_, args) ->
+                let bound = Option.bind (List.nth_opt args i) (Local_bindings.id_for_expr info.bindings) in
+                List.find_map (fun (i, id) ->
+                  if bound = Some id then Some i else None)
+                  (List.mapi (fun i id -> i, id) info.bindings.param_ids)
+            | _ -> None)) in
+  let rec projected_owner_type ty =
+      match Init_writes.strip ty with
+      | Ast.TypeExists (_, _, ty) -> projected_owner_type ty
+      | Ast.TypeIndexed (name, _) ->
+          (match projection with Some (_, _, owner_type, _) -> name = owner_type | None -> false)
+      | _ -> false in
+  let rec parameter_is_owner ty =
+    match Init_writes.strip ty with
+    | Ast.TypeBorrow ty | Ast.TypeBorrowMut ty | Ast.TypeSink ty -> parameter_is_owner ty
+    | ty -> projected_owner_type ty in
+  let owner_params (f : Ast.func) =
+    List.filter_map (fun (name, ty) ->
+      if Option.fold ~none:false ~some:parameter_is_owner ty then Some name else None) f.params in
+  let projected_init_requirements =
+    if not track_projected_owners then StringMap.empty else
+    StringMap.filter_map (fun key _ ->
+      Option.map (fun _ -> ()) (projected_requirement StringSet.empty key)) functions in
+  StringMap.iter (fun _ key ->
+    if StringMap.mem key projected_init_requirements then
+      Option.iter (fun (f, _) ->
+        collected_type_errors := (f.Ast.def_loc, Printf.sprintf
+          "function value for '%s' would erase projected initialization requirements" f.Ast.name)
+          :: !collected_type_errors) (init_definition key)) !resolved_function_values;
+  StringMap.iter (fun key () ->
+    Option.iter (fun (f, _) ->
+      let entry = f.Ast.name = "main" || Option.fold ~none:false
+        ~some:(List.exists (fun role -> List.mem role ["interrupt"; "exception"; "nmi"]))
+        f.effects in
+      if entry then collected_type_errors := (f.def_loc, Printf.sprintf
+        "entry '%s' would erase projected initialization requirements" f.name)
+        :: !collected_type_errors) (init_definition key)) projected_init_requirements;
+  let run_init separated (fdef : Ast.func) (finfo : Types.func_info) =
+    Init_flow.check
     ~separated
+    ~owner_parameters:(if not track_projected_owners then [] else
+      let key = overload_key fdef.name fdef.params in
+      let track = match !owner_scope with
+        | None -> true
+        | Some scope -> StringSet.mem key scope in
+      if track || StringMap.mem key projected_init_requirements then owner_params fdef
+      else [])
+    ~projected_size
+    ~initialized_owner_parameters:(if not track_projected_owners || explicit_publication fdef <> None then [] else
+      match Option.bind (projected_requirement StringSet.empty (overload_key fdef.name fdef.params))
+          (List.nth_opt fdef.params) with
+      | Some (parameter, _) -> [parameter]
+      | None -> [])
+    ~note_owner_return:(fun parameter tag _ ready ->
+      if !discovering_owner_facts then owner_returns := (parameter, tag, ready) :: !owner_returns)
+    ~projected_contract_owner:(projected_contract_owner fdef)
+    ~owner_call_facts:(fun call ->
+      match init_call_target call, call.Ast.desc with
+      | Some key, Ast.Call (_, args) ->
+          let summaries = Option.value ~default:[] (StringMap.find_opt key !owner_summaries) in
+          List.filter_map (fun (i, outcome) ->
+            Option.bind (List.nth_opt args i) (fun owner ->
+              Option.map (fun id -> id, outcome) (Local_bindings.id_for_expr finfo.bindings owner)))
+            summaries
+      | _ -> [])
+    ~owner_view_call:(owner_view_call finfo)
+    ~owner_type:(fun ty -> track_projected_owners && projected_owner_type ty)
+    ~inferred_owner_requirement:(fun call ->
+      match init_call_target call, call.Ast.desc with
+      | Some key, Ast.Call (_, args) ->
+          (match init_definition key with
+           | Some (f, _) when explicit_publication f = None ->
+               Option.map (fun i ->
+                 Option.bind (List.nth_opt args i) (Local_bindings.id_for_expr finfo.bindings))
+                 (projected_requirement StringSet.empty key)
+           | _ -> None)
+      | _ -> None)
     ~write_footprint:init_write_footprint
     ~pointer_store_origin:(fun e -> Local_bindings.Expr_table.find_opt pointer_store_origins e)
     ~global_view_origin:(fun e -> !init_origin finfo fdef e)
     ~noreturn:checked_noreturn_call
-    ~note_unsafe:(fun loc -> Hashtbl.replace type_checker_consumed_unsafe_at loc ())
+    ~note_unsafe:(fun loc -> if not !discovering_owner_facts then Hashtbl.replace type_checker_consumed_unsafe_at loc ())
     ~struct_fields:init_struct_fields
     ~callee:init_signature
     ~global_singleton:init_global_singleton
@@ -12459,6 +12630,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     ~variant_payload:init_variant_payload
     ~linear_owner:init_linear_owner
     ~decide_array_index:(fun loc reason ->
+      if not !discovering_owner_facts then
       let key = (overload_key fdef.name fdef.params, loc) in
       match reason with
       | None -> Hashtbl.replace arithmetic_array_index_proven_at key ();
@@ -12466,6 +12638,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Some r -> Hashtbl.remove arithmetic_array_index_proven_at key;
           Hashtbl.replace range_fact_unavailable_at key r)
     ~decide_index:(fun loc reason ->
+      if not !discovering_owner_facts then
       let key = (overload_key fdef.name fdef.params, loc) in
       match reason with
       | None ->
@@ -12512,6 +12685,51 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let derived_stores = Read_prefix.run ~protected_globals ~functions ~key_of:(fun f -> overload_key f.Ast.name f.params)
     ~target:init_call_target ~write_footprint:init_write_footprint ~constructors ~loop_summaries ~accessors prog in
   Local_bindings.Expr_table.iter (fun e name -> Local_bindings.Expr_table.replace pointer_store_origins e name) derived_stores;
+  end;
+  if track_projected_owners then begin
+    let candidates = List.filter_map (function
+      | Ast.FuncDef f when owner_params f <> [] ->
+          let key = overload_key f.name f.params in
+          Option.map (fun info -> (key, f, info)) (StringMap.find_opt key functions)
+      | _ -> None) prog in
+    let checked_summary f info =
+      owner_returns := [];
+      try
+        run_init (fun _ _ -> false) f info;
+        let checks = Hashtbl.create 8 in
+        List.iter (fun (param, tag, covered) ->
+          let recorded = Hashtbl.find_opt checks (param, tag) in
+          Hashtbl.replace checks (param, tag) (covered && recorded <> Some false))
+          !owner_returns;
+        let at_boundary = List.mapi (fun i p -> i, p) f.Ast.params in
+        Some (List.sort compare (Hashtbl.fold (fun (param, tag) covered facts ->
+          if not covered then facts else
+          match List.find_opt (fun (_, (name, ty)) ->
+            name = param && (match ty with Some (Ast.TypeBorrow _ | Ast.TypeBorrowMut _) -> true | _ -> false))
+            at_boundary with
+          | Some (i, _) -> (i, tag) :: facts
+          | None -> facts) checks []))
+      with Types.TypeError _ | Types.MultiTypeError _ -> None in
+    let saved_obligations = !Range_obligation.enabled in
+    discovering_owner_facts := true;
+    Range_obligation.enabled := false;
+    Fun.protect ~finally:(fun () ->
+      discovering_owner_facts := false;
+      Range_obligation.enabled := saved_obligations) (fun () ->
+      let rec converge fuel =
+        if fuel = 0 then (owner_summaries := StringMap.empty; owner_scope := Some StringSet.empty)
+        else begin
+          let summaries, scope = List.fold_left (fun (summaries, scope) (key, f, info) ->
+            match checked_summary f info with
+            | None -> (summaries, scope)
+            | Some facts ->
+                let summaries = if facts = [] then summaries else StringMap.add key facts summaries in
+                (summaries, StringSet.add key scope))
+            (StringMap.empty, StringSet.empty) candidates in
+          if StringMap.equal (=) summaries !owner_summaries then owner_scope := Some scope
+          else (owner_summaries := summaries; converge (fuel - 1))
+        end in
+      converge (List.length candidates + 1))
   end;
   let init_separation_requirements = ref StringMap.empty in
   List.iter (function
@@ -17065,4 +17283,5 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     function_values = !resolved_function_values;
     function_def_keys;
     separation_conditions;
+    projected_init_requirements;
   }

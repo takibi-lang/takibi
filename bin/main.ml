@@ -417,6 +417,9 @@ let () =
     List.iter (function
       | Ast.FuncDef f when List.mem f.name !external_entries ->
           let key = Call_graph.definition_key prog_types f in
+          if Types.StringMap.mem key prog_types.Types.projected_init_requirements then
+            raise (Types.TypeError (f.def_loc, Printf.sprintf
+              "--external-entry '%s' would erase projected initialization requirements" f.name));
           (match Types.StringMap.find_opt key prog_types.Types.separation_conditions with
            | Some cs when not (Init_separation_domain.Conditions.is_empty cs) ->
                raise (Types.TypeError (f.def_loc, Printf.sprintf

@@ -608,6 +608,8 @@ fn user_memory_boundary_probe_run(base: usize,
                                   data_page: sink PageOwner[data],
                                   text_page: sink PageOwner[text]) -> bool {
     let mut root: AddressSpaceRoot = address_space_boot_root();
+    let data_page_bytes = page_bytes(data_page);
+    for i: usize in 0..<4096 { data_page_bytes[i] = 0; }
     match address_space_map_page(address_space_boot_root(), base, data_page, USER_RW_XN_FLAGS) {
         AddressSpacePteWriteResult::Invalid => {
             page_free(text_page);
@@ -619,6 +621,8 @@ fn user_memory_boundary_probe_run(base: usize,
         }
         AddressSpacePteWriteResult::Written => {}
     }
+    let text_page_bytes = page_bytes(text_page);
+    for i: usize in 0..<4096 { text_page_bytes[i] = 0; }
     match address_space_map_page(address_space_boot_root(), base + 2, text_page, USER_TEXT_RX_FLAGS) {
         AddressSpacePteWriteResult::Invalid => {
             user_pte_clear(base);
@@ -764,6 +768,8 @@ fn user_memory_root_isolation_probe_run(root_a: AddressSpaceRoot, root_b: Addres
         root_b;
     // root_a: writable (RW+XN). root_b: read-only (rodata-R). root 0: left
     // unmapped (0) at this same index the whole time.
+    let page_a_bytes = page_bytes(page_a);
+    for i: usize in 0..<4096 { page_a_bytes[i] = 0; }
     match address_space_map_page(root_a, index, page_a, USER_RW_XN_FLAGS) {
         AddressSpacePteWriteResult::Invalid => {
             page_free(page_b);
@@ -775,6 +781,8 @@ fn user_memory_root_isolation_probe_run(root_a: AddressSpaceRoot, root_b: Addres
         }
         AddressSpacePteWriteResult::Written => {}
     }
+    let page_b_bytes = page_bytes(page_b);
+    for i: usize in 0..<4096 { page_b_bytes[i] = 0; }
     match address_space_map_page(root_b, index, page_b, USER_RODATA_R_FLAGS) {
         AddressSpacePteWriteResult::Invalid => {
             address_space_pte_clear(root_a, index);

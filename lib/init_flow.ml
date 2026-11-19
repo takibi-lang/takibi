@@ -104,8 +104,14 @@ let layout_size : (Ast.type_expr -> int option) ref = ref (fun _ -> None)
    are linear equalities known on the path. *)
 (* Rare scratch identities and linked certificates share one cold field.
    Ordinary interval-state copies keep the original record size. *)
-type extras = { links : Init_link.t; touched : StringSet.t }
-let empty_extras = { links = Init_link.empty; touched = StringSet.empty }
+type extras = {
+  links : Init_link.t;
+  touched : StringSet.t;
+  owners : string Types.IntMap.t;
+}
+let empty_extras = {
+  links = Init_link.empty; touched = StringSet.empty; owners = Types.IntMap.empty;
+}
 type state = {
   extras : extras;
   u : Leaves.t;
@@ -165,6 +171,15 @@ let check
     ?(noreturn : Ast.expr -> bool = fun _ -> false)
     ?(write_footprint : Ast.expr -> Init_writes.t = fun _ -> Init_writes.Unknown)
     ?(pointer_store_origin : Ast.expr -> string option = fun _ -> None)
+    ?(projected_size = 0)
+    ?(owner_view_call : Ast.expr -> int option = fun _ -> None)
+    ?(owner_type : Ast.type_expr -> bool = fun _ -> false)
+    ?(inferred_owner_requirement : Ast.expr -> int option option = fun _ -> None)
+    ?(projected_contract_owner : Ast.expr -> string option = fun _ -> None)
+    ?(owner_call_facts : Ast.expr -> (int * string) list = fun _ -> [])
+    ?(owner_parameters = [])
+    ?(initialized_owner_parameters = [])
+    ?(note_owner_return : string -> string -> Ast.loc -> bool -> unit = fun _ _ _ _ -> ())
     ?(global_view_origin : Ast.expr -> string option = fun _ -> None)
     ?(separated : string -> string -> bool = fun _ _ -> false)
     ?(note_unsafe : Ast.loc -> unit = fun _ -> ())
@@ -519,6 +534,27 @@ let check
     | Some ty when numeric_field ty field -> Some (Init_pred.atom (field_name st id field))
     | _ -> None in
   let aliases : (int, view) Hashtbl.t = Hashtbl.create 8 in
+  let entry_owners = List.fold_left (fun owners name ->
+    match List.assoc_opt name param_ids with
+    | None -> owners
+    | Some id ->
+        let root = "owner-param:" ^ string_of_int id in
+        Hashtbl.replace roots root
+          { display = name; leaves = [[], Ast.TypeArray (Ast.TypeU8, projected_size)];
+            array_root = false; out_param = false };
+        Types.IntMap.add id root owners) Types.IntMap.empty owner_parameters in
+  let with_owners st owners = { st with extras = { st.extras with owners } } in
+  let projected_view st id = Option.map (fun root ->
+    { vp = { root; path = []; inside = false };
+      off = Init_pred.const 0; len = Some (Init_pred.const projected_size) })
+    (Types.IntMap.find_opt id st.extras.owners) in
+  let observe_param_return st tag loc =
+    if not !in_trial then
+      Types.IntMap.iter (fun _ root ->
+        let parameter = (Hashtbl.find roots root).display in
+        note_owner_return parameter tag loc
+          (not (Leaves.mem (root, []) st.u))) entry_owners in
+
   (* Linear integer terms of the body, under the path facts [f].
 
      GitHub issue #983: a term is the MACHINE value of its expression, so
@@ -631,10 +667,22 @@ let check
      bounds are machine values (lin); the sub-slice's bounds check then
      keeps off + lo and hi - lo inside the leaf. *)
   and view_of (f : state) (e : Ast.expr) : view option =
-    match e.desc with
+    let projected =
+      if Types.IntMap.is_empty f.extras.owners then None
+      else Option.bind (owner_view_call e) (projected_view f) in
+    match projected with
+    | Some _ as view -> view
+    | None -> match e.desc with
     | Ast.Var _ when (match Local_bindings.id_for_expr bindings e with
                       | Some id -> Hashtbl.mem aliases id | None -> false) ->
-        Hashtbl.find_opt aliases (Option.get (Local_bindings.id_for_expr bindings e))
+        Option.bind (Hashtbl.find_opt aliases (Option.get (Local_bindings.id_for_expr bindings e)))
+          (fun v ->
+            let root = v.vp.root in
+            let owner_view = String.starts_with ~prefix:"owner-local:" root ||
+                             String.starts_with ~prefix:"owner-param:" root in
+            if owner_view &&
+               not (Types.IntMap.exists (fun _ live -> live = root) f.extras.owners)
+            then None else Some v)
     | Ast.SliceOf (b, lo, hi) ->
         (match view_of f b, lin f lo, lin f hi with
          | Some v, Some lo, Some hi ->
@@ -929,10 +977,13 @@ let check
   in
   (* The place a contract names, split into its root and optional bounds:
      `x`, `x[lo..<hi]`, `G[s.index].f`, `G[s.index].f[lo..<hi]`. *)
-  let rec split_target (e : Ast.expr) = match e.desc with
+  let rec split_target (e : Ast.expr) =
+    match projected_contract_owner e with
+    | Some owner -> Some (`OwnerProjection owner, None)
+    | None -> match e.desc with
     | Ast.SliceOf (b, lo, hi) ->
         (match split_target b with
-         | Some (r, None) -> Some (r, Some (lo, hi))
+         | Some ((`Param _ | `Global _) as r, None) -> Some (r, Some (lo, hi))
          | _ -> None)
     | Ast.Var x -> Some (`Param (x, []), None)
     | Ast.FieldGet _ ->
@@ -992,6 +1043,10 @@ let check
              if Init_state.param_qual fdef.Ast.def_loc x <> Some Init_state.Uninit then
                error loc (Printf.sprintf
                  "initialization contract: '%s' is not `borrow uninit`; use a tracked output parameter to check its initialization clauses" x)
+         | `OwnerProjection x ->
+             if not (Option.fold ~none:false ~some:(fun id ->
+               Types.IntMap.mem id entry_owners) (List.assoc_opt x param_ids)) then
+               error loc "initialization projection needs a tracked owner parameter"
          | `Global (g, idx, _) ->
              let ok_idx = match idx.desc with
                | Ast.FieldGet ({ desc = Ast.Var s; _ }, _) ->
@@ -1026,6 +1081,8 @@ let check
               | _ -> None in
             (p, match pat.Init_state.bind with Some b -> [(b, payload)] | None -> [])) arms in
     List.iter (fun (p, binders) -> match p with
+      | Init_state.PInit e when not c.requires && projected_contract_owner e <> None ->
+          error c.cloc "owner storage projections are supported in requires init clauses"
       | Init_state.PInit e -> validate_target c.cloc e ~binders
       | Init_state.PFields e ->
           let rec record_reference t = match strip t with
@@ -1121,12 +1178,13 @@ let check
   (* Resolve a contract predicate to facts in the CURRENT function's terms.
      [arg_view x] gives the view the caller passes for parameter x (or the
      callee's own root, when checking a body); [env] maps names to terms. *)
-  let rec resolve_pred ?(strengthen = false) ~arg_view ~index_expr ~env (p : Init_state.pred)
+  let rec resolve_pred ?(strengthen = false) ?(owner_view = fun _ -> None)
+      ~arg_view ~index_expr ~env (p : Init_state.pred)
       : (view * Init_pred.interval) option list =
     match p with
     | Init_state.PTrue -> []
     | Init_state.PLinked (_, head) ->
-        resolve_pred ~strengthen ~arg_view ~index_expr ~env (Init_state.PInit head)
+        resolve_pred ~strengthen ~owner_view ~arg_view ~index_expr ~env (Init_state.PInit head)
     | Init_state.PInit e | Init_state.PFields e ->
         let endpoint = match p with Init_state.PFields _ -> -2 | _ -> -1 in
         (match split_target e with
@@ -1144,6 +1202,7 @@ let check
                     | v when path = [] -> v
                     | Some `Untracked -> Some `Untracked
                     | _ -> None)
+               | `OwnerProjection name -> Option.map (fun v -> `View v) (owner_view name)
                | `Global (g, idx, path) ->
                    if StringMap.mem g scratch_names then
                      let p = scratch_element g (index_expr idx) in
@@ -1441,7 +1500,10 @@ let check
                  | Some (Ast.TypeSlice _) -> true | _ -> false) ->
           (match checked (fun () -> lin st j) with
            | Some t ->
-               let len = len_atom id in
+               let len = match view_of st b with
+                 | Some { vp = { root; _ }; len = Some n; _ }
+                   when String.starts_with ~prefix:"owner-param:" root -> n
+                 | _ -> len_atom id in
                let f = Init_pred.normalize_facts st.eqs st.facts in
                let goal = Init_pred.normalize st.eqs
                    (Init_pred.sub (Init_pred.sub len t) (Init_pred.const 1)) in
@@ -1828,6 +1890,13 @@ let check
          | Some r -> (add_iv st v.vp (v.off, Init_pred.add v.off r), [])
          | None -> (st, []))
     | Ast.Call (name, args) ->
+        if not !in_trial then
+          Option.iter (fun binding ->
+            match Option.bind binding (fun id -> Types.IntMap.find_opt id st.extras.owners) with
+            | Some root when not (Leaves.mem (root, []) st.u) -> ()
+            | Some _ -> error e.loc "publication requires initialization of all bytes of the live owner"
+            | None -> error e.loc "publication cannot establish the current owner")
+            (inferred_owner_requirement e);
         let params = match callee name with
           | Some (ps, loc) when List.length ps = List.length args -> Some (ps, loc)
           | _ -> None in
@@ -1922,7 +1991,10 @@ let check
                     error e.loc (Printf.sprintf
                       "cannot show the requires clause of '%s' at this call: \
                        its place or bounds are not expressible here" name);
-                    st) st (resolve_pred ~strengthen:true ~arg_view ~index_expr ~env:(env ~binder:None) p)
+                    st) st (resolve_pred ~strengthen:true
+                      ~owner_view:(fun name -> Option.bind (arg_of name) (fun arg ->
+                        Option.bind (Local_bindings.id_for_expr bindings arg) (projected_view st)))
+                      ~arg_view ~index_expr ~env:(env ~binder:None) p)
           | _ -> st) st cs in
         (* Mutable aggregate calls may replace fields with a value whose
            padding is undefined. Pre-call byte initialization is not a
@@ -1998,6 +2070,31 @@ let check
                  GCase (pat.case, Option.map bind_atom pat.bind,
                         facts ~binder p)) arms @ gs))
           (st, []) cs in
+        let st =
+          if Types.IntMap.is_empty st.extras.owners then st else
+          match write_footprint e with
+          | Init_writes.Writes _ -> st
+          | Init_writes.Unknown ->
+              let rec owner_of_arg arg =
+                match Option.bind (Local_bindings.id_for_expr bindings arg)
+                        (fun id -> Types.IntMap.find_opt id st.extras.owners) with
+                | Some _ as root -> root
+                | None ->
+                    (match view_of st arg with
+                     | Some view when Types.IntMap.exists
+                         (fun _ owner -> owner = view.vp.root) st.extras.owners ->
+                         Some view.vp.root
+                     | _ ->
+                         match arg.Ast.desc with
+                         | Ast.AddrOf inner | Ast.Deref inner | Ast.Cast (_, inner)
+                         | Ast.Unsafe inner | Ast.Index (inner, _)
+                         | Ast.SliceOf (inner, _, _) | Ast.FieldGet (inner, _) -> owner_of_arg inner
+                         | _ -> None) in
+              let affected = List.filter_map owner_of_arg args in
+              List.fold_left (fun st root ->
+                let leaf = root, [] in
+                { st with u = Leaves.add leaf st.u;
+                  iv = List.filter (fun (location, _) -> location <> leaf) st.iv }) st affected in
         let st = List.fold_left (fun st (i, arg) ->
           match arg.Ast.desc with
           | Ast.AddrOf target -> invalidate_place st target
@@ -2015,10 +2112,28 @@ let check
                      | Some (ps, _) -> (match snd (List.nth ps i) with
                          | Some (Ast.TypeBorrow _) -> true | _ -> false)
                      | None -> false in
-                   if is_owner && not shared then invalidate_selector st id else st
+                   let st = if is_owner && not shared then invalidate_selector st id else st in
+                   let consumed = match params with
+                     | Some (ps, _) ->
+                         (match snd (List.nth ps i) with
+                          | Some (Ast.TypeBorrow _ | Ast.TypeBorrowMut _) -> false
+                          | _ -> true)
+                     | None -> true in
+                   if consumed && Types.IntMap.mem id st.extras.owners then
+                     with_owners st (Types.IntMap.remove id st.extras.owners)
+                   else st
                | None -> st)
           | _ -> st) st (List.mapi (fun i a -> i, a) args) in
-        (st, gs)
+        List.fold_left (fun (st, gs) (id, outcome) ->
+          match projected_view st id with
+          | None -> (st, gs)
+          | Some view ->
+              let fact = (view, (Init_pred.const 0, Init_pred.const projected_size)) in
+              match outcome with
+              | "always" -> (apply_fact st fact, gs)
+              | "true" | "false" -> (st, GBool (outcome = "true", [fact]) :: gs)
+              | _ -> (st, GCase (Some outcome, None, [fact]) :: gs))
+          (st, gs) (owner_call_facts e)
     | _ -> (expr st e, [])
   in
   ignore callee_ret;
@@ -2274,8 +2389,13 @@ let check
           first.facts.Init_pred.mins in
         let links = List.fold_left (fun acc st -> Init_link.join acc st.extras.links)
              (List.hd states).extras.links (List.tl states) in
-        let extras = if links == first.extras.links && touched == first.extras.touched
-          then first.extras else {links; touched} in
+        let owners = Types.IntMap.filter (fun id root ->
+          in_all (fun st -> Types.IntMap.find_opt id st.extras.owners = Some root))
+          first.extras.owners in
+        let extras =
+          if links == first.extras.links && touched == first.extras.touched &&
+             owners == first.extras.owners
+          then first.extras else {links; touched; owners} in
         ({ extras; u; iv; eqs; facts = { Init_pred.ge; mins }; vers }, false)
   in
   let trackable _ty = true in
@@ -2545,6 +2665,18 @@ let check
              let t = Init_pred.normalize st.eqs t in
              ({ st with eqs = st.eqs @ [("v" ^ string_of_int id, t)] }, false)
          | None -> (st, false))
+    | Ast.Let (false, _, _, Some ({ desc = Ast.Var _; _ } as e), _)
+      when (match Local_bindings.id_for_expr bindings e with
+            | Some id -> Types.IntMap.mem id st.extras.owners
+            | None -> false) ->
+        let st = expr st e in
+        let st = match Local_bindings.id_for_expr bindings e, Local_bindings.ids_for_stmt bindings s with
+          | Some source, [destination] ->
+              let root = Types.IntMap.find source st.extras.owners in
+              with_owners st (Types.IntMap.add destination root
+                (Types.IntMap.remove source st.extras.owners))
+          | _ -> st in
+        (st, false)
     | Ast.Let (_, _, _, Some e, _) | Ast.LetTuple (_, e) | Ast.Expr e
     | Ast.Yield e -> (expr st e, noreturn e)
     | Ast.Return eo ->
@@ -2564,6 +2696,18 @@ let check
               (expr st e, Option.get (bound_guarded e))
           | Some e -> (expr st e, [])
           | None -> (st, []) in
+        (match eo, ret_variant, ret_is_bool with
+         | Some { desc = Ast.EnumVariant (_, tag) | Ast.VariantCtor (_, tag, _); _ }, _, _ ->
+             observe_param_return st tag s.loc
+         | Some { desc = Ast.BoolLit b; _ }, _, _ ->
+             observe_param_return st (string_of_bool b) s.loc
+         | _, Some cases, _ ->
+             List.iter (fun (tag, _) ->
+               observe_param_return (apply_case st gs tag (fun _ -> None)) tag s.loc) cases
+         | _, _, true ->
+             List.iter (fun b ->
+               observe_param_return (apply_bool st gs b) (string_of_bool b) s.loc) [true; false]
+         | _ -> observe_param_return st "always" s.loc);
         check_outs st s.loc; check_ensures ?ret st eo gs s.loc; (st, true)
     | Ast.Block b -> stmts st b
     | Ast.UnsafeBlock b ->
@@ -2641,7 +2785,27 @@ let check
                   | _ -> None in
                 apply_case st gs case value
             | _ -> st in
-          stmts st (arm_body a)) arms)
+          let run () = stmts st (arm_body a) in
+          match a, Local_bindings.id_for_arm bindings s.loc i with
+          | Ast.ArmVariant (vname, case, Some (Ast.PayloadBind (name, false)), _), Some id
+            when Option.fold ~none:false ~some:owner_type (variant_payload vname case) ->
+              let root = "owner-local:" ^ string_of_int id in
+              Hashtbl.replace roots root
+                { display = name; leaves = [[], Ast.TypeArray (Ast.TypeU8, projected_size)];
+                  array_root = false; out_param = false };
+              let st = with_owners st (Types.IntMap.add id root st.extras.owners) in
+              let leaf = root, [] in
+              let clear st = { st with iv = List.filter (fun (k, _) -> k <> leaf) st.iv } in
+              let initial = clear { st with u = Leaves.add leaf st.u } in
+              let result, dead = Fun.protect
+                ~finally:(fun () ->
+                  Hashtbl.filter_map_inplace (fun _ v ->
+                    if v.vp.root = root then None else Some v) aliases)
+                (fun () -> stmts initial (arm_body a)) in
+              let result = with_owners result (Types.IntMap.filter
+                (fun _ owned_root -> owned_root <> root) result.extras.owners) in
+              (clear { result with u = Leaves.remove leaf result.u }, dead)
+          | _ -> run ()) arms)
     | Ast.Break | Ast.Continue -> (st, true)
     | Ast.StaticAssert _ -> (st, false)
   (* GitHub issue #978: the state at a loop's head. The versioned locals
@@ -2767,7 +2931,11 @@ let check
   in
   (* Requires: assumed at entry. *)
   ignore assigned_s;
-  let entry = { extras = empty_extras; u = entry_u; iv = []; eqs = []; facts = Init_pred.no_facts;
+  let entry_u = Types.IntMap.fold (fun id root uninit ->
+    if List.exists (fun name -> List.assoc_opt name param_ids = Some id) initialized_owner_parameters
+    then uninit
+    else Leaves.add (root, []) uninit) entry_owners entry_u in
+  let entry = { extras = {empty_extras with owners = entry_owners}; u = entry_u; iv = []; eqs = []; facts = Init_pred.no_facts;
                 vers = Types.IntMap.empty } in
   (* A where clause is already checked at every call. Import only scalar
      unsigned singleton parameters whose bindings cannot be changed by alias. *)
@@ -2804,6 +2972,7 @@ let check
           | Some f -> apply_fact st f
           | None -> st) st
           (resolve_pred ~index_expr:Fun.id ~arg_view:own_arg_view
+             ~owner_view:(fun name -> Option.bind (List.assoc_opt name param_ids) (projected_view st))
              ~env:(own_env ~result:None ~binder:None) p)
     | _ -> st) entry contracts in
   (* GitHub issue #983: a term step past the checker's native range is
@@ -2813,6 +2982,7 @@ let check
   (try
      let (st, dead) = stmts entry fdef.Ast.body in
      if not dead then begin
+       observe_param_return st "always" fdef.Ast.def_loc;
        check_outs st fdef.Ast.def_loc;
        check_ensures st None [] fdef.Ast.def_loc
      end
