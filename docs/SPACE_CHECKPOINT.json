@@ -2,11 +2,11 @@
   "date": "2026-11-19",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "f7f4d42f5e7350034e5cc4169f1aa89d03dc8da80857d5e0694e0c9a1b72f1a5",
-  "workload": "Normal QEMU and RPi5 objects, linked kernels and host call graph files, compared with 10257b670.",
+  "source_sha256": "40c955a9c7dddb6626e9a6abe3a888291562bcf8ef5ada085a6c705825b11d48",
+  "workload": "Both normal linked kernels and the existing peer TTY uname success fixture, compared with 78e2068e4.",
   "evidence": [
-    "docs/CALL_GRAPH_IDENTITY_SPACE.md"
+    "docs/UNAME_ABI_FIXTURE_SPACE.md"
   ],
-  "assessment": "Normal objects and linked kernels are byte-identical and retain the same memory map. Host call graph files grow because distinct generated definitions each have a row, with less than 0.05 percent additional cumulative compiler allocation on either target.",
-  "next_trigger": "Remeasure when generated definition identity, graph output format or the normal kernel build changes."
+  "assessment": "The QEMU ELF is byte-identical. RPi5 linked text shrinks by 304 bytes with the compressed fixture. Data, BSS, usable RAM and allocator expectations are unchanged. The existing user fixture grows its identity frame by 32 bytes.",
+  "next_trigger": "Remeasure when the peer TTY fixture stack, embedded image or linked reservation boundary changes."
 }
