@@ -2,11 +2,11 @@
   "date": "2026-11-19",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "71bce9893a376f2c5fc2dada950da68594bac9fe634d0a012e7fa099499c8761",
-  "workload": "Both normal linked kernels and the existing EL0 scalar ABI fixture, compared with 0a36c6b20.",
+  "source_sha256": "60e31894c71623959376532b0eabf6ebfdc176ac0340f24c49cf1c487311d01c",
+  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 3faa0664: this branch's review, rebound to the merged sources (upstream's record was 2026-11-19 incremental/measured). Both normal linked kernels, the boot process probe frame symbols and their generated exception ABI, compared with 0a36c6b20.",
   "evidence": [
-    "docs/SCALAR_ABI_TAIL_FIXTURE_SPACE.md"
+    "docs/PROCESS_PROBE_FRAME_SPACE.md"
   ],
-  "assessment": "The normal QEMU kernel ELF is byte-identical. RPi5 text shrinks by 80 bytes with the embedded test image. Data, BSS, usable RAM and allocator reservations remain unchanged.",
-  "next_trigger": "Measure again when the fixture stack, embedded image or linked reservation boundary changes."
+  "assessment": "The two aligned ABI spans use 416 fewer bytes in total. Linked text, data, BSS and usable RAM starts are unchanged on both targets.",
+  "next_trigger": "Remeasure when the exception ABI, the probe storage or the linked reservation boundary changes."
 }
