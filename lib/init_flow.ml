@@ -108,9 +108,11 @@ type extras = {
   links : Init_link.t;
   touched : StringSet.t;
   owners : string Types.IntMap.t;
+  owner_guards : StringSet.t Types.IntMap.t;
 }
 let empty_extras = {
   links = Init_link.empty; touched = StringSet.empty; owners = Types.IntMap.empty;
+  owner_guards = Types.IntMap.empty;
 }
 type state = {
   extras : extras;
@@ -160,7 +162,7 @@ type guarded =
 
 let check
     ~(struct_fields : string -> (string * Ast.type_expr) list option)
-    ~(callee : string -> ((Ast.ident * Ast.type_expr option) list * Ast.loc) option)
+    ~(callee : string -> Ast.expr -> ((Ast.ident * Ast.type_expr option) list * Ast.loc) option)
     ~(scratch : (string * Ast.type_expr) list)
     ?(variant_cases : string -> (string * bool) list option = fun _ -> None)
     ?(linear_owner : string -> bool = fun _ -> false)
@@ -348,7 +350,7 @@ let check
       | Ast.Assign (l, r) -> record_root l; go l; go r
       | Ast.AddrOf x -> record_root x; go x
       | Ast.Call (name, xs) ->
-          let ps = match callee name with Some (ps, _) -> ps | None -> [] in
+          let ps = match callee name e with Some (ps, _) -> ps | None -> [] in
           List.iteri (fun i x ->
             let shared = match List.nth_opt ps i with
               | Some (_, Some (Ast.TypeBorrow _)) -> true | _ -> false in
@@ -544,6 +546,21 @@ let check
             array_root = false; out_param = false };
         Types.IntMap.add id root owners) Types.IntMap.empty owner_parameters in
   let with_owners st owners = { st with extras = { st.extras with owners } } in
+  let projected_root root =
+    String.starts_with ~prefix:"owner-local:" root ||
+    String.starts_with ~prefix:"owner-param:" root in
+  let forget_owner_guards st root =
+    let owner_guards = Types.IntMap.filter_map (fun _ roots ->
+      let roots = StringSet.remove root roots in
+      if StringSet.is_empty roots then None else Some roots) st.extras.owner_guards in
+    { st with extras = { st.extras with owner_guards } } in
+  let note_owner_invalidation = ref (fun (_ : string) -> ()) in
+  let invalidate_owner st root =
+    !note_owner_invalidation root;
+    let st = forget_owner_guards st root in
+    let leaf = root, [] in
+    { st with u = Leaves.add leaf st.u;
+      iv = List.filter (fun (location, _) -> location <> leaf) st.iv } in
   let projected_view st id = Option.map (fun root ->
     { vp = { root; path = []; inside = false };
       off = Init_pred.const 0; len = Some (Init_pred.const projected_size) })
@@ -678,9 +695,7 @@ let check
         Option.bind (Hashtbl.find_opt aliases (Option.get (Local_bindings.id_for_expr bindings e)))
           (fun v ->
             let root = v.vp.root in
-            let owner_view = String.starts_with ~prefix:"owner-local:" root ||
-                             String.starts_with ~prefix:"owner-param:" root in
-            if owner_view &&
+            if projected_root root &&
                not (Types.IntMap.exists (fun _ live -> live = root) f.extras.owners)
             then None else Some v)
     | Ast.SliceOf (b, lo, hi) ->
@@ -1393,12 +1408,17 @@ let check
       { st with u; iv = List.filter (fun ((r, _), _) -> not (List.mem r keys)) st.iv;
                 extras = {st.extras with touched = List.fold_left (fun seen key -> StringSet.add key seen) st.extras.touched keys} }
     end in
+  let live_guard_fact st id (view, _) =
+    let root = view.vp.root in
+    not (projected_root root) ||
+    Option.fold ~none:false ~some:(StringSet.mem root)
+      (Types.IntMap.find_opt id st.extras.owner_guards) in
   let apply_positive st =
-    Hashtbl.fold (fun _ gs st -> List.fold_left (fun st -> function
+    Hashtbl.fold (fun id gs st -> List.fold_left (fun st -> function
       | GPositive (result, facts)
         when Init_pred.entails (Init_pred.normalize_facts st.eqs st.facts)
           (Init_pred.normalize st.eqs (Init_pred.sub result (Init_pred.const 1))) ->
-          List.fold_left apply_fact st facts
+          List.fold_left apply_fact st (List.filter (live_guard_fact st id) facts)
       | _ -> st) st gs) bound_gs st in
   let rec selector_binding (e : Ast.expr) = match e.desc with
     | Ast.Var x -> binding_id e x
@@ -1406,9 +1426,17 @@ let check
     | _ -> None in
   let invalidate_place st e = match selector_binding e with
     | Some id -> invalidate_selector st id | None -> st in
-  let bound_guarded (e : Ast.expr) = match Local_bindings.id_for_expr bindings e with
-    | Some id -> Hashtbl.find_opt bound_gs id
-    | None -> None in
+  let guard_facts = function
+    | GBool (_, facts) | GPositive (_, facts) | GCase (_, _, facts) -> facts in
+  let bound_guarded st (e : Ast.expr) =
+    Option.bind (Local_bindings.id_for_expr bindings e) (fun id ->
+      Option.map (List.map (fun guard ->
+        let facts = List.filter (live_guard_fact st id) (guard_facts guard) in
+        match guard with
+        | GBool (pol, _) -> GBool (pol, facts)
+        | GPositive (value, _) -> GPositive (value, facts)
+        | GCase (tag, binder, _) -> GCase (tag, binder, facts)))
+        (Hashtbl.find_opt bound_gs id)) in
   (* GitHub issue #978: the versioned locals a statement or expression may
      assign (or rebind with a `let`), syntactically. *)
   let var_id (v : Ast.expr) x = match Local_bindings.id_for_expr bindings v with
@@ -1890,14 +1918,7 @@ let check
          | Some r -> (add_iv st v.vp (v.off, Init_pred.add v.off r), [])
          | None -> (st, []))
     | Ast.Call (name, args) ->
-        if not !in_trial then
-          Option.iter (fun binding ->
-            match Option.bind binding (fun id -> Types.IntMap.find_opt id st.extras.owners) with
-            | Some root when not (Leaves.mem (root, []) st.u) -> ()
-            | Some _ -> error e.loc "publication requires initialization of all bytes of the live owner"
-            | None -> error e.loc "publication cannot establish the current owner")
-            (inferred_owner_requirement e);
-        let params = match callee name with
+        let params = match callee name e with
           | Some (ps, loc) when List.length ps = List.length args -> Some (ps, loc)
           | _ -> None in
         let cs = match params with
@@ -1940,6 +1961,13 @@ let check
                     | _ -> (expr st a, fills)))
           | `No -> (expr st a, fills))
           (st, []) (List.mapi (fun i a -> (i, a)) args) in
+        if not !in_trial then
+          Option.iter (fun binding ->
+            match Option.bind binding (fun id -> Types.IntMap.find_opt id st.extras.owners) with
+            | Some root when not (Leaves.mem (root, []) st.u) -> ()
+            | Some _ -> error e.loc "publication requires initialization of all bytes of the live owner"
+            | None -> error e.loc "publication cannot establish the current owner")
+            (inferred_owner_requirement e);
         (* Requires: checked against the state before the out fills. *)
         let pnames = match params with Some (ps, _) -> List.map fst ps | None -> [] in
         let arg_of x = match List.find_index (( = ) x) pnames with
@@ -2091,10 +2119,7 @@ let check
                          | Ast.SliceOf (inner, _, _) | Ast.FieldGet (inner, _) -> owner_of_arg inner
                          | _ -> None) in
               let affected = List.filter_map owner_of_arg args in
-              List.fold_left (fun st root ->
-                let leaf = root, [] in
-                { st with u = Leaves.add leaf st.u;
-                  iv = List.filter (fun (location, _) -> location <> leaf) st.iv }) st affected in
+              List.fold_left invalidate_owner st affected in
         let st = List.fold_left (fun st (i, arg) ->
           match arg.Ast.desc with
           | Ast.AddrOf target -> invalidate_place st target
@@ -2119,9 +2144,11 @@ let check
                           | Some (Ast.TypeBorrow _ | Ast.TypeBorrowMut _) -> false
                           | _ -> true)
                      | None -> true in
-                   if consumed && Types.IntMap.mem id st.extras.owners then
-                     with_owners st (Types.IntMap.remove id st.extras.owners)
-                   else st
+                   (match Types.IntMap.find_opt id st.extras.owners with
+                    | Some root when consumed ->
+                        with_owners (invalidate_owner st root)
+                          (Types.IntMap.remove id st.extras.owners)
+                    | _ -> st)
                | None -> st)
           | _ -> st) st (List.mapi (fun i a -> i, a) args) in
         List.fold_left (fun (st, gs) (id, outcome) ->
@@ -2392,10 +2419,16 @@ let check
         let owners = Types.IntMap.filter (fun id root ->
           in_all (fun st -> Types.IntMap.find_opt id st.extras.owners = Some root))
           first.extras.owners in
+        let owner_guards = Types.IntMap.filter_map (fun id roots ->
+          let roots = StringSet.filter (fun root ->
+            in_all (fun st -> Option.fold ~none:false ~some:(StringSet.mem root)
+              (Types.IntMap.find_opt id st.extras.owner_guards))) roots in
+          if StringSet.is_empty roots then None else Some roots)
+          first.extras.owner_guards in
         let extras =
           if links == first.extras.links && touched == first.extras.touched &&
-             owners == first.extras.owners
-          then first.extras else {links; touched; owners} in
+             owners == first.extras.owners && owner_guards == first.extras.owner_guards
+          then first.extras else {links; touched; owners; owner_guards} in
         ({ extras; u; iv; eqs; facts = { Init_pred.ge; mins }; vers }, false)
   in
   let trackable _ty = true in
@@ -2626,9 +2659,20 @@ let check
         let (st, gs) = call st e ~result:(bind_result s) in
         (* GitHub issue #975: an immutable binding of a call's result keeps
            the facts that depend on it, for a later `match` or `return`. *)
-        (match Local_bindings.ids_for_stmt bindings s with
-         | id :: _ when immutable id && gs <> [] -> Hashtbl.replace bound_gs id gs
-         | _ -> ());
+        let st = match Local_bindings.ids_for_stmt bindings s with
+          | id :: _ when immutable id ->
+              if gs = [] then Hashtbl.remove bound_gs id
+              else Hashtbl.replace bound_gs id gs;
+              let roots = List.fold_left (fun roots guard ->
+                List.fold_left (fun roots (v, _) ->
+                  let root = v.vp.root in
+                  if projected_root root then StringSet.add root roots else roots)
+                roots (guard_facts guard)) StringSet.empty gs in
+              let owner_guards = if StringSet.is_empty roots then
+                  Types.IntMap.remove id st.extras.owner_guards
+                else Types.IntMap.add id roots st.extras.owner_guards in
+              { st with extras = { st.extras with owner_guards } }
+          | _ -> st in
         (st, false)
     | Ast.Let (false, _, _, Some ({ desc = Ast.SliceOf (b, lo, _); _ } as e), _)
       when view_of st e = None && view_of st b <> None && lin st lo <> None
@@ -2692,8 +2736,8 @@ let check
           | _ -> None in
         let (st, gs) = match eo with
           | Some ({ desc = Ast.Call _; _ } as e) -> call st e ~result:ret
-          | Some ({ desc = Ast.Var _; _ } as e) when bound_guarded e <> None ->
-              (expr st e, Option.get (bound_guarded e))
+          | Some ({ desc = Ast.Var _; _ } as e) ->
+              (expr st e, Option.value ~default:[] (bound_guarded st e))
           | Some e -> (expr st e, [])
           | None -> (st, []) in
         (match eo, ret_variant, ret_is_bool with
@@ -2762,7 +2806,7 @@ let check
     | Ast.Match (d, arms) | Ast.LetMatch (_, _, _, d, arms) ->
         let (st, gs) = match d.desc with
           | Ast.Call _ -> call st d ~result:None
-          | Ast.Var _ when bound_guarded d <> None -> (expr st d, Option.get (bound_guarded d))
+          | Ast.Var _ -> (expr st d, Option.value ~default:[] (bound_guarded st d))
           | _ -> (expr st d, []) in
         merge (List.mapi (fun i a ->
           (* GitHub issue #975: the binder's payload type, for its facts. *)
@@ -2793,7 +2837,8 @@ let check
               Hashtbl.replace roots root
                 { display = name; leaves = [[], Ast.TypeArray (Ast.TypeU8, projected_size)];
                   array_root = false; out_param = false };
-              let st = with_owners st (Types.IntMap.add id root st.extras.owners) in
+              let st = with_owners (forget_owner_guards st root)
+                (Types.IntMap.add id root st.extras.owners) in
               let leaf = root, [] in
               let clear st = { st with iv = List.filter (fun (k, _) -> k <> leaf) st.iv } in
               let initial = clear { st with u = Leaves.add leaf st.u } in
@@ -2822,6 +2867,7 @@ let check
      fixpoint. *)
   and loop_head st body enter =
     let link_head = ref st.extras.links in
+    let owner_head = ref st in
     let ids = List.sort_uniq compare (List.fold_left assigned_s [] body) in
     let hv = List.map (fun id -> (id, fresh_ver ())) ids in
     let to_head (s : state) =
@@ -2836,7 +2882,7 @@ let check
         | _ -> s) s hv in
       { s with vers = List.fold_left (fun m (id, k) -> Types.IntMap.add id k m) s.vers hv } in
     let head_of cands =
-      let st = List.fold_left (fun st ((root, _), _) -> touch_root st root) st cands in
+      let st = List.fold_left (fun st ((root, _), _) -> touch_root st root) !owner_head cands in
       let st = set_links st !link_head in
       let h = { st with vers = List.fold_left (fun m (id, k) -> Types.IntMap.add id k m)
                                  st.vers hv } in
@@ -2877,6 +2923,19 @@ let check
       in_trial := saved_trial;
       errors := saved_errors; Range_obligation.enabled := saved_obl;
       trace_func := saved_trace; r in
+    (* A loop can revisit its header or exit abruptly after an opaque write.
+       Collect invalidations even from paths that do not reach the backedge. *)
+    if not (Types.IntMap.is_empty st.extras.owners) then begin
+      let invalidated = ref StringSet.empty in
+      let outer = !note_owner_invalidation in
+      note_owner_invalidation := (fun root ->
+        invalidated := StringSet.add root !invalidated; outer root);
+      Fun.protect ~finally:(fun () -> note_owner_invalidation := outer)
+        (fun () -> quiet (fun () -> ignore (run (head_of []))));
+      owner_head := Types.IntMap.fold (fun _ root head ->
+        if StringSet.mem root !invalidated then invalidate_owner head root else head)
+        st.extras.owners st
+    end;
     (* Linked candidates are the entry certificates, intersected with every
        backedge. Mutable binding keys denote their current values here; the
        scalar assignments above replace, rather than accumulate, certificates.

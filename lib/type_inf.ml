@@ -12622,7 +12622,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     ~noreturn:checked_noreturn_call
     ~note_unsafe:(fun loc -> if not !discovering_owner_facts then Hashtbl.replace type_checker_consumed_unsafe_at loc ())
     ~struct_fields:init_struct_fields
-    ~callee:init_signature
+    ~callee:(fun name call ->
+      if not track_projected_owners then init_signature name
+      else match init_call_target call with
+        | Some key -> Option.map (fun (f, _) -> f.Ast.params, f.def_loc) (init_definition key)
+        | None -> init_signature name)
     ~global_singleton:init_global_singleton
     ~global_byte_array_length:init_global_byte_array_length
     ~scratch:init_scratch

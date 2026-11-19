@@ -2713,11 +2713,17 @@ fn publish746(o: sink Owner746[page]) !{unsafe}
         requires init(bytes746(o)[0..<64]) {
     release746(o);
 }
+fn publish746(value: usize) -> usize { return value; }
 fn fill746(o: borrow Owner746[page], ready: bool) -> bool !{unsafe} {
     if (ready == false) { return false; }
     let bytes = bytes746(o);
     for i: usize in 0..<64 { bytes[i] = 0; }
     return true;
+}
+variant Fill746 { Ready; Skipped; }
+fn fill_variant746(o: borrow Owner746[page], ready: bool) -> Fill746 !{unsafe} {
+    if (fill746(o, ready)) { return Fill746::Ready; }
+    return Fill746::Skipped;
 }
 extern fn opaque746(bytes: borrow [u8; 64..]);
 fn check746(arr: borrow places(Frame746)[b, n], ready: bool) !{unsafe} {
@@ -12861,6 +12867,46 @@ fn use745(held: RegionHeld(Rec745)) -> usize !{unsafe} {
             for i: usize in 0..<64 { bytes[i] = 0; }
             opaque746(bytes);
             publish746(o);
+|}));
+  Alcotest.test_case "owner publication: a saved outcome cannot restore invalidated coverage" `Quick
+    (expect_region_error "required initialized by 'publish746'" (owner_publication_1513 {|
+            let result = fill_variant746(o, ready);
+            let bytes = bytes746(o);
+            for i: usize in 0..<64 { bytes[i] = 0; }
+            opaque746(bytes);
+            match result {
+                Fill746::Ready => { publish746(o); }
+                Fill746::Skipped => { release746(o); }
+            }
+|}));
+  Alcotest.test_case "owner publication: an unchanged owner retains a saved outcome" `Quick
+    (fun () -> ignore (infer_regions (owner_publication_1513 {|
+            let result = fill_variant746(o, ready);
+            match result {
+                Fill746::Ready => { publish746(o); }
+                Fill746::Skipped => { release746(o); }
+            }
+|})));
+  Alcotest.test_case "owner publication: an immediate variant outcome supplies coverage" `Quick
+    (fun () -> ignore (infer_regions (owner_publication_1513 {|
+            match fill_variant746(o, ready) {
+                Fill746::Ready => { publish746(o); }
+                Fill746::Skipped => { release746(o); }
+            }
+|})));
+  Alcotest.test_case "owner publication: loop exits cannot restore a saved outcome" `Quick
+    (expect_region_error "required initialized by 'publish746'" (owner_publication_1513 {|
+            let result = fill_variant746(o, ready);
+            let bytes = bytes746(o);
+            while (ready) {
+                for i: usize in 0..<64 { bytes[i] = 0; }
+                opaque746(bytes);
+                break;
+            }
+            match result {
+                Fill746::Ready => { publish746(o); }
+                Fill746::Skipped => { release746(o); }
+            }
 |}));
 
   (* GitHub issue #746: give-back by address. *)
