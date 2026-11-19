@@ -89,9 +89,9 @@ def main() -> int:
             return True
 
         for cpus, supplied, cli, expected in [
-                (24, None, None, "16"), (4, None, None, "4"), (16, None, None, "16"),
-                (24, "6", None, "6"), (24, None, "7", "7"), (24, "6", "7", "7"),
-                (24, "", None, "16"), (24, None, "", "16")]:
+                (24, None, None, "8"), (4, None, None, "4"), (8, None, None, "8"),
+                (24, "12", None, "12"), (24, None, "10", "10"), (24, "12", "10", "10"),
+                (24, "", None, "8"), (24, None, "", "8")]:
             if not case("allcheck", cpus, supplied, cli, expected):
                 return 1
         for goal in ("modelcheck", "cicheck-models"):

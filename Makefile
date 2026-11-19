@@ -3032,7 +3032,7 @@ allcheck-prebuild: build
 .PHONY: allcheck
 # Keep model jobs below the measured allcheck contention point. Empty values
 # follow the runner's unset convention; explicit nonempty overrides survive.
-allcheck: override export MODELCHECK_JOBS := $(or $(strip $(MODELCHECK_JOBS)),$(shell nproc | awk '{print ($$1 < 16 ? $$1 : 16)}'))
+allcheck: override export MODELCHECK_JOBS := $(or $(strip $(MODELCHECK_JOBS)),$(shell nproc | awk '{print ($$1 < 8 ? $$1 : 8)}'))
 allcheck:
 	@status=0; . scripts/resource_lease.sh; \
 	rm -rf "$(LANE_TIMING_DIR)"; mkdir -p "$(LANE_TIMING_DIR)"; \
