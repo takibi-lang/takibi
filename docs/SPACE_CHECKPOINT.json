@@ -1,15 +1,12 @@
 {
   "date": "2026-11-19",
-  "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "a5cf5a243fd8d61f39af3cc737ee6e64914d71ebf5cf18b739380bf62a6105a2",
-  "workload": "Existing boot ext2 read/write workload with the existing fixed virtio DMA buffers and the storage-view response-length boundary controls.",
+  "event": "milestone",
+  "decision": "measured",
+  "source_sha256": "38b03a75b67b84e6b97dfa89838058e7a815da714b10df155660fc2195d00d9e",
+  "workload": "Normal linked QEMU and RPi5 kernels with the existing user-page mapping, COW, replacement and boot allocator workloads.",
   "evidence": [
-    "docs/EXT2_BITMAP_INIT_REVIEW.md",
-    "kernel/models/README.md",
-    "kernel/tests/qemu/views/storage.expected",
-    "kernel/tests/qemu/dma/virtio_blk_fixture.tkb"
+    "docs/PAGE_PUBLICATION.md"
   ],
-  "assessment": "Reuse the allocation evidence: reading the existing used-ring entry and rejecting a short response does not change DMA buffer sizes, allocator calls, or retained pages. The completion length is a scalar. The allcheck model job cap changes host-side scheduling only. The isolated QEMU DMA fixture now publishes complete used entries and exercises a short completion. It is not linked into the production kernels and changes no production allocation.",
-  "next_trigger": "Measure anew when the block receive allocation, queue depth, or extent-sharing policy changes."
+  "assessment": "Adopt the common checked mapping entry. Linked text grows by 1656 bytes on QEMU and 1816 bytes on RPi5. Data, BSS, usable RAM start and checked allocator capacities are unchanged. Boot fixtures write their input pages before publication and keep their allocation and release workload.",
+  "next_trigger": "Measure again when the published user-page, owner, frame or page-table allocation workload or image reservation changes."
 }
