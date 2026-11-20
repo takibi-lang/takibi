@@ -50,7 +50,31 @@ private let mut signal_probe_record: ProcessRecord;
 
 // 0 = phase 1, forged guard. 1 = phase 2, locked.
 private let mut signal_probe_phase: AtomicWord;
-private let mut signal_probe_armed: AtomicWord;
+// The low two bits are initial (0), open (1), closed (2), or abandoned
+// (3). Bit cpu + 1 records each admitted peer. A single atomic word orders
+// closing admission against a peer entering after its idle-loop check.
+const SIGNAL_PROBE_GATE_STATE: usize = 3;
+const SIGNAL_PROBE_OPEN: usize = 1;
+const SIGNAL_PROBE_CLOSED: usize = 2;
+private let mut signal_probe_gate: AtomicWord;
+
+private linear struct SignalProbeVisit[gate: addr] { private bit: usize; }
+private linear view SignalProbeDrained[gate: addr];
+
+must_use variant SignalProbeAdmission {
+    Closed;
+    Entered(SignalProbeVisit[&signal_probe_gate]);
+}
+
+must_use variant SignalProbeDrain {
+    TimedOut;
+    Drained(SignalProbeDrained[&signal_probe_gate]);
+}
+
+must_use variant SignalProbePhase {
+    Failed;
+    Complete(usize);
+}
 // Round the peers may raise for, and per peer the last round it finished
 // raising.
 private let mut signal_probe_go: AtomicWord;
@@ -59,7 +83,7 @@ private let mut signal_probe_done: PeerTally;
 // Armed for `cpu` while it is a peer: the run function holds it until
 // disarmed, so it cannot re-enter an armed probe (GitHub issue #860).
 fn signal_contention_is_armed(cpu: usize) -> bool !{unsafe} {
-    return atomic_word_load(&signal_probe_armed) == 1 &&
+    return (atomic_word_load(&signal_probe_gate) & SIGNAL_PROBE_GATE_STATE) == SIGNAL_PROBE_OPEN &&
            peer_tally_is_peer(&signal_probe_done, cpu);
 }
 
@@ -79,12 +103,68 @@ private fn signal_probe_peer_mask() -> usize !{unsafe} {
     return mask;
 }
 
+private fn signal_probe_enter(cpu: usize) -> SignalProbeAdmission {
+    if (cpu == 0 || cpu >= KERNEL_MAX_CORES) { return SignalProbeAdmission::Closed; }
+    let bit: usize = 1 << (cpu + 1);
+    let mut gate: usize = atomic_word_load(&signal_probe_gate);
+    while ((gate & SIGNAL_PROBE_GATE_STATE) == SIGNAL_PROBE_OPEN && (gate & bit) == 0) {
+        match atomic_word_compare_swap_acq_rel(&signal_probe_gate, gate, gate | bit) {
+            CasResult::Swapped => {
+                let mut visit: SignalProbeVisit[&signal_probe_gate] = { bit };
+                return SignalProbeAdmission::Entered(visit);
+            }
+            CasResult::Observed(seen) => { gate = seen; }
+        }
+    }
+    return SignalProbeAdmission::Closed;
+}
+
+private fn signal_probe_leave(visit: sink SignalProbeVisit[&signal_probe_gate]) {
+    let bit: usize = visit.bit;
+    let mut gate: usize = atomic_word_load(&signal_probe_gate);
+    while (true) {
+        match atomic_word_compare_swap_acq_rel(&signal_probe_gate, gate, gate & ~bit) {
+            CasResult::Swapped => { return; }
+            CasResult::Observed(seen) => { gate = seen; }
+        }
+    }
+}
+
+private fn signal_probe_close() -> SignalProbeDrain !{unsafe} {
+    // The primary is the only writer of the two state bits. Open + 1 is
+    // closed, with no carry into registrations. An acquire observation of
+    // the empty gate then sees the peers' release departures.
+    atomic_word_fetch_add(&signal_probe_gate, 1);
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        let bit: usize = 1 << (cpu + 1);
+        if ((atomic_word_load(&signal_probe_gate) & bit) != 0) {
+            let mut window = peer_tick_window_policy(cpu, PeerTickPolicy::Entry);
+            while (peer_tick_window_open(window) &&
+                   (atomic_word_load(&signal_probe_gate) & bit) != 0) { }
+            peer_tick_window_end(window);
+        }
+    }
+    if (atomic_word_load(&signal_probe_gate) != SIGNAL_PROBE_CLOSED) {
+        // Closed + 1 abandons the record even if a peer later leaves.
+        atomic_word_fetch_add(&signal_probe_gate, 1);
+        return SignalProbeDrain::TimedOut;
+    }
+    return SignalProbeDrain::Drained(view SignalProbeDrained[&signal_probe_gate]);
+}
+
+private fn signal_probe_reset(drained: sink SignalProbeDrained[&signal_probe_gate]) {
+    signal_probe_record.pending_signals = 0;
+}
+
 // Every online peer runs this from its idle loop while the probe is armed.
 fn signal_contention_secondary_run(cpu: usize) !{unsafe} {
     if (peer_tally_is_peer(&signal_probe_done, cpu) == false) { return; }
+    let SignalProbeAdmission::Entered(visit) = signal_probe_enter(cpu) else {
+        SignalProbeAdmission::Closed => { return; }
+    };
     let record: &mut ProcessRecord = &signal_probe_record;
     let bit: usize = signal_probe_peer_bit(cpu);
-    while (atomic_word_load(&signal_probe_armed) == 1) {
+    while ((atomic_word_load(&signal_probe_gate) & SIGNAL_PROBE_GATE_STATE) == SIGNAL_PROBE_OPEN) {
         let go: usize = atomic_word_load(&signal_probe_go);
         if (go != peer_tally_count(&signal_probe_done, cpu)) {
             if (atomic_word_load(&signal_probe_phase) == 1) {
@@ -99,6 +179,7 @@ fn signal_contention_secondary_run(cpu: usize) !{unsafe} {
             peer_tally_set(&signal_probe_done, cpu, go);
         }
     }
+    signal_probe_leave(visit);
 }
 
 private fn signal_probe_hold_locked(round: usize) -> bool
@@ -145,7 +226,10 @@ private fn signal_probe_round(round: usize, locked: bool) -> usize
             forged, record, SIGNAL_PRIMARY_BIT);
         atomic_word_store(&signal_probe_go,
                                   round);
-        let early: bool = signal_probe_wait_done(round);
+        if (signal_probe_wait_done(round) == false) {
+            process_run_guard_discard_unlocked(forged);
+            return 2;
+        }
         process_signal_pending_store(forged, record, value);
         process_run_guard_discard_unlocked(forged);
     }
@@ -157,13 +241,14 @@ private fn signal_probe_round(round: usize, locked: bool) -> usize
     return 3;
 }
 
-// Rounds that lost core 1's bit, or SIGNAL_CONTENTION_ROUNDS + 1 when core 1
-// missed a round and the phase says nothing.
-private fn signal_contention_run_phase(locked: usize) -> usize !{unsafe} {
+// A phase can reuse the record only after a complete close and drain.
+private fn signal_contention_run_phase(locked: usize) -> SignalProbePhase !{unsafe} {
+    let gate: usize = atomic_word_load(&signal_probe_gate);
+    if (gate != 0 && gate != SIGNAL_PROBE_CLOSED) { return SignalProbePhase::Failed; }
     atomic_word_store(&signal_probe_phase, locked);
     atomic_word_store(&signal_probe_go, 0);
     peer_tally_reset(&signal_probe_done, kernel_online_core_count());
-    atomic_word_store(&signal_probe_armed, 1);
+    atomic_word_store(&signal_probe_gate, SIGNAL_PROBE_OPEN);
     let mut lost: usize = 0;
     let mut missed: bool = false;
     for index: usize in 0..<SIGNAL_CONTENTION_ROUNDS {
@@ -177,17 +262,31 @@ private fn signal_contention_run_phase(locked: usize) -> usize !{unsafe} {
             }
         }
     }
-    atomic_word_store(&signal_probe_armed, 0);
-    signal_probe_record.pending_signals = 0;
-    if (missed) { return SIGNAL_CONTENTION_ROUNDS + 1; }
-    return lost;
+    let SignalProbeDrain::Drained(drained) = signal_probe_close() else {
+        SignalProbeDrain::TimedOut => {
+            kernel_boot_log("signal contention stage: secondary-never-left\n");
+            return SignalProbePhase::Failed;
+        }
+    };
+    signal_probe_reset(drained);
+    if (missed) {
+        kernel_boot_log("signal contention stage: secondary-missed-round\n");
+        return SignalProbePhase::Failed;
+    }
+    return SignalProbePhase::Complete(lost);
 }
 
 fn signal_contention_probe() -> bool !{unsafe} {
     static_assert(KERNEL_ACTIVE_CORES >= 2,
                   "signal contention evidence requires one peer");
-    let unlocked_lost: usize = signal_contention_run_phase(0);
-    let locked_lost: usize = signal_contention_run_phase(1);
+    static_assert(KERNEL_MAX_CORES < 64,
+                  "signal contention admissions fit one word");
+    let SignalProbePhase::Complete(unlocked_lost) = signal_contention_run_phase(0) else {
+        SignalProbePhase::Failed => { return false; }
+    };
+    let SignalProbePhase::Complete(locked_lost) = signal_contention_run_phase(1) else {
+        SignalProbePhase::Failed => { return false; }
+    };
     kernel_boot_log("signal contention counts: unlocked-lost=");
     uart_put_udec(unlocked_lost);
     kernel_boot_log(" locked-lost=");
@@ -195,9 +294,5 @@ fn signal_contention_probe() -> bool !{unsafe} {
     kernel_boot_log(" rounds=");
     uart_put_udec(SIGNAL_CONTENTION_ROUNDS);
     kernel_boot_log("\n");
-    if (unlocked_lost > SIGNAL_CONTENTION_ROUNDS ||
-            locked_lost > SIGNAL_CONTENTION_ROUNDS) {
-        kernel_boot_log("signal contention stage: secondary-missed-round\n");
-    }
     return unlocked_lost == SIGNAL_CONTENTION_ROUNDS && locked_lost == 0;
 }
