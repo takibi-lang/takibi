@@ -25,7 +25,9 @@ per-function static measurements. They do not bound the whole stack
 or measure elapsed allocation time.
 
 The ordinary adapters consolidate the explicit no-debit scopes from
-56 to 20. The thirteen adapters leave no separate linked symbols.
+56 to 20. Eleven adapters leave no separate linked symbols. The two
+boot mapping calls supply their scopes directly so the slot
+acquisition entries remain leaves.
 Inlining the four allocator wrappers as well removes their separate
 linked frames but adds 80 bytes of linked text on QEMU and 48 on
 RPi5, compared with the chosen layout. The narrower code size result

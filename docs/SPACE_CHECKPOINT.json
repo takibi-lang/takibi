@@ -2,7 +2,7 @@
   "date": "2026-11-20",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "50ebcf32cc1188bba10f8c5706484fbdfddaf9e751004a505af5bae46f5b8767",
+  "source_sha256": "818955daaedb7e8276ee06449ec154ee5b7277ab759af3362c14ae4d69593072",
   "workload": "Both normal linked kernels and exec reservation commit frames, including conditional image record growth, compared with a5c8342b2.",
   "evidence": [
     "docs/EXEC_RESERVATION_SPACE.md"
