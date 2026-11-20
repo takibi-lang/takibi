@@ -2,11 +2,11 @@
   "date": "2026-11-20",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "0855cc474ea234af4eacb4c2a4f37f29f47d5407033511d56eb94bb22ec32ff3",
-  "workload": "Connected TCP write, measured in the normal and debug linked QEMU and RPi5 images and matching function stack records. Baseline b19cbe015.",
+  "source_sha256": "1809ee8767ba5efa1cf0721722dfe26506930fcfc2c344a38a8be8ca3f36be58",
+  "workload": "PMU interrupt collection and stopped-machine sample reset and report. Compare linked QEMU and RPi5 images with baseline fcc42eb95.",
   "evidence": [
-    "docs/TCP_DIRECT_SEND_SPACE.md"
+    "docs/PMU_SAMPLE_AUTHORITY_SPACE.md"
   ],
-  "assessment": "The checked user payload copy targets the existing TX frame, removing the intermediate payload copy and RX frame hold. Normal linked text falls by 80 and 72 bytes respectively. Writable symbols and usable RAM starts are unchanged. The send frame grows by 16 bytes in normal QEMU and 64/32 bytes in debug QEMU/RPi5. The caller frame shrinks in all four builds. All affected frames remain within the existing ceiling.",
-  "next_trigger": "Remeasure when send staging, TX frame storage, or the copy and retransmission boundaries change."
+  "assessment": "Sample retention is unchanged at 32832 bytes. Linked text grows by 68 bytes on QEMU and 60 bytes on RPi5. The PMU handler, sample store and report instruction streams and all four measured stack frames are unchanged. The reset path grows by 12 bytes on both targets.",
+  "next_trigger": "Remeasure if the PMU authority mint, sample buffer layout, or interrupt collection path changes."
 }
