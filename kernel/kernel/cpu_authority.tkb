@@ -102,6 +102,15 @@ inline fn exception_cpu_here() -> CpuHere {
     return cpu;
 }
 
+// The sampled PMU IRQ passes its one MPIDR reading after the online and
+// bounds checks. The ordinary interrupt cannot migrate before its same-frame
+// return; a nested debugger stop resumes this interrupt on the same core.
+// The build confines this mint and the sampled handler to their IRQ callers.
+inline fn pmu_sample_cpu_here(index: {0..<KERNEL_MAX_CORES as usize}) -> CpuHere !{interrupt} {
+    let mut cpu: CpuHere = { index };
+    return cpu;
+}
+
 // The runtime checks of the preempt count: that every region entry finds
 // TPIDR_EL1 naming the CPU cpu_id() names, that no exit lowers a count of
 // zero, and that a blocking point is reached at count zero. The compiler

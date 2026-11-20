@@ -84,3 +84,5 @@ user-pte-write-callers	address_space_pte_write	kernel/kernel/syscall.tkb:kernel_
 user-pte-update-callers	mmu_pte_update	kernel/mm/address_space.tkb:address_space_pte_clear,kernel/mm/address_space.tkb:address_space_pte_write,kernel/mm/address_space.tkb:address_space_release_user_mappings	#1513	Keep user leaf descriptor updates in the reviewed writer and teardown paths
 user-page-ref-install-callers	page_mapping_install	kernel/mm/address_space.tkb:address_space_map_page	#1513	Only the common fresh-page publication entry converts its owner into a mapping reference
 user-l3-table-install-callers	mmu_user_l3_install	kernel/mm/address_space.tkb:address_space_publish_l3	#1513	Only the owner-checked publication boundary installs a new user L3 table.
+pmu-sample-authority-callers	pmu_sample_cpu_here	kernel/kernel/profile_samples.tkb:profile_sample_irq	#1159	Only the PMU sample handler mints with its checked single MPIDR observation.
+pmu-sample-handler-callers	profile_sample_irq	kernel/platform/qemu/irq_source.tkb:irq_pmu_clear,kernel/platform/rpi5/irq_source.tkb:irq_pmu_clear	#1159	Only the platform PMU IRQ clear reaches the sampled handler.

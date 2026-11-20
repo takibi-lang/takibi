@@ -68,7 +68,6 @@ LISTED = {
     ("kernel/kernel/process.tkb", "kernel_process_tick_wake_tick_now"): (CROSS, "the tick-wake report"),
     ("kernel/kernel/process.tkb", "kernel_process_tick_wake_tick_before"): (CROSS, "the tick-wake report"),
     ("kernel/kernel/process.tkb", "kernel_crash_trace_next"): (CROSS, "atomic per-core counters cleared together during boot reset"),
-    ("kernel/kernel/profile_samples.tkb", "profile_sample_cores"): (CROSS, "the profile report"),
     ("kernel/kernel/profile_session.tkb", "profile_core_store"): (CROSS, "the profile session's collector"),
     ("kernel/kernel/profile_session.tkb", "profile_core_state"): (CROSS, "the profile session's collector"),
     ("kernel/kernel/profile_session.tkb", "irqsoff_core"): (CROSS, "the irqsoff report"),

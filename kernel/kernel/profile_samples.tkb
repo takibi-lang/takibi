@@ -76,7 +76,7 @@ struct ProfileSample {
     level: ProfileSampleLevel;
 }
 
-struct ProfileSampleCore {
+struct per_cpu ProfileSampleCore {
     stored: usize;
     lost: usize;
     samples: [ProfileSample; PROFILE_SAMPLE_MAX];
@@ -102,15 +102,17 @@ private let mut profile_sample_end_pending: StopCell(usize);
 private let mut profile_sample_end_state: StopCell(usize);
 private let mut profile_sample_end_gic: StopCell(usize);
 
-private fn profile_sample_core_reset(cpu: {0..<KERNEL_MAX_CORES as usize}) {
-    profile_sample_cores[cpu].stored = 0;
-    profile_sample_cores[cpu].lost = 0;
+private fn profile_sample_core_reset(
+        stopped: borrow MachineStopped[&kernel_world_stop],
+        cpu: {0..<KERNEL_MAX_CORES as usize}) {
+    stopped_store(stopped, profile_sample_cores[cpu].stored, 0);
+    stopped_store(stopped, profile_sample_cores[cpu].lost, 0);
 }
 
 // Store one sample, or count it lost. The buffer's own size is the bound:
 // `stored` is proved below PROFILE_SAMPLE_MAX by the early return, which is
 // what lets the slot be indexed without a runtime bounds check.
-private fn profile_sample_store(cpu: {0..<KERNEL_MAX_CORES as usize},
+private fn profile_sample_store(cpu: CpuHere,
                                 timestamp: usize, pc: usize, pid: usize,
                                 level: ProfileSampleLevel) {
     let stored: usize = profile_sample_cores[cpu].stored;
@@ -133,7 +135,7 @@ fn profile_sample_start(stopped: borrow MachineStopped[&kernel_world_stop]) {
     // GitHub issue #497: a DDB profile session owns the PMU while it exists.
     if (profile_session_exists()) { return; }
     for cpu: usize in 0..<KERNEL_MAX_CORES {
-        profile_sample_core_reset(cpu);
+        profile_sample_core_reset(stopped, cpu);
     }
     if (atomic_word_load(&profile_sample_checked) == 0) {
         atomic_word_store(&profile_sample_checked, 1);
@@ -190,7 +192,7 @@ fn profile_sample_irq(frame: borrow FrameRef[process, level]) !{interrupt, unsaf
     // EL0t, anything else here is this kernel's own EL1.
     let mut level: ProfileSampleLevel = ProfileSampleLevel::El1;
     if ((frame_spsr_el1(frame) & 0xF) == 0) { level = ProfileSampleLevel::El0; }
-    profile_sample_store(bounded_cpu, read_cntpct() as usize, frame_elr_el1(frame),
+    profile_sample_store(pmu_sample_cpu_here(bounded_cpu), read_cntpct() as usize, frame_elr_el1(frame),
                          kernel_process_current_pid(), level);
     pmu_sample_rearm(PROFILE_SAMPLE_PERIOD_CYCLES);
 }
@@ -207,7 +209,7 @@ private fn profile_sample_put_level(level: ProfileSampleLevel) {
 // exactly one named workload interval, and it is the same one
 // workload_evidence.tkb names on its own `profile: begin`/`profile: end`
 // lines -- a second interval would make the name a parameter of both.
-fn profile_sample_report() {
+fn profile_sample_report(stopped: borrow MachineStopped[&kernel_world_stop]) {
     let online: usize = kernel_online_core_count();
     // The stable half of this dump, and the one a view asserts: whether the
     // hardware source this file needs was actually there and armed. The
@@ -225,24 +227,24 @@ fn profile_sample_report() {
     let mut sequence: usize = 0;
     for cpu: usize in 0..<KERNEL_MAX_CORES {
         if (cpu < online) {
-        let stored: usize = profile_sample_cores[cpu].stored;
+        let stored: usize = stopped_read(stopped, profile_sample_cores[cpu].stored);
         for slot: usize in 0..<PROFILE_SAMPLE_MAX {
             if (slot < stored) {
                 kernel_boot_log("profile: sample name=busy-pair sequence=");
                 uart_put_udec(sequence);
                 kernel_boot_log(" timestamp=");
-                uart_put_udec(profile_sample_cores[cpu].samples[slot].timestamp);
+                uart_put_udec(stopped_read(stopped, profile_sample_cores[cpu].samples[slot].timestamp));
                 kernel_boot_log(" cpu=");
                 uart_put_udec(cpu);
                 kernel_boot_log(" pid=");
-                uart_put_udec(profile_sample_cores[cpu].samples[slot].pid);
+                uart_put_udec(stopped_read(stopped, profile_sample_cores[cpu].samples[slot].pid));
                 kernel_boot_log(" pc=0x");
-                uart_put_hex_digits(profile_sample_cores[cpu].samples[slot].pc);
+                uart_put_hex_digits(stopped_read(stopped, profile_sample_cores[cpu].samples[slot].pc));
                 kernel_boot_log(" period=");
                 uart_put_udec(PROFILE_SAMPLE_PERIOD_CYCLES);
                 kernel_boot_log(" level=");
                 profile_sample_put_level(
-                    profile_sample_cores[cpu].samples[slot].level);
+                    stopped_read(stopped, profile_sample_cores[cpu].samples[slot].level));
                 kernel_boot_log("\n");
                 sequence = sequence + 1;
             }
@@ -252,7 +254,7 @@ fn profile_sample_report() {
     let mut lost: usize = 0;
     for cpu: usize in 0..<KERNEL_MAX_CORES {
         if (cpu < online) {
-            lost = lost + profile_sample_cores[cpu].lost;
+            lost = lost + stopped_read(stopped, profile_sample_cores[cpu].lost);
         }
     }
     kernel_boot_log("profile: sample-summary name=busy-pair stored=");

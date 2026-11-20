@@ -571,6 +571,14 @@ rules globally.
   function-value checks in `scripts/buildcheck_allowed_callers.py` and
   `scripts/buildcheck_cpu_authority_mints.py` enforce that boundary; they do
   not grant general ordinary-code mint permission.
+  The PMU sample mint is separate. Its only caller passes the one MPIDR
+  observation after online and bounds checks. The compiled caller rules
+  also confine that handler to the platform PMU IRQ clear functions.
+  Per-CPU sample writes require this authority; reset and report borrow
+  complete stop. The ordinary IRQ cannot migrate before its same-frame
+  return, and a nested debugger stop resumes that same interrupt. This
+  IRQ premise and the actual MPIDR argument remain reviewed source
+  obligations. The mint changes no preempt count and reads no TPIDR.
 - Exception retained CPU stores use that same approved manual authority.
   Complete-stop DDB readers use scalar `stopped_read` plus sequence freshness;
   sequence freshness alone grants no complete-stop authority. Crash reporters

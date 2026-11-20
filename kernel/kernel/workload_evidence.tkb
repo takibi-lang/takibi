@@ -2617,7 +2617,7 @@ private fn workload_busy_pair_report(stopped: borrow MachineStopped[&kernel_worl
     // Last, because scripts/profile_kernel_samples.py requires every
     // `profile: sample` record to fall between this interval's `profile:
     // end` and its `profile: sample-summary`.
-    profile_sample_report();
+    profile_sample_report(stopped);
 }
 
 // GitHub issue #479: this file had no execution-model assertion and holds
