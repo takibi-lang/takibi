@@ -2,11 +2,11 @@
   "date": "2026-11-20",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "198f8ddc40862b8cccfab4d227321ecf36b966cc8c37e65397e96edfef6602fe",
-  "workload": "Normal linked QEMU and RPi5 kernels with the existing two-phase signal contention probe, compared with 8c14aaa7b.",
+  "source_sha256": "a5911006b1068b6aeff36b4a2d39e7d6933be1b1292e9acbc331d24b2d78ee2c",
+  "workload": "Normal linked QEMU and RPi5 kernels and matching function stack records, including RPi5 debug, for the existing four-slot syscall scratch pool. Baseline 5c67235f8.",
   "evidence": [
-    "docs/SIGNAL_PROBE_LIFECYCLE_SPACE.md"
+    "docs/SYSCALL_SCRATCH_SPACE.md"
   ],
-  "assessment": "The probe text class grows by 840 bytes on QEMU and 792 bytes on RPi5. Its 8-byte gate replaces the armed word. Data, BSS, usable RAM and allocator expectations are unchanged. The new bounded close and drain run outside the compared payload updates.",
-  "next_trigger": "Remeasure when signal probe admission, deadlines, record storage or the linked reservation boundaries change."
+  "assessment": "QEMU and RPi5 text shrink by 240 and 256 bytes respectively. Linked writable symbols and usable RAM starts are unchanged. Normal getdents and rename frames grow 16 bytes while execve shrinks 48 bytes. RPi5 debug execve grows 128 bytes; all affected frames fit the existing ceilings.",
+  "next_trigger": "Remeasure when syscall scratch layout, pathname staging and copy boundaries, or the affected stack budget changes."
 }
