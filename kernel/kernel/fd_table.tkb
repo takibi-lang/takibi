@@ -3500,6 +3500,16 @@ private fn fd_refcount_probe_overlap_address() -> *AtomicWord {
     return &fd_refcount_probe_overlap;
 }
 
+// The probe publishes its handle once before arming any participant.
+// A successful retain grants one release against that same handle.
+private linear view FdRefcountProbeReceipt[published: addr];
+
+private inline fn fd_refcount_probe_release(
+        receipt: sink FdRefcountProbeReceipt[&fd_refcount_probe_handle])
+        -> UnifiedObjectReleaseResult !{unsafe} {
+    return unified_object_release(fd_refcount_probe_handle);
+}
+
 // One retain/release pair. Both cores run this, on the same object.
 private fn fd_refcount_probe_cycle() !{unsafe} {
     match unified_object_retain(fd_refcount_probe_handle) {
@@ -3512,7 +3522,7 @@ private fn fd_refcount_probe_cycle() !{unsafe} {
                 fd_refcount_probe_refused_address(), 1);
         }
         UnifiedObjectRetainResult::Ok => {
-            match unified_object_release(fd_refcount_probe_handle) {
+            match fd_refcount_probe_release(view FdRefcountProbeReceipt[&fd_refcount_probe_handle]) {
                 UnifiedObjectReleaseResult::Invalid => {
                     atomic_word_fetch_add(
                         fd_refcount_probe_refused_address(), 1);
