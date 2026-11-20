@@ -1,12 +1,12 @@
 {
-  "date": "2026-11-19",
+  "date": "2026-11-20",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "899ef7c191274317fe605875ed5f38a1223365bf619c39fab814d8a13f8eefc1",
-  "workload": "Both normal linked kernels and the existing EL0 prlimit64 success fixture, compared with 434a8c58d.",
+  "source_sha256": "8f76abc3b2875fc8c5c5334c72d33f7d4ae6884bd486945a752f1e7fec61bd86",
+  "workload": "Both normal linked kernels and the existing FD retain/release contention probe, compared with 44fa537e2.",
   "evidence": [
-    "docs/PRLIMIT_ABI_FIXTURE_SPACE.md"
+    "docs/FD_PROBE_RECEIPT_SPACE.md"
   ],
-  "assessment": "The QEMU kernel ELF is byte-identical. RPi5 linked text grows by 32 bytes with the compressed fixture. Data, BSS, usable RAM and allocator expectations are unchanged. The existing EL0 entry frame grows by 16 bytes.",
-  "next_trigger": "Remeasure when the EL0 payload stack, embedded image or linked reservation boundary changes."
+  "assessment": "The linked machine code is byte-identical on both targets. The FD probe cycle retains a 32-byte frame and the original calls. The linked unwind table shrinks by 4 bytes on each target. Data, BSS, usable RAM and allocator expectations are unchanged.",
+  "next_trigger": "Remeasure when the FD probe changes its receipt representation, retain/release calls or linked reservation boundary."
 }

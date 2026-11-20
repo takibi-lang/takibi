@@ -7,7 +7,7 @@
 # is not a non-write use of the global or a file naming it. Being named shows a reader
 # exists; the rest of the cell is a reviewer's claim, not a checked one.
 kernel/init/test_driver.tkb	rootfs_metadata	read-by kernel_test_driver_run: 2026-10-31 retain-boot: the boot read of the image's metadata; the exec plan borrows this permanent buffer afterward
-kernel/kernel/fd_table.tkb	fd_refcount_probe_handle	read-by fd_refcount_probe_cycle,fd_refcount_contention_probe: 2026-10-31 retain-fixture: the contention probe's two cores; published before the rendezvous, an order the probe keeps by hand
+kernel/kernel/fd_table.tkb	fd_refcount_probe_handle	read-by fd_refcount_probe_cycle,fd_refcount_probe_release,fd_refcount_contention_probe: 2026-10-31 retain-fixture: the contention probe's two cores; published before the rendezvous, an order the probe keeps by hand
 kernel/kernel/freelist_contention_evidence.tkb	freelist_probe	read-by freelist_probe_cycle,freelist_probe_open,freelist_probe_record_pop: all registered fixture peers; reset consumes a private quiescence proof and the unlocked phase is an intentional race control
 kernel/kernel/process.tkb	kernel_process_trace_probe_child_frame	read-by kernel_process_trace_block_wake_probe,kernel_process_scheduler_probe_frame_b: 2026-10-31 retain-fixture: stand-in frame of the boot trace probes, boot thread before userspace
 kernel/kernel/process.tkb	kernel_process_trace_probe_parent_frame	read-by kernel_process_trace_block_wake_probe,kernel_process_scheduler_probe_frame_a: 2026-10-31 retain-fixture: as the child frame
