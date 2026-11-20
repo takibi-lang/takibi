@@ -1,4 +1,4 @@
-use "kernel/lib/byte_slice.tkb";
+use "linux_user/common/byte_slice_split.tkb";
 
 let mut subject_calls: usize = 0;
 

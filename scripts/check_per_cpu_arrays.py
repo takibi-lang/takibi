@@ -48,7 +48,6 @@ LISTED = {
     ("kernel/drivers/block/memory.tkb", "block_single_reads"): (POOL, "BlockSlot; totalled by the block report"),
     ("kernel/drivers/block/block_cache.tkb", "block_cache_hits"): (POOL, "BlockSlot's index; totalled by the block report"),
     ("kernel/mm/process_image.tkb", "process_image_slot_words"): (POOL, "ProcessImageSlot's acquire words"),
-    ("kernel/kernel/syscall.tkb", "syscall_scratch"): (POOL, "SyscallSlot"),
     ("kernel/kernel/syscall.tkb", "syscall_slot_words"): (POOL, "SyscallSlot's acquire words"),
     ("kernel/init/test_driver.tkb", "exec_window_words"): (POOL, "ExecWindowSlot's acquire words"),
     # Read by another CPU.

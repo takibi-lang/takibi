@@ -50,6 +50,7 @@
 // host_stubs.S's kernel_invariant_stop with status 86.
 
 use "kernel/fs/ext2/ext2_syscall.tkb";
+use "linux_user/common/byte_slice_split.tkb";
 
 extern fn linux_syscall(nr: usize, a0: usize, a1: usize, a2: usize, a3: usize) -> isize;
 

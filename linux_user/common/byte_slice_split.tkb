@@ -1,0 +1,33 @@
+// Delimiter splitting for callers that keep the returned byte views.
+use "kernel/lib/byte_slice.tkb";
+
+struct ByteSliceSplit {
+    before: []const u8;
+    after: []const u8;
+}
+
+must_use variant ByteSliceSplitResult {
+    Absent;
+    Found(ByteSliceSplit);
+}
+
+fn byte_slice_split_first(value: []const u8, delimiter: u8)
+        -> ByteSliceSplitResult {
+    match byte_slice_find_first(value, delimiter) {
+        ByteSliceFindResult::Absent => {
+            return ByteSliceSplitResult::Absent;
+        }
+        ByteSliceFindResult::Found(position) => {
+            if (position < value.len) {
+                let after_start: usize = position + 1;
+                if (after_start <= value.len) {
+                    let mut split: ByteSliceSplit = {
+                        value[0..<position], value[after_start..<value.len]
+                    };
+                    return ByteSliceSplitResult::Found(split);
+                }
+            }
+        }
+    }
+    return ByteSliceSplitResult::Absent;
+}

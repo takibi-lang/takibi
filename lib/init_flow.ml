@@ -1105,19 +1105,30 @@ let check
                | None -> false) then
                error loc "initialization projection needs a matching tracked owner parameter"
          | `Global (g, idx, _) ->
+             let rec owner_name t = match strip t with
+               | Ast.TypeBorrow t | Ast.TypeBorrowMut t -> owner_name t
+               | Ast.TypeIndexed (n, _) | Ast.TypeNamed n when linear_owner n -> Some n
+               | _ -> None in
+             let declaration = Owned_by_registry.find g in
              let ok_idx = match idx.desc with
-               | Ast.FieldGet ({ desc = Ast.Var s; _ }, _) ->
-                   (match List.assoc_opt s param_types with
-                    | Some t ->
-                        let rec owner t = match strip t with
-                          | Ast.TypeBorrow t | Ast.TypeBorrowMut t -> owner t
-                          | Ast.TypeIndexed (n, _) | Ast.TypeNamed n -> linear_owner n
-                          | _ -> false in
-                        owner t
-                    | None -> false)
+               | Ast.FieldGet ({ desc = Ast.Var s; _ }, field) ->
+                   (match List.assoc_opt s param_types, declaration with
+                    | Some t, None -> owner_name t <> None
+                    | Some t, Some d ->
+                        field = d.field &&
+                        (match strip t with
+                         | Ast.TypeBorrow t -> owner_name t = Some d.token
+                         | _ -> false)
+                    | None, _ -> false)
                | _ -> false in
-             if not (StringMap.mem g scratch_names) || not ok_idx then
-               error loc slot_capability_rule);
+             if not (StringMap.mem g scratch_names) then
+               error loc slot_capability_rule
+             else if not ok_idx then
+               match declaration with
+               | None -> error loc slot_capability_rule
+               | Some d -> error loc (Printf.sprintf
+                   "slot-owned scratch initialization must select with a borrowed %s parameter's .%s"
+                   d.token d.field));
         (match bounds with
          | Some (lo, hi) ->
              List.iter (fun b ->

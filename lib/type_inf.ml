@@ -9489,6 +9489,9 @@ let validate_owned_by (prog : Ast.toplevel list) =
            a private field '%s', so only its declaring file mints one"
           d.token d.field name d.token d.field);
       (match Owned_by_registry.stride d with
+       | Some n when Init_state.is_scratch name && n <> 1 ->
+           fail d.decl_loc (Printf.sprintf
+             "owned_by on scratch '%s': the stride must be 1" name)
        | Some n when n >= 1 -> Hashtbl.replace strides name n
        | _ -> fail d.decl_loc (Printf.sprintf
            "owned_by on '%s': the stride must be an integer literal or a \

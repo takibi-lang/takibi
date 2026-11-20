@@ -338,9 +338,9 @@ struct SyscallScratch {
 //
 // Trusted here, and only here (TRUSTED_BASE.md): syscall_slot_acquire
 // returns a slot no other live SyscallSlot names. Its compare-exchange over
-// syscall_slot_words is what makes that so; nothing checks it. Each element
-// of the scratch global is therefore reached only by its slot's holder,
-// which is the premise definite initialization takes for a scratch array.
+// syscall_slot_words is what makes that so; nothing checks it. The compiler
+// requires a live SyscallSlot to select an element. Definite initialization
+// separately checks what that holder initializes during each call.
 //
 // scripts/check_slot_pool_entries.py checks that no slot holder reaches
 // another entry point (one slot per operation, so the pool cannot run dry
@@ -355,7 +355,8 @@ struct SyscallScratch {
 //   one section per CPU is live, so the acquire never waits. Under preemption
 //   it can, which is safe only because no slot holder waits for the ext2
 //   mutation lock or for ext2's readers (kernel/CONCURRENCY.md).
-private scratch let mut syscall_scratch: [SyscallScratch; KERNEL_MAX_CORES];
+private scratch let mut syscall_scratch: [SyscallScratch; KERNEL_MAX_CORES]
+    owned_by(SyscallSlot.index, 1);
 private let mut syscall_slot_words: [AtomicWord; KERNEL_MAX_CORES];
 
 // `[unit]` is always 0: an owner needs a static parameter, and the slot's
@@ -468,7 +469,8 @@ private fn syscall_rlimit_load(field: borrow [u8; 8..]) -> usize {
 // buffer -- a file with no trailing newline then ends at a NUL, which the
 // scan below treats as the end of the directive.
 
-must_use variant SyscallPathResult { Fault; Invalid; Name([]u8); }
+struct SyscallPathSpan { start: {0..<2 as usize}; limit: {1..<256 as usize}; }
+must_use variant SyscallPathResult { Fault; Invalid; Name(SyscallPathSpan); }
 
 fn kernel_syscall_exec_pending() -> bool {
     let mut slot: ProcessSlot = kernel_syscall_process_slot();
@@ -518,29 +520,6 @@ fn kernel_syscall_exec_clear() {
 // issue #974: these three views, and every function between them and
 // syscall_execve_current's zero fill, require the buffer initialized, so
 // each call is checked rather than trusted (they replaced assume_init).
-private fn syscall_exec_argv_here(slot: borrow SyscallSlot[0]) -> [u8; 512..]
-        requires init(syscall_scratch[slot.index].file_buffer) {
-    static_assert(PROCESS_EXEC_ARGV_BYTES == 512,
-                  "#1039: the argv staging area is execve's argv limit");
-    let scratch: [u8; KERNEL_BLOCK_SIZE..] =
-        syscall_scratch[slot.index].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
-    return scratch[0..<512];
-}
-
-private fn syscall_exec_path_here(slot: borrow SyscallSlot[0]) -> [u8; 256..]
-        requires init(syscall_scratch[slot.index].file_buffer) {
-    let scratch: [u8; KERNEL_BLOCK_SIZE..] =
-        syscall_scratch[slot.index].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
-    return scratch[512..<768];
-}
-
-private fn syscall_script_line_here(slot: borrow SyscallSlot[0]) -> [u8; 256..]
-        requires init(syscall_scratch[slot.index].file_buffer) {
-    let scratch: [u8; KERNEL_BLOCK_SIZE..] =
-        syscall_scratch[slot.index].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
-    return scratch[768..<1024];
-}
-
 // GitHub issue #591, #1065: the inode execve resolved its pathname to,
 // through any `#!` chain -- the one input that decides the image an exec
 // maps. argv[0] cannot: a shell passes `httpd` for `/bin/httpd`. Zero only
@@ -673,10 +652,11 @@ must_use variant SyscallArgvAppendResult { Full; Appended(usize); }
 
 // Append one NUL-terminated entry to the pending execve argv buffer and
 // return the offset the next entry starts at.
-private fn syscall_exec_argv_append(slot: borrow SyscallSlot[0], offset: usize, source: []u8)
+private fn syscall_exec_argv_append(slot: borrow SyscallSlot[0], offset: usize, source: borrow []u8)
         -> SyscallArgvAppendResult
         requires init(syscall_scratch[slot.index].file_buffer) {
-    let argv_view: []u8 = syscall_exec_argv_here(slot);
+    let argv_view_buffer = syscall_scratch[slot.index].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
+    let argv_view: []u8 = argv_view_buffer[0..<512];
     if (offset > argv_view.len) { return SyscallArgvAppendResult::Full; }
     let tail = argv_view[offset..<argv_view.len];
     let length: usize = source.len;
@@ -685,8 +665,10 @@ private fn syscall_exec_argv_append(slot: borrow SyscallSlot[0], offset: usize, 
     if (slice_copy(destination, source) != length) {
         return SyscallArgvAppendResult::Full;
     }
-    if (length < tail.len) {
-        tail[length] = 0;
+    let end: usize = offset + length;
+    if (end < 512) {
+        let terminator: {0..<512 as usize} = end;
+        argv_view[terminator] = 0;
     } else {
         return SyscallArgvAppendResult::Full;
     }
@@ -702,22 +684,26 @@ private fn syscall_exec_argv_append_line(slot: borrow SyscallSlot[0], offset: us
                                          to: usize)
         -> SyscallArgvAppendResult
         requires init(syscall_scratch[slot.index].file_buffer) {
-    let argv_view: []u8 = syscall_exec_argv_here(slot);
-    let line: []u8 = syscall_script_line_here(slot);
+    let argv_view_buffer = syscall_scratch[slot.index].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
+    let argv_view: []u8 = argv_view_buffer[0..<512];
+    let line_buffer = syscall_scratch[slot.index].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
+    let line: []u8 = line_buffer[768..<1024];
     let mut cursor: usize = offset;
     for position: usize in 0..<SYSCALL_SCRIPT_LINE_MAX {
         if (position >= from && position < to) {
             let value: u8 = line[position];
-            if (cursor < argv_view.len) {
-                argv_view[cursor] = value;
+            if (cursor < 512) {
+                let position: {0..<512 as usize} = cursor;
+                argv_view[position] = value;
             } else {
                 return SyscallArgvAppendResult::Full;
             }
             cursor = cursor + 1;
         }
     }
-    if (cursor < argv_view.len) {
-        argv_view[cursor] = 0;
+    if (cursor < 512) {
+        let position: {0..<512 as usize} = cursor;
+        argv_view[position] = 0;
     } else {
         return SyscallArgvAppendResult::Full;
     }
@@ -732,7 +718,8 @@ private fn syscall_exec_script_prefix(slot: borrow SyscallSlot[0], path_length: 
                                       previous_length: usize)
         -> SyscallExecFormatResult
         requires init(syscall_scratch[slot.index].file_buffer) {
-    let line: []u8 = syscall_script_line_here(slot);
+    let line_buffer = syscall_scratch[slot.index].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
+    let line: []u8 = line_buffer[768..<1024];
     let mut end: usize = 0;
     let mut line_terminated: bool = false;
     // The whole window is scanned, not only the bytes the file supplied: it
@@ -811,8 +798,9 @@ private fn syscall_exec_script_prefix(slot: borrow SyscallSlot[0], path_length: 
     // answer this reaches by a shorter route -- and the same answer a shell
     // has to act on either way.
     let mut interpreter_absolute: bool = false;
-    if (interpreter_from < line.len) {
-        interpreter_absolute = line[interpreter_from] == 0x2F;
+    if (interpreter_from < SYSCALL_SCRIPT_LINE_MAX) {
+        let position: {0..<SYSCALL_SCRIPT_LINE_MAX as usize} = interpreter_from;
+        interpreter_absolute = line[position] == 0x2F;
     }
     if (interpreter_absolute == false) {
         return SyscallExecFormatResult::Absent;
@@ -821,7 +809,8 @@ private fn syscall_exec_script_prefix(slot: borrow SyscallSlot[0], path_length: 
     // remainder before writing its prefix, so deeper levels precede earlier
     // directive arguments and script names without recursive stack growth.
     let mut previous: [u8; 512];
-    let argv: []u8 = syscall_exec_argv_here(slot);
+    let argv_buffer = syscall_scratch[slot.index].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
+    let argv: []u8 = argv_buffer[0..<512];
     let mut tail_start: usize = 0;
     let mut first_ended: bool = previous_argc == 0;
     if (previous_length > 512) { return SyscallExecFormatResult::TooBig; }
@@ -855,7 +844,8 @@ private fn syscall_exec_script_prefix(slot: borrow SyscallSlot[0], path_length: 
         }
         argc = argc + 1;
     }
-    let stored_path: []u8 = syscall_exec_path_here(slot);
+    let stored_path_buffer = syscall_scratch[slot.index].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
+    let stored_path: []u8 = stored_path_buffer[512..<768];
     if (path_length > stored_path.len) {
         return SyscallExecFormatResult::Invalid;
     }
@@ -1022,7 +1012,8 @@ private fn syscall_exec_format(slot: borrow SyscallSlot[0], path_length: usize)
     let mut argc: usize = 0;
     let mut prefix_length: usize = 0;
     for depth: usize in 0..<6 {
-        let path: []u8 = syscall_exec_path_here(slot);
+        let path_buffer = syscall_scratch[slot.index].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
+        let path: []u8 = path_buffer[512..<768];
         let pathname_length: usize = current_length;
         if (pathname_length < 2 || pathname_length > path.len) {
             return SyscallExecFormatResult::Absent;
@@ -1037,7 +1028,8 @@ private fn syscall_exec_format(slot: borrow SyscallSlot[0], path_length: usize)
                 return SyscallExecFormatResult::NotPermitted;
             }
             SyscallExecTargetResult::Inode(inode) => {
-                let line: []u8 = syscall_script_line_here(slot);
+                let line_buffer = syscall_scratch[slot.index].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
+                let line: []u8 = line_buffer[768..<1024];
                 for index: usize in 0..<SYSCALL_SCRIPT_LINE_MAX {
                     line[index] = 0;
                 }
@@ -1101,7 +1093,8 @@ private fn syscall_exec_format(slot: borrow SyscallSlot[0], path_length: usize)
                             SyscallExecFormatResult::TooDeep => { return SyscallExecFormatResult::TooDeep; }
                             SyscallExecFormatResult::Executable(value) => { return SyscallExecFormatResult::Executable(value); }
                         }
-                        let next_path: []u8 = syscall_exec_path_here(slot);
+                        let next_path_buffer = syscall_scratch[slot.index].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
+                        let next_path: []u8 = next_path_buffer[512..<768];
                         current_length = 0;
                         let mut ended: bool = false;
                         for index: usize in 0..<256 {
@@ -1536,11 +1529,13 @@ private fn syscall_statfs_with(slot: borrow SyscallSlot[0],
         SyscallFilesystemReady::Unconfigured => { return LINUX_ENOENT; }
         SyscallFilesystemReady::Configured(found) => { found }
     };
-    let path_name: []u8 = match kernel_syscall_path_name(slot, current_authority, path) {
+    let path_name_span: SyscallPathSpan = match kernel_syscall_path_name(slot, current_authority, path) {
         SyscallPathResult::Fault => { return LINUX_EFAULT; }
         SyscallPathResult::Invalid => { return LINUX_ENOENT; }
         SyscallPathResult::Name(name) => { name }
     };
+    let path_name_buffer = syscall_scratch[slot.index].path_buffer as [u8; 256..];
+    let path_name: []u8 = path_name_buffer[path_name_span.start..<path_name_span.limit];
     let mut procfs: bool = false;
     match procfs_lookup(path_name) {
         ProcfsLookupResult::Missing => {
@@ -2405,21 +2400,13 @@ fn kernel_syscall_socket_evidence() -> bool !{unsafe} {
     return valid;
 }
 
-// The path buffer as kernel_syscall_path_name left it. GitHub issue #954: the
-// requires clause is checked at every call, where kernel_syscall_path_name's
-// ensures established it; it replaced an assume_init site.
-private fn syscall_path_view_here(slot: borrow SyscallSlot[0]) -> [u8; 256..]
-        requires init(syscall_scratch[slot.index].path_buffer) {
-    return syscall_scratch[slot.index].path_buffer as [u8; 256..];
-}
-
 // Copy one NUL-terminated pathname through the user-memory boundary. Only a
 // single root component is supported by this first generic lookup slice;
 // directory traversal and symlink resolution remain separate work.
 //
 // GitHub issue #203: the path buffer is per-call scratch, zero-filled here
 // because the copy below writes only up to the terminator. A caller reads it
-// afterwards only through syscall_path_view_here.
+// afterwards through the same slot, using the returned byte bounds.
 fn kernel_syscall_path_name(slot: borrow SyscallSlot[0], current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], address: usize) -> SyscallPathResult
         ensures init(syscall_scratch[slot.index].path_buffer) {
     zero_fill(syscall_scratch[slot.index].path_buffer as []u8);
@@ -2449,21 +2436,21 @@ fn kernel_syscall_path_name(slot: borrow SyscallSlot[0], current_authority: borr
     if (terminated == false || length == 0) {
         return SyscallPathResult::Invalid;
     }
-    let path_length: usize = length;
-    if (path_length > path_view.len) {
+    if (length < 1 || length > 255) {
         return SyscallPathResult::Invalid;
     }
-    let full_path = path_view[0..<path_length];
-    if (path_length == 1 && path_view[0] == 0x2F) {
+    if (length == 1 && path_view[0] == 0x2F) {
         path_view[0] = 0x2E;
     }
     if (path_view[0] == 0x2F) {
-        if (full_path.len < 2) {
+        if (length < 2) {
             return SyscallPathResult::Invalid;
         }
-        return SyscallPathResult::Name(full_path[1..<full_path.len]);
+        let mut span: SyscallPathSpan = { 1, length };
+        return SyscallPathResult::Name(span);
     }
-    return SyscallPathResult::Name(full_path);
+    let mut span: SyscallPathSpan = { 0, length };
+    return SyscallPathResult::Name(span);
 }
 
 // GitHub issue #538: a path a mutating syscall names, split into the
@@ -5326,12 +5313,14 @@ private fn syscall_mkdirat_under_with(slot: borrow SyscallSlot[0],
         SyscallFilesystemReady::Unconfigured => { return LINUX_EBADF; }
         SyscallFilesystemReady::Configured(found) => { found }
     };
-    let path_name: []u8 = match kernel_syscall_path_name(slot, current_authority, x1) {
+    let path_name_span: SyscallPathSpan = match kernel_syscall_path_name(slot, current_authority, x1) {
         SyscallPathResult::Fault => { return LINUX_EFAULT; }
         SyscallPathResult::Invalid => { return LINUX_ENOENT; }
         SyscallPathResult::Name(path) => { path }
     };
-    let path_view: [u8; 256..] = syscall_path_view_here(slot);
+    let path_name_buffer = syscall_scratch[slot.index].path_buffer as [u8; 256..];
+    let path_name: []u8 = path_name_buffer[path_name_span.start..<path_name_span.limit];
+    let path_view: [u8; 256..] = syscall_scratch[slot.index].path_buffer as [u8; 256..];
     let absolute: bool = path_view[0] == 0x2F;
     let parent: SyscallParent = match kernel_syscall_parent_of(mount,
             x0, absolute, path_name) {
@@ -5375,12 +5364,14 @@ private fn syscall_unlinkat_under_with(slot: borrow SyscallSlot[0],
         SyscallFilesystemReady::Unconfigured => { return LINUX_EBADF; }
         SyscallFilesystemReady::Configured(found) => { found }
     };
-    let path_name: []u8 = match kernel_syscall_path_name(slot, current_authority, x1) {
+    let path_name_span: SyscallPathSpan = match kernel_syscall_path_name(slot, current_authority, x1) {
         SyscallPathResult::Fault => { return LINUX_EFAULT; }
         SyscallPathResult::Invalid => { return LINUX_ENOENT; }
         SyscallPathResult::Name(path) => { path }
     };
-    let path_view: [u8; 256..] = syscall_path_view_here(slot);
+    let path_name_buffer = syscall_scratch[slot.index].path_buffer as [u8; 256..];
+    let path_name: []u8 = path_name_buffer[path_name_span.start..<path_name_span.limit];
+    let path_view: [u8; 256..] = syscall_scratch[slot.index].path_buffer as [u8; 256..];
     let absolute: bool = path_view[0] == 0x2F;
     let parent: SyscallParent = match kernel_syscall_parent_of(mount,
             x0, absolute, path_name) {
@@ -5430,13 +5421,14 @@ private fn syscall_renameat_under_with(slot: borrow SyscallSlot[0],
         SyscallFilesystemReady::Unconfigured => { return LINUX_EBADF; }
         SyscallFilesystemReady::Configured(found) => { found }
     };
-    let old_path: []u8 = match kernel_syscall_path_name(slot, current_authority, x1) {
+    let old_path_span: SyscallPathSpan = match kernel_syscall_path_name(slot, current_authority, x1) {
         SyscallPathResult::Fault => { return LINUX_EFAULT; }
         SyscallPathResult::Invalid => { return LINUX_ENOENT; }
         SyscallPathResult::Name(path) => { path }
     };
-    let old_view: [u8; 256..] = syscall_path_view_here(slot);
-    let old_absolute: bool = old_view[0] == 0x2F;
+    let old_path_buffer = syscall_scratch[slot.index].path_buffer as [u8; 256..];
+    let old_path: []u8 = old_path_buffer[old_path_span.start..<old_path_span.limit];
+    let old_absolute: bool = old_path_span.start == 1;
     let old_parent: SyscallParent = match kernel_syscall_parent_of(mount,
             x0, old_absolute, old_path) {
         SyscallParentResult::Errno(errno) => {
@@ -5461,13 +5453,14 @@ private fn syscall_renameat_under_with(slot: borrow SyscallSlot[0],
     slice_copy(old_name, old_leaf);
     let old_directory: usize = old_parent.inode;
 
-    let new_path: []u8 = match kernel_syscall_path_name(slot, current_authority, x3) {
+    let new_path_span: SyscallPathSpan = match kernel_syscall_path_name(slot, current_authority, x3) {
         SyscallPathResult::Fault => { return LINUX_EFAULT; }
         SyscallPathResult::Invalid => { return LINUX_ENOENT; }
         SyscallPathResult::Name(path) => { path }
     };
-    let new_view: [u8; 256..] = syscall_path_view_here(slot);
-    let new_absolute: bool = new_view[0] == 0x2F;
+    let new_path_buffer = syscall_scratch[slot.index].path_buffer as [u8; 256..];
+    let new_path: []u8 = new_path_buffer[new_path_span.start..<new_path_span.limit];
+    let new_absolute: bool = new_path_span.start == 1;
     let new_parent: SyscallParent = match kernel_syscall_parent_of(mount,
             x2, new_absolute, new_path) {
         SyscallParentResult::Errno(errno) => {
@@ -7136,18 +7129,20 @@ private fn syscall_openat_with(slot: borrow SyscallSlot[0],
         SyscallFilesystemReady::Unconfigured => { return SyscallAction::Resume(LINUX_EBADF); }
         SyscallFilesystemReady::Configured(found) => { found }
     };
-    let path_name: []u8 = match kernel_syscall_path_name(slot, current_authority, x1) {
+    let path_name_span: SyscallPathSpan = match kernel_syscall_path_name(slot, current_authority, x1) {
         SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
         SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
         SyscallPathResult::Name(path) => { path }
     };
+    let path_name_buffer = syscall_scratch[slot.index].path_buffer as [u8; 256..];
+    let path_name: []u8 = path_name_buffer[path_name_span.start..<path_name_span.limit];
     match procfs_lookup(path_name) {
         ProcfsLookupResult::Missing => {}
         ProcfsLookupResult::Found(node) => {
             return syscall_openat_procfs(node, x2);
         }
     }
-    let path_view: [u8; 256..] = syscall_path_view_here(slot);
+    let path_view: [u8; 256..] = syscall_scratch[slot.index].path_buffer as [u8; 256..];
     let mut lookup_inode: usize = 2;
     if (path_view[0] != 0x2F && x0 != LINUX_AT_FDCWD) {
         if (kernel_syscall_directory_is_open(x0) == false) {
@@ -7203,11 +7198,13 @@ private fn syscall_openat_create_under_with(slot: borrow SyscallSlot[0],
         SyscallFilesystemReady::Unconfigured => { return SyscallAction::Resume(LINUX_EBADF); }
         SyscallFilesystemReady::Configured(found) => { found }
     };
-    let path_name: []u8 = match kernel_syscall_path_name(slot, current_authority, x1) {
+    let path_name_span: SyscallPathSpan = match kernel_syscall_path_name(slot, current_authority, x1) {
         SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
         SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
         SyscallPathResult::Name(path) => { path }
     };
+    let path_name_buffer = syscall_scratch[slot.index].path_buffer as [u8; 256..];
+    let path_name: []u8 = path_name_buffer[path_name_span.start..<path_name_span.limit];
     match procfs_lookup(path_name) {
         ProcfsLookupResult::Missing => {}
         ProcfsLookupResult::Found(node) => {
@@ -7215,7 +7212,7 @@ private fn syscall_openat_create_under_with(slot: borrow SyscallSlot[0],
             return syscall_openat_procfs(node, x2);
         }
     }
-    let path_view: [u8; 256..] = syscall_path_view_here(slot);
+    let path_view: [u8; 256..] = syscall_scratch[slot.index].path_buffer as [u8; 256..];
     let absolute: bool = path_view[0] == 0x2F;
     let parent: SyscallParent = match kernel_syscall_parent_of(mount,
             x0, absolute, path_name) {
@@ -7284,12 +7281,14 @@ private fn syscall_truncate_under_with(slot: borrow SyscallSlot[0],
         if (kernel_syscall_file_writable(x0) == false) { return LINUX_EINVAL; }
         inode_number = kernel_syscall_file_inode(x0);
     } else {
-        let path_name: []u8 = match kernel_syscall_path_name(slot,
+        let path_name_span: SyscallPathSpan = match kernel_syscall_path_name(slot,
                 current_authority, x0) {
             SyscallPathResult::Fault => { return LINUX_EFAULT; }
             SyscallPathResult::Invalid => { return LINUX_ENOENT; }
             SyscallPathResult::Name(path) => { path }
         };
+        let path_name_buffer = syscall_scratch[slot.index].path_buffer as [u8; 256..];
+        let path_name: []u8 = path_name_buffer[path_name_span.start..<path_name_span.limit];
         match ext2_lookup_path_from(mount, 2, path_name) {
             Ext2LookupResult::Invalid => { return LINUX_EINVAL; }
             Ext2LookupResult::NotFound => { return LINUX_ENOENT; }
@@ -7340,12 +7339,14 @@ private fn syscall_faccessat_with(slot: borrow SyscallSlot[0],
         (number == 439 && x3 != 0 && x3 != LINUX_AT_EACCESS)) {
         return SyscallAction::Resume(LINUX_EINVAL);
     }
-    let path_name: []u8 = match kernel_syscall_path_name(slot, current_authority, path_address) {
+    let path_name_span: SyscallPathSpan = match kernel_syscall_path_name(slot, current_authority, path_address) {
         SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
         SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
         SyscallPathResult::Name(path) => { path }
     };
-    let path_view: [u8; 256..] = syscall_path_view_here(slot);
+    let path_name_buffer = syscall_scratch[slot.index].path_buffer as [u8; 256..];
+    let path_name: []u8 = path_name_buffer[path_name_span.start..<path_name_span.limit];
+    let path_view: [u8; 256..] = syscall_scratch[slot.index].path_buffer as [u8; 256..];
     let mut lookup_inode: usize = 2;
     if (path_view[0] != 0x2F && dirfd != LINUX_AT_FDCWD) {
         if (kernel_syscall_directory_is_open(dirfd) == false) {
@@ -7386,11 +7387,13 @@ private fn syscall_newfstatat_with(slot: borrow SyscallSlot[0],
     // newfstatat(AT_FDCWD, path, stat, flags): return the bounded ext2
     // file, directory, or applet-link shape after validating the complete
     // userspace result.
-    let path_name: []u8 = match kernel_syscall_path_name(slot, current_authority, x1) {
+    let path_name_span: SyscallPathSpan = match kernel_syscall_path_name(slot, current_authority, x1) {
         SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
         SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
         SyscallPathResult::Name(path) => { path }
     };
+    let path_name_buffer = syscall_scratch[slot.index].path_buffer as [u8; 256..];
+    let path_name: []u8 = path_name_buffer[path_name_span.start..<path_name_span.limit];
     match procfs_lookup(path_name) {
         ProcfsLookupResult::Missing => {}
         ProcfsLookupResult::Found(node) => {
@@ -7416,7 +7419,7 @@ private fn syscall_newfstatat_with(slot: borrow SyscallSlot[0],
             }
         }
     }
-    let path_view: [u8; 256..] = syscall_path_view_here(slot);
+    let path_view: [u8; 256..] = syscall_scratch[slot.index].path_buffer as [u8; 256..];
     let mut lookup_inode: usize = 2;
     if (path_view[0] != 0x2F && x0 != LINUX_AT_FDCWD) {
         if (kernel_syscall_directory_is_open(x0) == false) {
@@ -9974,12 +9977,14 @@ private inline fn syscall_getdents64_current_with(slot: borrow SyscallSlot[0],
                                 }
                                 return SyscallAction::Resume(written);
                             }
-                            let name_tail = entry_tail[8..<entry_tail.len];
-                            if (name_length > name_tail.len) {
+                            let name_start: usize = entry_start + 8;
+                            let name_limit: usize = name_start + name_length;
+                            if (name_limit > KERNEL_BLOCK_SIZE) {
                                 if (written != 0) { return SyscallAction::Resume(written); }
                                 return SyscallAction::Resume(LINUX_EINVAL);
                             }
-                            let entry_name = name_tail[0..<name_length];
+                            let name_buffer =
+                                syscall_scratch[slot.index].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
                             let mut record = user_write_u64(range, written,
                                 entry_inode as u64);
                             record = user_write_join(record,
@@ -9990,10 +9995,14 @@ private inline fn syscall_getdents64_current_with(slot: borrow SyscallSlot[0],
                             record = user_write_join(record,
                                 user_write_byte(range, written + 18, entry[7]));
                             let mut name_output: usize = written + 19;
-                            for name_byte in entry_name {
-                                record = user_write_join(record,
-                                    user_write_byte(range, name_output, name_byte));
-                                name_output = name_output + 1;
+                            for name_offset: usize in name_start..<name_limit {
+                                if (name_offset < KERNEL_BLOCK_SIZE) {
+                                    let position: {0..<KERNEL_BLOCK_SIZE as usize} = name_offset;
+                                    let name_byte: u8 = name_buffer[position];
+                                    record = user_write_join(record,
+                                        user_write_byte(range, name_output, name_byte));
+                                    name_output = name_output + 1;
+                                }
                             }
                             record = user_write_join(record,
                                 user_write_byte(range,
@@ -10169,13 +10178,15 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
         path_address = x1;
         argv_address = x2;
     }
-    let exec_lookup_name: []u8 = match kernel_syscall_path_name(slot, current_authority, path_address) {
+    let exec_lookup_name_span: SyscallPathSpan = match kernel_syscall_path_name(slot, current_authority, path_address) {
         SyscallPathResult::Fault => { return SyscallExecveResult::Refused(LINUX_EFAULT); }
         SyscallPathResult::Invalid => { return SyscallExecveResult::Refused(LINUX_ENOENT); }
         SyscallPathResult::Name(path) => { path }
     };
+    let exec_lookup_name_buffer = syscall_scratch[slot.index].path_buffer as [u8; 256..];
+    let exec_lookup_name: []u8 = exec_lookup_name_buffer[exec_lookup_name_span.start..<exec_lookup_name_span.limit];
     let mut path_length: usize = exec_lookup_name.len;
-    let path_view: [u8; 256..] = syscall_path_view_here(slot);
+    let path_view: [u8; 256..] = syscall_scratch[slot.index].path_buffer as [u8; 256..];
     if (path_view[0] == 0x2F) { path_length = path_length + 1; }
     if (path_length == 0 || argv_address == 0) { return SyscallExecveResult::Refused(LINUX_EINVAL); }
     let exec_path_absolute: bool = path_view[0] == 0x2F;
@@ -10183,8 +10194,10 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
     // GitHub issue #974: the staging helpers and every function between
     // here and them require file_buffer initialized; this fill is what
     // shows it, checked at each call.
+    static_assert(PROCESS_EXEC_ARGV_BYTES == 512, "exec argv staging size");
     zero_fill(syscall_scratch[slot.index].file_buffer as []u8);
-    let exec_path: []u8 = syscall_exec_path_here(slot);
+    let exec_path_buffer = syscall_scratch[slot.index].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
+    let exec_path: []u8 = exec_path_buffer[512..<768];
     for path_index: usize in 0..<256 { exec_path[path_index] = 0; }
     let saved_path: usize = slice_copy(
         exec_path[0..<path_length],
@@ -10263,7 +10276,7 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
                 if (string_address == 0) {
                     vector_terminated = true;
                 } else {
-                    let argument_name: []u8 = match kernel_syscall_path_name(slot, current_authority,
+                    let argument_name_span: SyscallPathSpan = match kernel_syscall_path_name(slot, current_authority,
                         string_address as usize) {
                         SyscallPathResult::Fault => {
                             return SyscallExecveResult::Refused(LINUX_EFAULT);
@@ -10273,6 +10286,8 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
                         }
                         SyscallPathResult::Name(path) => { path }
                     };
+                    let argument_name_buffer = syscall_scratch[slot.index].path_buffer as [u8; 256..];
+                    let argument_name: []u8 = argument_name_buffer[argument_name_span.start..<argument_name_span.limit];
                     let mut string_length: usize = argument_name.len;
                     if (path_view[0] == 0x2F) {
                         string_length = string_length + 1;
@@ -10296,8 +10311,8 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
                                 }
                                 let copy_length: usize = string_length + 1;
                                 let destination_start: usize = output_offset;
-                                let exec_argv_view: []u8 =
-                                    syscall_exec_argv_here(slot);
+                                let exec_argv_view_buffer = syscall_scratch[slot.index].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
+                                let exec_argv_view: []u8 = exec_argv_view_buffer[0..<512];
                                 if (destination_start > exec_argv_view.len) {
                                     return SyscallExecveResult::Refused(LINUX_E2BIG);
                                 }
@@ -10344,7 +10359,8 @@ private inline fn syscall_execve_current_with(slot: borrow SyscallSlot[0],
         }
         PageAllocResult::Allocated(page) => { page }
     };
-    let diagnostic_argv: []u8 = syscall_exec_argv_here(slot);
+    let diagnostic_argv_buffer = syscall_scratch[slot.index].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
+    let diagnostic_argv: []u8 = diagnostic_argv_buffer[0..<512];
     // GitHub issue #618: one critical section, so a procfs snapshot on
     // another CPU copies the old command line or the new one, never
     // half of each.

@@ -67,6 +67,14 @@ def main():
            any("want file" in e for e in errors(base, "kernel/a.tkb\tx\t \n")))
     scratch = table(row("kernel/a.tkb", "s", "none", "scratch"), row("kernel/a.tkb", "w", "atomic"))
     expect("scratch global counts as unprotected", errors(scratch, "") != [])
+    owned_scratch = table(row("kernel/a.tkb", "s", "slot_owned", "scratch"),
+                          row("kernel/a.tkb", "w", "atomic"))
+    expect("slot-owned scratch needs no exception", errors(owned_scratch, "") == [])
+    expect("a slot-owned scratch exception is stale",
+           any("now protected" in e for e in errors(owned_scratch, "kernel/a.tkb\ts\tr\n")))
+    atomic_scratch = table(row("kernel/a.tkb", "s", "atomic", "scratch"))
+    expect("another protection class does not imply slot ownership",
+           errors(atomic_scratch, "") != [])
     tests = table(row("kernel/tests/t.tkb", "x"), row("kernel/models/m.tkb", "y"),
                   row("kernel/a.tkb", "w", "atomic"))
     expect("test and model globals are not production", errors(tests, "") == [])

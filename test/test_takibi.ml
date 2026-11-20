@@ -30135,7 +30135,59 @@ let definite_init_tests =
        || not (List.for_all2 contains_substring msgs frags)
     then Alcotest.failf "expected errors [%s], got [%s]"
         (String.concat " | " frags) (String.concat " | " msgs) in
+  let slot_scratch =
+    "struct Scratch { bytes: [u8; 8]; }
+     linear struct ScratchSlot[k: usize] {
+       private index: {0..<2 as usize};
+       private other: {0..<2 as usize};
+     }
+     private scratch let mut staging: [Scratch; 2] owned_by(ScratchSlot.index, 1);
+     " in
   [
+    t "slot-owned scratch passes a local initialized view to a borrower"
+      (expect_ok (slot_scratch ^
+        "fn byte(src: borrow []u8) -> u8 {
+           if (src.len == 0) { return 0; }
+           return src[0];
+         }
+         fn fill(slot: borrow ScratchSlot[0]) ensures init(staging[slot.index].bytes) {
+           zero_fill(staging[slot.index].bytes as []u8);
+         }
+         fn read(slot: borrow ScratchSlot[0]) -> u8
+             requires init(staging[slot.index].bytes) {
+           let bytes_view = staging[slot.index].bytes as [u8; 8..];
+           return byte(bytes_view[0..<8]);
+         }
+         fn f(slot: borrow ScratchSlot[0]) -> u8 { fill(slot); return read(slot); }"));
+    t "slot-owned scratch rejects a contract for another selector field"
+      (expect_type_error "slot-owned scratch initialization must select"
+        (slot_scratch ^
+         "fn read(slot: borrow ScratchSlot[0]) -> u8
+             requires init(staging[slot.other].bytes) { return 0; }"));
+    t "slot-owned scratch does not share initialization across borrowed slots"
+      (expect_type_error "uninitialized"
+        (slot_scratch ^
+         "fn read(a: borrow ScratchSlot[0], b: borrow ScratchSlot[0]) -> u8 {
+            zero_fill(staging[a.index].bytes as []u8);
+            return staging[b.index].bytes[0];
+          }"));
+    t "slot-owned scratch rejects a contract on another token type"
+      (expect_type_error "slot-owned scratch initialization must select"
+        (slot_scratch ^
+         "linear struct OtherSlot[k: usize] { private index: {0..<2 as usize}; }
+          fn read(slot: borrow OtherSlot[0]) -> u8
+              requires init(staging[slot.index].bytes) { return 0; }"));
+    t "slot-owned scratch rejects an initialization contract on a consumed slot"
+      (expect_type_error "slot-owned scratch initialization must select"
+        (slot_scratch ^
+         "fn read(slot: sink ScratchSlot[0]) -> u8
+             requires init(staging[slot.index].bytes) { return 0; }"));
+    t "slot-owned scratch rejects a read without per-call initialization"
+      (expect_type_error "uninitialized" (slot_scratch ^
+        "fn read(slot: borrow ScratchSlot[0]) -> u8 {
+           let bytes_view = staging[slot.index].bytes as [u8; 8..];
+           return bytes_view[0];
+         }"));
     t "issue #763: two independent uninit reads in one function are both reported"
       (expect_errors ["'x' is uninitialized"; "'y' is uninitialized"]
          "fn f() -> u32 { let mut x: u32; let mut y: u32;

@@ -414,6 +414,15 @@ item:
           "unexpected '%s' before 'let' (only 'scratch' or 'region' may qualify a global)" kw)));
       LetDef (name, Some ty, None, None, true, p, $symbolstartpos) }
   | p = private_flag kw = IDENT LET MUT name = IDENT COLON ty = type_expr
+    OWNED_BY LPAREN token = IDENT DOT field = IDENT COMMA stride = owned_stride
+    RPAREN SEMI
+    { if kw <> "scratch" then
+        raise (Types.TypeError ($startpos(kw), Printf.sprintf
+          "unexpected '%s' before a slot-owned global (only 'scratch' may qualify it)" kw));
+      Init_state.mark_scratch name;
+      Owned_by_registry.note name token field stride $startpos(name);
+      LetDef (name, Some ty, None, None, true, p, $symbolstartpos) }
+  | p = private_flag kw = IDENT LET MUT name = IDENT COLON ty = type_expr
     ALIGN LPAREN a = alignment_value RPAREN SEMI
     { if kw <> "region" then
         raise (Types.TypeError ($startpos(kw), Printf.sprintf

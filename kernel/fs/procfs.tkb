@@ -47,10 +47,11 @@ fn procfs_inode(pid: usize, suffix: usize) -> usize {
     return PROCFS_PID_INODE_BASE + pid * 4 + suffix;
 }
 
-private fn procfs_parse_pid(component: []const u8) -> ProcfsPidResult {
+private fn procfs_parse_pid(component: borrow []const u8) -> ProcfsPidResult {
     if (component.len == 0) { return ProcfsPidResult::Invalid; }
     let mut pid: usize = 0;
-    for byte in component {
+    for index: usize in 0..<component.len {
+        let byte: u8 = component[index];
         if (byte < 0x30 || byte > 0x39) {
             return ProcfsPidResult::Invalid;
         }
@@ -63,8 +64,9 @@ private fn procfs_parse_pid(component: []const u8) -> ProcfsPidResult {
     return ProcfsPidResult::Parsed(pid);
 }
 
-fn procfs_lookup(path: []const u8) -> ProcfsLookupResult !{unsafe} {
-    match path {
+fn procfs_lookup(path: borrow []const u8) -> ProcfsLookupResult !{unsafe} {
+    let root_name = path[0..<path.len];
+    match root_name {
         bs"proc" => {
             let mut root: ProcfsNode = {
                 ProcfsNodeKind::Root, 0, PROCFS_ROOT_INODE
@@ -73,18 +75,19 @@ fn procfs_lookup(path: []const u8) -> ProcfsLookupResult !{unsafe} {
         }
         _ => {}
     }
-    let process_path: []const u8 = match byte_slice_split_first(path, 0x2F) {
-        ByteSliceSplitResult::Absent => {
-            return ProcfsLookupResult::Missing;
-        }
-        ByteSliceSplitResult::Found(split) => {
-            match split.before {
-                bs"proc" => {}
-                _ => { return ProcfsLookupResult::Missing; }
-            }
-            split.after
-        }
+    let prefix_limit: usize = match byte_slice_find_first(path, 0x2F) {
+        ByteSliceFindResult::Absent => { return ProcfsLookupResult::Missing; }
+        ByteSliceFindResult::Found(position) => { position }
     };
+    if (prefix_limit >= path.len) { return ProcfsLookupResult::Missing; }
+    let prefix = path[0..<prefix_limit];
+    match prefix {
+        bs"proc" => {}
+        _ => { return ProcfsLookupResult::Missing; }
+    }
+    let process_start: usize = prefix_limit + 1;
+    if (process_start > path.len) { return ProcfsLookupResult::Missing; }
+    let process_path: []const u8 = path[process_start..<path.len];
     match process_path {
         bs"takibi" => {
             let mut takibi: ProcfsNode = {
@@ -107,12 +110,14 @@ fn procfs_lookup(path: []const u8) -> ProcfsLookupResult !{unsafe} {
         _ => {}
     }
     let mut leaf: []const u8 = bs"";
-    let pid_component: []const u8 = match byte_slice_split_first(process_path,
-                                                            0x2F) {
-        ByteSliceSplitResult::Absent => { process_path }
-        ByteSliceSplitResult::Found(split) => {
-            leaf = split.after;
-            split.before
+    let pid_component: []const u8 = match byte_slice_find_first(process_path, 0x2F) {
+        ByteSliceFindResult::Absent => { process_path }
+        ByteSliceFindResult::Found(position) => {
+            if (position >= process_path.len) { return ProcfsLookupResult::Missing; }
+            let leaf_start: usize = position + 1;
+            if (leaf_start > process_path.len) { return ProcfsLookupResult::Missing; }
+            leaf = process_path[leaf_start..<process_path.len];
+            process_path[0..<position]
         }
     };
     let pid: usize = match procfs_parse_pid(pid_component) {

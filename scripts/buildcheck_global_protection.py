@@ -5,7 +5,7 @@ Reads the compiler's `--facts globals.tsv` tables of both kernels
 (docs/GLOBAL_PROTECTION.md) and refuses:
 
 - a production `let mut` global whose type shows no protection (protection
-  `none`, or a `scratch` global) and that is not listed in
+  `none`, or a `scratch` global without `slot_owned` protection) and that is not listed in
   scripts/global_protection_allowlist.tsv;
 - a listed row that no longer names such a global (it was migrated,
   renamed or deleted): the list only shrinks, and a stale row would let
@@ -119,7 +119,8 @@ def production(file):
 
 
 def unprotected(row):
-    return row["protection"] in UNPROTECTED or row["qualifier"] == "scratch"
+    return row["protection"] in UNPROTECTED or (
+        row["qualifier"] == "scratch" and row["protection"] != "slot_owned")
 
 
 def debugger_set_names(path=DEBUGGER_SET):
@@ -373,7 +374,8 @@ def rewrite_allowlist(text, found, removed):
 
 def summary(found):
     counts = collections.Counter(
-        "scratch" if r["qualifier"] == "scratch" else r["protection"] for r in found.values())
+        "scratch" if r["qualifier"] == "scratch" and unprotected(r)
+        else r["protection"] for r in found.values())
     return ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
 
 

@@ -2533,6 +2533,14 @@ What stays trusted is the token's mint: that two live `T` never carry the
 same `f` (the slot pool's compare-exchange). `--facts globals.tsv` reports
 such a global with protection `slot_owned`.
 
+A per-call scratch array can also declare slot ownership:
+`scratch let mut g: [T; N] owned_by(Slot.index, 1);`. Both checks apply.
+Initialization contracts for an element use the declared index of a shared
+`borrow Slot` parameter. Each call still establishes initialization before
+reading the slot, unless a checked contract supplies it. The scratch form
+requires stride 1. The global facts retain the `scratch` qualifier and report
+`slot_owned` protection.
+
 ## Scoped Mutable Owner Borrows (Takibi Core Slice 4)
 
 `borrow mut` exposes the caller's indexed runtime-owner place for one direct

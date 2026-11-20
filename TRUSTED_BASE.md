@@ -680,7 +680,9 @@ rules globally.
 - The syscall scratch (`SyscallScratch`: file, path, sockaddr, uname,
   rlimit, interpreter and ELF buffers) is a pool of `KERNEL_MAX_CORES`
   slots reached through a linear `SyscallSlot` (#638), acquired narrowly
-  around each handler that uses it. Trusted: `syscall_slot_acquire` in
+  around each handler that uses it. `scratch` checks per-call initialization,
+  and `owned_by` ties each slot access and derived view to the live token.
+  Trusted: `syscall_slot_acquire` in
   `kernel/kernel/syscall.tkb` returns a slot no other live token names (its
   compare-exchange). `scripts/check_slot_pool_entries.py`, a build check
   rather than a type rule, keeps one slot per operation, keeps every slot
