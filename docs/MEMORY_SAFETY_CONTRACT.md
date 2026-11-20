@@ -125,6 +125,23 @@ No new production annotation, runtime store, unsafe site or storage was
 needed for this re-audit. Slot mint uniqueness and raw-memory assumptions
 remain named trust, rather than being discharged by these controls.
 
+## Solver checkpoint on the direct TCP send revision
+
+A clean allcheck passed on 8f6832d8e (2026-11-20), including the maintained
+QEMU and RPi5 kernels. Their main-object obligation sets contain 2,230 and
+2,533 SMT inputs, respectively. The pinned Z3 gate passed on both. Cold
+initialization checking took 3.43 s on QEMU and 4.04 s on RPi5 against the
+5.0 s budget per target. The maintained fault controls obtained counterexamples
+for deliberately incorrect range, indexing, initialization coverage, path
+facts and padding obligations. The selector and reuse tests above and the
+Init_link concrete-heap oracle check separate premises that a solver cannot
+recover from the emitted arithmetic alone.
+
+This checkpoint covers extracted arithmetic and finite byte-coverage
+obligations under the documented compiler and external premises. The direct
+send path uses the TX frame. Establishing that a TCP read uses the extent
+written by the current receive after RX slot reacquisition remains open.
+
 ## User-visible byte paths: initial coverage inventory
 
 The initial source audit found nine direct copy-out call sites in
@@ -138,7 +155,7 @@ This is a source-backed entry inventory, not complete export certification.
 | copy_to_user_span | borrow uninit source with requires init(source[offset..<offset + length]); checked tail forwards to copy_to_user | Every producer's range fact and alias/lease identity |
 | Pipe reads (two wrap segments) | copy_to_user_span from pipe_of(owner).buffer | Stored-owner lifetime and written ring ranges across wrap/reuse |
 | TCP reads (buffered and freshly received) | copy_to_user_span from tcp_frame_bytes | Frame ownership, received extent, publication and DMA completion |
-| procfs rendering, ext2 file reads, getrandom | copy_to_user_span from the selected syscall scratch file_buffer | Producer prefix, cursor/count transfer, partial/failure paths and reacquisition |
+| procfs rendering, ext2 file reads, syslog | copy_to_user_span from the selected syscall scratch file_buffer | Producer prefix, cursor/count transfer, partial/failure paths and reacquisition. Syslog checks that the snapshot copy produced the full requested chunk before copyout |
 | prlimit64 | copy_to_user from constructed scratch bytes; the initial RLIMIT_NOFILE read checks both words and adjacent sentinels | Scratch source lifetime and output cases beyond the initial successful read |
 | uname | copy_to_user from constructed scratch bytes; successful field tails and adjacent sentinels checked by the peer TTY fixture | Source initialization and lifetime proof across scratch reacquisition; other field values and faulting destinations |
 | user_write_byte/u16/u32/u64 and user_zero_fill | Typed scalar inputs or constant zero; range/COW checks and access windows | All callers and all padding/holes of user ABI records; untouched user bytes are not kernel disclosure |
