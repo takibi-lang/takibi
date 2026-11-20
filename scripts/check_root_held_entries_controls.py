@@ -61,10 +61,10 @@ def main():
                      'image, address_space_boot_root(), mapped, entry, stack_pointer,'),
         replace_in_function(image, 'fn process_image_unmap(', 'let mut target: AddressSpaceRoot = pages.root;',
                      'let mut target: AddressSpaceRoot = address_space_boot_root();'),
-        replace_in_function(image, 'fn process_image_map_ext2_in_root(', 'process_image_map_current(slot, target, plan, argv, argc)',
-                     'process_image_map_current(slot, address_space_boot_root(), plan, argv, argc)'),
-        replace_in_function(image, 'fn process_image_map_ext2_in_root(', 'process_image_map_current(slot, target, plan, argv, argc)',
-                     'process_image_map_current(slot, address_space_boot_root(), plan, argv, argc); process_image_map_current(slot, target, plan, argv, argc)'),
+        replace_in_function(image, 'fn process_image_map_ext2_in_root(', 'process_image_map_current(slot, target, plan, argv, argc, reservation)',
+                     'process_image_map_current(slot, address_space_boot_root(), plan, argv, argc, reservation)'),
+        replace_in_function(image, 'fn process_image_map_ext2_in_root(', 'process_image_map_current(slot, target, plan, argv, argc, reservation)',
+                     'process_image_map_current(slot, address_space_boot_root(), plan, argv, argc, reservation); process_image_map_current(slot, target, plan, argv, argc, reservation)'),
     ]
     reader = 'let mut target: AddressSpaceRoot = pages.root;'
     image_mutations.extend([

@@ -941,17 +941,17 @@ private fn process_image_pte_read(target: AddressSpaceRoot, index: usize) -> usi
 // Do not transfer PageOwner until the lazy-L3 allocation and PTE write have
 // both succeeded. This is the mapping-side half of address_space.tkb's OOM
 // contract; the failure arm returns the still-owned physical page directly.
-private inline fn process_image_install_page(target: AddressSpaceRoot,
+private inline fn process_image_install_page_ordinary(target: AddressSpaceRoot,
                               page: sink PageOwner[page_id],
                               index: usize, flags: usize) -> bool
         requires init(page_bytes(page)[0..<PAGE_SIZE]) {
     let reservation = page_allocation_ordinary();
-    let result = process_image_install_page_with_reservation(target, page, index, flags, reservation);
+    let result = process_image_install_page(target, page, index, flags, reservation);
     page_allocation_ordinary_end(reservation);
     return result;
 }
 
-private fn process_image_install_page_with_reservation(target: AddressSpaceRoot,
+private fn process_image_install_page(target: AddressSpaceRoot,
                               page: sink PageOwner[page_id],
                               index: usize, flags: usize, reservation: borrow PageReservation[mode]) -> bool {
     match address_space_map_page(
@@ -1165,7 +1165,7 @@ fn process_image_clone_vm_begin(source_space: AddressSpaceRoot,
     let mut clone_page_count: usize = 0;
     address_space_clear_root(dest_space);
     // Reset the destination root's demand-stack metadata before rebuilding
-    // it below, the same way process_image_map_current() resets its own
+    // it below, the same way process_image_map_current_ordinary() resets its own
     // root's before mapping a fresh image -- otherwise a reaped child's
     // stale counts would leak into the next fork.
     process_image_set_stack_growth_active(dest, evidence, false);
@@ -1488,7 +1488,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
             }
         }
     }
-    // Mirrors exactly the metadata process_image_map_current() sets after
+    // Mirrors exactly the metadata process_image_map_current_ordinary() sets after
     // mapping a fresh image's single top stack page: growth enabled, one
     // page active, nothing yet grown below the top.
     process_image_set_stack_growth_active(0, evidence, true);
@@ -1665,15 +1665,15 @@ must_use variant ProcessImageExecInstallResult {
     OutOfMemory;
 }
 
-inline fn process_image_exec_install(
+inline fn process_image_exec_install_ordinary(
         pages: sink ProcessImagePages[image]) -> ProcessImageExecInstallResult {
     let reservation = page_allocation_ordinary();
-    let result = process_image_exec_install_with_reservation(pages, reservation);
+    let result = process_image_exec_install(pages, reservation);
     page_allocation_ordinary_end(reservation);
     return result;
 }
 
-fn process_image_exec_install_with_reservation(
+fn process_image_exec_install(
         pages: sink ProcessImagePages[image], reservation: borrow PageReservation[mode]) -> ProcessImageExecInstallResult {
     let root: usize = match process_image_root_checked(pages.root) {
         ProcessImageTargetRootResult::Missing => {
@@ -1681,7 +1681,7 @@ fn process_image_exec_install_with_reservation(
             // path that does not install it, exactly as AlreadyInstalled
             // below already does -- and `pages` being linear is what makes
             // that a compile error to forget rather than a leak to find.
-            process_image_unmap_with_reservation(pages, reservation);
+            process_image_unmap(pages, reservation);
             return ProcessImageExecInstallResult::NoTarget;
         }
         ProcessImageTargetRootResult::Ready(target) => {
@@ -1689,13 +1689,13 @@ fn process_image_exec_install_with_reservation(
         }
     };
     let evidence = match process_image_record_ensure_with_reservation(root, reservation) {
-        ProcessImageRecordReady::Missing => { process_image_unmap_with_reservation(pages, reservation); return ProcessImageExecInstallResult::OutOfMemory; }
+        ProcessImageRecordReady::Missing => { process_image_unmap(pages, reservation); return ProcessImageExecInstallResult::OutOfMemory; }
         ProcessImageRecordReady::Ready(ready) => { ready }
     };
     if (process_image_record_read(root, evidence).exec_image_installed) {
         // Unchanged: the INCOMING image is the one unmapped, and the
         // already-installed one is left alone.
-        process_image_unmap_with_reservation(pages, reservation);
+        process_image_unmap(pages, reservation);
         return ProcessImageExecInstallResult::AlreadyInstalled;
     }
     process_image_set_exec_image_page_count(root, evidence,
@@ -2297,7 +2297,7 @@ fn process_image_handle_data_abort(target: AddressSpaceRoot, esr: usize,
             PageAllocResult::Allocated(stack_page) => {
                 let bytes = page_bytes(stack_page);
                 for i: usize in 0..<4096 { bytes[i] = 0; }
-                if (process_image_install_page(target,
+                if (process_image_install_page_ordinary(target,
                         stack_page, l3_index, USER_RW_XN_FLAGS) == false) {
                     return false;
                 }
@@ -2340,13 +2340,13 @@ private fn process_image_unmap_pages(target: AddressSpaceRoot, count: usize, res
     }
 }
 
-inline fn process_image_unmap(pages: sink ProcessImagePages[image]) {
+inline fn process_image_unmap_ordinary(pages: sink ProcessImagePages[image]) {
     let reservation = page_allocation_ordinary();
-    process_image_unmap_with_reservation(pages, reservation);
+    process_image_unmap(pages, reservation);
     page_allocation_ordinary_end(reservation);
 }
 
-fn process_image_unmap_with_reservation(pages: sink ProcessImagePages[image], reservation: borrow PageReservation[mode]) {
+fn process_image_unmap(pages: sink ProcessImagePages[image], reservation: borrow PageReservation[mode]) {
     let count: usize = pages.count;
     let mut target: AddressSpaceRoot = pages.root;
     process_image_pages_discard(pages);
@@ -2422,7 +2422,7 @@ private fn process_image_map_segments(slot: borrow ProcessImageSlot[0],
                                     }
                                     DistroElfAccess::ReadWrite => {}
                                 }
-                                if (process_image_install_page_with_reservation(target,
+                                if (process_image_install_page(target,
                                         page, l3_index, flags, reservation) == false) {
                                     process_image_cleanup_root(target, reservation);
                                     return ProcessImageSegmentsResult::OutOfMemory;
@@ -2533,7 +2533,7 @@ private fn process_image_pair_probe(slot: borrow ProcessImageSlot[0],
                             PageAllocResult::Allocated(heap_page) => {
                                 let bytes = page_bytes(heap_page);
                                 for i: usize in 0..<4096 { bytes[i] = 0; }
-                                if (process_image_install_page_with_reservation(target,
+                                if (process_image_install_page(target,
                                         heap_page, l3_index,
                                         USER_RW_XN_FLAGS, reservation) == false) {
                                     process_image_cleanup_root(target, reservation);
@@ -2564,7 +2564,7 @@ private fn process_image_pair_probe(slot: borrow ProcessImageSlot[0],
                             PageAllocResult::Allocated(stack_page) => {
                                 let bytes = page_bytes(stack_page);
                                 for i: usize in 0..<4096 { bytes[i] = 0; }
-                                if (process_image_install_page_with_reservation(target,
+                                if (process_image_install_page(target,
                                         stack_page, l3_index,
                                         USER_RW_XN_FLAGS, reservation) == false) {
                                     process_image_cleanup_root(target, reservation);
@@ -2589,7 +2589,7 @@ private fn process_image_pair_probe(slot: borrow ProcessImageSlot[0],
                                     return ProcessImagePairProbeResult::Invalid;
                                 }
                                 ProcessImageStackResult::Ready => {
-                                        if (process_image_install_page_with_reservation(target,
+                                        if (process_image_install_page(target,
                                                 stack, process_stack_top_page(),
                                                 USER_RW_XN_FLAGS, reservation) == false) {
                                             process_image_cleanup_root(target, reservation);
@@ -2633,26 +2633,7 @@ private fn process_image_pair_probe(slot: borrow ProcessImageSlot[0],
 // reside on ext2. Metadata plans retain their separate header windows while
 // PT_LOAD bytes switch from primary_inode to interpreter_inode between the
 // two segment passes.
-inline fn process_image_pair_map_ext2_in_root(
-        primary: DistroElfLoadPlan,
-        primary_mount: Ext2Mount,
-        primary_inode: usize,
-        primary_length: usize,
-        interpreter: DistroElfLoadPlan,
-        interpreter_mount: Ext2Mount,
-        interpreter_inode: usize,
-        interpreter_length: usize,
-        interpreter_bias: usize,
-        argv: borrow []const u8,
-        argc: usize,
-        target: AddressSpaceRoot) -> ProcessImagePairProbeResult borrows(primary,interpreter) {
-    let reservation = page_allocation_ordinary();
-    let result = process_image_pair_map_ext2_in_root_with_reservation(primary, primary_mount, primary_inode, primary_length, interpreter, interpreter_mount, interpreter_inode, interpreter_length, interpreter_bias, argv, argc, target, reservation);
-    page_allocation_ordinary_end(reservation);
-    return result;
-}
-
-fn process_image_pair_map_ext2_in_root_with_reservation(
+fn process_image_pair_map_ext2_in_root(
         primary: DistroElfLoadPlan,
         primary_mount: Ext2Mount,
         primary_inode: usize,
@@ -2681,18 +2662,18 @@ fn process_image_pair_map_ext2_in_root_with_reservation(
     return result;
 }
 
-private inline fn process_image_map_current(slot: borrow ProcessImageSlot[0],
+private inline fn process_image_map_current_ordinary(slot: borrow ProcessImageSlot[0],
                              target: AddressSpaceRoot,
                              plan: DistroElfLoadPlan,
                              argv: borrow []const u8,
                              argc: usize) -> ProcessImageMapResult borrows(plan) {
     let reservation = page_allocation_ordinary();
-    let result = process_image_map_current_with_reservation(slot, target, plan, argv, argc, reservation);
+    let result = process_image_map_current(slot, target, plan, argv, argc, reservation);
     page_allocation_ordinary_end(reservation);
     return result;
 }
 
-private fn process_image_map_current_with_reservation(slot: borrow ProcessImageSlot[0],
+private fn process_image_map_current(slot: borrow ProcessImageSlot[0],
                              target: AddressSpaceRoot,
                              plan: DistroElfLoadPlan,
                              argv: borrow []const u8,
@@ -2757,7 +2738,7 @@ private fn process_image_map_current_with_reservation(slot: borrow ProcessImageS
             PageAllocResult::Allocated(heap_page) => {
                 let bytes = page_bytes(heap_page);
                 for i: usize in 0..<4096 { bytes[i] = 0; }
-                if (process_image_install_page_with_reservation(target,
+                if (process_image_install_page(target,
                         heap_page, l3_index, USER_RW_XN_FLAGS, reservation) == false) {
                     process_image_cleanup_root(target, reservation);
                     return ProcessImageMapResult::OutOfMemory;
@@ -2783,7 +2764,7 @@ private fn process_image_map_current_with_reservation(slot: borrow ProcessImageS
                     return ProcessImageMapResult::InvalidImage;
                 }
                 ProcessImageStackResult::Ready => {
-                        if (process_image_install_page_with_reservation(target,
+                        if (process_image_install_page(target,
                                 stack, process_stack_top_page(),
                                 USER_RW_XN_FLAGS, reservation) == false) {
                             process_image_cleanup_root(target, reservation);
@@ -2822,25 +2803,12 @@ fn process_image_map_ext2(plan: DistroElfLoadPlan,
     let mut target: AddressSpaceRoot = address_space_boot_root();
     let slot: ProcessImageSlot[0] = process_image_slot_acquire();
     process_image_set_source(slot, mount, inode, file_length);
-    let result = process_image_map_current(slot, target, plan, argv, argc);
+    let result = process_image_map_current_ordinary(slot, target, plan, argv, argc);
     process_image_slot_release(slot);
     return result;
 }
 
-inline fn process_image_map_ext2_in_root(plan: DistroElfLoadPlan,
-                                  mount: Ext2Mount,
-                                  inode: usize,
-                                  file_length: usize,
-                                  argv: borrow []const u8,
-                                  argc: usize,
-                                  target: AddressSpaceRoot) -> ProcessImageMapResult borrows(plan) {
-    let reservation = page_allocation_ordinary();
-    let result = process_image_map_ext2_in_root_with_reservation(plan, mount, inode, file_length, argv, argc, target, reservation);
-    page_allocation_ordinary_end(reservation);
-    return result;
-}
-
-fn process_image_map_ext2_in_root_with_reservation(plan: DistroElfLoadPlan,
+fn process_image_map_ext2_in_root(plan: DistroElfLoadPlan,
                                   mount: Ext2Mount,
                                   inode: usize,
                                   file_length: usize,
@@ -2854,7 +2822,7 @@ fn process_image_map_ext2_in_root_with_reservation(plan: DistroElfLoadPlan,
     }
     let slot: ProcessImageSlot[0] = process_image_slot_acquire();
     process_image_set_source(slot, mount, inode, file_length);
-    let result = process_image_map_current_with_reservation(slot, target, plan, argv, argc, reservation);
+    let result = process_image_map_current(slot, target, plan, argv, argc, reservation);
     process_image_slot_release(slot);
     return result;
 }
@@ -3423,7 +3391,7 @@ private fn mmap_region_page_in(target: AddressSpaceRoot,
         PageAllocResult::Allocated(fresh) => {
             let bytes = page_bytes(fresh);
             for i: usize in 0..<4096 { bytes[i] = 0; }
-            return process_image_install_page(target, fresh, page, USER_RW_XN_FLAGS);
+            return process_image_install_page_ordinary(target, fresh, page, USER_RW_XN_FLAGS);
         }
     }
 }

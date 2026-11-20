@@ -388,7 +388,7 @@ fn kernel_process_child_exec_map_result(current_authority: borrow ProcessCurrent
                 process_image_entry(pages), process_image_stack_pointer(pages)
             };
             let (heap_start, heap_limit) = process_image_heap_range(pages);
-            match process_image_exec_install_with_reservation(pages, reservation) {
+            match process_image_exec_install(pages, reservation) {
                 ProcessImageExecInstallResult::AlreadyInstalled => {
                     return KernelChildExecPrepareResult::ImageAlreadyInstalled;
                 }
@@ -1029,12 +1029,12 @@ private fn kernel_process_child_exec_commit(current_authority: borrow ProcessCur
         }
         ExecImageResolveResult::Static(image) => {
             return kernel_process_child_exec_map_result(current_authority,
-                process_image_map_ext2_in_root_with_reservation(
+                process_image_map_ext2_in_root(
                     image.plan, mount, image.inode, image.file_length, argv,
                     kernel_syscall_exec_argc(), child_space, reservation), child_space, reservation);
         }
         ExecImageResolveResult::Dynamic(images) => {
-            match process_image_pair_map_ext2_in_root_with_reservation(
+            match process_image_pair_map_ext2_in_root(
                     images.primary.plan,
                     mount,
                     images.primary.inode,
@@ -1057,7 +1057,7 @@ private fn kernel_process_child_exec_commit(current_authority: borrow ProcessCur
                     };
                     let (heap_start, heap_limit) =
                         process_image_heap_range(pages);
-                    match process_image_exec_install_with_reservation(pages, reservation) {
+                    match process_image_exec_install(pages, reservation) {
                         ProcessImageExecInstallResult::AlreadyInstalled => {
                             return KernelChildExecPrepareResult::ImageAlreadyInstalled;
                         }
@@ -1194,7 +1194,7 @@ fn httpd_image_mapping_check(mount: Ext2Mount, httpd: Ext2ExecImage,
         }
         ProcessImageMapResult::Mapped(httpd_pages) => {
             let httpd_count: usize = process_image_page_count(httpd_pages);
-            process_image_unmap(httpd_pages);
+            process_image_unmap_ordinary(httpd_pages);
             // GitHub issue #516: ask about the root this MAPPED into, by
             // name. process_image_map_ext2 maps into root 0, and
             // process_image_unmap_pages clears the per-CPU target on every
@@ -1221,7 +1221,7 @@ fn httpd_image_mapping_check(mount: Ext2Mount, httpd: Ext2ExecImage,
         }
         ProcessImageMapResult::Mapped(musl_pages) => {
             let musl_count: usize = process_image_page_count(musl_pages);
-            process_image_unmap(musl_pages);
+            process_image_unmap_ordinary(musl_pages);
             // The same root, for the same reason as the pie check above.
             if (musl_count != 296 ||
                 process_image_root_window_is_clear(
@@ -1668,7 +1668,8 @@ irq_uart_rx_unmask();
                             }
                             HttpdImageMapCheckResult::Verified => {}
                         }
-                        match process_image_pair_map_ext2_in_root(
+                        let ordinary_reservation = page_allocation_ordinary();
+                        let mapped = process_image_pair_map_ext2_in_root(
                                 images.primary.plan,
                                 mount,
                                 images.primary.inode,
@@ -1678,7 +1679,9 @@ irq_uart_rx_unmask();
                                 images.interpreter.inode,
                                 images.interpreter.file_length,
                                 kernel_exec_interpreter_bias(images.primary.plan),
-                                bs"check\0", 1, address_space_boot_root()) {
+                                bs"check\0", 1, address_space_boot_root(), ordinary_reservation);
+                        page_allocation_ordinary_end(ordinary_reservation);
+                        match mapped {
                             ProcessImagePairProbeResult::Invalid => {
                                 kernel_boot_log("httpd map: combined invalid\n");
                             }
@@ -1697,7 +1700,7 @@ irq_uart_rx_unmask();
                                 kernel_syscall_process_configure(
                                     kernel_syscall_process_slot(),
                                     dynamic_heap_start, dynamic_heap_limit);
-                                process_image_unmap(dynamic_pages);
+                                process_image_unmap_ordinary(dynamic_pages);
                             }
                         }
                     }
@@ -1788,10 +1791,13 @@ private fn kernel_init_process_start(mount: Ext2Mount, image: Ext2ExecImage,
         InitProcessCreateResult::Created(created) => { created }
     };
     let mut init_slot: ProcessSlot = kernel_process_init_slot(init);
-    match process_image_map_ext2_in_root(
+    let ordinary_reservation = page_allocation_ordinary();
+    let mapped = process_image_map_ext2_in_root(
             image.plan, mount, image.inode, image.file_length,
             bs"bin/busybox.static\0init\0", 2,
-            scheduled_process_address_space_root_lookup(init_slot)) {
+            scheduled_process_address_space_root_lookup(init_slot), ordinary_reservation);
+    page_allocation_ordinary_end(ordinary_reservation);
+    match mapped {
         ProcessImageMapResult::InvalidImage => {
             kernel_boot_log("script map: invalid image\n");
         }
@@ -1826,7 +1832,7 @@ private fn kernel_init_process_start(mount: Ext2Mount, image: Ext2ExecImage,
                 script_heap_start, script_heap_limit);
             // Installed as an exec image, as a child's is after its first
             // execve, so PID 1's own execve replaces it the same way.
-            match process_image_exec_install(script_pages) {
+            match process_image_exec_install_ordinary(script_pages) {
                 ProcessImageExecInstallResult::AlreadyInstalled => {
                     kernel_boot_log("init: image already installed\n");
                     test_driver_phase_end(driver_phase);
