@@ -3134,31 +3134,15 @@ fn syscall_write_segment_with(slot: borrow SyscallSlot[0],
                       tcp_connection_put(owner);
                       return SyscallIoResult::Transferred(0);
                   }
-                  let received_length: usize =
-                      tcp_connection_of(owner).socket_buffer_length;
                   match network_capability_take() {
                     NetworkCapabilityTakeResult::Empty => {
                         tcp_connection_put(owner);
                         return SyscallIoResult::NetWait;
                     }
                     NetworkCapabilityTakeResult::Ready(ready) => {
-                    let Place::Full(rx) =
-                            tcp_connection_frame_hold(owner, TcpFrameRole::Rx) else {
-                        Place::Empty => {
-                            tcp_frame_missing();
-                            tcp_connection_put(owner);
-                            match network_capability_put(ready) {
-                                NetworkCapabilityPutResult::Stored => {}
-                                NetworkCapabilityPutResult::Conflict => {}
-                            }
-                            return SyscallIoResult::Errno(LINUX_EINVAL);
-                        }
-                    };
-                    let socket_buffers = tcp_frame_bytes(rx);
-                    match user_range_check_read(current_authority, address, amount) {
+                    let UserReadRangeResult::Ok(range) =
+                            user_range_check_read(current_authority, address, amount) else {
                         UserReadRangeResult::Fault => {
-                            tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
-                                                        rx);
                             tcp_connection_put(owner);
                             match network_capability_put(ready) {
                                 NetworkCapabilityPutResult::Stored => {}
@@ -3166,27 +3150,16 @@ fn syscall_write_segment_with(slot: borrow SyscallSlot[0],
                             }
                             return SyscallIoResult::Errno(LINUX_EFAULT);
                         }
-                        UserReadRangeResult::Ok(range) => {
-                            if (copy_from_user_span(range, socket_buffers, 0,
-                                                    amount) == false) {
-                                tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
-                                                            rx);
-                                tcp_connection_put(owner);
-                                match network_capability_put(ready) {
-                                    NetworkCapabilityPutResult::Stored => {}
-                                    NetworkCapabilityPutResult::Conflict => {}
-                                }
-                                return SyscallIoResult::Errno(LINUX_EFAULT);
+                    };
+                    match kernel_tcp_send_user(owner, ready, range, amount) {
+                        KernelTcpSendResult::SourceFault(after_fault) => {
+                            tcp_connection_put(owner);
+                            match network_capability_put(after_fault) {
+                                NetworkCapabilityPutResult::Stored => {}
+                                NetworkCapabilityPutResult::Conflict => {}
                             }
+                            return SyscallIoResult::Errno(LINUX_EFAULT);
                         }
-                    }
-                    let sent = kernel_tcp_send_received(
-                            owner, ready,
-                            socket_buffers[0..<1460],
-                            received_length, amount);
-                    tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
-                                                rx);
-                    match sent {
                         KernelTcpSendResult::Invalid(after_invalid) => {
                             match network_capability_put(after_invalid) {
                                 NetworkCapabilityPutResult::Stored => {

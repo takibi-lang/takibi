@@ -640,6 +640,7 @@ must_use variant KernelTcpReceiveResult[net: addr] {
 
 must_use variant KernelTcpSendResult[net: addr] {
     Invalid(NetRxCanAcquire[net]);
+    SourceFault(NetRxCanAcquire[net]);
     Sent(NetRxCanAcquire[net]);
 }
 
@@ -3998,19 +3999,12 @@ fn kernel_tcp_received_length(owner: borrow TcpConnectionOwner[connection_pool, 
     return tcp_connection_of(owner).received_length;
 }
 
-fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection_pool, connection],
-                            ready: sink NetRxCanAcquire[net],
-                            source: borrow [u8; 1460..],
-                            received_length: usize,
-                            payload_length: usize)
+fn kernel_tcp_send_user(owner: borrow TcpConnectionOwner[connection_pool, connection],
+                        ready: sink NetRxCanAcquire[net],
+                        source: borrow UserReadRange[process],
+                        payload_length: usize)
         -> KernelTcpSendResult[net] !{may_block} {
-    let conn: &mut TcpConnection = tcp_connection_of(owner);
-    let remote_ip_bytes =
-        conn.remote_ip as []u8;
-    let remote_mac_bytes =
-        conn.remote_mac as []u8;
-    if (payload_length >= 1 && payload_length <= 1460 &&
-        received_length >= 1 && received_length <= 1460) {
+    if (payload_length >= 1 && payload_length <= 1460) {
         let length: usize = payload_length;
         let Place::Full(tx) =
                 tcp_connection_frame_hold(owner, TcpFrameRole::Tx) else {
@@ -4020,6 +4014,20 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection_pool, co
             }
         };
         let frame_bytes = tcp_frame_bytes(tx);
+        // The RX frame can still contain unread data. Copy into the TX
+        // payload before mutating connection or retransmit state.
+        if (copy_from_user_span(source, frame_bytes, 54, length) == false) {
+            tcp_connection_frame_unhold(owner, TcpFrameRole::Tx, tx);
+            return KernelTcpSendResult::SourceFault(ready);
+        }
+        let conn: &mut TcpConnection = tcp_connection_of(owner);
+        let received_length: usize = conn.socket_buffer_length;
+        if (received_length < 1 || received_length > 1460) {
+            tcp_connection_frame_unhold(owner, TcpFrameRole::Tx, tx);
+            return KernelTcpSendResult::Invalid(ready);
+        }
+        let remote_ip_bytes = conn.remote_ip as []u8;
+        let remote_mac_bytes = conn.remote_mac as []u8;
         slice_copy(frame_bytes[0..<6],
                    remote_mac_bytes[0..<6]);
         let mut frame_mac: TcpMacAddress = boot_once_get(&our_mac);
@@ -4051,7 +4059,6 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection_pool, co
         tcp_hdr.window = 65535;
         tcp_hdr.checksum = 0;
         tcp_hdr.urgent = 0;
-        slice_copy(frame_bytes[54..<54 + length], source[0..<length]);
         fix_tcp_checksum(ip, frame_bytes[34..<54 + length]);
         conn.snd_nxt =
             conn.snd_nxt + (length as u32);

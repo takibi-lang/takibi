@@ -2,11 +2,11 @@
   "date": "2026-11-20",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "a5911006b1068b6aeff36b4a2d39e7d6933be1b1292e9acbc331d24b2d78ee2c",
-  "workload": "Normal linked QEMU and RPi5 kernels and matching function stack records, including RPi5 debug, for the existing four-slot syscall scratch pool. Baseline 5c67235f8.",
+  "source_sha256": "0855cc474ea234af4eacb4c2a4f37f29f47d5407033511d56eb94bb22ec32ff3",
+  "workload": "Connected TCP write, measured in the normal and debug linked QEMU and RPi5 images and matching function stack records. Baseline b19cbe015.",
   "evidence": [
-    "docs/SYSCALL_SCRATCH_SPACE.md"
+    "docs/TCP_DIRECT_SEND_SPACE.md"
   ],
-  "assessment": "QEMU and RPi5 text shrink by 240 and 256 bytes respectively. Linked writable symbols and usable RAM starts are unchanged. Normal getdents and rename frames grow 16 bytes while execve shrinks 48 bytes. RPi5 debug execve grows 128 bytes; all affected frames fit the existing ceilings.",
-  "next_trigger": "Remeasure when syscall scratch layout, pathname staging and copy boundaries, or the affected stack budget changes."
+  "assessment": "The checked user payload copy targets the existing TX frame, removing the intermediate payload copy and RX frame hold. Normal linked text falls by 80 and 72 bytes respectively. Writable symbols and usable RAM starts are unchanged. The send frame grows by 16 bytes in normal QEMU and 64/32 bytes in debug QEMU/RPi5. The caller frame shrinks in all four builds. All affected frames remain within the existing ceiling.",
+  "next_trigger": "Remeasure when send staging, TX frame storage, or the copy and retransmission boundaries change."
 }
