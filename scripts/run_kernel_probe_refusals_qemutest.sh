@@ -126,11 +126,16 @@ for line in ('world stop stage: secondary-never-acknowledged',
 errors = []
 if 'world stop resume control: refused' not in lines:
     errors.append('FAIL probe-refusals: world stop resume accepted a stale tick')
-if 'signal phase control attempts: 2' not in lines:
+# One timed-out round ends the fixture. The subsequent peer world-stop probe
+# and the completion marker witness that the boot driver continued.
+if (lines.index('signal contention: failed') >= lines.index('world stop from a peer: failed')
+        or lines.index('world stop from a peer: failed') >= lines.index(marker)):
+    errors.append('FAIL probe-refusals: boot did not continue after signal timeout')
+if 'signal phase control attempts: 1' not in lines:
     errors.append('FAIL probe-refusals: signal retried an invalid phase')
 if errors:
     print('\n'.join(errors))
     raise SystemExit(1)
 print(f'PASS probe-refusals: {len(names)} real probes refused a missing participant; '
-      f'entry diagnoses and stale-resume refusal retained; completed in {time.monotonic() - start:.1f}s')
+      f'signal timeout returned to boot after one attempt; stale resume refused; completed in {time.monotonic() - start:.1f}s')
 PY
