@@ -2,11 +2,11 @@
   "date": "2026-11-20",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "8f76abc3b2875fc8c5c5334c72d33f7d4ae6884bd486945a752f1e7fec61bd86",
-  "workload": "Both normal linked kernels and the existing FD retain/release contention probe, compared with 44fa537e2.",
+  "source_sha256": "50ebcf32cc1188bba10f8c5706484fbdfddaf9e751004a505af5bae46f5b8767",
+  "workload": "Both normal linked kernels and exec reservation commit frames, including conditional image record growth, compared with a5c8342b2.",
   "evidence": [
-    "docs/FD_PROBE_RECEIPT_SPACE.md"
+    "docs/EXEC_RESERVATION_SPACE.md"
   ],
-  "assessment": "The linked machine code is byte-identical on both targets. The FD probe cycle retains a 32-byte frame and the original calls. The linked unwind table shrinks by 4 bytes on each target. Data, BSS, usable RAM and allocator expectations are unchanged.",
-  "next_trigger": "Remeasure when the FD probe changes its receipt representation, retain/release calls or linked reservation boundary."
+  "assessment": "Linked text grows by 1648 bytes on QEMU and 1552 on RPi5. Writable symbols, reservation storage, BSS, usable RAM and allocator expectations are unchanged. Retain the smaller measured allocator entry layout.",
+  "next_trigger": "Remeasure when reservation representation, allocator entry, image mapping path or image reservation changes."
 }
