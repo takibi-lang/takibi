@@ -2,11 +2,11 @@
   "date": "2026-11-20",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "818955daaedb7e8276ee06449ec154ee5b7277ab759af3362c14ae4d69593072",
-  "workload": "Both normal linked kernels and exec reservation commit frames, including conditional image record growth, compared with a5c8342b2.",
+  "source_sha256": "73d208f17953e7632db050bfe720bb446d5d2bb45900f4d4cfe55394148aa255",
+  "workload": "Normal linked QEMU and RPi5 kernels with the existing two-phase signal contention probe, compared with 8c14aaa7b.",
   "evidence": [
-    "docs/EXEC_RESERVATION_SPACE.md"
+    "docs/SIGNAL_PROBE_LIFECYCLE_SPACE.md"
   ],
-  "assessment": "Linked text grows by 1648 bytes on QEMU and 1552 on RPi5. Writable symbols, reservation storage, BSS, usable RAM and allocator expectations are unchanged. Retain the smaller measured allocator entry layout.",
-  "next_trigger": "Remeasure when reservation representation, allocator entry, image mapping path or image reservation changes."
+  "assessment": "The probe text class grows by 840 bytes on QEMU and 792 bytes on RPi5. Its 8-byte gate replaces the armed word. Data, BSS, usable RAM and allocator expectations are unchanged. The new bounded close and drain run outside the compared payload updates.",
+  "next_trigger": "Remeasure when signal probe admission, deadlines, record storage or the linked reservation boundaries change."
 }
