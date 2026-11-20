@@ -80,3 +80,18 @@ On the release base d78156045, the linked normal text sizes change from
 Data, BSS, usable RAM starts, and the checked allocator capacities are
 unchanged. The compilation process measurements above use the original
 aae4cc731 comparison.
+
+## Untouched entry in a present L3
+
+The existing boot isolation probe maps root B's page 511, then
+checks that the neighboring, unmapped page 510 in the same L3 still
+has a zero descriptor. Its existing page 512 check covers a missing
+parent branch. This adds a single descriptor read while keeping the
+probe's mappings and allocator live-count checks the same.
+
+Compared with fcc42eb95, the normal linked QEMU text grows from
+834416 to 834464 bytes and the RPi5 text grows from 4227460 to
+4227524 bytes. Data and BSS are unchanged. Usable RAM still starts at
+0x40210000 on QEMU and 0x7e0000 on RPi5. The probe's linked stack frames
+remain 320 bytes on QEMU and 304 bytes on RPi5. The observation covers
+the one neighboring descriptor in the maintained boot workload.

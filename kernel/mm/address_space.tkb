@@ -1661,6 +1661,10 @@ fn process_address_space_probe() -> bool !{unsafe} {
                                 // the table must agree.
                                 let (second_high_mapped, second_high) =
                                     user_probe_root_read_byte(owner_b, running_b, high_address);
+                                // In root B, mapped page 511 already allocated this L3.
+                                // Its unwritten neighbor must still hold a zero descriptor.
+                                let second_neighbor_empty: bool =
+                                    address_space_pte_read(root_b_root, 510) == 0;
                                 let second_high_absent: bool =
                                     second_high_mapped == false && second_high == 0 &&
                                     address_space_pte_read(root_b_root, 512) == 0;
@@ -1673,7 +1677,7 @@ fn process_address_space_probe() -> bool !{unsafe} {
                                     second_low_ok && second_low == 22 &&
                                     first_low_ok && first_low == 11 &&
                                     first_high_ok && first_high == 12 &&
-                                    second_high_absent;
+                                    second_high_absent && second_neighbor_empty;
                             }
                             address_space_release_root(root_b_root);
                             address_space_release_root(root_a_root);
