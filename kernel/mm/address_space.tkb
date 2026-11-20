@@ -1103,7 +1103,7 @@ private inline fn address_space_publish_l3(l2_physical: usize, branch: usize,
 // This function is intentionally the only owner of lazy L3-table
 // allocation. A caller keeps its PageOwner until Written is returned, so an
 // L3-allocation failure cannot silently discard a mapped user page.
-fn address_space_pte_write(root: AddressSpaceRoot, index: usize, value: usize)
+fn address_space_pte_write(root: AddressSpaceRoot, index: usize, value: usize, reservation: borrow PageReservation[mode])
         -> AddressSpacePteWriteResult {
     let slot: usize = root.slot;
     if (address_space_root_key_valid(slot) == false || index >= USER_SPACE_PAGE_COUNT) {
@@ -1122,7 +1122,7 @@ fn address_space_pte_write(root: AddressSpaceRoot, index: usize, value: usize)
         // Clearing a never-populated branch is already complete and must
         // not spend a physical page merely to hold an all-zero table.
         if (value == 0) { return AddressSpacePteWriteResult::Written; }
-        match page_alloc(PageOwnerTag::PageTable) {
+        match page_alloc_with_reservation(PageOwnerTag::PageTable, reservation) {
             PageAllocResult::OutOfMemory => {
                 return AddressSpacePteWriteResult::OutOfMemory;
             }
@@ -1192,13 +1192,23 @@ fn address_space_pte_cow_value(pte: usize) -> usize {
 // Installs the first mapping of a freshly allocated page. PageOwner stays
 // linear until the fallible lazy-L3 allocation has succeeded; after that
 // point page.tkb records one runtime mapping reference for the PTE.
-inline fn address_space_map_page(root: AddressSpaceRoot, index: usize,
+inline fn address_space_map_page_ordinary(root: AddressSpaceRoot, index: usize,
                           page: sink PageOwner[page_id],
                           flags: usize) -> AddressSpacePteWriteResult
         requires init(page_bytes(page)[0..<PAGE_SIZE]) {
+    let reservation = page_allocation_ordinary();
+    let result = address_space_map_page(root, index, page, flags, reservation);
+    page_allocation_ordinary_end(reservation);
+    return result;
+}
+
+inline fn address_space_map_page(root: AddressSpaceRoot, index: usize,
+                          page: sink PageOwner[page_id],
+                          flags: usize, reservation: borrow PageReservation[mode]) -> AddressSpacePteWriteResult
+        requires init(page_bytes(page)[0..<PAGE_SIZE]) {
     let slot: usize = root.slot;
     let physical: usize = page_physical_address(page);
-    match address_space_pte_write(root, index, physical | flags) {
+    match address_space_pte_write(root, index, physical | flags, reservation) {
         AddressSpacePteWriteResult::Invalid => {
             page_free(page);
             return AddressSpacePteWriteResult::Invalid;
@@ -1227,8 +1237,11 @@ fn address_space_resolve_cow(root: AddressSpaceRoot, index: usize) -> bool !{uns
     // neither a new page nor a copy, and cannot turn memory pressure into a
     // fault for data the process already owns exclusively.
     if (page_mapping_refcount_physical(old_physical) == 1) {
-        match address_space_pte_write(
-                root, index, old_physical | USER_RW_XN_FLAGS) {
+        let ordinary_reservation = page_allocation_ordinary();
+        let write_result = address_space_pte_write(
+                root, index, old_physical | USER_RW_XN_FLAGS, ordinary_reservation);
+        page_allocation_ordinary_end(ordinary_reservation);
+        match write_result {
             AddressSpacePteWriteResult::Invalid => { return false; }
             AddressSpacePteWriteResult::OutOfMemory => { return false; }
             AddressSpacePteWriteResult::Written => {
@@ -1251,7 +1264,7 @@ fn address_space_replace_with_copy(root: AddressSpaceRoot, index: usize,
                 page_free(page);
                 return false;
             }
-            match address_space_map_page(root, index, page, USER_RW_XN_FLAGS) {
+            match address_space_map_page_ordinary(root, index, page, USER_RW_XN_FLAGS) {
                 AddressSpacePteWriteResult::Invalid => { return false; }
                 AddressSpacePteWriteResult::OutOfMemory => { return false; }
                 AddressSpacePteWriteResult::Written => {
@@ -1272,7 +1285,10 @@ fn address_space_pte_is_shared(pte: usize) -> bool {
 fn address_space_mark_shared(root: AddressSpaceRoot, index: usize) -> bool {
     let pte: usize = address_space_pte_read(root, index);
     if (address_space_pte_is_writable(pte) == false) { return false; }
-    match address_space_pte_write(root, index, pte | USER_SHARED_BIT) {
+    let ordinary_reservation = page_allocation_ordinary();
+    let write_result = address_space_pte_write(root, index, pte | USER_SHARED_BIT, ordinary_reservation);
+    page_allocation_ordinary_end(ordinary_reservation);
+    match write_result {
         AddressSpacePteWriteResult::Invalid => { return false; }
         AddressSpacePteWriteResult::OutOfMemory => { return false; }
         AddressSpacePteWriteResult::Written => { return true; }
@@ -1294,7 +1310,7 @@ fn address_space_replace_with_zero(root: AddressSpaceRoot, index: usize) -> bool
         PageAllocResult::Allocated(page) => {
             let bytes = page_bytes(page);
             for i: usize in 0..<4096 { bytes[i] = 0; }
-            match address_space_map_page(root, index, page, flags) {
+            match address_space_map_page_ordinary(root, index, page, flags) {
                 AddressSpacePteWriteResult::Invalid => { return false; }
                 AddressSpacePteWriteResult::OutOfMemory => { return false; }
                 AddressSpacePteWriteResult::Written => {
@@ -1454,7 +1470,7 @@ fn process_address_space_probe_map(
         root: AddressSpaceRoot, index: usize, page: sink PageOwner[page_id]) -> bool {
     let bytes = page_bytes(page);
     for i: usize in 0..<4096 { bytes[i] = 0; }
-    match address_space_map_page(root, index, page, USER_RW_XN_FLAGS) {
+    match address_space_map_page_ordinary(root, index, page, USER_RW_XN_FLAGS) {
         AddressSpacePteWriteResult::Invalid => {
             return false;
         }

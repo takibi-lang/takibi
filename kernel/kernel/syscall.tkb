@@ -9375,7 +9375,7 @@ fn kernel_syscall_cow_read_probe() -> SyscallCowReadReport !{unsafe} {
             let bytes = page_bytes(page);
             for i: usize in 0..<4096 { bytes[i] = 0; }
             let physical: usize = page_physical_address(page);
-            match address_space_map_page(root, probe_index, page,
+            match address_space_map_page_ordinary(root, probe_index, page,
                                          USER_RW_XN_FLAGS) {
                 AddressSpacePteWriteResult::Invalid => {
                     return SyscallCowReadReport::Failed;
@@ -9410,8 +9410,11 @@ fn kernel_syscall_cow_read_probe() -> SyscallCowReadReport !{unsafe} {
                 PageMappingRetainResult::Retained => {
                     let cow_pte: usize = address_space_pte_cow_value(
                         shared_physical | USER_RW_XN_FLAGS);
-                    match address_space_pte_write(sibling_root, probe_index,
-                                                  cow_pte) {
+                    let ordinary_reservation = page_allocation_ordinary();
+                    let write_result = address_space_pte_write(sibling_root, probe_index,
+                                                  cow_pte, ordinary_reservation);
+                    page_allocation_ordinary_end(ordinary_reservation);
+                    match write_result {
                         AddressSpacePteWriteResult::Invalid => {
                             page_mapping_release_physical(shared_physical);
                         }
@@ -9419,8 +9422,11 @@ fn kernel_syscall_cow_read_probe() -> SyscallCowReadReport !{unsafe} {
                             page_mapping_release_physical(shared_physical);
                         }
                         AddressSpacePteWriteResult::Written => {
-                            match address_space_pte_write(root, probe_index,
-                                                          cow_pte) {
+                            let ordinary_reservation = page_allocation_ordinary();
+                            let write_result = address_space_pte_write(root, probe_index,
+                                                          cow_pte, ordinary_reservation);
+                            page_allocation_ordinary_end(ordinary_reservation);
+                            match write_result {
                                 AddressSpacePteWriteResult::Invalid => {}
                                 AddressSpacePteWriteResult::OutOfMemory => {}
                                 AddressSpacePteWriteResult::Written => {
@@ -9509,7 +9515,7 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
         PageAllocResult::Allocated(page) => {
             let bytes = page_bytes(page);
             for i: usize in 0..<4096 { bytes[i] = 0; }
-            match address_space_map_page(
+            match address_space_map_page_ordinary(
                     address_space_boot_root(), probe_index, page, USER_RW_XN_FLAGS) {
                 AddressSpacePteWriteResult::Invalid => {
                     return false;

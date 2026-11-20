@@ -563,7 +563,10 @@ fn user_range_reprotect(root: AddressSpaceRoot, first_l3: usize, last_l3: usize,
         let root_slot: usize = root_slot_word(address_space_root_slot(root));
         let old_pte: usize = address_space_pte_read(root, index);
         let phys: usize = old_pte & USER_PAGE_PHYS_MASK;
-        match address_space_pte_write(root, index, phys | new_flags) {
+        let ordinary_reservation = page_allocation_ordinary();
+        let write_result = address_space_pte_write(root, index, phys | new_flags, ordinary_reservation);
+        page_allocation_ordinary_end(ordinary_reservation);
+        match write_result {
             AddressSpacePteWriteResult::Invalid => { return; }
             AddressSpacePteWriteResult::OutOfMemory => { return; }
             AddressSpacePteWriteResult::Written => {}
@@ -610,7 +613,7 @@ fn user_memory_boundary_probe_run(base: usize,
     let mut root: AddressSpaceRoot = address_space_boot_root();
     let data_page_bytes = page_bytes(data_page);
     for i: usize in 0..<4096 { data_page_bytes[i] = 0; }
-    match address_space_map_page(address_space_boot_root(), base, data_page, USER_RW_XN_FLAGS) {
+    match address_space_map_page_ordinary(address_space_boot_root(), base, data_page, USER_RW_XN_FLAGS) {
         AddressSpacePteWriteResult::Invalid => {
             page_free(text_page);
             return false;
@@ -623,7 +626,7 @@ fn user_memory_boundary_probe_run(base: usize,
     }
     let text_page_bytes = page_bytes(text_page);
     for i: usize in 0..<4096 { text_page_bytes[i] = 0; }
-    match address_space_map_page(address_space_boot_root(), base + 2, text_page, USER_TEXT_RX_FLAGS) {
+    match address_space_map_page_ordinary(address_space_boot_root(), base + 2, text_page, USER_TEXT_RX_FLAGS) {
         AddressSpacePteWriteResult::Invalid => {
             user_pte_clear(base);
             return false;
@@ -770,7 +773,7 @@ fn user_memory_root_isolation_probe_run(root_a: AddressSpaceRoot, root_b: Addres
     // unmapped (0) at this same index the whole time.
     let page_a_bytes = page_bytes(page_a);
     for i: usize in 0..<4096 { page_a_bytes[i] = 0; }
-    match address_space_map_page(root_a, index, page_a, USER_RW_XN_FLAGS) {
+    match address_space_map_page_ordinary(root_a, index, page_a, USER_RW_XN_FLAGS) {
         AddressSpacePteWriteResult::Invalid => {
             page_free(page_b);
             return false;
@@ -783,7 +786,7 @@ fn user_memory_root_isolation_probe_run(root_a: AddressSpaceRoot, root_b: Addres
     }
     let page_b_bytes = page_bytes(page_b);
     for i: usize in 0..<4096 { page_b_bytes[i] = 0; }
-    match address_space_map_page(root_b, index, page_b, USER_RODATA_R_FLAGS) {
+    match address_space_map_page_ordinary(root_b, index, page_b, USER_RODATA_R_FLAGS) {
         AddressSpacePteWriteResult::Invalid => {
             address_space_pte_clear(root_a, index);
             return false;

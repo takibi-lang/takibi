@@ -845,6 +845,17 @@ private fn page_run_is_free(pool: borrow &mut BootPagePool, metas: borrow region
 // between the scan and the claim.
 fn page_alloc_contiguous(count: usize, owner: PageOwnerTag)
         -> PageRunAllocResult !{allocates, requires_mmu, unsafe} {
+    return page_alloc_contiguous_with(count, owner, PageDebit::Ordinary);
+}
+
+fn page_alloc_contiguous_with_reservation(count: usize, owner: PageOwnerTag,
+        reservation: borrow PageReservation[mode])
+        -> PageRunAllocResult !{allocates, requires_mmu, unsafe} {
+    return page_alloc_contiguous_with(count, owner, page_reservation_debit(reservation));
+}
+
+private fn page_alloc_contiguous_with(count: usize, owner: PageOwnerTag, debit: PageDebit)
+        -> PageRunAllocResult !{allocates, requires_mmu, unsafe} {
     let guard = locked_cell_take(&boot_page_pool_cell);
     let pool = memory_map_pool_record(guard, &boot_page_pool_cell);
     let started: i64 = read_cntpct();
@@ -856,7 +867,7 @@ fn page_alloc_contiguous(count: usize, owner: PageOwnerTag)
                 Place::Full(extents) => {
                     let framed: PageRunAllocResult = match place_borrow(guard, page_meta_store.frames) {
                         Place::Empty => { PageRunAllocResult::OutOfMemory }
-                        Place::Full(frames) => { page_alloc_contiguous_admitted(frames, pool, metas, extents, count, owner) }
+                        Place::Full(frames) => { page_alloc_contiguous_admitted(frames, pool, metas, extents, count, owner, debit) }
                     };
                     framed
                 }
@@ -872,19 +883,19 @@ fn page_alloc_contiguous(count: usize, owner: PageOwnerTag)
     return result;
 }
 
-// GitHub issue #1079: a run is refused when it would take the free list
-// below what other CPUs' execs have reserved, and drawn from this CPU's
-// own reservation first.
+// A reserved run protects other reservations and draws from its issuer's
+// balance only after allocation succeeds. An ordinary run protects all
+// reservations and never draws from any of them.
 private fn page_alloc_contiguous_admitted(frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, fso, fsn], pool: borrow &mut BootPagePool, metas: borrow region(PageMeta)[mb, mn], extents: borrow region(PageExtent)[eb, en], count: usize,
-                                          owner: PageOwnerTag)
+                                          owner: PageOwnerTag, debit: PageDebit)
         -> PageRunAllocResult !{allocates, requires_mmu, unsafe} {
-    if (page_reserve_admits(pool, count) == false) {
+    if (page_reserve_admits(pool, count, debit) == false) {
         return PageRunAllocResult::OutOfMemory;
     }
     match page_alloc_contiguous_locked(frames, pool, metas, extents, count, owner) {
         PageRunAllocResult::OutOfMemory => { return PageRunAllocResult::OutOfMemory; }
         PageRunAllocResult::Allocated(run) => {
-            page_reserve_consume(pool, count);
+            page_reserve_consume(pool, count, debit);
             return PageRunAllocResult::Allocated(run);
         }
     }
@@ -894,23 +905,32 @@ private fn page_alloc_contiguous_admitted(frames: borrow PageFrameStore[fbc, fbo
 // GitHub issue #1079 (maintainer decision 2026-10-25, option c): execve
 // reserves the new image's pages before it tears the old image down, so
 // exhaustion is ENOMEM while the caller can still see it. A reservation is
-// a count, not a set of pages: the allocator refuses an allocation that
-// would leave fewer free pages than the OTHER CPUs' reservations, and an
-// allocation on the reserving CPU draws its own reservation down first.
-// An exec's prepare is one non-preemptible EL1 action on one CPU, and the
-// effect checker keeps the allocator out of interrupt context (see the
-// lock comment above), so every allocation the reserving CPU makes while
-// the reservation is held is the exec's. One reservation per CPU.
+// a count, not a set of pages. A reservation is issued against one CPU
+// slot, but its owner may move. Borrowing it through the allocation path
+// identifies the issuing slot at the debit under the page-pool lock.
+// Ordinary allocations protect every reservation and never draw from one.
 //
-// Invariant: runtime_free_count >= reserved_total, as long as every
-// reservation was admitted against the free count and every allocation is
-// admitted below. An allocation past its own reservation is counted in
-// reserve_overdrawn, which page_reservation_release returns: an exec whose
-// bound undercounted its allocations is visible, not silent.
-// `[unit]` is always 0: a linear struct needs a static parameter.
+// runtime_free_count >= reserved_total while the admission checks hold.
+// A debit beyond the borrowed reservation's balance is reported by release
+// so an overlooked allocation in the image bound remains visible.
+// Only this file constructs the value. It pairs [0] with a real debit
+// and [1] with ordinary admission, which reserves no pages to release.
 linear struct PageReservation[unit: usize] {
     private cpu: {0..<KERNEL_MAX_CORES as usize};
-    private count: usize;
+    private has_debit: bool;
+}
+
+inline fn page_allocation_ordinary() -> PageReservation[1] {
+    let mut ordinary: PageReservation[1] = { 0, false };
+    return ordinary;
+}
+
+inline fn page_allocation_ordinary_end(ordinary: sink PageReservation[1]) {
+}
+
+private inline fn page_reservation_debit(reservation: borrow PageReservation[mode]) -> PageDebit {
+    if (reservation.has_debit) { return PageDebit::Reserved(reservation.cpu); }
+    return PageDebit::Ordinary;
 }
 
 must_use variant PageReserveResult {
@@ -924,19 +944,30 @@ private fn page_reserve_cpu() -> {0..<KERNEL_MAX_CORES as usize} {
     return 0;
 }
 
-private fn page_reserve_admits(pool: borrow &mut BootPagePool, count: usize) -> bool {
+variant PageDebit {
+    Ordinary;
+    Reserved({0..<KERNEL_MAX_CORES as usize});
+}
+
+private fn page_reserve_admits(pool: borrow &mut BootPagePool, count: usize,
+        debit: PageDebit) -> bool {
     if (pool.runtime_applied == false) { return true; }
-    let cpu: {0..<KERNEL_MAX_CORES as usize} = page_reserve_cpu();
-    let own: usize = pool.reserved_by_cpu[cpu];
+    let own: usize = match debit {
+        PageDebit::Ordinary => { 0 }
+        PageDebit::Reserved(cpu) => { pool.reserved_by_cpu[cpu] }
+    };
     if (own > pool.reserved_total) { return false; }
     let others: usize = pool.reserved_total - own;
     if (pool.runtime_free_count < others) { return false; }
     return pool.runtime_free_count - others >= count;
 }
 
-private fn page_reserve_consume(pool: borrow &mut BootPagePool, count: usize) {
+private fn page_reserve_consume(pool: borrow &mut BootPagePool, count: usize, debit: PageDebit) {
     if (pool.runtime_applied == false) { return; }
-    let cpu: {0..<KERNEL_MAX_CORES as usize} = page_reserve_cpu();
+    let cpu: {0..<KERNEL_MAX_CORES as usize} = match debit {
+        PageDebit::Ordinary => { return; }
+        PageDebit::Reserved(issuer) => { issuer }
+    };
     if (pool.reserve_active[cpu] == false) { return; }
     let own: usize = pool.reserved_by_cpu[cpu];
     let mut drawn: usize = count;
@@ -970,7 +1001,7 @@ fn page_reserve(count: usize) -> PageReserveResult !{unsafe} {
     }
     locked_cell_give(&boot_page_pool_cell, guard);
     if (granted == false) { return PageReserveResult::Refused; }
-    let mut reservation: PageReservation[0] = { cpu, count };
+    let mut reservation: PageReservation[0] = { cpu, true };
     return PageReserveResult::Reserved(reservation);
 }
 
@@ -2199,7 +2230,7 @@ fn page_alloc_boot(owner: PageOwnerTag) -> PageAllocResult
                 Place::Full(extents) => {
                     let framed: PageAllocResult = match place_borrow(unlocked, page_meta_store.frames) {
                         Place::Empty => { PageAllocResult::OutOfMemory }
-                        Place::Full(frames) => { page_alloc_locked(frames, pool, metas, extents, owner) }
+                        Place::Full(frames) => { page_alloc_locked(frames, pool, metas, extents, owner, PageDebit::Ordinary) }
                     };
                     framed
                 }
@@ -2232,6 +2263,15 @@ fn page_free_boot(owner: sink PageOwner[page]) !{mmu_off, unsafe} {
 }
 
 fn page_alloc(owner: PageOwnerTag) -> PageAllocResult !{allocates} {
+    return page_alloc_with(owner, PageDebit::Ordinary);
+}
+
+fn page_alloc_with_reservation(owner: PageOwnerTag, reservation: borrow PageReservation[mode])
+        -> PageAllocResult !{allocates} {
+    return page_alloc_with(owner, page_reservation_debit(reservation));
+}
+
+private fn page_alloc_with(owner: PageOwnerTag, debit: PageDebit) -> PageAllocResult !{allocates} {
     if (owner == PageOwnerTag::Unowned ||
         owner == PageOwnerTag::Unavailable) {
         return PageAllocResult::OutOfMemory;
@@ -2246,7 +2286,7 @@ fn page_alloc(owner: PageOwnerTag) -> PageAllocResult !{allocates} {
                 Place::Full(extents) => {
                     let framed: PageAllocResult = match place_borrow(guard, page_meta_store.frames) {
                         Place::Empty => { PageAllocResult::OutOfMemory }
-                        Place::Full(frames) => { page_alloc_locked(frames, pool, metas, extents, owner) }
+                        Place::Full(frames) => { page_alloc_locked(frames, pool, metas, extents, owner, debit) }
                     };
                     framed
                 }
@@ -2266,7 +2306,7 @@ fn page_alloc(owner: PageOwnerTag) -> PageAllocResult !{allocates} {
     return result;
 }
 
-private fn page_alloc_locked(frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, fso, fsn], pool: borrow &mut BootPagePool, metas: borrow region(PageMeta)[mb, mn], extents: borrow region(PageExtent)[eb, en], owner: PageOwnerTag) -> PageAllocResult
+private fn page_alloc_locked(frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, fso, fsn], pool: borrow &mut BootPagePool, metas: borrow region(PageMeta)[mb, mn], extents: borrow region(PageExtent)[eb, en], owner: PageOwnerTag, debit: PageDebit) -> PageAllocResult
         !{allocates} {
     if (pool.runtime_applied == false) {
         let core: &mut FreelistCore(BOOTSTRAP_PAGE_COUNT) = &pool.core;
@@ -2295,8 +2335,8 @@ private fn page_alloc_locked(frames: borrow PageFrameStore[fbc, fbo, fbn, fsc, f
     if (pool.runtime_next_generation == 0) { return PageAllocResult::OutOfMemory; }
     let index: usize = pool.runtime_free_head;
     if (index >= page_capacity(pool, metas, extents)) { return PageAllocResult::OutOfMemory; }
-    if (page_reserve_admits(pool, 1) == false) { return PageAllocResult::OutOfMemory; }
-    page_reserve_consume(pool, 1);
+    if (page_reserve_admits(pool, 1, debit) == false) { return PageAllocResult::OutOfMemory; }
+    page_reserve_consume(pool, 1, debit);
     let capacity: usize = page_capacity(pool, metas, extents);
     let meta: &mut PageMeta = page_meta_at(metas, index);
     let next: usize = meta.next_free as usize;
@@ -2343,7 +2383,7 @@ private fn page_generation_exhaustion_locked(
     let mut ok: bool = true;
 
     pool.runtime_next_generation = FREELIST_LAST_GENERATION;
-    match page_alloc_locked(frames, pool, metas, extents, PageOwnerTag::KernelStack) {
+    match page_alloc_locked(frames, pool, metas, extents, PageOwnerTag::KernelStack, PageDebit::Ordinary) {
         PageAllocResult::OutOfMemory => { ok = false; }
         PageAllocResult::Allocated(page) => {
             if (page.generation != FREELIST_LAST_GENERATION) { ok = false; }
@@ -2353,7 +2393,7 @@ private fn page_generation_exhaustion_locked(
     if (pool.runtime_next_generation != 0) { ok = false; }
     let free_exhausted: usize = pool.runtime_free_count;
     let head_exhausted: usize = pool.runtime_free_head;
-    match page_alloc_locked(frames, pool, metas, extents, PageOwnerTag::KernelStack) {
+    match page_alloc_locked(frames, pool, metas, extents, PageOwnerTag::KernelStack, PageDebit::Ordinary) {
         PageAllocResult::OutOfMemory => {}
         PageAllocResult::Allocated(page) => {
             ok = false;

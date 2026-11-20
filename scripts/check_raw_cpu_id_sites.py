@@ -48,7 +48,7 @@ LISTED = {
     "kernel/kernel/cpu_authority.tkb": (3, MINT, "normal region entry and availability, plus the approved exception-only unscoped constructor (#1159, #638)"),
     "kernel/kernel/process.tkb": (21, FLIP, "remaining raw callers after typed ExecutionState selection removed execution_cpu_index (#638)"),
     "kernel/kernel/syscall.tkb": (2, FLIP, "kernel_syscall_dispatch_action: affinity response can outlive its selecting CPU before Migrate consumption; getcpu is a scalar sample in the same function and remains counted pending that path review"),
-    "kernel/mm/page.tkb": (1, FLIP, "#1079 page_reserve_cpu: read only under the page pool's IRQ-masking lock, and the kernel is not preemptible (KERNEL_PREEMPTIBLE == 0), so the CPU cannot change before the lock is given back; page_alloc has no CpuHere to take"),
+    "kernel/mm/page.tkb": (1, FLIP, "#638 page_reserve_cpu: samples the issuing slot once under the page pool lock; allocation and release select the issuer carried by the reservation"),
 }
 
 # "file::function" -> (count, reason): calls read before the flip that hold

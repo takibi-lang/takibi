@@ -374,7 +374,7 @@ fn kernel_exec_interpreter_bias(primary: DistroElfLoadPlan) -> usize borrows(pri
 }
 
 fn kernel_process_child_exec_map_result(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
-        pages_result: ProcessImageMapResult, child_root: AddressSpaceRoot)
+        pages_result: ProcessImageMapResult, child_root: AddressSpaceRoot, reservation: borrow PageReservation[0])
         -> KernelChildExecPrepareResult {
     match pages_result {
         ProcessImageMapResult::InvalidImage => {
@@ -388,7 +388,7 @@ fn kernel_process_child_exec_map_result(current_authority: borrow ProcessCurrent
                 process_image_entry(pages), process_image_stack_pointer(pages)
             };
             let (heap_start, heap_limit) = process_image_heap_range(pages);
-            match process_image_exec_install(pages) {
+            match process_image_exec_install_with_reservation(pages, reservation) {
                 ProcessImageExecInstallResult::AlreadyInstalled => {
                     return KernelChildExecPrepareResult::ImageAlreadyInstalled;
                 }
@@ -974,7 +974,7 @@ private fn kernel_process_child_exec_reserved(current_authority: borrow ProcessC
         PageReserveResult::Reserved(reservation) => {
             let result: KernelChildExecPrepareResult =
                 kernel_process_child_exec_commit(current_authority, argv,
-                    mount, child_space, resolved);
+                    mount, child_space, resolved, reservation);
             if (page_reservation_release(reservation) != 0) {
                 atomic_word_fetch_add(&kernel_exec_reserve_undercount, 1);
             }
@@ -992,7 +992,7 @@ private let mut kernel_exec_reserve_undercount: AtomicWord;
 // every failure after it ends the process (kernel_syscall_child_exec_return).
 private fn kernel_process_child_exec_commit(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], argv: borrow []u8,
         mount: Ext2Mount, child_space: AddressSpaceRoot,
-        resolved: ExecImageResolveResult)
+        resolved: ExecImageResolveResult, reservation: borrow PageReservation[0])
         -> KernelChildExecPrepareResult borrows(resolved) {
     let child_root: usize = root_slot_word(address_space_root_slot(child_space));
     // Which VM this exec replaces depends on how the process got the one it
@@ -1002,11 +1002,11 @@ private fn kernel_process_child_exec_commit(current_authority: borrow ProcessCur
     // installed image instead -- released here, before the replacement is
     // mapped over the same window, because afterwards the old image's page
     // table entries are gone and its physical pages are unreachable.
-    if (process_image_exec_image_installed(child_root)) {
+    if (process_image_exec_image_installed(child_root, reservation)) {
         process_image_exec_teardown(child_space,
             scheduled_process_image_record_handle(child_root));
     } else {
-        match process_image_clone_vm_reap(child_space) {
+        match process_image_clone_vm_reap_with_reservation(child_space, reservation) {
             ProcessCloneVmReapResult::Missing => {
                 match resolved {
                     ExecImageResolveResult::NoInode => {}
@@ -1029,12 +1029,12 @@ private fn kernel_process_child_exec_commit(current_authority: borrow ProcessCur
         }
         ExecImageResolveResult::Static(image) => {
             return kernel_process_child_exec_map_result(current_authority,
-                process_image_map_ext2_in_root(
+                process_image_map_ext2_in_root_with_reservation(
                     image.plan, mount, image.inode, image.file_length, argv,
-                    kernel_syscall_exec_argc(), child_space), child_space);
+                    kernel_syscall_exec_argc(), child_space, reservation), child_space, reservation);
         }
         ExecImageResolveResult::Dynamic(images) => {
-            match process_image_pair_map_ext2_in_root(
+            match process_image_pair_map_ext2_in_root_with_reservation(
                     images.primary.plan,
                     mount,
                     images.primary.inode,
@@ -1046,7 +1046,7 @@ private fn kernel_process_child_exec_commit(current_authority: borrow ProcessCur
                     kernel_exec_interpreter_bias(images.primary.plan),
                     argv,
                     kernel_syscall_exec_argc(),
-                    child_space) {
+                    child_space, reservation) {
                 ProcessImagePairProbeResult::Invalid => {
                     return KernelChildExecPrepareResult::DynamicPairInvalid;
                 }
@@ -1057,7 +1057,7 @@ private fn kernel_process_child_exec_commit(current_authority: borrow ProcessCur
                     };
                     let (heap_start, heap_limit) =
                         process_image_heap_range(pages);
-                    match process_image_exec_install(pages) {
+                    match process_image_exec_install_with_reservation(pages, reservation) {
                         ProcessImageExecInstallResult::AlreadyInstalled => {
                             return KernelChildExecPrepareResult::ImageAlreadyInstalled;
                         }
