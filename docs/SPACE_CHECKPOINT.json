@@ -2,7 +2,7 @@
   "date": "2026-11-20",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "73d208f17953e7632db050bfe720bb446d5d2bb45900f4d4cfe55394148aa255",
+  "source_sha256": "198f8ddc40862b8cccfab4d227321ecf36b966cc8c37e65397e96edfef6602fe",
   "workload": "Normal linked QEMU and RPi5 kernels with the existing two-phase signal contention probe, compared with 8c14aaa7b.",
   "evidence": [
     "docs/SIGNAL_PROBE_LIFECYCLE_SPACE.md"

@@ -373,7 +373,10 @@ Symmetric now:
   bits in one atomic word. The primary closes admission and waits on each
   registered peer's own tick window. A phase consumes a private linear
   quiescence witness to reset the fixture. A failed drain yields no witness
-  and fails the boot fixture.
+  and fails the boot fixture. Core 0 also opens and closes admission for
+  the signal fixture; peer registrations occupy the same gate word. A
+  failed signal drain leaves its standalone record in place and lets the
+  boot driver continue after reporting failure.
 - The console cost counters (`console: tx spin` in the boot report, #454):
   every core's spun and sent bytes are counted, in atomic words (#775).
   They counted core 0's alone, as "the TX interrupt owner", which stopped
