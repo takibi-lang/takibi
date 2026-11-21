@@ -281,6 +281,12 @@ fn kernel_idle_loop(clean: sink IdleStackClean[0]) !{unsafe} {
                     preempt_span_resume(span);
                     el0_context_resume(next);
                 }
+                ProcessSecondaryStart::Ordinary(started) => {
+                    let (next, span) = started;
+                    if (KERNEL_STALL_PROBES != 0) { stall_probe_note(STALL_PROBE_RESUME); }
+                    preempt_span_resume(span);
+                    arm64_ordinary_resume_from_process(next);
+                }
             }
             // GitHub issue #846: an idle CPU retransmits what nobody
             // reading or closing a connection would; nothing due costs a
@@ -325,9 +331,10 @@ fn kernel_idle_yield_reenter() {
 // interrupt, with the value kernel_process_timer_schedule returned. The
 // tick gave the process back (GitHub issue #582), so leave the IRQ stack
 // for this CPU's idle loop rather than returning to a frame no longer ours.
-fn kernel_timer_tick_leave(switch: TimerSwitch) -> AnyFrame !{interrupt} {
+fn kernel_timer_tick_leave(switch: TimerSwitch) -> IrqResume !{interrupt} {
     match switch {
-        TimerSwitch::Resume(frame) => { return frame_any(frame); }
+        TimerSwitch::Resume(frame) => { return IrqResume::Exception(frame); }
+        TimerSwitch::Ordinary(target) => { return IrqResume::Ordinary(target); }
         TimerSwitch::ToIdle => {
             kernel_idle_tick_enter();
         }
@@ -384,6 +391,11 @@ fn kernel_tick(frame: sink FrameRef[process, level])
                         // Its span ends at this entry's after_switch.
                         preempt_span_resume(span);
                         return TimerSwitch::Resume(next);
+                    }
+                    FrameSwitch::Ordinary(switched) => {
+                        let (next, span) = switched;
+                        preempt_span_resume(span);
+                        return TimerSwitch::Ordinary(next);
                     }
                 }
             }

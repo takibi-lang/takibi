@@ -828,6 +828,228 @@ def check_process_stack_handoff_hook(insns):
     return failures
 
 
+ORDINARY_SAVE = "arm64_ordinary_context_save"
+ORDINARY_RESUME = "arm64_ordinary_context_resume"
+ORDINARY_CONTEXT_BYTES = 176
+# AAPCS64 callee-saved registers, LR, and the two FP control words. The
+# ordinary leaf has a separate ABI from the compiler-generated exception
+# restore. Only the typed dispatch may choose which kind of SP to pass.
+ORDINARY_CONTEXT_PAIRS = (
+    ("x19", "x20"), ("x21", "x22"), ("x23", "x24"),
+    ("x25", "x26"), ("x27", "x28"), ("x29", "x30"),
+    ("d8", "d9"), ("d10", "d11"), ("d12", "d13"), ("d14", "d15"),
+    ("x3", "x4"),  # FPCR, FPSR
+)
+
+
+def ordinary_context_leaf_instructions():
+    save = ["msr daifset, #0x2", f"sub sp, sp, #{ORDINARY_CONTEXT_BYTES:#x}"]
+    resume = ["msr daifset, #0x2", "mov sp, x0"]
+    for index, (first, second) in enumerate(ORDINARY_CONTEXT_PAIRS):
+        slot = "[sp]" if index == 0 else f"[sp, #{index * 16:#x}]"
+        if (first, second) == ("x3", "x4"):
+            save += ["mrs x3, fpcr", "mrs x4, fpsr"]
+        save.append(f"stp {first}, {second}, {slot}")
+        resume.append(f"ldp {first}, {second}, {slot}")
+    # x0 is the checked save destination, x1 the already selected incoming
+    # SP, and x5 the already selected architecture landing. No call or SP
+    # switch can intervene between saving, publishing, and handing off.
+    save += ["mov x2, sp", "stlr x2, [x0]", "mov x0, x1", "br x5"]
+    resume += ["msr fpcr, x3", "msr fpsr, x4", "mov x0, x1",
+               f"add sp, sp, #{ORDINARY_CONTEXT_BYTES:#x}", "ret"]
+    return {ORDINARY_SAVE: save, ORDINARY_RESUME: resume}
+
+
+def check_ordinary_context_leaves(insns):
+    expected = ordinary_context_leaf_instructions()
+    bodies = {}
+    referenced = set()
+    reference = re.compile(r"^(?:b|bl|adr)\s+.* <([\w.$]+)>$", re.I)
+    for _, text, fn in insns:
+        if fn in expected:
+            instruction = " ".join(text.split("//", 1)[0].lower().split())
+            bodies.setdefault(fn, []).append(instruction)
+        match = reference.match(text)
+        if match and match[1] in expected and match[1] != fn:
+            referenced.add(match[1])
+    if not bodies and not referenced:
+        return []
+
+    failures = []
+    for name, instructions in expected.items():
+        if name not in referenced:
+            failures.append(f"ordinary context: {name} has no incoming edge")
+        actual = bodies.get(name)
+        if actual is None:
+            failures.append(f"ordinary context: {name} is missing")
+        elif actual != instructions:
+            mismatch = next((i for i, (got, want) in
+                             enumerate(zip(actual, instructions)) if got != want),
+                            min(len(actual), len(instructions)))
+            got = actual[mismatch] if mismatch < len(actual) else "<end>"
+            want = (instructions[mismatch] if mismatch < len(instructions)
+                    else "<end>")
+            failures.append(
+                f"ordinary context: {name} instruction {mismatch + 1} "
+                f"expected {want!r}, got {got!r}")
+    return failures
+
+
+def ordinary_context_leaf_controls():
+    expected = ordinary_context_leaf_instructions()
+    valid = [(0, f"b 0x100 <{ORDINARY_SAVE}>", "ordinary_dispatch"),
+             (4, f"b 0x200 <{ORDINARY_RESUME}>", "ordinary_dispatch")]
+    for name, base in ((ORDINARY_SAVE, 0x100), (ORDINARY_RESUME, 0x200)):
+        valid += [(base + index * 4, instruction, name)
+                  for index, instruction in enumerate(expected[name])]
+    without_save = [item for item in valid if item[2] != ORDINARY_SAVE]
+    without_edge = valid[1:]
+    early_sp = [(addr, "mov sp, x0" if addr == 0x200 else text, name)
+                for addr, text, name in valid]
+    early_publish = [(addr, "stlr x2, [x0]" if addr == 0x104 else text, name)
+                     for addr, text, name in valid]
+    cases = (
+        ("absent route", [], None),
+        ("complete route", valid, None),
+        ("missing save", without_save, f"{ORDINARY_SAVE} is missing"),
+        ("unused save", without_edge, f"{ORDINARY_SAVE} has no incoming edge"),
+        ("SP before mask", early_sp, f"{ORDINARY_RESUME} instruction 1"),
+        ("early publication", early_publish, f"{ORDINARY_SAVE} instruction 2"),
+    )
+    failures = []
+    for label, insns, diagnostic in cases:
+        problems = check_ordinary_context_leaves(insns)
+        if ((diagnostic is None and problems) or
+                (diagnostic is not None and
+                 not any(diagnostic in problem for problem in problems))):
+            failures.append(f"ordinary context control {label}: {problems}")
+    return failures
+
+
+
+ORDINARY_DEPARTURES = {
+    "arm64_ordinary_depart_exception": "el0_context_resume",
+    "arm64_ordinary_depart_idle": "kernel_idle_block_enter",
+    "arm64_ordinary_depart_ordinary": "arm64_ordinary_resume_from_process",
+}
+ORDINARY_LANDINGS = {
+    "arm64_ordinary_resume_from_process": 0,
+    "arm64_ordinary_resume_from_irq": 1,
+}
+ORDINARY_EDGES = {
+    **{name: {"kernel_process_ext2_mutex_park"} for name in ORDINARY_DEPARTURES},
+    "arm64_ordinary_resume_from_process": {
+        "arm64_ordinary_depart_ordinary", "kernel_idle_loop",
+        "kernel_syscall_block_return", "kernel_syscall_resume_tail",
+        "kernel_syscall_ordinary_exit_return",
+    },
+    "arm64_ordinary_resume_from_irq": {"irq_resume_frame"},
+    ORDINARY_SAVE: set(ORDINARY_DEPARTURES),
+    ORDINARY_RESUME: set(ORDINARY_LANDINGS),
+}
+ORDINARY_LINK_TARGET = re.compile(
+    r"^(b|bl|adr)\s+(?:(x[0-9]+),\s*)?(0x[0-9a-f]+) <([\w.$]+)(\+[^>]+)?>$"
+)
+
+
+def check_ordinary_context_predecessors(insns):
+    """Bind the linked leaves to the typed selectors and fixed local stubs."""
+    bodies = {}
+    by_address = {}
+    edges = {}
+    failures = []
+    for address, text, fn in insns:
+        if fn in ORDINARY_EDGES:
+            bodies.setdefault(fn, []).append(text)
+        if text.startswith(("adr", "b")):
+            by_address[address] = text
+            match = ORDINARY_LINK_TARGET.fullmatch(text)
+            if match and match[4] in ORDINARY_EDGES:
+                edges.setdefault(match[4], set()).add(fn)
+                if match[5] is not None:
+                    failures.append(f"ordinary context: {fn} targets an interior "
+                                    f"instruction of {match[4]}")
+    if not bodies and not edges:
+        return []
+    for target, callers in ORDINARY_EDGES.items():
+        if edges.get(target, set()) != callers:
+            failures.append(f"ordinary context: {target} must be reached from "
+                            f"{', '.join(sorted(callers))}")
+
+    for name, target in ORDINARY_DEPARTURES.items():
+        body = bodies.get(name, [])
+        if len(body) == 2:
+            select = ORDINARY_LINK_TARGET.fullmatch(body[0])
+            save = ORDINARY_LINK_TARGET.fullmatch(body[1])
+            if select and select[1] == "adr" and select[2] == "x5" and save and (
+                    save[1] == "b" and save[4] == ORDINARY_SAVE):
+                if target == "el0_context_resume":
+                    # This reuses the existing exception-resume relocation.
+                    # The selected local instruction must branch to it.
+                    selected = by_address.get(int(select[3], 16), "")
+                    branch = ORDINARY_LINK_TARGET.fullmatch(selected)
+                    if branch and branch[1] == "b" and branch[4] == target:
+                        continue
+                elif select[4] == target and select[5] is None:
+                    continue
+        failures.append(f"ordinary context: {name} must select {target} "
+                        "before entering the save leaf")
+
+    for name, tag in ORDINARY_LANDINGS.items():
+        body = bodies.get(name, [])
+        if len(body) == 2:
+            select = " ".join(body[0].split("//", 1)[0].split())
+            branch = ORDINARY_LINK_TARGET.fullmatch(body[1])
+            if select == f"mov x1, #{tag:#x}" and branch and (
+                    branch[1] == "b" and branch[4] == ORDINARY_RESUME):
+                continue
+        failures.append(f"ordinary context: {name} must supply its origin "
+                        "before entering the resume leaf")
+    return failures
+
+
+def ordinary_context_predecessor_controls():
+    valid = [
+        (0, "b 0x300 <el0_context_resume>", "el1_resume_probe_run"),
+        (4, "adr x5, 0x0 <el1_resume_probe_run>", "arm64_ordinary_depart_exception"),
+        (8, f"b 0x400 <{ORDINARY_SAVE}>", "arm64_ordinary_depart_exception"),
+        (12, "adr x5, 0x500 <kernel_idle_block_enter>", "arm64_ordinary_depart_idle"),
+        (16, f"b 0x400 <{ORDINARY_SAVE}>", "arm64_ordinary_depart_idle"),
+        (20, "adr x5, 0x1c <arm64_ordinary_resume_from_process>",
+         "arm64_ordinary_depart_ordinary"),
+        (24, f"b 0x400 <{ORDINARY_SAVE}>", "arm64_ordinary_depart_ordinary"),
+        (28, "mov x1, #0x0", "arm64_ordinary_resume_from_process"),
+        (32, f"b 0x600 <{ORDINARY_RESUME}>", "arm64_ordinary_resume_from_process"),
+        (36, "mov x1, #0x1", "arm64_ordinary_resume_from_irq"),
+        (40, f"b 0x600 <{ORDINARY_RESUME}>", "arm64_ordinary_resume_from_irq"),
+        (44, "bl 0x4 <arm64_ordinary_depart_exception>", "kernel_process_ext2_mutex_park"),
+        (48, "bl 0xc <arm64_ordinary_depart_idle>", "kernel_process_ext2_mutex_park"),
+        (52, "bl 0x14 <arm64_ordinary_depart_ordinary>", "kernel_process_ext2_mutex_park"),
+        (56, "b 0x1c <arm64_ordinary_resume_from_process>", "kernel_idle_loop"),
+        (68, "b 0x1c <arm64_ordinary_resume_from_process>", "kernel_syscall_block_return"),
+        (72, "b 0x1c <arm64_ordinary_resume_from_process>", "kernel_syscall_resume_tail"),
+        (76, "b 0x1c <arm64_ordinary_resume_from_process>", "kernel_syscall_ordinary_exit_return"),
+        (60, "b 0x24 <arm64_ordinary_resume_from_irq>", "irq_resume_frame"),
+    ]
+    if check_ordinary_context_predecessors(valid):
+        return ["ordinary context control: complete predecessor set rejected"]
+    cases = (
+        ("missing IRQ predecessor", valid[:-1], "must be reached from irq_resume_frame"),
+        ("wrong exception target", valid[1:], "must select el0_context_resume"),
+        ("direct unchecked restore", valid + [
+            (64, f"b 0x600 <{ORDINARY_RESUME}>", "unrelated_caller"),
+        ], f"{ORDINARY_RESUME} must be reached from"),
+        ("interior restore entry", valid[:-1] + [
+            (60, "b 0x28 <arm64_ordinary_resume_from_irq+0x4>", "irq_resume_frame"),
+        ], "irq_resume_frame targets an interior instruction"),
+    )
+    failures = []
+    for label, insns, diagnostic in cases:
+        if not any(diagnostic in problem for problem in
+                   check_ordinary_context_predecessors(insns)):
+            failures.append(f"ordinary context control: {label} was accepted")
+    return failures
+
 def call_graph(insns):
     """Direct `bl` edges between the image's functions."""
     edges = {}
@@ -1285,6 +1507,10 @@ def main():
         + check_tlb_invalidate_all_is_broadcast(insns)
         + check_exception_stacks_are_per_core(insns)
         + check_process_stack_handoff_hook(insns)
+        + ordinary_context_leaf_controls()
+        + check_ordinary_context_leaves(insns)
+        + ordinary_context_predecessor_controls()
+        + check_ordinary_context_predecessors(insns)
         + check_el0_return_resets_pmr(insns)
         + (check_mmu_off_from_graph(insns, takibi_object)
            if takibi_object is not None

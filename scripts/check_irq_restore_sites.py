@@ -67,6 +67,13 @@ ALLOWED = {
             "platform_irq_init(), which is where interrupt delivery is turned "
             "on for the first time in the boot",
     },
+    "kernel/kernel/process.tkb": {
+        "enable_irq(); // The ordinary landing owns the IRQ mask.":
+            "kernel_process_ordinary_complete: the waiter entered unmasked; "
+            "the linked AArch64 restore masks IRQs before changing SP. "
+            "Validate the retained frame and take the physical stack before "
+            "ending that architecture-owned mask",
+    },
     "kernel/kernel/syscall.tkb": {
         "enable_irq();":
             "signal_return_exit (#949): the return-to-EL0 hook ending the "

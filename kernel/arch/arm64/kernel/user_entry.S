@@ -322,8 +322,93 @@ el1_resume_probe_run:
     stp     x10, x1, [x9]
     EL1_RESUME_PROBE_READ_PAN x10, .Lel1_resume_probe_pan_saved
     str     x10, [x9, #16]
+.Lordinary_legacy_exception:
     b       el0_context_resume
     .size el1_resume_probe_run, . - el1_resume_probe_run
+
+/* The Takibi caller selects the target kind before entering these leaves.
+ * x0 is its private, same-generation saved-SP destination and x1 is the
+ * selected SP. The common leaf publishes only after saving the AAPCS64
+ * context, while this CPU still owns the stack. */
+    .global arm64_ordinary_depart_exception
+    .type arm64_ordinary_depart_exception, %function
+arm64_ordinary_depart_exception:
+    adr     x5, .Lordinary_legacy_exception
+    b       arm64_ordinary_context_save
+    .size arm64_ordinary_depart_exception, .-arm64_ordinary_depart_exception
+
+    .global arm64_ordinary_depart_idle
+    .type arm64_ordinary_depart_idle, %function
+arm64_ordinary_depart_idle:
+    adr     x5, kernel_idle_block_enter
+    b       arm64_ordinary_context_save
+    .size arm64_ordinary_depart_idle, .-arm64_ordinary_depart_idle
+
+    .global arm64_ordinary_depart_ordinary
+    .type arm64_ordinary_depart_ordinary, %function
+arm64_ordinary_depart_ordinary:
+    adr     x5, arm64_ordinary_resume_from_process
+    b       arm64_ordinary_context_save
+    .size arm64_ordinary_depart_ordinary, .-arm64_ordinary_depart_ordinary
+
+    .type arm64_ordinary_context_save, %function
+arm64_ordinary_context_save:
+    msr     DAIFSet, #0x2
+    sub     sp, sp, #176
+    stp     x19, x20, [sp, #0]
+    stp     x21, x22, [sp, #16]
+    stp     x23, x24, [sp, #32]
+    stp     x25, x26, [sp, #48]
+    stp     x27, x28, [sp, #64]
+    stp     x29, x30, [sp, #80]
+    stp     d8, d9, [sp, #96]
+    stp     d10, d11, [sp, #112]
+    stp     d12, d13, [sp, #128]
+    stp     d14, d15, [sp, #144]
+    mrs     x3, fpcr
+    mrs     x4, fpsr
+    stp     x3, x4, [sp, #160]
+    mov     x2, sp
+    stlr    x2, [x0]
+    mov     x0, x1
+    br      x5
+    .size arm64_ordinary_context_save, .-arm64_ordinary_context_save
+
+    .global arm64_ordinary_resume_from_process
+    .type arm64_ordinary_resume_from_process, %function
+arm64_ordinary_resume_from_process:
+    mov     x1, #0
+    b       arm64_ordinary_context_resume
+    .size arm64_ordinary_resume_from_process, .-arm64_ordinary_resume_from_process
+
+    .global arm64_ordinary_resume_from_irq
+    .type arm64_ordinary_resume_from_irq, %function
+arm64_ordinary_resume_from_irq:
+    mov     x1, #1
+    b       arm64_ordinary_context_resume
+    .size arm64_ordinary_resume_from_irq, .-arm64_ordinary_resume_from_irq
+
+    .type arm64_ordinary_context_resume, %function
+arm64_ordinary_context_resume:
+    msr     DAIFSet, #0x2
+    mov     sp, x0
+    ldp     x19, x20, [sp, #0]
+    ldp     x21, x22, [sp, #16]
+    ldp     x23, x24, [sp, #32]
+    ldp     x25, x26, [sp, #48]
+    ldp     x27, x28, [sp, #64]
+    ldp     x29, x30, [sp, #80]
+    ldp     d8, d9, [sp, #96]
+    ldp     d10, d11, [sp, #112]
+    ldp     d12, d13, [sp, #128]
+    ldp     d14, d15, [sp, #144]
+    ldp     x3, x4, [sp, #160]
+    msr     fpcr, x3
+    msr     fpsr, x4
+    mov     x0, x1
+    add     sp, sp, #176
+    ret
+    .size arm64_ordinary_context_resume, .-arm64_ordinary_context_resume
 
     .type el1_resume_probe_landing, %function
 el1_resume_probe_landing:

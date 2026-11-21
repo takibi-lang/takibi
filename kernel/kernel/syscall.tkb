@@ -4321,14 +4321,9 @@ fn uname_write_field(
     let copied: usize = slice_copy(field_view, value);
 }
 
-// Mirrors user_entry.S's .Lsyscall_dispatch branch table exactly (action
-// numbers 0/1/2/.../9 there correspond one-to-one to the variants below,
-// via syscall_action_encode). Kept as a real sum type internally so a
-// mistyped numeric action code -- the shape of bug class this file's
-// syscall handling cannot otherwise catch at compile time -- is a type
-// error instead of a silent wrong branch at the asm boundary. The asm
-// side is untouched by this: kernel_syscall_dispatch below still returns
-// a plain (usize, usize) register pair, exactly as before.
+// The frame-based cases map to user_entry.S's syscall action table.
+// OrdinaryExit carries a typed successor through syscall cleanup to
+// the terminal kernel tail. It has no assembly action code.
 must_use variant SyscallAction {
     Unreachable;         // 0: esr wasn't a real SVC; asm's own default path
                           //    already fail-stops before this can be selected
@@ -4345,9 +4340,16 @@ must_use variant SyscallAction {
     // slot. Execve's success never leaves Takibi now (#1080, the first
     // instance of "assembly is a leaf", #1133): see SyscallExecveResult.
     Migrate;                      // 9: rerun this syscall on core 0
+    OrdinaryExit(exists process: usize. (ProcessOrdinaryTarget[process], PreemptOff[0]));
 }
 
-fn syscall_action_encode(action: SyscallAction) -> (usize, usize) {
+variant SyscallCompletion {
+    None;
+    Dispatch(usize);
+}
+
+private fn syscall_action_encode(action: sink SyscallAction, completion: SyscallCompletion)
+        -> (usize, usize) {
     match action {
         SyscallAction::Unreachable => { return (0, 0); }
         SyscallAction::Resume(value) => { return (1, value); }
@@ -4357,6 +4359,15 @@ fn syscall_action_encode(action: SyscallAction) -> (usize, usize) {
         SyscallAction::Block => { return (5, 0); }
         SyscallAction::WaitInterrupt => { return (6, 0); }
         SyscallAction::Migrate => { return (9, 0); }
+        SyscallAction::OrdinaryExit(switched) => {
+            let (next, span) = switched;
+            match completion {
+                SyscallCompletion::None => {}
+                SyscallCompletion::Dispatch(number) => { workload_profile_syscall_complete(number); }
+            }
+            kernel_syscall_ordinary_exit_return(next, span);
+            return (0, 0);
+        }
     }
 }
 
@@ -4861,6 +4872,12 @@ fn kernel_syscall_block_return(frame_sp: usize) {
             preempt_span_resume(span);
             el0_context_resume(next);
         }
+        BlockSwitch::Ordinary(switched) => {
+            let (next, span) = switched;
+            workload_profile_el0_enter();
+            preempt_span_resume(span);
+            arm64_ordinary_resume_from_process(next);
+        }
     }
 }
 
@@ -4901,6 +4918,13 @@ private fn kernel_syscall_resume_tail(frame: sink FrameRef[process, ExceptionLev
             preempt_span_end(span);
             preempt_span_resume(next_span);
             el0_context_resume(next);
+        }
+        FrameSwitch::Ordinary(switched) => {
+            let (next, next_span) = switched;
+            workload_profile_el0_enter();
+            preempt_span_end(span);
+            preempt_span_resume(next_span);
+            arm64_ordinary_resume_from_process(next);
         }
     }
 }
@@ -5155,7 +5179,17 @@ fn kernel_syscall_clone_parent_action(switch: sink ExitSwitch)
             preempt_span_resume(span);
             return SyscallAction::CloneParent(frame_ref_address(frame));
         }
+        ExitSwitch::Ordinary(switched) => { return SyscallAction::OrdinaryExit(switched); }
     }
+}
+
+// Enter the selected task after any syscall reader and profiling cleanup.
+private fn kernel_syscall_ordinary_exit_return(next: sink ProcessOrdinaryTarget[process],
+        span: sink PreemptOff[0]) !{noreturn} {
+    preempt_span_resume(span);
+    kernel_process_child_exec_reap();
+    workload_profile_el0_enter();
+    arm64_ordinary_resume_from_process(next);
 }
 
 // Step 6/8: action 4 (.Lsyscall_clone_parent). This is the exact bug fixed
@@ -5224,7 +5258,7 @@ private fn syscall_ext2_write_locked(current_authority: borrow ProcessCurrent[cu
     let answer: usize = syscall_ext2_write_locked_with(slot, current_authority,
             mount, guard, fd, source, chunk);
     syscall_slot_release(slot);
-    ext2_mutation_give(guard);
+    kernel_ext2_mutation_give(guard);
     if (answer == LINUX_ENOSPC) {
         kernel_boot_log_resource_exhausted("ext2 blocks" as *u8,
                                           ext2_block_capacity(mount));
@@ -5268,6 +5302,28 @@ private fn syscall_ext2_write_locked_with(slot: borrow SyscallSlot[0],
 // parent a lookup finds could otherwise be renamed or removed by another
 // core before the mutation it gates -- the atomicity core 0's
 // non-preemptible dispatch used to give for free.
+must_use variant Ext2MkdirMutationTake {
+    Refused;
+    Acquired(Ext2MutationGuard[&ext2_mutation_lock]);
+}
+
+private fn ext2_mkdir_mutation_take(frame: borrow FrameRef[process, ExceptionLevel::El0],
+        original: ProcessWaitIdentity) -> Ext2MkdirMutationTake
+        !{may_block, requires_irq_unmasked, acquires_lock_20_ext2_mutation,
+          lock_guard_20_ext2_mutation, unsafe} {
+    while (true) {
+        match ext2_mutation_try_take() {
+            Ext2MutationTry::Acquired(guard) => { return Ext2MkdirMutationTake::Acquired(guard); }
+            Ext2MutationTry::Busy => {}
+        }
+        match kernel_process_ext2_mutex_park(frame, original) {
+            ProcessExt2Park::RetryAcquire => {}
+            ProcessExt2Park::NoOrdinaryStack => { return Ext2MkdirMutationTake::Refused; }
+        }
+    }
+    return Ext2MkdirMutationTake::Refused;
+}
+
 private fn syscall_mkdirat_under(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], guard: borrow Ext2MutationGuard[&ext2_mutation_lock],
         x0: usize, x1: usize, permissions: usize) -> usize !{unsafe} {
     let slot: SyscallSlot[0] = syscall_slot_acquire();
@@ -6235,6 +6291,9 @@ fn syscall_signal_deliver(current_authority: ProcessCurrent[current_process, Pro
         SyscallAction::CloneParent(sp) => {
             process_current_end(current_authority); return SyscallAction::CloneParent(sp);
         }
+        SyscallAction::OrdinaryExit(switched) => {
+            process_current_end(current_authority); return SyscallAction::OrdinaryExit(switched);
+        }
         SyscallAction::Block => { return syscall_block_interrupt(current_authority, frame); }
         SyscallAction::WaitInterrupt => { process_current_end(current_authority); return SyscallAction::WaitInterrupt; }
         SyscallAction::Migrate => { process_current_end(current_authority); return SyscallAction::Migrate; }
@@ -6656,8 +6715,17 @@ private fn signal_return_exit(current_authority: ProcessCurrent[current_process,
         SyscallAction::CloneParent(parent_sp) => {
             kernel_syscall_clone_parent_return(parent_sp);
         }
+        SyscallAction::OrdinaryExit(switched) => {
+            let (next, span) = switched;
+            kernel_syscall_ordinary_exit_return(next, span);
+        }
         SyscallAction::Exit(code) => { kernel_syscall_init_exit(code); }
-        _ => { }
+        SyscallAction::Unreachable => {}
+        SyscallAction::Resume(_) => {}
+        SyscallAction::CloneChild(_) => {}
+        SyscallAction::Block => {}
+        SyscallAction::WaitInterrupt => {}
+        SyscallAction::Migrate => {}
     }
     // kernel_syscall_exit_current_process answers nothing else; the
     // syscall tail fail-stops on Unreachable (its file reap failed) too.
@@ -6821,16 +6889,15 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     // entry, before affinity exclusion can yield its current CPU.
     workload_ordinary_placement_note_syscall(number);
     let mut ext2_reader: SyscallExt2Reader = { false };
-    let (action_code, action_value) = syscall_action_encode(
-        kernel_syscall_dispatch_action(esr, number, x0, x1, x2, x3, x4,
-            maybe_frame_from_entry(frame_sp, kernel_process_entry_generation()),
-            &ext2_reader));
+    let action: SyscallAction = kernel_syscall_dispatch_action(esr, number, x0, x1, x2, x3, x4,
+        maybe_frame_from_entry(frame_sp, kernel_process_entry_generation()), &ext2_reader);
     // GitHub issue #559: the ext2 reader registered at entry is done with
     // ext2 by the time the handler has chosen what happens next, whatever
     // that is -- Block and Migrate included. An execve that succeeded is the
     // exception (#597) and never returns here: its prepare reads the image,
     // and kernel_syscall_child_exec_return releases the registration then.
     if (syscall_ext2_reader_take(&ext2_reader)) { ext2_read_leave(); }
+    let (action_code, action_value) = syscall_action_encode(action, SyscallCompletion::Dispatch(number));
     if (action_code == 6) {
         workload_profile_syscall_wait(number);
     } else {
@@ -6897,7 +6964,7 @@ fn kernel_el0_fault_dispatch(esr: usize, fault_address: usize)
     }
     let (action_code, action_value) = syscall_action_encode(
         kernel_syscall_exit_current_process(current_authority,
-                                            process_end_signaled(signal)));
+                                            process_end_signaled(signal)), SyscallCompletion::None);
     return (action_code, action_value);
 }
 
@@ -7801,6 +7868,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     let delivered: usize = taken_signal_delivered(taken);
                     return SyscallAction::CloneParent(value);
                 }
+                SyscallAction::OrdinaryExit(switched) => {
+                    let delivered: usize = taken_signal_delivered(taken);
+                    return SyscallAction::OrdinaryExit(switched);
+                }
             }
         }
     }
@@ -8001,7 +8072,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         let action: SyscallAction =
             syscall_openat_create_under(current_authority, guard, x0, x1, x2,
                 syscall_umasked(current_authority, x3, 0xFFF));
-        ext2_mutation_give(guard);
+        kernel_ext2_mutation_give(guard);
         return syscall_finish_current(frame, action, current_authority);
     }
 
@@ -8010,19 +8081,41 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
 
     if (number == 34) {
-        let guard = ext2_mutation_take();
-        // Linux's vfs_mkdir keeps the permission bits and S_ISVTX.
-        let answer: usize = syscall_mkdirat_under(current_authority, guard, x0, x1,
-            syscall_umasked(current_authority, x2, 0x3FF));
-        ext2_mutation_give(guard);
-        if (answer == 0) { workload_peer_mutation_note(1); }
-        return syscall_finish_current(frame, SyscallAction::Resume(answer), current_authority);
+        match frame {
+            MaybeFrame::Frame(entry) => {
+                let mut original: ProcessWaitIdentity = kernel_process_ext2_mkdir_begin(current_authority);
+                let Ext2MkdirMutationTake::Acquired(guard) =
+                        ext2_mkdir_mutation_take(entry, original) else {
+                    Ext2MkdirMutationTake::Refused => { return SyscallAction::Unreachable; }
+                };
+                let ProcessRunningHere::Running(resumed) =
+                        kernel_process_ext2_mkdir_complete(original) else {
+                    ProcessRunningHere::Idle => {
+                        kernel_ext2_mutation_give(guard);
+                        return SyscallAction::Unreachable;
+                    }
+                };
+                let answer: usize = syscall_mkdirat_under(resumed, guard, x0, x1,
+                    syscall_umasked(resumed, x2, 0x3FF));
+                kernel_ext2_mutation_give(guard);
+                if (answer == 0) { workload_peer_mutation_note(1); }
+                return syscall_finish_current(MaybeFrame::Frame(entry), SyscallAction::Resume(answer), resumed);
+            }
+            MaybeFrame::NoFrame => {
+                let guard = ext2_mutation_take();
+                let answer: usize = syscall_mkdirat_under(current_authority, guard, x0, x1,
+                    syscall_umasked(current_authority, x2, 0x3FF));
+                kernel_ext2_mutation_give(guard);
+                if (answer == 0) { workload_peer_mutation_note(1); }
+                return syscall_finish_current(MaybeFrame::NoFrame, SyscallAction::Resume(answer), current_authority);
+            }
+        }
     }
 
     if (number == 35) {
         let guard = ext2_mutation_take();
         let answer: usize = syscall_unlinkat_under(current_authority, guard, x0, x1, x2);
-        ext2_mutation_give(guard);
+        kernel_ext2_mutation_give(guard);
         if (answer == 0 && x2 != 0) { workload_peer_mutation_note(4); }
         return syscall_finish_current(frame, SyscallAction::Resume(answer), current_authority);
     }
@@ -8030,7 +8123,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     if (number == 38) {
         let guard = ext2_mutation_take();
         let answer: usize = syscall_renameat_under(current_authority, guard, x0, x1, x2, x3);
-        ext2_mutation_give(guard);
+        kernel_ext2_mutation_give(guard);
         if (answer == 0) { workload_peer_mutation_note(2); }
         return syscall_finish_current(frame, SyscallAction::Resume(answer), current_authority);
     }
@@ -8039,7 +8132,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         let guard = ext2_mutation_take();
         let answer: usize = syscall_truncate_under(current_authority, guard,
                 number, x0, x1);
-        ext2_mutation_give(guard);
+        kernel_ext2_mutation_give(guard);
         return syscall_finish_current(frame, SyscallAction::Resume(answer), current_authority);
     }
 
@@ -9509,10 +9602,10 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
             // from invalid clone arguments at the Linux syscall boundary.
             let (invalid_clone_action, invalid_clone_value) =
                 syscall_action_encode(kernel_syscall_clone_failure_action(
-                    ProcessCloneFailure::Invalid));
+                    ProcessCloneFailure::Invalid), SyscallCompletion::None);
             let (exhausted_clone_action, exhausted_clone_value) =
                 syscall_action_encode(kernel_syscall_clone_failure_action(
-                    ProcessCloneFailure::ResourceExhausted));
+                    ProcessCloneFailure::ResourceExhausted), SyscallCompletion::None);
             if (invalid_clone_action != 1 ||
                 invalid_clone_value != LINUX_EINVAL ||
                 exhausted_clone_action != 1 ||
@@ -9607,6 +9700,9 @@ private fn syscall_finish_write(
         SyscallAction::Exit(status) => { return syscall_finish_current(frame, SyscallAction::Exit(status), current_authority); }
         SyscallAction::CloneChild(pid) => { return syscall_finish_current(frame, SyscallAction::CloneChild(pid), current_authority); }
         SyscallAction::CloneParent(sp) => { return syscall_finish_current(frame, SyscallAction::CloneParent(sp), current_authority); }
+        SyscallAction::OrdinaryExit(switched) => {
+            process_current_end(current_authority); return SyscallAction::OrdinaryExit(switched);
+        }
         SyscallAction::Block => { return syscall_finish_current(frame, SyscallAction::Block, current_authority); }
         SyscallAction::WaitInterrupt => { return syscall_finish_current(frame, SyscallAction::WaitInterrupt, current_authority); }
         SyscallAction::Migrate => { return syscall_finish_current(frame, SyscallAction::Migrate, current_authority); }

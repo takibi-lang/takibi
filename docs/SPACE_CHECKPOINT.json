@@ -1,12 +1,12 @@
 {
   "date": "2026-11-21",
-  "event": "incremental",
+  "event": "milestone",
   "decision": "measured",
-  "source_sha256": "3210894c64163f55b01ac44e7a32be55cd075950ca291311a57124ae97fc1dcb",
-  "workload": "Successful getrusage tail and sentinel verification in the existing EL0 payload. Compare the payload, fixture disk, normal linked kernels and static stack records with ab24e7bb5.",
+  "source_sha256": "9faf73d53d7c07d080a64fa491fbf85ae1c605a2b0185b9b6095d108631d49b8",
+  "workload": "Ordinary mkdirat wait and restore, with retained private-stack context. Compare normal linked QEMU and RPi5 kernels against 617f5f2d0 and the earlier bounded QEMU occupancy observation.",
   "evidence": [
-    "docs/SCALAR_ABI_TAIL_FIXTURE_SPACE.md"
+    "docs/ORDINARY_EXT2_MUTATION_WAIT_SPACE.md"
   ],
-  "assessment": "The EL0 payload gains 320 text bytes and a 192-byte probe frame. The entry frame is unchanged. The compressed disk grows by 171 bytes and RPi5 linked read-only data grows by 160 bytes. QEMU linked text, read-only data and data are byte-identical; both usable RAM starts are unchanged.",
-  "next_trigger": "Remeasure when the scalar ABI fixtures change allocation workload or an embedded payload grows across a reservation boundary."
+  "assessment": "Linked text class grows by 5948 B QEMU and 5836 B RPi5. The process record grows 8 B and the parked context uses 176 B on its existing stack. Usable RAM starts are unchanged.",
+  "next_trigger": "Remeasure after reader-drain waiting or allowing an ext2 reader to sleep while registered, and before claiming a real-device timing result."
 }

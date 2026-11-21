@@ -69,8 +69,10 @@ MUTATORS = (
 # named in MUTATORS.
 BLOCK_WRITE = "ext2_block_write"
 MUTATOR_FILE = "kernel/fs/ext2/ext2.tkb"
-TAKE = "ext2_mutation_take"
 LOCK_FILE = "kernel/fs/ext2/mutation_lock.tkb"
+TAKES = {"ext2_mutation_take": LOCK_FILE,
+         "ext2_mutation_try_take": LOCK_FILE,
+         "ext2_mkdir_mutation_take": "kernel/kernel/syscall.tkb"}
 HELD = "guard: borrow Ext2MutationGuard[&ext2_mutation_lock]"
 
 # The files that define the mutators and the lock: they call each other
@@ -90,8 +92,8 @@ def mutators_called(row: dict, mutators=MUTATORS) -> list[str]:
 
 
 def takes_guard(row: dict) -> bool:
-    return any(call_graph_table.callee_name(entry) == TAKE
-               and call_graph_table.callee_file(entry) == LOCK_FILE
+    return any(call_graph_table.callee_name(entry) in TAKES
+               and call_graph_table.callee_file(entry) == TAKES[call_graph_table.callee_name(entry)]
                for entry in row["callees"]) or HELD in row["params"]
 
 
@@ -134,13 +136,14 @@ def guard_problems(rows: list[dict], mutators=MUTATORS) -> tuple[list[str], int]
                         "called from outside it, but is not in MUTATORS: its "
                         "callers are not checked for the guard (GitHub issue #1019)")
     defined = {row["name"] for row in rows if row["file"] == MUTATOR_FILE}
-    defined_take = any(row["name"] == TAKE and row["file"] == LOCK_FILE for row in rows)
+    defined_takes = {row["name"] for row in rows if row["file"] == TAKES.get(row["name"])}
     for name in mutators:
         if name not in defined:
             problems.append(f"mutator {name} is not defined in {MUTATOR_FILE}; "
                             "a renamed mutator would leave this check matching nothing")
-    if not defined_take:
-        problems.append(f"{TAKE} is not defined in {LOCK_FILE}")
+    for take in TAKES:
+        if take not in defined_takes:
+            problems.append(f"{take} is not defined in {TAKES[take]}")
     guarded = 0
     for row in rows:
         if row["file"] in DEFINING:
@@ -195,7 +198,7 @@ def controls_fail(rows: list[dict]) -> list[str]:
                         if call_graph_table.callee_name(entry) in MUTATORS)
     untaken = planted(rows, "syscall_ext2_write_locked", "callees",
                       lambda callees: [c for c in callees
-                                       if call_graph_table.callee_name(c) != TAKE]
+                                       if call_graph_table.callee_name(c) not in TAKES]
                       + [mutator_call])
     if not guard_problems(untaken)[0]:
         failed.append("a helper that no longer takes the guard")

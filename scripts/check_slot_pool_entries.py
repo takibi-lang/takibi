@@ -83,8 +83,11 @@ POOLS = [
 ]
 # Nesting: a holder may reach only higher numbers. Syscall and exec scratch are
 # siblings: neither reaches the other today, and equal ranks keep it so.
-MUTATION_TAKE = "ext2_mutation_take"
-RANK = {MUTATION_TAKE: 0, "syscall_slot_acquire": 1,
+MUTATION_LOCK_FILE = "kernel/fs/ext2/mutation_lock.tkb"
+MUTATION_TAKES = {"ext2_mutation_take": MUTATION_LOCK_FILE,
+                  "ext2_mutation_try_take": MUTATION_LOCK_FILE,
+                  "ext2_mkdir_mutation_take": "kernel/kernel/syscall.tkb"}
+RANK = {**dict.fromkeys(MUTATION_TAKES, 0), "syscall_slot_acquire": 1,
         "exec_window_slot_acquire": 1, "process_image_slot_acquire": 2,
         "ext2_slot_acquire": 3, "block_slot_acquire": 4,
         "block_slot_acquire_from": 4}
@@ -401,7 +404,8 @@ def function_value_problems(files):
             for name, (_, body) in functions(text).items():
                 fns.setdefault(name, []).append(body)
     boundaries = {name: {"a slot acquire"} for name in RANK}
-    boundaries[MUTATION_TAKE] = {"the ext2 mutation lock"}
+    for acquire in MUTATION_TAKES:
+        boundaries[acquire] = {"the ext2 mutation lock"}
     for name, bodies in fns.items():
         names = {name}
         for body in bodies:
@@ -517,6 +521,10 @@ def controls():
             "fn w(s: borrow SyscallSlot[0]) { h(); }\n"
             "fn h() { ext2_mutation_take(); }\n"
             "fn ext2_mutation_take() { }\n",
+        "write holding a slot reaches the mkdirat lock":
+            "fn w(s: borrow SyscallSlot[0]) { h(); }\n"
+            "fn h() { ext2_mkdir_mutation_take(); }\n"
+            "fn ext2_mkdir_mutation_take() { }\n",
         "inner holder takes the outer pool":
             "fn f(s: borrow Ext2Slot[0]) { process_image_slot_acquire(); }\n"
             "fn process_image_slot_acquire() { }\n",
@@ -549,6 +557,12 @@ def main():
     for tree in ("kernel", "linux_user"):
         for source in (ROOT / tree).rglob("*.tkb"):
             files[str(source.relative_to(ROOT))] = source.read_text()
+    missing = {name for name, path in MUTATION_TAKES.items()
+               if name not in functions(files.get(path, ""))}
+    if missing:
+        print("ERROR slot-pool-entries: missing ext2 acquisition roots: " +
+              ", ".join(sorted(missing)))
+        sys.exit(1)
     sleepers = sleepers_in(files)
     if not any(SLEEP.match(name) for name in sleepers):
         print("ERROR slot-pool-entries: no kernel_process_block_* function "
@@ -582,7 +596,7 @@ def main():
                 "a slot, no slot holder reaches another entry point or any of "
                 f"{len(sleepers)} functions that reach a scheduler sleep, and "
                 "no slot is returned or protected function captured as a "
-                f"value ({len(files)} files scanned, sixteen "
+                f"value ({len(files)} files scanned, seventeen "
                 "controls)",
                 entries=total, files=len(files), sleepers=len(sleepers))
 

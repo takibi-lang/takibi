@@ -126,6 +126,25 @@ fn ext2_mutation_take() -> Ext2MutationGuard[&ext2_mutation_lock]
     static_assert(KERNEL_PREEMPTIBLE == 0,
                   "a mutator spins for every CPU's ext2 readers holding a TaskMutex; with preemption it spins until the tick switches it to a reader preempted on its CPU (live, not forever: the take is may_block, so no span holds it). Lock-holder group of GitHub issue #638: lifted at the flip, with the waiter-yields TaskMutex of the route review");
     task_mutex_acquire(&ext2_mutation_lock);
+    return ext2_mutation_wait_for_readers();
+}
+
+// Busy retains no guard. Acquired includes the existing registered-reader drain.
+must_use variant Ext2MutationTry {
+    Busy;
+    Acquired(Ext2MutationGuard[&ext2_mutation_lock]);
+}
+
+fn ext2_mutation_try_take() -> Ext2MutationTry
+        !{acquires_lock_20_ext2_mutation, lock_guard_20_ext2_mutation, unsafe} {
+    if (task_mutex_trylock(&ext2_mutation_lock) == false) {
+        return Ext2MutationTry::Busy;
+    }
+    return Ext2MutationTry::Acquired(ext2_mutation_wait_for_readers());
+}
+
+private fn ext2_mutation_wait_for_readers() -> Ext2MutationGuard[&ext2_mutation_lock]
+        !{lock_guard_20_ext2_mutation, unsafe} {
     // The Dekker half: the lock is visibly held before the count is read,
     // and ext2_read_enter publishes its count before it reads the lock, so
     // at least one side sees the other. A reader that saw the lock free is

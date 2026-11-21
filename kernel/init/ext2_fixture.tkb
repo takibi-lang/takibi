@@ -1580,11 +1580,11 @@ fn kernel_ext2_fixture_run(mount: Ext2Mount, phase: borrow TestDriverPhase[drive
     match ext2_exhaustion_mode(guard, mount) {
         Ext2ExhaustionMode::Invalid => {
             kernel_boot_log("ext2 exhaustion: invalid inittab\n");
-            ext2_mutation_give(guard);
+            kernel_ext2_mutation_give(guard);
             return;
         }
         Ext2ExhaustionMode::Interactive => {
-            ext2_mutation_give(guard);
+            kernel_ext2_mutation_give(guard);
             return;
         }
         Ext2ExhaustionMode::Integration => { }
@@ -1598,7 +1598,7 @@ fn kernel_ext2_fixture_run(mount: Ext2Mount, phase: borrow TestDriverPhase[drive
     let exhaustion_reads: usize = block_read_call_total();
     let exhaustion_writes: usize = block_write_call_total();
     let exhausted: bool = ext2_exhaustion_run(guard, mount);
-    ext2_mutation_give(guard);
+    kernel_ext2_mutation_give(guard);
     let exhaustion_ticks: usize = (read_cntpct() as usize) - exhaustion_start;
     kernel_boot_log("ext2 exhaustion cost: ticks=");
     uart_put_udec(exhaustion_ticks);

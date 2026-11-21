@@ -42,6 +42,8 @@ from pass_line import report_pass
 SYSCALL_FILE = "kernel/kernel/syscall.tkb"
 LOCK_FILE = "kernel/fs/ext2/mutation_lock.tkb"
 TAKE = "ext2_mutation_take"
+MKDIR_TAKE = "ext2_mkdir_mutation_take"
+TAKES = {TAKE: LOCK_FILE, MKDIR_TAKE: SYSCALL_FILE, "ext2_mutation_try_take": LOCK_FILE}
 MARK = "syscall_ext2_reader_mark"
 RELEASE = "syscall_ext2_reader_take"
 REGISTRAR = "kernel_syscall_dispatch_action"
@@ -51,8 +53,9 @@ RELEASERS = ("kernel_syscall_dispatch", "kernel_syscall_child_exec_return")
 # numbers they serve. Each number must be one syscall_reaches_filesystem
 # answers false for; that function's comment says why.
 MUTATING_ARMS = {
-    TAKE: "taken inline by REGISTRAR for mkdirat (34), unlinkat (35), "
+    TAKE: "taken inline by REGISTRAR for no-frame mkdirat (34), unlinkat (35), "
           "renameat (38) and openat with O_CREAT (56, #967)",
+    MKDIR_TAKE: "taken inline by REGISTRAR for ordinary mkdirat (34)",
     "syscall_write_segment": "write (64) and sendto with no address (206) "
                              "to an ext2 file, through syscall_ext2_write_locked",
     "syscall_writev_current": "writev (66) to an ext2 file, through "
@@ -70,8 +73,8 @@ def names(entries: list[str]) -> list[str]:
 
 def chain_to_take(rows: dict[str, dict], start: str) -> list[str] | None:
     """A shortest call chain start -> ... -> TAKE, or None."""
-    if start == TAKE:
-        return [TAKE]
+    if start in TAKES:
+        return [start]
     parent = {start: None}
     frontier = [start]
     while frontier:
@@ -84,11 +87,11 @@ def chain_to_take(rows: dict[str, dict], start: str) -> list[str] | None:
                 callee = call_graph_table.callee_name(entry)
                 if callee in parent:
                     continue
-                if callee == TAKE and call_graph_table.callee_file(entry) != LOCK_FILE:
+                if callee in TAKES and call_graph_table.callee_file(entry) != TAKES[callee]:
                     continue
                 parent[callee] = name
-                if callee == TAKE:
-                    chain = [TAKE]
+                if callee in TAKES:
+                    chain = [callee]
                     while parent[chain[-1]] is not None:
                         chain.append(parent[chain[-1]])
                     return list(reversed(chain))
@@ -101,7 +104,8 @@ def self_wait_problems(table: list[dict]) -> tuple[list[str], int]:
     """Problems found, and how many window callees were checked."""
     rows = by_name(table)
     problems = []
-    for name, file in ((TAKE, LOCK_FILE), (MARK, SYSCALL_FILE),
+    for name, file in (*TAKES.items(),
+                       (MARK, SYSCALL_FILE),
                        (RELEASE, SYSCALL_FILE), (REGISTRAR, SYSCALL_FILE),
                        *((releaser, SYSCALL_FILE) for releaser in RELEASERS)):
         if name not in rows or rows[name]["file"] != file:
@@ -140,7 +144,7 @@ def self_wait_problems(table: list[dict]) -> tuple[list[str], int]:
         problems.append(
             f"{' -> '.join([owner] + chain)}: "
             f"{callee} runs while the syscall is counted as an ext2 reader "
-            f"({MARK}) and reaches {TAKE}, which waits for every counted "
+            f"({MARK}) and reaches {chain[-1]}, which waits for every counted "
             "reader, itself included (GitHub issue #1015). Do not register "
             "the syscall in syscall_reaches_filesystem, or, if it is already "
             "unregistered, name it in MUTATING_ARMS with the numbers it serves")
@@ -163,9 +167,9 @@ def planted(table: list[dict], name: str, change) -> list[dict]:
     return copy
 
 
-def take_entry(table: list[dict]) -> str:
-    row = next(row for row in table if row["name"] == TAKE)
-    return f"{TAKE}@{row['file']}:{row['line']}"
+def take_entry(table: list[dict], name: str) -> str:
+    row = next(row for row in table if row["name"] == name)
+    return f"{name}@{row['file']}:{row['line']}"
 
 
 def mark_entry(table: list[dict]) -> str:
@@ -185,12 +189,14 @@ def with_caller(table: list[dict], callee: str, caller: str) -> list[dict]:
 def controls_fail(table: list[dict]) -> list[str]:
     """Self-waits planted in the table that must be refused; the ones that are not."""
     failed = []
-    take = take_entry(table)
-    # A reader handler (openat without O_CREAT) that takes the guard: the
-    # #967 shape.
-    if not self_wait_problems(planted(table, "syscall_openat",
-                                      lambda callees: callees + [take]))[0]:
-        failed.append("a registered reader handler that takes the guard")
+    take = take_entry(table, TAKE)
+    for name in TAKES:
+        entry = take_entry(table, name)
+        registered = planted(table, "syscall_openat", lambda callees: callees + [entry])
+        if not self_wait_problems(registered)[0]:
+            failed.append(f"a registered reader handler reaching {name}")
+        if not self_wait_problems([row for row in table if row["name"] != name])[0]:
+            failed.append(f"missing acquisition root {name}")
     # The exec prepare, run after dispatch with the registration still held.
     if not self_wait_problems(planted(table, "kernel_syscall_child_exec_return",
                                       lambda callees: callees + [take]))[0]:

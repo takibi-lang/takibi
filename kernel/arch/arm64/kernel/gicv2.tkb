@@ -153,8 +153,13 @@ fn platform_pmu_irq_debug() -> usize {
 // set, otherwise hand the mask to the GIC priority mask for the rest of the
 // handler. The platform's own sources are platform_irq_dispatch_ordinary,
 // defined once in each kernel/platform/<target>/intc.tkb.
+must_use variant IrqResume {
+    Exception(exists process: usize. exists level: ExceptionLevel. FrameRef[process, level]);
+    Ordinary(exists process: usize. ProcessOrdinaryTarget[process]);
+}
+
 fn gic_irq_dispatch(frame: sink FrameRef[process, level])
-        -> AnyFrame !{interrupt, unsafe} {
+        -> IrqResume !{interrupt, unsafe} {
     // GitHub issue #632: GICC_IAR is not the interrupt number alone. For an
     // SGI, bits [12:10] name the CPU that sent it, so the world-stop SGI from
     // core 3 reads 0xC01, not 1, and comparing the raw word recognised only
@@ -178,7 +183,7 @@ fn gic_irq_dispatch(frame: sink FrameRef[process, level])
         // the way into it.
         kernel_world_stop_serve(frame);
         gicc.eoir = iar;
-        return frame_any(frame);
+        return IrqResume::Exception(frame);
     }
     // GitHub issue #1119: a spurious acknowledgement is no interrupt, so it
     // touches nothing an ordinary handler owns -- no profile accounting, no
@@ -192,14 +197,14 @@ fn gic_irq_dispatch(frame: sink FrameRef[process, level])
     // nested irq_enter/irq_exit then charged a second time: CPU 0's
     // classified cycles came out 876 above its wall cycles.
     if (id >= GIC_SPURIOUS_INTID_FIRST) {
-        return frame_any(frame);
+        return IrqResume::Exception(frame);
     }
     // GitHub issue #920: every other source hands this handler's mask to
     // the GIC priority mask and clears DAIF.I, so the stop above can still
     // nest into the handler if it never returns; the mask it interrupted is
     // put back, DAIF.I first, on the way out.
     let interrupted: usize = irq_nest_open();
-    let resumed: AnyFrame = gic_irq_dispatch_after_open(frame, iar, id);
+    let resumed: IrqResume = gic_irq_dispatch_after_open(frame, iar, id);
     irq_nest_close(interrupted);
     return resumed;
 }
@@ -210,11 +215,11 @@ fn gic_irq_dispatch(frame: sink FrameRef[process, level])
 // `id` is refined below GIC_SPURIOUS_INTID_FIRST (1020): the compiler refuses
 // a caller that has not returned on a spurious IAR first (GitHub issue #1119).
 fn gic_irq_dispatch_after_open(frame: sink FrameRef[process, level],
-        iar: u32, id: {0..<1020 as u32}) -> AnyFrame !{interrupt, unsafe} {
+        iar: u32, id: {0..<1020 as u32}) -> IrqResume !{interrupt, unsafe} {
     if (id == GIC_WORLD_STOP_SGI) {
         kernel_world_stop_serve(frame);
         gicc.eoir = iar;
-        return frame_any(frame);
+        return IrqResume::Exception(frame);
     }
     return platform_irq_dispatch_ordinary(frame, iar, id);
 }
@@ -224,19 +229,28 @@ fn gic_irq_dispatch_after_open(frame: sink FrameRef[process, level],
 // GitHub issue #992: both read the frame's level from its SPSR; the
 // dispatch is the same for either, and only the tick branches on it.
 fn platform_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
-    return frame_any_address(gic_irq_dispatch_leveled(
-        frame_ref_from_entry(frame_sp, kernel_process_entry_generation())));
+    return frame_any_address(irq_resume_frame(gic_irq_dispatch_leveled(
+        frame_ref_from_entry(frame_sp, kernel_process_entry_generation()))));
 }
 
 fn platform_el0_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
-    return frame_any_address(gic_irq_dispatch_leveled(
-        frame_ref_from_entry(frame_sp, kernel_process_entry_generation())));
+    return frame_any_address(irq_resume_frame(gic_irq_dispatch_leveled(
+        frame_ref_from_entry(frame_sp, kernel_process_entry_generation()))));
 }
 
 fn gic_irq_dispatch_leveled(frame: sink LeveledFrame[process])
-        -> AnyFrame !{interrupt} {
+        -> IrqResume !{interrupt} {
     match frame {
         LeveledFrame::El0(user_frame) => { return gic_irq_dispatch(user_frame); }
         LeveledFrame::El1(kernel_frame) => { return gic_irq_dispatch(kernel_frame); }
+    }
+}
+
+// The GIC dispatch has acknowledged its source and closed the nested IRQ.
+// Stay on the IRQ stack until the selected target kind is known.
+private fn irq_resume_frame(selected: sink IrqResume) -> AnyFrame !{interrupt} {
+    match selected {
+        IrqResume::Exception(frame) => { return frame_any(frame); }
+        IrqResume::Ordinary(target) => { arm64_ordinary_resume_from_irq(target); }
     }
 }

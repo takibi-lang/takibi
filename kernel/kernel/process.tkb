@@ -354,6 +354,7 @@ struct ProcessRecord {
     command_line: [u8; 512];
     command_line_length: usize;
     saved_sp: usize;
+    ordinary_saved_sp: usize;
     // Physical SP_EL1 ownership, separate from logical Ready/Running state.
     // The run lock serializes every transition. PROCESS_STACK_UNOWNED is the
     // only value from which another CPU may acquire this stack.
@@ -1771,6 +1772,7 @@ private fn scheduled_process_ddb_record(
         ProcessWaitReason::Signal => { result.wait_reason = 5; }
         ProcessWaitReason::UartTx => { result.wait_reason = 6; }
         ProcessWaitReason::Pipe => { result.wait_reason = 7; }
+        ProcessWaitReason::Ext2Mutation => { result.wait_reason = 8; }
     }
     result.saved_sp = record.saved_sp;
     result.stack_bottom = 0;
@@ -1934,6 +1936,7 @@ private fn kernel_process_protocol_reason(reason: ProcessWaitReason)
         ProcessWaitReason::Signal => { return 5; }
         ProcessWaitReason::UartTx => { return 6; }
         ProcessWaitReason::Pipe => { return 7; }
+        ProcessWaitReason::Ext2Mutation => { return 8; }
     }
 }
 
@@ -2971,6 +2974,7 @@ fn kernel_process_monitor_proc(stopped: borrow MachineStopped[&kernel_world_stop
         ProcessWaitReason::Signal => { ddb_put_udec(5); }
         ProcessWaitReason::UartTx => { ddb_put_udec(6); }
         ProcessWaitReason::Pipe => { ddb_put_udec(7); }
+        ProcessWaitReason::Ext2Mutation => { ddb_put_udec(8); }
     }
     ddb_puts(" saved_sp=");
     ddb_put_hex(saved_sp);
@@ -3668,6 +3672,7 @@ private fn scheduled_process_record_reset(guard: borrow ProcessRunGuard[lock],
     record.start_time_ticks = 0;
     record.command_line_length = 0;
     record.saved_sp = 0;
+    record.ordinary_saved_sp = 0;
     record.stack_owner_cpu = PROCESS_STACK_UNOWNED;
     process_state_free(&record.state);
     record.pending_block_reason = ProcessWaitReason::None;
@@ -7576,6 +7581,7 @@ private fn kernel_process_next_ready(guard: borrow ProcessRunGuard[lock], from: 
 must_use variant FrameSwitch {
     Stay;
     Switch(exists next: usize. exists level: ExceptionLevel. (FrameRef[next, level], PreemptOff[0]));
+    Ordinary(exists next: usize. (ProcessOrdinaryTarget[next], PreemptOff[0]));
 }
 
 // The reserved-successor and switch-tail spans of #1323: open before the
@@ -7620,6 +7626,7 @@ fn kernel_process_schedule(current: borrow FrameRef[process, level]) -> FrameSwi
 must_use variant ProcessSecondaryStart {
     Idle;
     Frame(exists process: usize. exists level: ExceptionLevel. (FrameRef[process, level], PreemptOff[0]));
+    Ordinary(exists process: usize. (ProcessOrdinaryTarget[process], PreemptOff[0]));
 }
 
 private fn kernel_process_secondary_start_reserved(
@@ -7681,8 +7688,24 @@ private fn kernel_process_secondary_start_reserved(
                     preempt_span_end(span);
                     return ProcessSecondaryStart::Idle;
                 }
+                let admitted: ProcessResumePrepared[process] =
+                        match process_resume_admit(guard, owner, running) {
+                    ProcessResumeAdmission::Refused => {
+                        process_image_cancel_activation(prepared);
+                        let ready = scheduled_process_yield(owner, running);
+                        scheduled_process_release(owner, ready);
+                        process_run_unlock(guard);
+                        preempt_span_end(span);
+                        return ProcessSecondaryStart::Idle;
+                    }
+                    ProcessResumeAdmission::Legacy => { ProcessResumePrepared::Legacy }
+                    ProcessResumeAdmission::Ordinary(permit) => {
+                        ProcessResumePrepared::Ordinary(permit)
+                    }
+                };
                 match process_image_commit_activation(owner, running, prepared) {
                     AddressSpaceActivationCommitResult::Invalid => {
+                        process_resume_discard(admitted);
                         let ready = scheduled_process_yield(owner, running);
                         scheduled_process_release(owner, ready);
                         process_run_unlock(guard);
@@ -7699,6 +7722,15 @@ private fn kernel_process_secondary_start_reserved(
                 workload_busy_note_selected_locked(
                     guard, scheduled_process_pid_of_handle(to));
                 kernel_process_trace_handle(ProcessTraceResume, to, to, 0);
+                match admitted {
+                    ProcessResumePrepared::Legacy => {}
+                    ProcessResumePrepared::Ordinary(permit) => {
+                        let selected = process_resume_commit(owner, permit);
+                        scheduled_process_release(owner, running);
+                        process_run_unlock(guard);
+                        return ProcessSecondaryStart::Ordinary((selected, span));
+                    }
+                }
                 let next = scheduled_process_saved_frame(owner);
                 if (scheduled_process_wait_reason_of_locked(guard, to) ==
                         ProcessWaitReason::ChildExit) {
@@ -7959,8 +7991,24 @@ private fn kernel_process_schedule_reserved(
                     preempt_span_end(span);
                     return FrameSwitch::Stay;
                 }
+                let admitted: ProcessResumePrepared[process] =
+                        match process_resume_admit(guard, owner, running) {
+                    ProcessResumeAdmission::Refused => {
+                        process_image_cancel_activation(prepared);
+                        let ready = scheduled_process_yield(owner, running);
+                        scheduled_process_release(owner, ready);
+                        process_run_unlock(guard);
+                        preempt_span_end(span);
+                        return FrameSwitch::Stay;
+                    }
+                    ProcessResumeAdmission::Legacy => { ProcessResumePrepared::Legacy }
+                    ProcessResumeAdmission::Ordinary(permit) => {
+                        ProcessResumePrepared::Ordinary(permit)
+                    }
+                };
                 scheduled_process_record_live_locked(guard, from).saved_sp = frame_ref_address(current);
                 if (kernel_process_yield_handle(guard, from) == false) {
+                    process_resume_discard(admitted);
                     process_image_cancel_activation(prepared);
                     let ready = scheduled_process_yield(owner, running);
                     scheduled_process_release(owner, ready);
@@ -7970,6 +8018,7 @@ private fn kernel_process_schedule_reserved(
                 }
                 match process_image_commit_activation(owner, running, prepared) {
                     AddressSpaceActivationCommitResult::Invalid => {
+                        process_resume_discard(admitted);
                         if (kernel_process_start_handle(guard, from)) {}
                         let ready = scheduled_process_yield(owner, running);
                         scheduled_process_release(owner, ready);
@@ -7990,6 +8039,15 @@ private fn kernel_process_schedule_reserved(
                     guard, scheduled_process_pid_of_handle(to));
                 kernel_process_trace_handle(ProcessTraceSchedule, to, from, 0);
                 kernel_process_trace_handle(ProcessTraceResume, to, from, 0);
+                match admitted {
+                    ProcessResumePrepared::Legacy => {}
+                    ProcessResumePrepared::Ordinary(permit) => {
+                        let selected = process_resume_commit(owner, permit);
+                        scheduled_process_release(owner, running);
+                        process_run_unlock(guard);
+                        return FrameSwitch::Ordinary((selected, span));
+                    }
+                }
                 let next = scheduled_process_saved_frame(owner);
                 if (scheduled_process_wait_reason_of_locked(guard, to) ==
                         ProcessWaitReason::ChildExit) {
@@ -9012,6 +9070,7 @@ fn kernel_stack_watermark_report() !{unsafe} {
 // (kernel_timer_tick_leave) instead of returning to EL0.
 must_use variant TimerSwitch {
     Resume(exists process: usize. exists level: ExceptionLevel. FrameRef[process, level]);
+    Ordinary(exists process: usize. ProcessOrdinaryTarget[process]);
     ToIdle;
 }
 
@@ -9037,6 +9096,12 @@ fn kernel_process_timer_schedule(current: sink FrameRef[process, ExceptionLevel:
                     // The tick's span ends at this interrupt's own after_switch.
                     preempt_span_resume(span);
                     return TimerSwitch::Resume(next);
+                }
+                FrameSwitch::Ordinary(switched) => {
+                    let (next, span) = switched;
+                    process_test_evidence_record_timer_switch();
+                    preempt_span_resume(span);
+                    return TimerSwitch::Ordinary(next);
                 }
             }
         }
@@ -9252,6 +9317,10 @@ fn kernel_process_syscall_return_schedule(current: borrow FrameRef[process, leve
                 process_test_evidence_record_deferred_switch();
                 return FrameSwitch::Switch(switched);
             }
+            FrameSwitch::Ordinary(switched) => {
+                process_test_evidence_record_deferred_switch();
+                return FrameSwitch::Ordinary(switched);
+            }
         }
     }
 }
@@ -9315,6 +9384,7 @@ private fn kernel_process_block_would_miss(
     // answers EINTR or restarts, instead of sleeping beside it.
     // kernel/models/Wait4Block.tla checks this re-check (SIGRECHECK).
     if (reason != ProcessWaitReason::None &&
+        reason != ProcessWaitReason::Ext2Mutation &&
         process_signal_interrupt_of(scheduled_process_record_live_locked(guard, from)) != 0) {
         return true;
     }
@@ -9370,6 +9440,7 @@ private fn kernel_process_block_would_miss(
         ProcessWaitReason::Pipe => {
             return scheduled_process_record_live_locked(guard, from).pipe_wait == 0;
         }
+        ProcessWaitReason::Ext2Mutation => { return ext2_mutation_in_flight() == false; }
         // Delivered again: the same list's next tick
         // (kernel_process_tick_wake_scan) wakes a Blocked waiter whose
         // deadline has passed, whenever it passed.
@@ -9410,6 +9481,7 @@ variant BlockSwitch {
     Retry;
     ToIdle(PreemptOff[0]);
     Switch(exists process: usize. exists level: ExceptionLevel. (FrameRef[process, level], PreemptOff[0]));
+    Ordinary(exists process: usize. (ProcessOrdinaryTarget[process], PreemptOff[0]));
 }
 
 // GitHub issue #583: a wait with no Ready successor used to decline to
@@ -9568,9 +9640,25 @@ private fn kernel_process_block_reserved(
                     preempt_span_end(span);
                     return BlockSwitch::Retry;
                 }
+                let admitted: ProcessResumePrepared[process] =
+                        match process_resume_admit(guard, owner, running) {
+                    ProcessResumeAdmission::Refused => {
+                        process_image_cancel_activation(prepared);
+                        let ready = scheduled_process_yield(owner, running);
+                        scheduled_process_release(owner, ready);
+                        process_run_unlock(guard);
+                        preempt_span_end(span);
+                        return BlockSwitch::Retry;
+                    }
+                    ProcessResumeAdmission::Legacy => { ProcessResumePrepared::Legacy }
+                    ProcessResumeAdmission::Ordinary(permit) => {
+                        ProcessResumePrepared::Ordinary(permit)
+                    }
+                };
                 scheduled_process_record_live_locked(guard, from).saved_sp = frame_ref_address(current);
                 match scheduled_process_running_take(guard, from) {
                     ScheduledProcessRunningTakeResult::Missing => {
+                        process_resume_discard(admitted);
                         process_image_cancel_activation(prepared);
                         let ready = scheduled_process_yield(owner, running);
                         scheduled_process_release(owner, ready);
@@ -9589,6 +9677,7 @@ private fn kernel_process_block_reserved(
                     ProcessTraceBlock, from, to, trace_aux);
                 match process_image_commit_activation(owner, running, prepared) {
                     AddressSpaceActivationCommitResult::Invalid => {
+                        process_resume_discard(admitted);
                         match scheduled_process_blocked_take(guard, from) {
                             ScheduledProcessBlockedTakeResult::Missing => {}
                             ScheduledProcessBlockedTakeResult::Blocked(resources) => {
@@ -9628,6 +9717,15 @@ private fn kernel_process_block_reserved(
                 workload_busy_note_selected_locked(
                     guard, scheduled_process_pid_of_handle(to));
                 kernel_process_trace_handle(ProcessTraceResume, to, from, 0);
+                match admitted {
+                    ProcessResumePrepared::Legacy => {}
+                    ProcessResumePrepared::Ordinary(permit) => {
+                        let selected = process_resume_commit(owner, permit);
+                        scheduled_process_release(owner, running);
+                        process_run_unlock(guard);
+                        return BlockSwitch::Ordinary((selected, span));
+                    }
+                }
                 let next = scheduled_process_saved_frame(owner);
                 if (scheduled_process_wait_reason_of_locked(guard, to) ==
                         ProcessWaitReason::ChildExit) {
@@ -10629,6 +10727,12 @@ private fn kernel_process_signal_deliver_traced(
         record.signal_sender[index] = sender_pid as u32;
     }
     process_signal_pending_raise(guard, record, bit);
+    // Ordinary ext2 mutex waits end when the lock is released. Both fatal
+    // and caught signals stay pending for the eventual syscall return.
+    if (scheduled_process_state_of_locked(guard, target) == ProcessSlotState::Blocked &&
+        scheduled_process_wait_reason_of_locked(guard, target) == ProcessWaitReason::Ext2Mutation) {
+        return ProcessSignalSendResult::Delivered;
+    }
     // A fatal signal must interrupt a blocked target too, not wait for its
     // deadline or an unrelated input byte: the rerun of its syscall takes
     // the signal at entry and exits.
@@ -11349,6 +11453,42 @@ fn kernel_process_uart_tx_wake_all(guard: borrow ProcessRunGuard[&scheduled_proc
     }
 }
 
+// Release the filesystem guard before making its ordinary waiters Ready.
+fn kernel_ext2_mutation_give(guard: sink Ext2MutationGuard[&ext2_mutation_lock]) {
+    ext2_mutation_give(guard);
+    kernel_process_ext2_mutation_wake();
+}
+
+// Recheck and Blocked publication hold the same run lock as this wake.
+// An early wake cannot select a task whose private stack is still owned.
+private fn kernel_process_ext2_mutation_wake() !{unsafe} {
+    let guard = process_run_lock();
+    let mut cursor = scheduled_process_first_slot();
+    let mut walking: bool = true;
+    while (walking) {
+        match cursor {
+            ProcessSlotCursor::Done => { walking = false; }
+            ProcessSlotCursor::At(slot) => {
+                if (scheduled_process_record_state_locked(guard, slot) ==
+                        ProcessSlotState::Blocked &&
+                    scheduled_process_record_wait_reason_locked(guard, slot) ==
+                        ProcessWaitReason::Ext2Mutation) {
+                    match scheduled_process_blocked_take_slot(guard, slot) {
+                        ScheduledProcessBlockedTakeResult::Missing => {}
+                        ScheduledProcessBlockedTakeResult::Blocked(resources) => {
+                            let (owner, blocked) = resources;
+                            let ready = scheduled_process_wake(guard, owner, blocked);
+                            scheduled_process_release(owner, ready);
+                        }
+                    }
+                }
+                cursor = scheduled_process_next_slot(slot);
+            }
+        }
+    }
+    process_run_unlock(guard);
+}
+
 // GitHub issue #1042: a pipe read found nothing to read with a writer still
 // open, or a pipe write found no room with a reader still open. The frame was
 // rewound before this, so the woken process runs the same call again.
@@ -11468,6 +11608,10 @@ fn kernel_process_block_uart(current: borrow FrameRef[process, level])
         BlockSwitch::Switch(switched) => {
             kernel_process_uart_block_published(fixture_block);
             return BlockSwitch::Switch(switched);
+        }
+        BlockSwitch::Ordinary(switched) => {
+            kernel_process_uart_block_published(fixture_block);
+            return BlockSwitch::Ordinary(switched);
         }
     }
 }
@@ -11827,6 +11971,12 @@ private fn kernel_process_probe_blocks_to(
             preempt_span_end(span);
             frame_ref_address(resumed) == frame_ref_address(parent)
         }
+        BlockSwitch::Ordinary(switched) => {
+            let (target, span) = switched;
+            process_ordinary_probe_reject(target);
+            preempt_span_end(span);
+            false
+        }
     };
     return same;
 }
@@ -11846,6 +11996,10 @@ private fn kernel_process_probe_tick_address(sp: usize) -> usize
     let address: usize = match kernel_process_timer_schedule(
             frame_ref_from_el0_entry(sp, kernel_process_entry_generation())) {
         TimerSwitch::Resume(resumed) => { frame_ref_address(resumed) }
+        TimerSwitch::Ordinary(target) => {
+            process_ordinary_probe_reject(target);
+            0
+        }
         TimerSwitch::ToIdle => { 1 }
     };
     // The probe stands in for the exception return: no after_switch follows.
@@ -11864,6 +12018,12 @@ private noinline fn kernel_process_probe_deferred_address(
             let (resumed, span) = switched;
             preempt_span_end(span);
             return frame_ref_address(resumed);
+        }
+        FrameSwitch::Ordinary(switched) => {
+            let (target, span) = switched;
+            process_ordinary_probe_reject(target);
+            preempt_span_end(span);
+            return 0;
         }
     }
 }
@@ -12641,6 +12801,12 @@ private fn kernel_process_exit_continuation_probe(parent: ProcessHandle) -> bool
                     preempt_span_end(ended);
                     frame_ref_address(frame)
                 }
+                ExitSwitch::Ordinary(switched) => {
+                    let (target, ended) = switched;
+                    process_ordinary_probe_reject(target);
+                    preempt_span_end(ended);
+                    0
+                }
             };
             address
         }
@@ -13255,6 +13421,7 @@ fn kernel_process_crash_wait_reason() -> usize !{unsafe} {
         ProcessWaitReason::Signal => { return 5; }
         ProcessWaitReason::UartTx => { return 6; }
         ProcessWaitReason::Pipe => { return 7; }
+        ProcessWaitReason::Ext2Mutation => { return 8; }
     }
 }
 
@@ -13360,6 +13527,7 @@ private fn kernel_process_leave_parent_ready(
 must_use variant ExitSwitch {
     Idle(PreemptOff[0]);
     Resume(exists process: usize. exists level: ExceptionLevel. (FrameRef[process, level], PreemptOff[0]));
+    Ordinary(exists process: usize. (ProcessOrdinaryTarget[process], PreemptOff[0]));
 }
 
 private fn kernel_process_exit_reserved(
@@ -13417,8 +13585,31 @@ private fn kernel_process_exit_reserved(
                 process_run_unlock(guard);
                 return ExitSwitch::Idle(span);
             }
+            let admitted: ProcessResumePrepared[process] =
+                    match process_resume_admit(guard, owner, running) {
+                ProcessResumeAdmission::Refused => {
+                    process_image_cancel_activation(prepared);
+                    let ready = scheduled_process_yield(owner, running);
+                    scheduled_process_release(owner, ready);
+                    process_run_unlock(guard);
+                    return ExitSwitch::Idle(span);
+                }
+                ProcessResumeAdmission::Legacy => { ProcessResumePrepared::Legacy }
+                ProcessResumeAdmission::Ordinary(permit) => {
+                    if (deliver_wait4) {
+                        process_resume_permit_end(permit);
+                        process_image_cancel_activation(prepared);
+                        let ready = scheduled_process_yield(owner, running);
+                        scheduled_process_release(owner, ready);
+                        process_run_unlock(guard);
+                        return ExitSwitch::Idle(span);
+                    }
+                    ProcessResumePrepared::Ordinary(permit)
+                }
+            };
             match process_image_commit_activation(owner, running, prepared) {
                 AddressSpaceActivationCommitResult::Invalid => {
+                    process_resume_discard(admitted);
                     let ready = scheduled_process_yield(owner, running);
                     scheduled_process_release(owner, ready);
                     process_run_unlock(guard);
@@ -13439,7 +13630,6 @@ private fn kernel_process_exit_reserved(
                     ProcessWaitReason::ChildExit) {
                 scheduled_process_wait_settle(scheduled_process_record_live_locked(guard, successor));
             }
-            let successor_frame = scheduled_process_saved_frame(owner);
             if (deliver_wait4 || auto_reap) {
                 preempt_off (execution_cpu) {
                     if (execution_state[execution_cpu].deferred_reap_live) {
@@ -13456,6 +13646,18 @@ private fn kernel_process_exit_reserved(
             // child's exit, outside this lock, from whichever CPU it ran
             // on, so a sibling exiting meanwhile would have had the parent's
             // wait4 report the sibling and the reap collect this child.
+            match admitted {
+                ProcessResumePrepared::Legacy => {}
+                ProcessResumePrepared::Ordinary(permit) => {
+                    let selected = process_resume_commit(owner, permit);
+                    scheduled_process_release(owner, running);
+                    process_run_unlock(guard);
+                    workload_busy_note_selected(scheduled_process_pid_of_handle(successor));
+                    kernel_process_trace_handle(ProcessTraceResume, successor, child, 0);
+                    return ExitSwitch::Ordinary((selected, span));
+                }
+            }
+            let successor_frame = scheduled_process_saved_frame(owner);
             let reaped_pid: usize = scheduled_process_pid_of_handle(child);
             process_run_unlock(guard);
             workload_busy_note_selected(
@@ -14808,4 +15010,201 @@ fn kernel_process_current_set_pending_block_locked(
             record.wait4_status_ptr = wait4_status_ptr;
         }
     }
+}
+
+
+// A parked ordinary call retains its original SVC frame. The resumer may
+// hold either kind of stack target, but only these constructors can mint
+// an ordinary SP or the one-word save destination.
+private linear struct ProcessOrdinaryDestination[process: usize] {
+    private address: usize;
+}
+
+private linear struct ProcessOrdinaryTarget[process: usize] {
+    private sp: usize;
+}
+
+// Scheduler boot probes use synthetic exception frames and never run the
+// target. An ordinary target is a probe failure, not a production outcome
+// that may silently discard a suspended activation.
+private fn process_ordinary_probe_reject(target: sink ProcessOrdinaryTarget[process]) {}
+
+extern fn arm64_ordinary_depart_exception(
+        saved: sink ProcessOrdinaryDestination[process],
+        target: sink FrameRef[next, level]) -> usize !{may_block};
+extern fn arm64_ordinary_depart_idle(
+        saved: sink ProcessOrdinaryDestination[process]) -> usize !{may_block};
+extern fn arm64_ordinary_depart_ordinary(
+        saved: sink ProcessOrdinaryDestination[process],
+        target: sink ProcessOrdinaryTarget[next]) -> usize !{may_block};
+extern fn arm64_ordinary_resume_from_process(
+        target: sink ProcessOrdinaryTarget[process]) !{noreturn};
+extern fn arm64_ordinary_resume_from_irq(
+        target: sink ProcessOrdinaryTarget[process]) !{noreturn};
+
+private fn process_ordinary_destination_end(saved: sink ProcessOrdinaryDestination[process]) {}
+
+private linear struct ProcessOrdinaryPermit[process: usize] {
+    private sp: usize;
+}
+
+must_use variant ProcessResumeAdmission[process: usize] {
+    Refused;
+    Legacy;
+    Ordinary(ProcessOrdinaryPermit[process]);
+}
+
+private fn process_resume_admit(
+        guard: borrow ProcessRunGuard[lock],
+        owner: borrow ScheduledProcessOwner[process],
+        running: borrow ScheduledProcessState[process, ProcessState::Running])
+        -> ProcessResumeAdmission[process] {
+    let mut handle: ProcessHandle = { owner.pool_index, owner.generation };
+    if (scheduled_process_handle_matches(handle) == false ||
+        scheduled_process_state_of_locked(guard, handle) != ProcessSlotState::Running) {
+        return ProcessResumeAdmission::Refused;
+    }
+    let record = scheduled_process_record_owned(owner);
+    let sp: usize = record.ordinary_saved_sp;
+    if (sp == 0) { return ProcessResumeAdmission::Legacy; }
+
+    let frame: usize = record.saved_sp;
+    let bottom: usize = kernel_stack_bottom(process_slot_of(handle.pool_index));
+    if (bottom == 0 ||
+        scheduled_process_wait_reason_of_locked(guard, handle) == ProcessWaitReason::ChildExit ||
+        record.stack_owner_cpu != PROCESS_STACK_UNOWNED ||
+        frame < bottom ||
+        frame - bottom > KERNEL_PROCESS_STACK_SIZE - KERNEL_STACK_TOP_RESERVE - EXC_CONTEXT_SIZE ||
+        frame % 16 != 0 || sp % 16 != 0 || sp < bottom ||
+        sp >= frame || frame - sp < 176) {
+        return ProcessResumeAdmission::Refused;
+    }
+    let mut permit: ProcessOrdinaryPermit[process] = { sp };
+    return ProcessResumeAdmission::Ordinary(permit);
+}
+
+must_use variant ProcessResumePrepared[process: usize] {
+    Legacy;
+    Ordinary(ProcessOrdinaryPermit[process]);
+}
+
+private fn process_resume_permit_end(permit: sink ProcessOrdinaryPermit[process]) {}
+
+private fn process_resume_discard(prepared: sink ProcessResumePrepared[process]) {
+    match prepared {
+        ProcessResumePrepared::Legacy => {}
+        ProcessResumePrepared::Ordinary(permit) => { process_resume_permit_end(permit); }
+    }
+}
+
+private fn process_resume_commit(
+        owner: borrow ScheduledProcessOwner[process],
+        permit: sink ProcessOrdinaryPermit[process]) -> ProcessOrdinaryTarget[process] {
+    scheduled_process_record_owned(owner).ordinary_saved_sp = 0;
+    let mut selected: ProcessOrdinaryTarget[process] = { permit.sp };
+    return selected;
+}
+
+struct ProcessWaitIdentity {
+    private slot: ProcessSlot;
+    private generation: usize;
+}
+
+private fn process_wait_identity_matches(identity: ProcessWaitIdentity,
+        handle: ProcessHandle) -> bool {
+    return identity.slot.word == process_slot_of(handle.pool_index).word &&
+        identity.generation == handle.generation;
+}
+
+private fn kernel_process_ordinary_complete(
+        frame: borrow FrameRef[process, ExceptionLevel::El0],
+        original: ProcessWaitIdentity, from_irq: usize) {
+    // The architecture has restored SP and still masks IRQs. Check the
+    // original task and its retained frame before taking the physical stack.
+    let restored: bool = match kernel_process_current_read() {
+        ProcessCurrentRead::Idle => { false }
+        ProcessCurrentRead::Running(current_task) => {
+            process_wait_identity_matches(original, current_task) &&
+                kernel_process_frame_belongs_to(current_task, frame)
+        }
+    };
+    if (restored == false) {
+        kernel_invariant_stop_with_frame(frame);
+    }
+    preempt_count_after_switch();
+    kernel_process_stack_switch_take(frame);
+    if (from_irq != 0) { el1_preempt_irq_return_resume_note(); }
+    enable_irq(); // The ordinary landing owns the IRQ mask.
+}
+
+must_use variant ProcessExt2Park {
+    RetryAcquire;
+    NoOrdinaryStack;
+}
+
+fn kernel_process_ext2_mutex_park(frame: borrow FrameRef[process, ExceptionLevel::El0],
+        original: ProcessWaitIdentity) -> ProcessExt2Park !{may_block, requires_irq_unmasked} {
+    static_assert(sizeof(ProcessOrdinaryDestination[process]) == sizeof(usize),
+                  "ordinary save destination is one machine word");
+    let mut address: usize = 0;
+    preempt_off (execution_cpu) {
+        let guard = process_run_lock();
+        let mut stack: ProcessHandle = execution_state[execution_cpu].stack_handle;
+        let mut current: ProcessHandle = kernel_process_current_required();
+        let bottom: usize = kernel_stack_bottom(original.slot);
+        let sp: usize = kernel_stack_read_sp_el1();
+        if (execution_state[execution_cpu].stack_live &&
+            process_wait_identity_matches(original, stack) &&
+            process_wait_identity_matches(original, current) &&
+            scheduled_process_record_live_locked(guard, current).stack_owner_cpu ==
+                cpu_here_index(execution_cpu) &&
+            bottom != 0 && sp >= bottom && sp - bottom >= 176 &&
+            sp < frame_ref_address(frame) &&
+            kernel_process_frame_belongs_to(current, frame)) {
+            address = region_held_address(current.pool_index) +
+                offsetof(ProcessRecord, ordinary_saved_sp);
+        }
+        process_run_unlock(guard);
+    }
+    if (address == 0) { return ProcessExt2Park::NoOrdinaryStack; }
+    let mut destination: ProcessOrdinaryDestination[process] = { address };
+    match kernel_process_block_current(frame, ProcessWaitReason::Ext2Mutation, 8) {
+        BlockSwitch::Retry => { process_ordinary_destination_end(destination); }
+        BlockSwitch::ToIdle(span) => {
+            preempt_span_resume(span);
+            let from_irq: usize = arm64_ordinary_depart_idle(destination);
+            kernel_process_ordinary_complete(frame, original, from_irq);
+        }
+        BlockSwitch::Switch(switched) => {
+            let (next, span) = switched;
+            preempt_span_resume(span);
+            let from_irq: usize = arm64_ordinary_depart_exception(destination, next);
+            kernel_process_ordinary_complete(frame, original, from_irq);
+        }
+        BlockSwitch::Ordinary(switched) => {
+            let (next, span) = switched;
+            preempt_span_resume(span);
+            let from_irq: usize = arm64_ordinary_depart_ordinary(destination, next);
+            kernel_process_ordinary_complete(frame, original, from_irq);
+        }
+    }
+    return ProcessExt2Park::RetryAcquire;
+}
+
+fn kernel_process_ext2_mkdir_begin(
+        current: sink ProcessCurrent[process, ProcessState::Running]) -> ProcessWaitIdentity {
+    let mut handle: ProcessHandle = process_current_handle(current);
+    process_current_end(current);
+    let mut identity: ProcessWaitIdentity = { process_slot_of(handle.pool_index), handle.generation };
+    return identity;
+}
+
+fn kernel_process_ext2_mkdir_complete(original: ProcessWaitIdentity) -> ProcessRunningHere !{unsafe} {
+    let ProcessCurrentRead::Running(current_task) = kernel_process_current_read() else {
+        ProcessCurrentRead::Idle => { return ProcessRunningHere::Idle; }
+    };
+    if (process_wait_identity_matches(original, current_task) == false) {
+        return ProcessRunningHere::Idle;
+    }
+    return process_running_here();
 }

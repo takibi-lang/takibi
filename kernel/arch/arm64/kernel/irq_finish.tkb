@@ -6,16 +6,16 @@
 
 // The EOI after a source's clear, for every source with no work after it.
 fn irq_finish(acked: sink IrqAcked, frame: sink FrameRef[process, level],
-        iar: u32) -> AnyFrame !{interrupt, unsafe} {
+        iar: u32) -> IrqResume !{interrupt, unsafe} {
     irq_eoi(acked, iar);
     workload_profile_irq_exit();
-    return frame_any(frame);
+    return IrqResume::Exception(frame);
 }
 
 // GitHub issue #830 (UART slice): the route is rewritten after the EOI, and
 // a BREAK enters DDB on this core after it.
 fn irq_uart_finish(served: sink IrqUartServed, frame: sink FrameRef[process, level],
-        iar: u32, id: u32) -> AnyFrame !{interrupt, unsafe} {
+        iar: u32, id: u32) -> IrqResume !{interrupt, unsafe} {
     match served {
         IrqUartServed::Plain(acked) => {
             irq_eoi(acked, iar);
@@ -27,7 +27,7 @@ fn irq_uart_finish(served: sink IrqUartServed, frame: sink FrameRef[process, lev
             kernel_ddb_enter(frame_ref_address(frame), 1, id as usize);
         }
     }
-    return frame_any(frame);
+    return IrqResume::Exception(frame);
 }
 
 // GitHub issue #932: one timer-tick entry for every core. GICC_IAR was read
@@ -35,7 +35,7 @@ fn irq_uart_finish(served: sink IrqUartServed, frame: sink FrameRef[process, lev
 // GitHub issue #830: the DDB lane's hung-core scenario polls first (a no-op
 // unless a debugger armed it).
 fn irq_timer_finish(claim: sink IrqClaim[IrqSource::Timer],
-        frame: sink FrameRef[process, level], iar: u32) -> AnyFrame !{interrupt, unsafe} {
+        frame: sink FrameRef[process, level], iar: u32) -> IrqResume !{interrupt, unsafe} {
     uart_irq_hang_poll();
     let acked: IrqAcked = irq_timer_clear(claim);
     let switch: TimerSwitch = kernel_tick(frame);
@@ -46,7 +46,7 @@ fn irq_timer_finish(claim: sink IrqClaim[IrqSource::Timer],
 
 // An INTID this build does not handle.
 fn irq_unclaimed_finish(stray: sink IrqStray, frame: sink FrameRef[process, level],
-        iar: u32) -> AnyFrame !{interrupt, unsafe} {
+        iar: u32) -> IrqResume !{interrupt, unsafe} {
     uart_irq_hang_poll();
     return irq_finish(irq_unclaimed(stray), frame, iar);
 }

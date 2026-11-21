@@ -60,6 +60,13 @@ def invoke(checker, root, pool=None):
     only the temporary one-pool source tree uses the holders fixture rule.
     Unexpected exceptions propagate instead of becoming intended rejections.
     """
+    for path in set(checker.MUTATION_TAKES.values()):
+        source = root / path
+        if not source.exists():
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text("".join(f"fn {name}() {{}}\n"
+                                      for name, origin in checker.MUTATION_TAKES.items()
+                                      if origin == path))
     original_root = checker.ROOT
     original_pools = checker.POOLS
     original_controls = checker.controls
@@ -173,6 +180,13 @@ def main():
         for label, extra, diagnostic in cases:
             (root / "kernel/pool.tkb").write_text(BASE + extra + "\n")
             check_case(checker, root, label, diagnostic, count)
+        for missing, path in checker.MUTATION_TAKES.items():
+            source = root / path
+            original = source.read_text()
+            source.write_text(original.replace(f"fn {missing}() {{}}\n", ""))
+            check_case(checker, root, "missing " + missing,
+                       "missing ext2 acquisition roots: " + missing, count)
+            source.write_text(original)
         (root / "kernel/pool.tkb").unlink()
         block = root / "kernel/drivers/block"
         block.mkdir(parents=True)
