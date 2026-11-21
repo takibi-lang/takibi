@@ -95,3 +95,17 @@ Compared with e0ec95e88, the normal linked QEMU text grows from
 0x40210000 on QEMU and 0x7e0000 on RPi5. The probe's linked stack frames
 remain 320 bytes on QEMU and 304 bytes on RPi5. The observation covers
 the one neighboring descriptor in the maintained boot workload.
+
+## Branch presence interface
+
+Fork's branch scan and mmap's resident-page count receive a boolean
+that reports whether a branch has an L3 table. The helpers that return
+physical addresses are private to the address-space implementation.
+The boot probe still compares table identities there and checks the
+untouched neighbor in a present L3.
+
+Compared with `865e8cf05`, normal linked text remains 840480 bytes on
+QEMU and 4235964 bytes on RPi5. Data, BSS, usable RAM starts, and the
+five allocator expectations are unchanged. Resolved call graphs on
+both targets confirm the private helpers and the two boolean callers.
+The per-file raw-site counts are unchanged on both targets.

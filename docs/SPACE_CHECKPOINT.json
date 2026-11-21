@@ -2,11 +2,11 @@
   "date": "2026-11-21",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "efc3151b602b6fc854ad8974e4625d61f1a06c051cf5123864846e1d147f48f8",
-  "workload": "Existing user address-space isolation boot probe, measured in both normal linked images against e0ec95e88.",
+  "source_sha256": "4d1f8f9e4bb8eaf09dee385d58d66eeacac00b9a2cc3dc442422c15c849625af",
+  "workload": "Existing fork, mmap, and user address-space isolation boot paths. Both normal linked images measured against 865e8cf05.",
   "evidence": [
     "docs/MMU_L3_PUBLICATION.md"
   ],
-  "assessment": "One descriptor read adds 48 bytes of QEMU text and 64 bytes of RPi5 text. Data, BSS, usable RAM starts, and the five linked allocator expectations are unchanged.",
-  "next_trigger": "Remeasure if the probe mappings, descriptor read, or table allocation workload changes."
+  "assessment": "Branch presence replaces physical addresses at two callers. Linked text, data, BSS, usable RAM starts, and all five allocator expectations are unchanged.",
+  "next_trigger": "Remeasure if the branch lookup, probe mappings, or table allocation workload changes."
 }
