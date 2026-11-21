@@ -18,6 +18,14 @@ def check(tree, status, diagnostic=None):
         assert diagnostic in output.getvalue(), output.getvalue()
 
 
+def check_windows(tree, diagnostic=None, covered=frozenset(), callers=frozenset()):
+    errors, _ = checker.window_errors(tree, covered, callers)
+    if diagnostic is None:
+        assert not errors, errors
+    else:
+        assert any(diagnostic in error for error in errors), errors
+
+
 def main():
     tree, cases = checker.sources(), CaseCount()
     check(tree, 0)
@@ -51,7 +59,7 @@ def main():
     # The #756 / #860 aggregate shape: core 0 waits on every writer's count
     # with CPU 1's clock.
     storm = 'kernel/kernel/log_storm_evidence.tkb'
-    check({**tree, storm: replace_once(
+    check_windows({**tree, storm: replace_once(
         tree[storm],
         'let mut window = peer_tick_window_policy(cpu, PeerTickPolicy::Arrival);\n'
         '            while (peer_tick_window_open(window) &&\n'
@@ -59,11 +67,11 @@ def main():
         'let mut window = peer_tick_window_policy(\n'
         '                peer_tick_window_peer(), PeerTickPolicy::Arrival);\n'
         '            while (peer_tick_window_open(window) &&\n'
-        '                   atomic_word_load(cell) < value) { }')}, 1,
+        '                   atomic_word_load(cell) < value) { }')},
         'log_storm_wait_peers: waits on peer_tick_window_peer()')
     cases.note()
     console = 'kernel/kernel/console_contention_evidence.tkb'
-    check({**tree, console: replace_once(
+    check_windows({**tree, console: replace_once(
         tree[console],
         '    let mut window = peer_tick_window_policy(\n'
         '        peer_tick_window_peer(), PeerTickPolicy::Arrival);\n'
@@ -72,18 +80,35 @@ def main():
         '    let mut window = peer_tick_window_policy(\n'
         '        0, PeerTickPolicy::Arrival);\n'
         '    while (peer_tick_window_open(window)) {\n'
-        '        if (atomic_word_load(cell) != 0)')}, 1,
+        '        if (atomic_word_load(cell) != 0)')},
         'console_probe_wait: listed in PAIR_WINDOW but no longer calls')
     cases.note()
     fresh = 'kernel/kernel/new_contention_evidence.tkb'
-    check({**tree, fresh: '// peer_tick_window_peer() in a comment\n'
-           'fn harmless() { let text: *u8 = "peer_tick_window_peer()"; }\n'}, 0)
+    check_windows({**tree, fresh: '// peer_tick_window_peer() in a comment\n'
+           'fn harmless() { let text: *u8 = "peer_tick_window_peer()"; }\n'})
     cases.note()
-    check({**tree, fresh: 'fn fresh_wait() !{unsafe} {\n'
+    check_windows({**tree, fresh: 'fn fresh_wait() !{unsafe} {\n'
            '    let mut window = peer_tick_window_policy(\n'
            '        peer_tick_window_peer(), PeerTickPolicy::Arrival);\n'
-           '    peer_tick_window_end(window);\n}\n'}, 1,
+           '    peer_tick_window_end(window);\n}\n'},
           'fresh_wait: waits on peer_tick_window_peer()')
+    cases.note()
+    # A resolved caller is authoritative for a covered definition. A new
+    # source-only caller in the same file still goes through the fallback.
+    line = tree[console][:tree[console].index('fn console_probe_wait(')].count('\n') + 1
+    covered = {(console, 'console_probe_wait', line)}
+    check_windows(tree, 'console_probe_wait: listed in PAIR_WINDOW',
+                  covered=covered)
+    cases.note()
+    check_windows(tree, covered=covered, callers={(console, 'console_probe_wait')})
+    cases.note()
+    check_windows({**tree, console: tree[console] +
+                   '\nfn source_only_wait() { peer_tick_window_peer(); }\n'},
+                  'source_only_wait: waits on peer_tick_window_peer()',
+                  covered=covered, callers={(console, 'console_probe_wait')})
+    cases.note()
+    check_windows(tree, 'resolved_only_wait: waits on peer_tick_window_peer()',
+                  callers={(console, 'resolved_only_wait')})
     cases.note()
     report_pass('probe-visit-latch controls',
                 'an arming question without the visit latch, an idle-loop ask '

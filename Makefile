@@ -2390,6 +2390,7 @@ $(FRAME_API_STAMP): $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_DIR)/RA
 .PHONY: _kernelbuild
 _kernelbuild: _kernelbuild-rpi5 _kernelbuild-qemu _kernelbuild-dma-qemu _kernelbuild-invariant-qemu _kernel-memory-map-check $(MODEL_MAP_STAMP) $(GLOBAL_PROTECTION_STAMP) $(FRAME_API_STAMP)
 	python3 scripts/buildcheck_kernel_asm_entries.py $(KERNEL_QEMU_MAIN_O).facts/source-signatures.tsv $(KERNEL_RPI5_MAIN_O).facts/source-signatures.tsv
+	python3 scripts/check_probe_visit_latch.py $(KERNEL_QEMU_MAIN_O).facts/callgraph.tsv $(KERNEL_RPI5_MAIN_O).facts/callgraph.tsv
 
 kernelbuild: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild

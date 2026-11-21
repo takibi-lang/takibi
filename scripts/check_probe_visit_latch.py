@@ -27,15 +27,15 @@ GitHub issue #860, two rules over the boot contention probes.
    peer_tick_window_peer() is listed in PAIR_WINDOW with why one clock is
    the right one there, so a new use is a reviewed decision.
 
-Source-level only: rule 1 sees that the question reads the core's own
-progress, not that it reads the right word; rule 2 sees the call, not the
-predicate it bounds.
+Rule 1 checks source shape. Rule 2 checks resolved direct calls in the
+production call graphs and uses the source check for uncovered definitions.
 """
 
 import re
 import sys
 from pathlib import Path
 
+from call_graph_table import TableError, callee_file, callee_name, read
 from function_source import function_body, masked_sources
 from pass_line import report_pass
 from source_scan import function_header
@@ -64,6 +64,8 @@ PAIR_WINDOW = {
     'log_storm_wait_word': 'a secondary waits on core 0',
 }
 DEFINITION = function_header(suffix=r"\s*\(")
+PAIR_FUNCTION = "peer_tick_window_peer"
+PAIR_FILE = "kernel/lib/peer_tick_window.tkb"
 
 
 def sources():
@@ -111,26 +113,53 @@ def armed_errors(tree):
     return errors, len(calls)
 
 
-def window_errors(tree):
-    errors, seen = [], set()
+def compiled_windows(paths, tree):
+    covered, callers = set(), set()
+    for path in paths:
+        rows = read(path)
+        targets = [row for row in rows
+                   if row['name'] == PAIR_FUNCTION and row['file'] == PAIR_FILE]
+        if len(targets) != 1:
+            raise ValueError(f'{path}: expected one compiled {PAIR_FUNCTION}, found {len(targets)}')
+        for row in rows:
+            file, name = row['file'], row['name']
+            if file not in tree or file == PAIR_FILE:
+                continue
+            covered.add((file, name, int(row['line'])))
+            if any(callee_name(edge) == PAIR_FUNCTION and callee_file(edge) == PAIR_FILE
+                   for edge in row['callees']):
+                callers.add((file, name))
+    return covered, callers
+
+
+def window_errors(tree, covered=frozenset(), callers=frozenset()):
+    callers = set(callers)
     for path, source in tree.items():
-        if path.endswith('/peer_tick_window.tkb'):
+        if path == PAIR_FILE or PAIR_FUNCTION not in source:
             continue
         masked = masked_sources(source)
-        if 'peer_tick_window_peer' not in masked:
+        if PAIR_FUNCTION not in masked:
             continue
-        for name in DEFINITION.findall(masked):
+        for definition in DEFINITION.finditer(masked):
+            name = definition[1]
+            line = masked.count('\n', 0, definition.start()) + 1
+            if (path, name, line) in covered:
+                continue
             body = function_body(name, source)
             if body is None or not re.search(r'\bpeer_tick_window_peer\s*\(',
                                              masked_sources(body)):
                 continue
-            if name in PAIR_WINDOW:
-                seen.add(name)
-                continue
-            errors.append(f'{path}: {name}: waits on peer_tick_window_peer(), '
-                          'one fixed peer\'s clock; a wait across several peers '
-                          'takes each peer\'s own window (kernel/lib/'
-                          'peer_round.tkb; GitHub issues #756, #860)')
+            callers.add((path, name))
+
+    errors, seen = [], set()
+    for path, name in sorted(callers):
+        if name in PAIR_WINDOW:
+            seen.add(name)
+        else:
+            errors.append(f"{path}: {name}: waits on peer_tick_window_peer(), "
+                          "one fixed peer's clock; a wait across several peers "
+                          "takes each peer's own window (kernel/lib/"
+                          "peer_round.tkb; GitHub issues #756, #860)")
     for name in PAIR_WINDOW:
         if name not in seen:
             errors.append(f'{name}: listed in PAIR_WINDOW but no longer calls '
@@ -138,21 +167,32 @@ def window_errors(tree):
     return errors, len(seen)
 
 
-def main(tree=None):
+def main(tree=None, facts=()):
     tree = sources() if tree is None else tree
-    errors, asked = armed_errors(tree)
-    more, pairs = window_errors(tree)
-    errors += more
+    if facts:
+        try:
+            errors, pairs = window_errors(tree, *compiled_windows(facts, tree))
+        except (OSError, TableError, ValueError) as error:
+            print(f'ERROR probe-visit-latch: {error}')
+            return 1
+    else:
+        errors, asked = armed_errors(tree)
     if errors:
         for error in errors:
             print(f'ERROR probe-visit-latch: {error}')
         return 1
-    report_pass('probe-visit-latch',
-                'every idle-loop arming question reads the calling core\'s own '
-                'progress; fixed-pair windows only where reviewed',
-                asked=asked, holds=len(HOLDS), pair_windows=pairs)
+    if facts:
+        report_pass('probe-visit-latch', 'fixed-pair windows only where reviewed',
+                    pair_windows=pairs)
+    else:
+        report_pass('probe-visit-latch',
+                    "every idle-loop arming question reads the calling core's own progress",
+                    asked=asked, holds=len(HOLDS))
     return 0
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    arguments = sys.argv[1:]
+    if arguments and len(arguments) != 2:
+        sys.exit('usage: check_probe_visit_latch.py [QEMU_CALLGRAPH RPI5_CALLGRAPH]')
+    sys.exit(main(facts=arguments))
