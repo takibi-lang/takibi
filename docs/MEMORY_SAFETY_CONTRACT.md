@@ -155,7 +155,9 @@ This is a source-backed entry inventory, not complete export certification.
 | copy_to_user_span | borrow uninit source with requires init(source[offset..<offset + length]); checked tail forwards to copy_to_user | Every producer's range fact and alias/lease identity |
 | Pipe reads (two wrap segments) | copy_to_user_span from pipe_of(owner).buffer | Stored-owner lifetime and written ring ranges across wrap/reuse |
 | TCP reads (buffered and freshly received) | copy_to_user_span from tcp_frame_bytes | Frame ownership, received extent, publication and DMA completion |
-| procfs rendering, ext2 file reads, syslog | copy_to_user_span from the selected syscall scratch file_buffer | Producer prefix, cursor/count transfer, partial/failure paths and reacquisition. Syslog checks that the snapshot copy produced the full requested chunk before copyout |
+| procfs file reads | `procfs_render_file` initializes `[0, total)`. With `offset < total`, the read copies `min(total - offset, requested)` bytes from the selected scratch slot and then updates the offset | Renderer input provenance, destination faults and file-offset semantics |
+| ext2 file reads | `Ext2ReadResult::Read(n)` establishes the scratch prefix `[0, n)`. Each iteration copies that prefix before updating the file offset and delivered count | Block/device completion and actual byte fulfillment, destination faults and partial-result semantics |
+| syslog snapshot reads | `kernel_log_snapshot_copy` initializes the prefix it returns. The syscall holds one snapshot guard and copies a chunk from the selected scratch slot only after checking `staged == chunk` | Snapshot construction and guard implementation, destination faults and partial-result semantics |
 | prlimit64 | copy_to_user from constructed scratch bytes; the initial RLIMIT_NOFILE read checks both words and adjacent sentinels | Scratch source lifetime and output cases beyond the initial successful read |
 | uname | copy_to_user from constructed scratch bytes; successful field tails and adjacent sentinels checked by the peer TTY fixture | Source initialization and lifetime proof across scratch reacquisition; other field values and faulting destinations |
 | user_write_byte/u16/u32/u64 and user_zero_fill | Typed scalar inputs or constant zero; range/COW checks and access windows | All callers and all padding/holes of user ABI records; untouched user bytes are not kernel disclosure |
@@ -163,10 +165,22 @@ This is a source-backed entry inventory, not complete export certification.
 | Retained fork/COW mappings, signal frames, shared backing | Existing-page reference or ABI paths | Reference and teardown lifetimes, and record-specific initialization |
 | Raw/assembly/device output paths | Named mint files and external contracts | Audit bypasses of the typed entry set; confinement is not initialization proof |
 
-The next consumer review starts with the selected scratch-to-procfs output
-chain and its alias/lifetime transfer, followed by the ring/frame consumers.
-It must also enumerate allocation-backed exports and scalar ABI writers;
-closing only the nine copying call sites would weaken the required claim.
+For these three scratch-backed paths, `owned_by(SyscallSlot.index, 1)`
+ties the staging buffer and source of `copy_to_user_span` to the same live
+slot borrow. Their scratch initialization facts apply within that call.
+The maintained compiler controls exercise a live slot's local view and
+reject a different selector or borrowed slot, a wrong token type, a
+contract on a consuming parameter, and a read without initialization in
+the call.
+[Syscall scratch evidence](SYSCALL_SCRATCH_SPACE.md) records the paired
+builds. Physical slot exclusion depends on the acquire compare-exchange
+and release store. Destination mapping, COW and the PAN access window
+retain the premises of the common copy-out boundary.
+
+The remaining review includes ring and frame consumers, allocation-backed
+exports and scalar ABI writers. In particular, TCP RX still needs
+current-receive initialization evidence across reacquisition, and fresh
+COW publication still relies on the lifetime of the old copy source.
 
 The kernel-only EL0 fixture checks successful scalar ABI output in the
 existing userspace view. For statfs, both the ext2 root and procfs overwrite
