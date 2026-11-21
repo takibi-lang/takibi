@@ -271,6 +271,37 @@ address write. If the destinations overlap, the length store can overwrite
 part of the address. The socket views check connections and descriptors
 without comparing the address and length bytes.
 
+For `wait4`, a supplied status pointer receives one checked four-byte
+status word when a child is delivered. The optional usage result is
+cleared across a checked 144-byte span before waiting or reaping, so it
+can change before the call returns a child. An invalid usage destination
+fails before reaping. The regular child fixture checks the status and
+reads the two microsecond fields from a previously filled usage buffer;
+it does not inspect the remaining usage bytes.
+
+`getcwd` writes only the root slash and trailing NUL and returns 2.
+A buffer smaller than two bytes returns `EFAULT` before output, and
+the shell startup exercises the usable result. `getcpu` writes its
+optional four-byte CPU and node results separately, so failure of the
+second write can leave the first visible. `sched_getaffinity` writes
+one eight-byte mask and returns 8 even when the accepted buffer is
+larger. The EL0 CPU fixture checks node zero and the reported CPU's
+membership in the mask. These fixtures do not compare adjacent bytes.
+
+The `TIOCGWINSZ` ioctl clears its checked eight-byte reply and writes
+the fixed row and column counts. `TCGETS` copies all 36 settings bytes
+under the process-run lock. The UART read writes received bytes
+individually and counts them after successful stores. Bytes after a
+successful read's returned extent stay caller-owned. A failed store
+can leave earlier bytes visible. The terminal views check settings
+and input behavior without inspecting every raw output byte.
+
+The shared `getitimer` and `setitimer` output helper checks a
+32-byte span and writes four eight-byte interval and remaining-time
+fields. A write fault can leave earlier fields visible. The ordinary
+timer fixture checks `getitimer` and the previous timer value returned
+by `setitimer`; it does not compare adjacent bytes.
+
 The kernel-only EL0 fixture checks successful scalar ABI output in the
 existing userspace view. For statfs, both the ext2 root and procfs overwrite
 a nonzero 32-byte reserved tail with zero. For sysinfo, all 104 bytes after
