@@ -18,9 +18,18 @@ forwarding wrapper inherits the requirement at its callers.
 Fork and in-place COW retain existing page contents. Fork retains
 the source mapping reference before sharing its physical page. The
 single-reference COW path changes the existing mapping's permissions.
-The COW copy reads from a live existing mapping and writes a new owner
-before publishing it. The raw source view relies on that mapping
-reference and the managed physical-page adapter.
+During a COW copy, the current root's old PTE keeps its mapping
+reference. The copy initializes a new owner, and successful publication
+of the replacement PTE precedes dropping the old reference. Failure
+before publication leaves the old mapping in place.
+
+The copy relies on the current process's exclusive mutation of its
+root. Fork creates a distinct child root, and teardown of another
+process requires its matching Reapable generation. A sibling root may
+drop its own reference while the copying root retains its reference.
+The physical-page adapter checks alignment and allocator membership,
+then releases the allocator lock before the raw copy. The retained
+mapping supplies the source lifetime throughout that copy.
 
 The compiler follows the storage selected by the owner accessor.
 The allocator's unique frame authority, the correspondence between
