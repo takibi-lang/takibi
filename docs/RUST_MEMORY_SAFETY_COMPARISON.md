@@ -6,8 +6,8 @@ covers ordinary safe Rust with `core`, safe APIs whose implementations
 use unsafe operations, and the additional premises at raw kernel and
 device boundaries. Each verdict applies only to the property and scope
 in its row. Whole-kernel and whole-language equivalence are unresolved.
-This review compares published source and recorded checks. It adds no
-same-program, performance, or hardware measurements.
+The comparison uses published source, recorded checks, and the small
+controls below. It includes no performance or hardware measurements.
 
 | Property | Scoped verdict | Remaining boundary |
 | --- | --- | --- |
@@ -31,6 +31,26 @@ correspondence](../kernel/models/README.md) state the compiler and bounded
 protocol evidence limits. The local TCP producer prefix can be expressed
 in the demonstrated subset. Its transfer through the current frame's
 slot and later reacquisition is unresolved in the maintained path.
+
+## Small compiler controls
+
+Rust 1.91.0 rejected an uninitialized local read (E0381) and a borrow
+used after its local owner went out of scope (E0597). Two safe Rust
+programs ran successfully. One used `split_at_mut` to write to disjoint
+parts of an array. The other encoded a record explicitly into eight
+initialized bytes, leaving the three reserved bytes zero.
+
+In optimized x86-64 objects, Rust's eight-element array lookup with a
+plain `usize` index retained a bounds check and panic path. A private
+`u8` newtype with a checked constructor still retained that path in
+the separately inspected lookup. Combining construction and lookup in
+one function preserved the input range check and eliminated the separate
+indexing panic. An eight-variant `repr(u8)` enum produced a lookup with
+no bounds check. Takibi accepted the lookup with a `{0..<8 as usize}`
+parameter and emitted no bounds check. The plain `usize` Takibi variant
+was rejected under the default trap policy. These controls compare
+specific encodings and generated code, with no timing or broader
+inference verdict.
 
 Rust baseline sources are pinned to the [1.91.0 release][release].
 
