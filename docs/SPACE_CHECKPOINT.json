@@ -1,12 +1,12 @@
 {
   "date": "2026-11-21",
   "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "8c6236a54fed5a290222eee1cfdd2f81b0d25e09ad4703f08f198502af7d1816",
-  "workload": "Existing EL0 pipe wrap fixture and fixed-size RPi5 USB READ(10) receipt, measured together in both normal linked images against d9ad31ea0.",
+  "decision": "measured",
+  "source_sha256": "efc3151b602b6fc854ad8974e4625d61f1a06c051cf5123864846e1d147f48f8",
+  "workload": "Existing user address-space isolation boot probe, measured in both normal linked images against e0ec95e88.",
   "evidence": [
-    "docs/MEMORY_PUBLICATION_BATCH_SPACE.md"
+    "docs/MMU_L3_PUBLICATION.md"
   ],
-  "assessment": "Reuse the published combined pipe and USB measurements. The new compiler tests and documentation do not change production inputs. The Makefile only adds verifier commands after the existing kernel builds. Compiler and linker inputs, target code, fixture contents, allocation and lifetimes are unchanged.",
-  "next_trigger": "Remeasure if the pipe fixture workload or buffer, USB transfer descriptors or DMA aperture layout changes."
+  "assessment": "One descriptor read adds 48 bytes of QEMU text and 64 bytes of RPi5 text. Data, BSS, usable RAM starts, and the five linked allocator expectations are unchanged.",
+  "next_trigger": "Remeasure if the probe mappings, descriptor read, or table allocation workload changes."
 }

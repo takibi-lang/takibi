@@ -89,9 +89,9 @@ has a zero descriptor. Its existing page 512 check covers a missing
 parent branch. This adds a single descriptor read while keeping the
 probe's mappings and allocator live-count checks the same.
 
-Compared with fcc42eb95, the normal linked QEMU text grows from
-834416 to 834464 bytes and the RPi5 text grows from 4227460 to
-4227524 bytes. Data and BSS are unchanged. Usable RAM still starts at
+Compared with e0ec95e88, the normal linked QEMU text grows from
+840432 to 840480 bytes and the RPi5 text grows from 4235116 to
+4235180 bytes. Data and BSS are unchanged. Usable RAM still starts at
 0x40210000 on QEMU and 0x7e0000 on RPi5. The probe's linked stack frames
 remain 320 bytes on QEMU and 304 bytes on RPi5. The observation covers
 the one neighboring descriptor in the maintained boot workload.
