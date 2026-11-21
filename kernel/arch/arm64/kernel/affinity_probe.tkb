@@ -435,15 +435,25 @@ fn affinity_probe() !{unsafe} {
     if (directory >= AFFINITY_ERROR_FLOOR) {
         affinity_fail(bs"affinity: procfs open failed on cpu 1\n");
     }
+    for index: usize in 0..<256 { descriptor_bytes[index] = 0xA5; }
     let directory_bytes: usize = svc5(GETDENTS_SYSCALL, directory,
         descriptor_bytes as *u8 as usize, 256, 0, 0);
-    if (directory_bytes < 26 || directory_bytes > 256 ||
+    if (directory_bytes < 32 || directory_bytes > 256 ||
+        descriptor_bytes[26] != 0xA5 || descriptor_bytes[27] != 0xA5 ||
+        descriptor_bytes[28] != 0xA5 || descriptor_bytes[29] != 0xA5 ||
+        descriptor_bytes[30] != 0xA5 || descriptor_bytes[31] != 0xA5 ||
         descriptor_bytes[19] != 0x74 || descriptor_bytes[20] != 0x61 ||
         descriptor_bytes[21] != 0x6b || descriptor_bytes[22] != 0x69 ||
         descriptor_bytes[23] != 0x62 || descriptor_bytes[24] != 0x69 ||
         descriptor_bytes[25] != 0 ||
         svc5(CLOSE_SYSCALL, directory, 0, 0, 0, 0) != 0) {
         affinity_fail(bs"affinity: procfs directory result changed on cpu 1\n");
+    }
+    // The first record is "takibi"; its NUL is at 25, before six padding bytes.
+    if (directory_bytes < 256) {
+        if (descriptor_bytes[directory_bytes] != 0xA5) {
+            affinity_fail(bs"affinity: procfs directory wrote past its returned bytes\n");
+        }
     }
     if (affinity_cpu() != 1) {
         affinity_fail(bs"affinity: descriptor calls moved the pinned caller\n");

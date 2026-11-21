@@ -233,9 +233,10 @@ stay caller-owned and untouched. A pending record that does not fit in a
 nonempty buffer is left unwritten. The call returns `EINVAL` if it has
 written no records, or returns the completed prefix. A store fault can
 leave part of the attempted record changed. Procfs PID enumeration and
-ext2 exclude that record from any returned prefix. The BusyBox `ls` and
-`ps` checks exercise directory enumeration without inspecting the raw
-padding or partial-store behavior.
+ext2 exclude that record from any returned prefix. The affinity fixture
+checks the fixed `takibi` entry's six padding bytes and the next byte
+after the returned extent when it fits in the buffer. The BusyBox `ls`
+and `ps` checks exercise enumeration without inspecting raw padding.
 
 The implemented `newfstatat` routes for procfs nodes and ext2
 directories, applet links and files each validate a 128-byte result, zero
