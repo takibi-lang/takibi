@@ -247,6 +247,30 @@ visible. The BusyBox shell checks exercise pathname metadata such as
 directory size, without comparing every output byte or the surrounding
 extent. The kernel has no separate `fstat` dispatcher arm.
 
+The `getresuid` and `getresgid` paths write real, effective and saved
+IDs in order, each to a separately checked four-byte destination. A
+fault on a later destination can leave earlier IDs written. The
+credentials fixture checks all three values for both calls and
+`getresuid` with an invalid first pointer. It does not check adjacent
+bytes or faulting later destinations.
+
+On success, `pipe2` writes two four-byte descriptors and
+`clock_gettime` writes two eight-byte timespec fields. Both check the
+entire result span before writing. A failed store can leave earlier
+writes visible. On a store fault `pipe2` also closes both descriptors.
+Existing fixtures use both pipe descriptors and read both time fields
+for realtime and monotonic clocks. They do not check adjacent bytes
+or partial-store behavior for these outputs.
+
+`accept` and `accept4` return the descriptor without accessing their
+address and length arguments. The implemented `getpeername` first
+clears a checked 16-byte address and sets its first byte to 2
+(`AF_INET`), then writes 16 to a separately checked four-byte length.
+The output length is fixed, and a length fault can follow a successful
+address write. If the destinations overlap, the length store can overwrite
+part of the address. The socket views check connections and descriptors
+without comparing the address and length bytes.
+
 The kernel-only EL0 fixture checks successful scalar ABI output in the
 existing userspace view. For statfs, both the ext2 root and procfs overwrite
 a nonzero 32-byte reserved tail with zero. For sysinfo, all 104 bytes after
