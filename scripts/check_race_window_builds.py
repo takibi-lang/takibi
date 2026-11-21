@@ -3,7 +3,9 @@
 
 scripts/build_qemu_race_window.py names the windows. The Makefile builds an
 armed and a reverted kernel for each name in KERNEL_QEMU_RACE_WINDOWS, and a
-reverted kernel only for each name in KERNEL_QEMU_RACE_CONTROLS. A lane names
+reverted kernel only for each name in KERNEL_QEMU_RACE_CONTROLS.
+KERNEL_QEMU_RACE_ARMED_ONLY builds fixtures that retain the checked policy.
+A lane names
 its window with KERNEL_QEMU_RACE_WINDOW=<name> (and skips the armed boot with
 KERNEL_QEMU_RACE_WINDOW_ARMED=skip), and a script can name a kernel file
 directly (kernel-race-<name>-<variant>.elf). A name missing from those lists
@@ -46,10 +48,12 @@ def validate(makefile, scripts, windows):
     errors = []
     armed_built = make_list(makefile, "KERNEL_QEMU_RACE_WINDOWS")
     controls = make_list(makefile, "KERNEL_QEMU_RACE_CONTROLS")
-    if armed_built is None or controls is None:
-        return ["Makefile: KERNEL_QEMU_RACE_WINDOWS or KERNEL_QEMU_RACE_CONTROLS is gone"], 0
-    built = {"armed": set(armed_built), "reverted": set(armed_built) | set(controls)}
-    for name in armed_built + controls:
+    armed_only = make_list(makefile, "KERNEL_QEMU_RACE_ARMED_ONLY")
+    if any(group is None for group in (armed_built, controls, armed_only)):
+        return ["Makefile: a kernel race-window build list is missing"], 0
+    built = {"armed": set(armed_built) | set(armed_only),
+             "reverted": set(armed_built) | set(controls)}
+    for name in armed_built + controls + armed_only:
         if name not in windows:
             errors.append(f"Makefile builds window {name}, which "
                           "scripts/build_qemu_race_window.py does not define")
@@ -60,7 +64,7 @@ def validate(makefile, scripts, windows):
             errors.append(f"{source}: boots window {name}, which "
                           "scripts/build_qemu_race_window.py does not define")
         elif name not in built[variant]:
-            where = ("KERNEL_QEMU_RACE_WINDOWS" if variant == "armed"
+            where = ("KERNEL_QEMU_RACE_WINDOWS or KERNEL_QEMU_RACE_ARMED_ONLY" if variant == "armed"
                      else "KERNEL_QEMU_RACE_CONTROLS (or KERNEL_QEMU_RACE_WINDOWS)")
             errors.append(f"{source}: boots kernel-race-{name}-{variant}.elf, "
                           f"which kernelbuild-check never builds; add {name} to {where}"
@@ -122,6 +126,15 @@ def main():
     unknown = makefile + "\n\tenv KERNEL_QEMU_RACE_WINDOW=999-unknown KERNEL_QEMU_RACE_WINDOW_ARMED=skip true\n"
     if not validate(unknown, scripts, WINDOWS)[0]:
         errors.append("control: a window the overlay builder lacks was accepted")
+    armed_fixture = "1517-admitted-drain"
+    missing_armed = makefile.replace(
+        f"KERNEL_QEMU_RACE_ARMED_ONLY := {armed_fixture}",
+        "KERNEL_QEMU_RACE_ARMED_ONLY :=")
+    if not validate(missing_armed, scripts, WINDOWS)[0]:
+        errors.append("control: omitting an armed-only fixture was accepted")
+    reverted_use = {"control": f"kernel-race-{armed_fixture}-reverted.elf"}
+    if not validate(makefile, reverted_use, WINDOWS)[0]:
+        errors.append("control: a reverted boot of an armed-only fixture was accepted")
     if errors:
         for error in errors:
             print(f"ERROR race-window-builds: {error}")

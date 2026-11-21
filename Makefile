@@ -2047,7 +2047,8 @@ KERNEL_QEMU_NET_WAKE_CONTROL_ELF := $(KERNEL_QEMU_BUILD_DIR)/kernel-net-wake-con
 KERNEL_QEMU_RACE_WINDOWS := 609 603 633 678 651 1211
 # Controls only: a reverted kernel, and no armed one (the ordinary kernel is it).
 KERNEL_QEMU_RACE_CONTROLS := 635 705 705-missed-arrival 651-no-peer 651-resume-old 830-core0 761-unbounded 905-late-wake 1339-load-store 1194-el0-spsr 1194-no-pan 638-no-consult
-KERNEL_QEMU_RACE_WINDOW_ELFS := $(foreach w,$(KERNEL_QEMU_RACE_WINDOWS),$(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-armed.elf $(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-reverted.elf) $(foreach w,$(KERNEL_QEMU_RACE_CONTROLS),$(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-reverted.elf) $(KERNEL_QEMU_BUILD_DIR)/kernel-race-1517-admitted-drain-armed.elf
+KERNEL_QEMU_RACE_ARMED_ONLY := 1517-admitted-drain
+KERNEL_QEMU_RACE_WINDOW_ELFS := $(foreach w,$(KERNEL_QEMU_RACE_WINDOWS),$(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-armed.elf $(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-reverted.elf) $(foreach w,$(KERNEL_QEMU_RACE_CONTROLS),$(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-reverted.elf) $(foreach w,$(KERNEL_QEMU_RACE_ARMED_ONLY),$(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-armed.elf)
 KERNEL_QEMU_LINK_LD      := $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld
 KERNEL_QEMU_ELF          := $(KERNEL_QEMU_BUILD_DIR)/kernel.elf
 KERNEL_QEMU_UART_TKB     := $(KERNEL_DIR)/platform/qemu/uart.tkb
