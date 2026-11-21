@@ -1059,6 +1059,7 @@ fn initial_user_payload() !{unsafe} {
         sigaltstack_autodisarm_probe();
         shared_mapping_probe();
         sysinfo_kernel_probe();
+        rusage_kernel_probe();
         statfs_umask_kernel_probe();
         mmap_region_probe();
         mmap_region_kernel_probe();
@@ -1893,6 +1894,18 @@ fn sysinfo_kernel_probe() !{unsafe} {
     for index: usize in 0..<8 { fail_if(src_loc(), output[index] != 0xFF); }
     for index: usize in 16..<120 { fail_if(src_loc(), output[index] != 0); }
     for index: usize in 120..<128 { fail_if(src_loc(), output[index] != 0xFF); }
+}
+
+// This kernel reports CPU times and clears unaccounted fields. The host
+// Linux probe cannot require zeros for fields such as minor faults.
+fn rusage_kernel_probe() !{unsafe} {
+    let mut output: [u8; 160];
+    for index: usize in 0..<160 { output[index] = 0xFF; }
+    let base: *u8 = output as *u8;
+    fail_if(src_loc(), svc5(GETRUSAGE_SYSCALL, 0, ptr_of(base, 8), 0, 0, 0) != 0);
+    for index: usize in 0..<8 { fail_if(src_loc(), output[index] != 0xFF); }
+    for index: usize in 40..<152 { fail_if(src_loc(), output[index] != 0); }
+    for index: usize in 152..<160 { fail_if(src_loc(), output[index] != 0xFF); }
 }
 
 // The half that needs this kernel's ext2 root and /proc: statfs reports
