@@ -225,6 +225,18 @@ Earlier stores can remain visible if a later access faults or the call
 blocks. A zero-descriptor call has no descriptor array output. Physical
 access retains the common user-range and access-window premises.
 
+For `getdents64`, fixed procfs entries, numeric procfs entries and ext2
+entries all write the header fields, name bytes and trailing NUL directly
+into the caller's buffer. A completed record contributes its eight-byte
+aligned length, including up to seven alignment bytes after the NUL that
+stay caller-owned and untouched. A pending record that does not fit in a
+nonempty buffer is left unwritten. The call returns `EINVAL` if it has
+written no records, or returns the completed prefix. A store fault can
+leave part of the attempted record changed. Procfs PID enumeration and
+ext2 exclude that record from any returned prefix. The BusyBox `ls` and
+`ps` checks exercise directory enumeration without inspecting the raw
+padding or partial-store behavior.
+
 The kernel-only EL0 fixture checks successful scalar ABI output in the
 existing userspace view. For statfs, both the ext2 root and procfs overwrite
 a nonzero 32-byte reserved tail with zero. For sysinfo, all 104 bytes after
