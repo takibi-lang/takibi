@@ -205,6 +205,16 @@ builds check the callers of publication, release and their shared setter.
 The lifetime of the backing record is distinct from the lifetime of the
 physical tables it names.
 
+Both initial exec stack builders clear the stack page, then write the
+16-byte `AT_RANDOM` payload between the auxiliary vector and argument
+strings. The vector points to the payload's user virtual address. Each
+payload store checks its index, and an out-of-range index returns
+`Invalid` before publication. The page uses the common full-initialization
+mapping gate, with its existing allocator and architecture premises.
+The payload bytes come from fixed patterns and provide no entropy.
+The existing distro image and httpd loader views check auxiliary vector
+setup for static and dynamic exec. They do not compare the payload bytes.
+
 For a supported, nonempty `ppoll` descriptor array, the syscall checks
 the writable span of all 8-byte `Pollfd` records. Each visited record
 supplies a four-byte `fd` read and a four-byte read starting at `events`
