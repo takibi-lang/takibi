@@ -2,11 +2,11 @@
   "date": "2026-11-21",
   "event": "incremental",
   "decision": "reuse",
-  "source_sha256": "0afeb6ab95c02698c05c7a300555e0ce65fb4d01a385e89e1f52abb9fac9124b",
-  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 1ee2f0a3: this branch's review, rebound to the merged sources (upstream's record was 2026-11-21 incremental/measured). Successful getrusage tail and sentinel verification in the existing EL0 payload. Compare the payload, fixture disk, normal linked kernels and static stack records with ab24e7bb5.",
+  "source_sha256": "8c6236a54fed5a290222eee1cfdd2f81b0d25e09ad4703f08f198502af7d1816",
+  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 3467e988: this branch's review, rebound to the merged sources (upstream's record was 2026-11-21 incremental/reuse). Ordinary mkdirat wait and restore, with retained private-stack context. Compare normal linked QEMU and RPi5 kernels against 617f5f2d0 and the earlier bounded QEMU occupancy observation.",
   "evidence": [
-    "docs/SCALAR_ABI_TAIL_FIXTURE_SPACE.md"
+    "docs/ORDINARY_EXT2_MUTATION_WAIT_SPACE.md"
   ],
-  "assessment": "Reuse the getrusage fixture and linked-kernel measurements. The Makefile adds a host-side comparison of the existing call graph after each production build. The kernel source, compiler inputs and flags, link commands, allocation workload and shipped image contents are unchanged.",
-  "next_trigger": "Remeasure when the scalar ABI fixtures change allocation workload or an embedded payload grows across a reservation boundary."
+  "assessment": "Reuse the ordinary ext2 wait linked-image and process-pool evidence. The fixed-pair probe policy is checked against existing compiler facts after the two kernel builds. Kernel sources and their compile and link inputs, fixture workloads, image contents, allocation and lifetimes are unchanged.",
+  "next_trigger": "Remeasure after reader-drain waiting or allowing an ext2 reader to sleep while registered, and before claiming a real-device timing result."
 }
