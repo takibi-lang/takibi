@@ -212,13 +212,23 @@ extern function/symbol declarations. Production handwritten assembly was
 1 / 27. These syntactic counts describe review surfaces, not independent
 premises or a proof strength.
 
-The ledger report uses different scopes: its source-wide unsafe count was
-178, extern functions 74, and assembly lines 2,864. Build-derived raw-site
-facts were 146 QEMU / 156 RPi5 (78 / 88 after excluding probe-linked evidence
-files), while the older ledger recorded 144 / 154 (76 / 86). Do not replace
-one scope with another or describe the old recorded values as freshly
-measured. The report alone does not establish that each new site was
-individually reviewed; ledger refresh/reduction remains under #986.
+The ledger report uses different scopes. Its source-wide unsafe count was
+178, extern functions 74, and assembly lines 2,864. The
+[trust ledger](TRUST_LEDGER.json) recorded 144 QEMU and 154 RPi5 build-derived
+raw sites on 2026-11-11 (76 and 86 after excluding probe-linked evidence
+files). The 2026-11-17 entry records 146 and 156 (78 and 88 under the same
+exclusion). The two added sites on each target are the raw output-address
+conversions in `el1_resume_probe_checked` and
+`crash_snapshot_copy_leveled_frame`. The
+[trusted base](../TRUSTED_BASE.md#explicit-trusted-boundaries) records the
+assembly output and lifetime premises for these wrappers. The compiler
+checks their Takibi callers against the wrapper contracts.
+
+The ledger in published `e0ec95e88` retains the later counts. The normal
+QEMU and RPi5 facts from the subsequent L3 neighbor check agree with the
+ledger totals and the two sites in `user_entry_extern.tkb`. These are
+counts of compiler-reported sites. Assembly stores and pointer lifetime
+remain audited premises.
 
 No trust premise is retired or added by this document. Before making the
 final scoped claim, complete each matrix row's source-backed controls,
