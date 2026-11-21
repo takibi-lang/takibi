@@ -1,12 +1,12 @@
 {
   "date": "2026-11-21",
-  "event": "milestone",
+  "event": "incremental",
   "decision": "measured",
-  "source_sha256": "9faf73d53d7c07d080a64fa491fbf85ae1c605a2b0185b9b6095d108631d49b8",
-  "workload": "Ordinary mkdirat wait and restore, with retained private-stack context. Compare normal linked QEMU and RPi5 kernels against 617f5f2d0 and the earlier bounded QEMU occupancy observation.",
+  "source_sha256": "4c499655bcefc271cfcfe81c7fc6c9d3ab9776e6e4b9248307a62d9ae6ef1e18",
+  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto d9ad31ea: this branch's review, rebound to the merged sources (upstream's record was 2026-11-21 milestone/measured). One ordinary pipe with a split write and read in the existing EL0 fixture. Compare its payload, compressed fixture and both linked normal kernels.",
   "evidence": [
-    "docs/ORDINARY_EXT2_MUTATION_WAIT_SPACE.md"
+    "docs/PIPE_WRAP_FIXTURE_SPACE.md"
   ],
-  "assessment": "Linked text class grows by 5948 B QEMU and 5836 B RPi5. The process record grows 8 B and the parked context uses 176 B on its existing stack. Usable RAM starts are unchanged.",
-  "next_trigger": "Remeasure after reader-drain waiting or allowing an ext2 reader to sleep while registered, and before claiming a real-device timing result."
+  "assessment": "The EL0 probe adds 992 text bytes and a 3168-byte static frame. The EL0 entry frame is unchanged. The fixture grows by 415 compressed bytes. QEMU linked text, both writable totals and both usable RAM starts are unchanged. RPi5 linked text grows by 416 bytes.",
+  "next_trigger": "Remeasure if the pipe capacity, fixture buffer, embedded image or allocation lifetime changes."
 }
