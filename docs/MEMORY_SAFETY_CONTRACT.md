@@ -205,6 +205,16 @@ builds check the callers of publication, release and their shared setter.
 The lifetime of the backing record is distinct from the lifetime of the
 physical tables it names.
 
+For a supported, nonempty `ppoll` descriptor array, the syscall checks
+the writable span of all 8-byte `Pollfd` records. Each visited record
+supplies a four-byte `fd` read and a four-byte read starting at `events`
+that also spans `revents`. The result store writes only the two-byte
+`revents` field. The `fd` and `events` bytes stay caller-owned and
+unchanged. The ready count includes entries with nonzero reported events.
+Earlier stores can remain visible if a later access faults or the call
+blocks. A zero-descriptor call has no descriptor array output. Physical
+access retains the common user-range and access-window premises.
+
 The kernel-only EL0 fixture checks successful scalar ABI output in the
 existing userspace view. For statfs, both the ext2 root and procfs overwrite
 a nonzero 32-byte reserved tail with zero. For sysinfo, all 104 bytes after
