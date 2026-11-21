@@ -395,7 +395,9 @@ def eq_lines(rows):
                 # dd of=P bs=1024 count=N: O_TRUNC, then N one-KiB writes
                 lines.append(f"trunc {p[0]}")
                 lines.append(f"pwrite {p[0]} 0 {int(args[1]) * 1024} 1")
-            elif op == "overwrite":
+            elif op in ("copy", "overwrite"):
+                if op == "copy":
+                    lines.append(f"trunc {p[0]}")
                 lines.append(f"overwrite {p[0]} {p[1]}")
             elif op == "truncate":
                 # truncate -s 0: open(O_CREAT) and ftruncate(2) to 0, the
@@ -910,8 +912,11 @@ def self_test():
     assert lines == [f"mkdir {ROOT}/r", f"trunc {ROOT}/r/f", f"pwrite {ROOT}/r/f 0 2048 1",
                      f"trunc {ROOT}/r/{ext2_eq.LONG}0", f"trunc {ROOT}/r/{ext2_eq.LONG}1"], lines
     assert spans == [(0, 5)]
+    copy = ext2_eq.parse("row r match -\ncopy r/dst r/src\n")
+    assert eq_lines(copy) == ([f"trunc {ROOT}/r/dst",
+                               f"overwrite {ROOT}/r/dst {ROOT}/r/src"], [(0, 2)], [])
     report_pass("ext2-host self-test", "result parser, pattern, generator, Linux oracle, "
-                "ENOSPC justification and ops.eq translation", cases=7)
+                "ENOSPC justification and ops.eq translation", cases=8)
 
 
 def main(argv):

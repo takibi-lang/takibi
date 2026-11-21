@@ -315,8 +315,9 @@ next one taken. The done record of the previous queue is in HISTORY.md
    fixes #1019 and #968 flipped their ops.eq rows to `match` when they
    landed (2026-10-25); #1021's doubly-indirect O_TRUNC row matches on a
    sparse fixture the comparing runner plants (2026-10-25; #1022's truncate row and #1023's `peer` row, a held fd
-   across O_TRUNC, match since 2026-10-25), and #1067
-   (printf) and #1070 (sendfile to a file) are writers the rows avoid.
+   across O_TRUNC, match since 2026-10-25). The cat copy row compares
+   ext2-to-ext2 bytes through BusyBox's fallback from sendfile (#1070).
+   The writer rows still avoid printf (#1067).
    Signals: #999 (host-Linux conformance suite; done 2026-11-06, its #946 row runs on the kernel since #1373), #1000 (one delivery
    chokepoint and `SignalDelivery.tla`, designed with #992; done 2026-11-06,
    `signal_deliver`; #1379 won back 80 B and 64 B of its text, done 2026-11-06); #948 (the

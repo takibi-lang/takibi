@@ -64,4 +64,14 @@ row truncate_dind
   truncate_dind/f file size=276480
 3 write truncate_dind/f ab -> 0
   truncate_dind/f file size=2
+row cat_copy
+1 mkdir cat_copy -> 0
+  cat_copy dir
+2 write cat_copy/src correct-bytes -> 0
+  cat_copy/src file size=13
+3 write cat_copy/dst previous-longer-content -> 0
+  cat_copy/dst file size=23
+4 copy cat_copy/dst cat_copy/src -> 0
+  cat_copy/dst file size=13
+  cat_copy/src file size=13
 eq done

@@ -9,6 +9,7 @@
 #   mkdir P | rmdir P | unlink P | rename A B
 #   write P TEXT        open(O_CREAT|O_TRUNC) and write TEXT
 #   fill P N            write the BusyBox binary's first N KiB (N <= 1024), dd bs=1024
+#   copy P SRC          cat SRC with stdout redirected to a distinct P
 #   overwrite P SRC     write SRC's bytes at offset 0 without O_TRUNC
 #   files D N           create N empty files with 200-byte names in D
 #   truncate P          truncate -s 0: ftruncate(2) to length 0
@@ -22,10 +23,8 @@
 # The script runs from /etc/init.sh after /bin/user_payload has released its
 # ENOSPC fillers; the rows share the image's free space (about 360 blocks
 # since #1413 shrank /pad by 128).
-# Every command writing a file is an external one (/bin/busybox APPLET):
-# printf writes nothing on the guest (#1067) and cat's sendfile goes to the
-# console (#1070). (dup3 duplicates any file descriptor; the earlier note
-# here that it served only stdin/stdout was wrong, #1023.)
+# File writes use external BusyBox applets. The copy row exercises cat's
+# read/write fallback when its sendfile destination is an ext2 file.
 
 row base match -
 mkdir base
@@ -74,3 +73,9 @@ row truncate_dind match #1021
 mkdir truncate_dind
 adopt truncate_dind/f
 write truncate_dind/f ab
+
+row cat_copy match #1070
+mkdir cat_copy
+write cat_copy/src correct-bytes
+write cat_copy/dst previous-longer-content
+copy cat_copy/dst cat_copy/src

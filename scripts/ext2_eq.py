@@ -90,6 +90,7 @@ OPS = {
     "rmdir": (("path",), 'rmdir "$R/{0}"'),
     "write": (("path", "text"), '$B echo -n {1} >"$R/{0}"'),
     "fill": (("path", "count"), None),
+    "copy": (("path", "path"), '$B cat "$R/{1}" >"$R/{0}"'),
     "overwrite": (("path", "path"), '$B dd if="$R/{1}" of="$R/{0}" conv=notrunc 2>/dev/null'),
     # ftruncate(fd, 0) after open(O_WRONLY|O_CREAT|O_NONBLOCK) (#1022)
     "truncate": (("path",), '$B truncate -s 0 "$R/{0}"'),
@@ -149,6 +150,8 @@ def parse(text):
                 raise EqError(f"line {lineno}: text {arg!r} is not [A-Za-z0-9_.-]+")
             if kind == "count" and not re.fullmatch(r"[0-9]{1,4}", arg):
                 raise EqError(f"line {lineno}: count {arg!r}")
+        if op == "copy" and args[0] == args[1]:
+            raise EqError(f"line {lineno}: copy needs distinct destination and source")
         # `fill` copies the first N KiB of the BusyBox binary; past its end
         # dd would write a short file and the row would differ for that
         if op == "fill" and int(args[1]) > FILL_MAX:
@@ -177,9 +180,7 @@ def gen_sh(rows):
         # the guest; on the host BusyBox runs them in-process (B empty)
         'B="${2-/bin/busybox}"',
         # the bytes `fill` writes: the BusyBox binary, the same file on both
-        # sides. dd copies them with read(2) and write(2): printf writes
-        # nothing on the guest (#1067), and cat's sendfile goes to the
-        # console whatever fd 1 is (#1070)
+        # sides. dd limits the copy to the requested number of blocks.
         'S="${3-/bin/busybox}"',
         # the image root, where `adopt` finds the planted fixture: / on the
         # guest, the scratch root (seeded with the same file) on the host
@@ -545,26 +546,29 @@ def self_test():
     assert "$B echo -n x >\"$R/a/f\"" in script, script
     for bad in ("mkdir a\n", "row a maybe -\n", "row a match -\nmkdir b\n",
                 "row a match -\nwrite a/f 'x y'\n", "row a match -\nrow a match -\n",
-                "row a match -\nfrob a\n", "row a match -\nfill a/f 1025\n"):
+                "row a match -\nfrob a\n", "row a match -\nfill a/f 1025\n",
+                "row a match -\ncopy a/f a/f\n"):
         try:
             parse(bad)
         except EqError:
             continue
         raise AssertionError(f"accepted {bad!r}")
-    # Every file the script writes is written by an external /bin/busybox
-    # applet: `printf` writes nothing on the guest (#1067) and `cat`'s
-    # sendfile reaches the console whatever fd 1 is (#1070), so a row would
-    # differ for the wrong reason (#1034's first fill). Not dup3: it serves
-    # any descriptor (#1023's peer row shares fd 3 through it).
+    # Every file write uses an external BusyBox applet. Keep printf out
+    # while its fcntl probe is unsupported. The dedicated copy operation
+    # must exercise cat with redirected stdout.
     every = parse("row a match -\nmkdir a\nwrite a/f x\nfill a/g 13\n"
-                  "overwrite a/f a/g\ntruncate a/g\nfiles a 2\npeer a/p\n")
-    for line in gen_sh(every).splitlines():
+                  "overwrite a/f a/g\ncopy a/copy a/f\ntruncate a/g\nfiles a 2\npeer a/p\n")
+    generated = gen_sh(every)
+    assert re.findall(r'^\$B cat .*$', generated, re.M) == [
+        '$B cat "$R/a/f" >"$R/a/copy" 2>/dev/null'
+    ], generated
+    for line in generated.splitlines():
         for part in re.split(r";|&&|\bdo\b", line):
             # `exec 3<>` only opens the file the external writers then use
             if re.search(r'>"\$R/', part) and not part.strip().startswith(("$B ", "exec 3<>")):
                 raise AssertionError(f"a file written by a non-external command: {line!r}")
-            if re.search(r'\b(cat|printf)\b', part):
-                raise AssertionError(f"cat (sendfile, #1070) or printf (#1067): {line!r}")
+            if re.search(r'\bprintf\b', part):
+                raise AssertionError(f"printf is unsupported: {line!r}")
     # `adopt` moves the planted fixture, once (#1021); the fixture reaches
     # past the singly-indirect range, or the row tests no doubly-indirect
     # release
@@ -586,8 +590,22 @@ def self_test():
     assert row_differences("a", files, files, {}, {}) == []
     assert len(row_differences("a", files, other, {}, {})) == 1
     assert row_differences("b", files, other, {}, {}) == []
+    # A copy must match its exit status and bytes independently. Equal sizes
+    # and a successful log cannot hide incorrect destination contents.
+    source = "/eq/cat_copy/src"
+    destination = "/eq/cat_copy/dst"
+    contents = ("reg", 0o644, 13, 1, 2, None, b"correct-bytes")
+    expected = {source: contents, destination: contents}
+    wrong = {**expected, destination: contents[:-1] + (b"changed-bytes",)}
+    success = {"cat_copy": ["4 copy cat_copy/dst cat_copy/src -> 0"]}
+    failure = {"cat_copy": ["4 copy cat_copy/dst cat_copy/src -> 1"]}
+    assert row_differences("cat_copy", expected, expected, success, success) == []
+    errors = row_differences("cat_copy", wrong, expected, success, success)
+    assert len(errors) == 1 and errors[0].startswith(destination + ":"), errors
+    errors = row_differences("cat_copy", expected, expected, failure, success)
+    assert len(errors) == 1 and errors[0].startswith("log:"), errors
     report_pass("ext2-eq self-test", "parser, generator, log and row diff",
-                cases=12)
+                cases=16)
 
 
 def main(argv):
