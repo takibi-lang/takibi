@@ -260,8 +260,9 @@ On success, `pipe2` writes two four-byte descriptors and
 entire result span before writing. A failed store can leave earlier
 writes visible. On a store fault `pipe2` also closes both descriptors.
 The pipe wrap fixture uses both descriptors and checks eight untouched
-bytes on either side of the pair. The clock fixture reads both fields
-for realtime and monotonic clocks without checking adjacent bytes.
+bytes on either side of the pair. For realtime and monotonic clocks,
+the clock fixture reads both fields and checks eight untouched bytes
+on either side of the result.
 Neither fixture checks partial-store behavior.
 
 `accept` and `accept4` return the descriptor without accessing their

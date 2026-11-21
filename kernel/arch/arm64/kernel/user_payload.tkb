@@ -1705,8 +1705,13 @@ fn realtime_clock_probe_alone() !{unsafe} {
 
 // One clock as nanoseconds; fails the probe on an error or a bad timespec.
 fn realtime_probe_read_ns(clock: usize) -> usize !{unsafe} {
-    let mut ts: [u8; 16];
-    payload_clock(src_loc(), clock, ts as []u8);
+    let mut bytes: [u8; 32];
+    for index: usize in 0..<32 { bytes[index] = 0xAD; }
+    let ts = bytes[8..<24];
+    payload_clock(src_loc(), clock, ts);
+    for index: usize in 0..<8 {
+        fail_if(src_loc(), bytes[index] != 0xAD || bytes[24 + index] != 0xAD);
+    }
     let ts_base: *u8 = ts as *u8;
     let seconds: usize = payload_read_u64(ts_base, 0);
     let nanos: usize = payload_read_u64(ts_base, 8);
