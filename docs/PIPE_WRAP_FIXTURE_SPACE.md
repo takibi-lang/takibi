@@ -3,9 +3,8 @@
 The kernel-only EL0 probe keeps 1024 bytes queued between two writes. The
 second write and the final read each straddle the 4096-byte pipe ring
 boundary. The final read checks the three byte patterns in order and the
-eight destination bytes on each side. Existing pipe limits and allocation
-workload are unchanged. The probe uses the ordinary pipe API and closes
-both ends.
+eight destination bytes on each side. The probe uses the ordinary pipe API to open one pipe and closes both
+ends. The existing allocation policy and pipe limits are unchanged.
 
 | Boundary | Published baseline | With probe |
 | --- | ---: | ---: |
