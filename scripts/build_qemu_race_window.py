@@ -337,6 +337,46 @@ WINDOWS["651-no-peer"] = {
   '    while (true) { wfi(); }\n'
   '}\n')],
 }
+# This overlay delays one real visit without changing the drain or reuse policy.
+SIGNAL_DRAIN_FILE = "kernel/signal_contention_evidence.tkb"
+WINDOWS["1517-admitted-drain"] = {
+    "spin": None,
+    "check": [],
+    "prepare": [
+        (SIGNAL_DRAIN_FILE,
+         "    let record: &mut ProcessRecord = &signal_probe_record;\n"
+         "    let bit: usize = signal_probe_peer_bit(cpu);\n",
+         "    if (cpu == 1) {\n"
+         "        kernel_boot_log(\"signal drain fixture: peer admitted\\n\");\n"
+         "    }\n"
+         "    let record: &mut ProcessRecord = &signal_probe_record;\n"
+         "    let bit: usize = signal_probe_peer_bit(cpu);\n"),
+        (SIGNAL_DRAIN_FILE,
+         "    signal_probe_leave(visit);\n",
+         "    if (cpu == 1) {\n"
+         "        let signal_drain_fixture_start: i64 = read_cntpct();\n"
+         "        while ((atomic_word_load(&signal_probe_gate) & SIGNAL_PROBE_GATE_STATE) != 3 &&\n"
+         "               read_cntpct() - signal_drain_fixture_start < read_cntfrq() * 15) {}\n"
+         "    }\n"
+         "    signal_probe_leave(visit);\n"
+         "    if (cpu == 1) {\n"
+         "        if ((atomic_word_load(&signal_probe_gate) & SIGNAL_PROBE_GATE_STATE) == 3) {\n"
+         "            kernel_boot_log(\"signal drain fixture: peer left abandoned record\\n\");\n"
+         "        } else {\n"
+         "            kernel_boot_log(\"signal drain fixture: departure did not preserve abandonment\\n\");\n"
+         "        }\n"
+         "    }\n"),
+        (SIGNAL_DRAIN_FILE,
+         "    atomic_word_store(&signal_probe_gate, SIGNAL_PROBE_OPEN);\n",
+         "    kernel_boot_log(\"signal drain fixture: opened\\n\");\n"
+         "    atomic_word_store(&signal_probe_gate, SIGNAL_PROBE_OPEN);\n"),
+        (SIGNAL_DRAIN_FILE,
+         "    signal_probe_reset(drained);\n",
+         "    kernel_boot_log(\"signal drain fixture: reset\\n\");\n"
+         "    signal_probe_reset(drained);\n"),
+    ],
+}
+
 WINDOWS["651-resume-old"] = {
     "spin": None,
     "check": WINDOWS["651-no-peer"]["check"] + [('lib/occupancy.tkb',

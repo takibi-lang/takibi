@@ -5,6 +5,10 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT_DIR="${KERNEL_PROBE_REFUSALS_ARTIFACT_DIR:-${TAKIBI_LANE_ARTIFACT_ROOT:-$REPO_ROOT/_build}/kernel-probe-refusals-qemu}"
 ELF="${KERNEL_PROBE_REFUSALS_ELF:-$REPO_ROOT/kernel/build/qemu/kernel-race-651-no-peer-reverted.elf}"
+if [ "${KERNEL_PROBE_REFUSALS_CONTROL:-normal}" = admitted-drain ]; then
+    ELF="$REPO_ROOT/kernel/build/qemu/kernel-race-1517-admitted-drain-armed.elf"
+    ARTIFACT_DIR="$ARTIFACT_DIR/admitted-drain"
+fi
 mkdir -p "$ARTIFACT_DIR"
 trap 'status=$?; if [ "$status" -ne 0 ]; then bash "$REPO_ROOT/scripts/archive_kernel_failure.sh" "$ARTIFACT_DIR" "${ARTIFACT_DIR}-failures" "probe refusal controls failed"; fi' EXIT
 if [ "${KERNEL_PROBE_REFUSALS_CONTROL:-normal}" = old-baseline ]; then
@@ -53,7 +57,17 @@ disk = artifacts / 'ext2.img'
 shutil.copyfile(root / 'kernel/build/user/ext2.img', disk)
 uart = artifacts / 'uart.log'
 uart.write_bytes(b'')
+admitted_drain = os.environ.get('KERNEL_PROBE_REFUSALS_CONTROL') == 'admitted-drain'
 marker = 'probe-ticks: missing-peer controls complete'
+departed = 'signal drain fixture: peer left abandoned record'
+next_probe = 'world stop from a peer: '
+
+def capture_complete(text):
+    if admitted_drain:
+        return departed in text and any(
+            line.startswith(next_probe) for line in text.splitlines())
+    return marker in text
+
 command = [str(root / 'scripts/qemu.sh'), '-machine', 'virt', '-cpu', 'cortex-a76',
            '-smp', os.environ['TAKIBI_QEMU_SMP'], '-m', '1024', '-display', 'none', '-monitor', 'none',
            '-serial', 'file:' + str(uart),
@@ -70,7 +84,7 @@ signal.signal(signal.SIGTERM, interrupted)
 with (artifacts / 'qemu.log').open('wb') as log:
     process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
     try:
-        while marker not in uart.read_text(errors='replace'):
+        while not capture_complete(uart.read_text(errors='replace')):
             if process.poll() is not None:
                 raise SystemExit('FAIL probe-refusals: QEMU exited before all probes returned')
             if time.monotonic() - start >= 180:
@@ -89,6 +103,33 @@ if subprocess.run([sys.executable, str(root / 'scripts/ext2_postcheck.py'),
                    '--out', str(artifacts), '--uart-log', str(uart)]).returncode:
     raise SystemExit('FAIL probe-refusals: the guest\'s ext2 disk failed its postcheck')
 text = uart.read_text(errors='replace').replace('\r', '')
+if admitted_drain:
+    lines = text.splitlines()
+    opened = 'signal drain fixture: opened'
+    admitted = 'signal drain fixture: peer admitted'
+    timed_out = 'signal contention stage: secondary-never-left'
+    failed = 'signal contention: failed'
+    reset = 'signal drain fixture: reset'
+
+    def validate_drain(events):
+        ordered = (opened, admitted, timed_out, failed)
+        if any(events.count(event) != 1 for event in (*ordered, departed)):
+            return False
+        if any(events.index(a) >= events.index(b)
+               for a, b in zip(ordered, ordered[1:])):
+            return False
+        return reset not in events and any(
+            event.startswith(next_probe) for event in events[events.index(failed) + 1:])
+
+    if not validate_drain(lines):
+        raise SystemExit('FAIL probe-refusals: admitted peer drain evidence incomplete')
+    # Change only the observed trace. The guest never runs a reuse mutation.
+    for event in (opened, reset):
+        if validate_drain(lines + [event]):
+            raise SystemExit('FAIL probe-refusals: drain oracle accepted reuse evidence')
+    print('PASS probe-refusals: admitted peer timed out, left an abandoned '
+          f'record, and boot continued; synthetic reuse refused; {time.monotonic() - start:.1f}s')
+    raise SystemExit(0)
 names = ('console contention', 'schedule contention',
          'pid contention', 'fd refcount contention', 'asid contention',
          'page contention', 'freelist contention', 'pool contention',
