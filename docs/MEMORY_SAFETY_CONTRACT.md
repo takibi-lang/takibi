@@ -250,9 +250,9 @@ extent. The kernel has no separate `fstat` dispatcher arm.
 The `getresuid` and `getresgid` paths write real, effective and saved
 IDs in order, each to a separately checked four-byte destination. A
 fault on a later destination can leave earlier IDs written. The
-credentials fixture checks all three values for both calls and
-`getresuid` with an invalid first pointer. It does not check adjacent
-bytes or faulting later destinations.
+credentials fixture checks all three values and the four untouched
+bytes after each ID for both calls. It also checks `getresuid` with
+an invalid first pointer. Faulting later destinations are untested.
 
 On success, `pipe2` writes two four-byte descriptors and
 `clock_gettime` writes two eight-byte timespec fields. Both check the

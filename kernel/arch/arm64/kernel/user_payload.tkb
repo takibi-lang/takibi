@@ -2081,7 +2081,7 @@ fn credentials_probe_alone() !{unsafe} {
 }
 
 // getresgid (group) or getresuid into three 8-byte cells; true when the call
-// returned 0 and all three equal `want`.
+// returned 0, all three IDs equal `want`, and their sentinels are intact.
 fn credentials_probe_res(group: bool, output: borrow uninit [u8; 24..], want: usize)
         -> bool !{unsafe} ensures init(output[0..<24]) {
     for byte: usize in 0..<24 { output[byte] = 0xFF; }
@@ -2094,7 +2094,10 @@ fn credentials_probe_res(group: bool, output: borrow uninit [u8; 24..], want: us
     }
     if (answer != 0) { return false; }
     for cell: usize in 0..<3 {
-        if ((payload_read_u64(base, cell * 8) & 0xFFFFFFFF) != want) { return false; }
+        let result: usize = payload_read_u64(base, cell * 8);
+        if ((result & 0xFFFFFFFF) != want || (result >> 32) != 0xFFFFFFFF) {
+            return false;
+        }
     }
     return true;
 }
