@@ -27,3 +27,14 @@ appeared in the source inventory and was omitted from the resolved call
 graph. The frame gate rejected that added signature. Remeasure when the
 fact generation affects kernel code or the frame capabilities change
 their storage workload.
+
+## FDT base helper retirement
+
+The boot log and native FDT fixture read the first bank's base from the
+existing region result. Both retain zero for an invalid or out-of-range
+result. The unused integer-returning helper leaves the frame API ratchet.
+
+Compared with published `ab79a8441`, normal linked text falls from
+840480 to 840416 bytes on QEMU and from 4235964 to 4235908 bytes on RPi5.
+Data, BSS, usable RAM starts and the five linked allocator expectations
+are unchanged. The mint file set is unchanged.

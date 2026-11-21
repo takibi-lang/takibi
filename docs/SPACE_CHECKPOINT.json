@@ -2,11 +2,11 @@
   "date": "2026-11-21",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "4d1f8f9e4bb8eaf09dee385d58d66eeacac00b9a2cc3dc442422c15c849625af",
-  "workload": "Existing fork, mmap, and user address-space isolation boot paths. Both normal linked images measured against 865e8cf05.",
+  "source_sha256": "07ca82bd07b0ba58aec05d7742670005244c526daf3d52553f4aafd102034877",
+  "workload": "Normal QEMU and RPi5 kernels linked against ab79a8441. The existing FDT boot log reads the first bank through the region result.",
   "evidence": [
-    "docs/MMU_L3_PUBLICATION.md"
+    "docs/FRAME_API_SPACE_REVIEW.md"
   ],
-  "assessment": "Branch presence replaces physical addresses at two callers. Linked text, data, BSS, usable RAM starts, and all five allocator expectations are unchanged.",
-  "next_trigger": "Remeasure if the branch lookup, probe mappings, or table allocation workload changes."
+  "assessment": "Linked text falls by 64 bytes on QEMU and 56 bytes on RPi5. Data, BSS, usable RAM starts and five allocator expectations are unchanged.",
+  "next_trigger": "Remeasure when FDT region logging or memory-bank allocation changes."
 }
