@@ -200,10 +200,10 @@ owners are TaskMutex, the spare stack stays masked). #980
    `IoHandle` as `usb_xhci` did (#720), which is also "drivers out of the
    frame" in #1017; then section regions (#777, awaiting its decision) take
    `stack_poison.tkb`'s last integer ranges and the DTB blob. The frame API
-   rule holds as `scripts/check_frame_api.py` (#1018, done 2026-10-25):
-   eight ratchet exports remain, two of them (`mmu_user_l3_physical`,
-   `fdt_memory_first_base`) to owners under #637. `make
-   raw-site-counts` picks the next file. #750 (consolidating the built-ins)
+   rule is checked on both targets by `scripts/buildcheck_frame_api.py`
+   (#1018). Six reviewed raw exports remain after the FDT base helper
+   retirement. The `mmu_user_l3_physical` ownership work remains under
+   #637. `make raw-site-counts` picks the next file. #750 (consolidating the built-ins)
    follows #732.
 2. **The process record.** Threads sharing an address space are #742
    stages 2-3, after the preemption flip.
