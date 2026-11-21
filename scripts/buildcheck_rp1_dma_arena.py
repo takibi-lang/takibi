@@ -53,6 +53,10 @@ def problems(symbols, names):
         if address < start or address + size > end:
             found.append(f"{name} at {address:#x}+{size:#x} is outside the arena; "
                          f"add .bss.{name} to link.ld")
+    if "msc_data_receive" in symbols:
+        address, size = symbols["msc_data_receive"]
+        if address != start or address % 0x10000 != 0 or size != 0x10000:
+            found.append("msc_data_receive must occupy the arena's first aligned 64 KiB")
     if present == 0:
         found.append("no RP1 DMA object in the image: the declaration scan found nothing")
     return found

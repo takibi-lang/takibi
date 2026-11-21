@@ -11,3 +11,8 @@ ctrl-unaligned foreign
 ctrl-other-ep  foreign
 ctrl-other-slt foreign
 ctrl-as-cmd    foreign
+bulk-full      match
+bulk-partial   match
+bulk-empty     match
+bulk-residual  match
+bulk-no-event  match

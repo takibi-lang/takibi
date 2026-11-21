@@ -206,8 +206,20 @@ fn xhci_receive_configuration(guard: borrow BlockDeviceGuard[&block_device_lock]
     }
 }
 
+linear struct MscReceivedData[unit: usize] {
+    private cpu: *MscDataReceiveCpu;
+    private status: u32;
+    private requested: {1..<65537 as u32};
+}
+
+must_use variant MscReceiveDataResult {
+    Completed(MscReceivedData[0]);
+    RestartRequired;
+    ControllerUnusable;
+}
+
 fn msc_data_receive_once(guard: borrow BlockDeviceGuard[&block_device_lock], length: {1..<65537 as u32})
-        -> MscDataReceiveResult !{unsafe} {
+        -> MscReceiveDataResult !{unsafe} {
     static_assert(sizeof(MscDataReceive) ==
                   MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE,
                   "the protected receive extent covers one maximal USB transfer");
@@ -223,26 +235,74 @@ fn msc_data_receive_once(guard: borrow BlockDeviceGuard[&block_device_lock], len
                     MscTimeoutResult::RestartRequired => {
                         let restored = dma_finish_owned_rx(device, MscDataReceive);
                         msc_data_put(MscDataReceiveAuthority::Cpu(restored));
-                        return MscDataReceiveResult::RestartRequired;
+                        return MscReceiveDataResult::RestartRequired;
                     }
                     MscTimeoutResult::ControllerUnusable => {
                         msc_data_put(MscDataReceiveAuthority::Device(device));
-                        return MscDataReceiveResult::ControllerUnusable;
+                        return MscReceiveDataResult::ControllerUnusable;
                     }
                 }
             }
             let restored = dma_finish_owned_rx(device, MscDataReceive);
-            msc_data_put(MscDataReceiveAuthority::Cpu(restored));
-            return MscDataReceiveResult::Completed(completion);
+            let mut received: MscReceivedData[0] = { restored, completion, length };
+            return MscReceiveDataResult::Completed(received);
         }
         MscDataReceiveAuthority::Device(stale) => {
             msc_data_fail_device(stale);
-            return MscDataReceiveResult::ControllerUnusable;
+            return MscReceiveDataResult::ControllerUnusable;
         }
     }
 }
 
 // The CSW is always 13 bytes (USB MSC BOT 1.0, 5.2).
+fn msc_data_receive_code(guard: borrow BlockDeviceGuard[&block_device_lock], length: {1..<65537 as u32})
+        -> MscDataReceiveResult !{unsafe} {
+    match msc_data_receive_once(guard, length) {
+        MscReceiveDataResult::Completed(received) => {
+            let code: u32 = received.status >> 24;
+            msc_data_put(MscDataReceiveAuthority::Cpu(received.cpu));
+            return MscDataReceiveResult::Completed(code);
+        }
+        MscReceiveDataResult::RestartRequired => { return MscDataReceiveResult::RestartRequired; }
+        MscReceiveDataResult::ControllerUnusable => { return MscDataReceiveResult::ControllerUnusable; }
+    }
+}
+
+fn msc_received_data_phase_completed(received: borrow MscReceivedData[0]) -> bool {
+    let code: u32 = received.status >> 24;
+    return code == 1 || code == 13;
+}
+
+fn msc_received_discard(received: sink MscReceivedData[0]) {
+    msc_data_put(MscDataReceiveAuthority::Cpu(received.cpu));
+}
+
+// The CPU token and the matching event travel together. Backing storage
+// is device-initialized only for the reported bytes in this receive.
+fn msc_received_copy_full(received: sink MscReceivedData[0],
+                          output: borrow uninit []u8) -> MscCommandResult
+        ensures match result { MscCommandResult::Ok => init(output), _ => true } {
+    let requested: u32 = received.requested;
+    match xhci_bulk_receive_length(received.status, requested) {
+        XhciBulkReceiveLength::Invalid => {
+            msc_received_discard(received);
+            return MscCommandResult::CompletedError(2);
+        }
+        XhciBulkReceiveLength::Received(amount) => {
+            let actual: usize = amount as usize;
+            if (amount != requested || actual != output.len || actual > 65536) {
+                msc_received_discard(received);
+                return MscCommandResult::CompletedError(2);
+            }
+            let bytes = dma_cpu_slice(received.cpu, MscDataReceive);
+            let copied: usize = slice_copy(output, bytes[0..<actual]);
+            msc_received_discard(received);
+            if (copied != output.len) { return MscCommandResult::CompletedError(2); }
+            return MscCommandResult::Ok;
+        }
+    }
+}
+
 fn msc_csw_receive_once(guard: borrow BlockDeviceGuard[&block_device_lock]) -> MscDataReceiveResult !{unsafe} {
     static_assert(sizeof(MscCswReceive) >= 13,
                   "the protected CSW extent covers its transfer");

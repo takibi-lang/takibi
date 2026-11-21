@@ -20,6 +20,13 @@ fn ev_dw3(trb_type: u32, endpoint: u32, slot: u32) -> u32 {
     return (trb_type << 10) | (endpoint << 16) | (slot << 24) | 1;
 }
 
+fn check_bulk_length(status: u32, requested: u32, expected: u32) -> bool {
+    match xhci_bulk_receive_length(status, requested) {
+        XhciBulkReceiveLength::Received(actual) => { return actual == expected; }
+        XhciBulkReceiveLength::Invalid => { return expected == 0xFFFFFFFF; }
+    }
+}
+
 fn app_main() {
     // A ring above 4 GiB, so DWORD1 matters.
     let ring: usize = 0x100002000;
@@ -44,4 +51,11 @@ fn app_main() {
     say("ctrl-other-ep ", xhci_event_matches(ctrl, lo + 96, hi, ev_dw3(32, 3, 2)));
     say("ctrl-other-slt", xhci_event_matches(ctrl, lo + 96, hi, ev_dw3(32, 1, 4)));
     say("ctrl-as-cmd   ", xhci_event_matches(ctrl, lo + 96, hi, ev_dw3(33, 1, 2)));
+
+    say("bulk-full     ", check_bulk_length(1 << 24, 65536, 65536));
+    say("bulk-partial  ", check_bulk_length((13 << 24) | 1024, 65536, 64512));
+    say("bulk-empty    ", check_bulk_length((13 << 24) | 1024, 1024, 0));
+    say("bulk-residual ", check_bulk_length((13 << 24) | 1025, 1024, 0xFFFFFFFF));
+    say("bulk-no-event ", check_bulk_length(0, 1024, 0xFFFFFFFF));
+
 }

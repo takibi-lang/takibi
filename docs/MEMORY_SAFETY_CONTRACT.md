@@ -177,6 +177,13 @@ builds. Physical slot exclusion depends on the acquire compare-exchange
 and release store. Destination mapping, COW and the PAN access window
 retain the premises of the common copy-out boundary.
 
+On RPi5, a fixed-size USB READ(10) finishes with a checked destination
+only after the current receive reports the full byte extent and the
+matching CSW reports a complete successful command. The linear receipt
+holds the DMA CPU token until copy or discard. The aligned receive
+placement, event fields, and cache assumptions are recorded in
+[the READ(10) evidence](XHCI_READ10_SPACE.md).
+
 The remaining review includes ring and frame consumers, allocation-backed
 exports and scalar ABI writers. In particular, TCP RX still needs
 current-receive initialization evidence across reacquisition, and fresh

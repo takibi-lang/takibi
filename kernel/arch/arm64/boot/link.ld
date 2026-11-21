@@ -42,6 +42,8 @@ SECTIONS {
            that no RP1 DMA object was left out of this list. */
         . = ALIGN(0x40000);
         rp1_dma_arena_start = .;
+        /* READ(10) uses a single Normal TRB for up to 64 KiB. */
+        *(.bss.msc_data_receive)
         *(.bss.gem_rx_ring)
         *(.bss.gem_tx_ring)
         *(.bss.gem_pkt_pool)
@@ -58,7 +60,6 @@ SECTIONS {
         *(.bss.xhci_input_ctx)
         *(.bss.xhci_device_ctx)
         *(.bss.xhci_control_receive)
-        *(.bss.msc_data_receive)
         *(.bss.msc_csw_receive)
         *(.bss.msc_cbw_transmit)
         *(.bss.msc_data_transmit)

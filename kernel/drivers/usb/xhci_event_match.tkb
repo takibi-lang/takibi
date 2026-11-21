@@ -62,3 +62,16 @@ fn xhci_event_matches(want: XhciEventWant, dw0: u32, dw1: u32,
     }
     return true;
 }
+
+// For a final Transfer Event from one Normal TRB without Event Data,
+// DWORD2 carries the completion code and the residual byte count.
+must_use variant XhciBulkReceiveLength { Received(u32); Invalid; }
+
+fn xhci_bulk_receive_length(status: u32, requested: u32) -> XhciBulkReceiveLength {
+    let code: u32 = status >> 24;
+    let remaining: u32 = status & 0xFFFFFF;
+    if ((code != 1 && code != 13) || remaining > requested) {
+        return XhciBulkReceiveLength::Invalid;
+    }
+    return XhciBulkReceiveLength::Received(requested - remaining);
+}

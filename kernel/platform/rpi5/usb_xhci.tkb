@@ -355,7 +355,7 @@ fn xhci_event_dequeue_release(dequeue_dma: usize) {
 // one (GitHub issue #720). Skipped events of the wanted type are counted
 // in xhci_foreign_events. Advances ERDP past everything consumed, which
 // the controller requires to keep delivering events. Returns the
-// completion code (DWORD2 bits 31:24), or 0 if no matching event turned up.
+// complete status word (DWORD2), or 0 if no matching event turned up.
 // GitHub issue #1159 (1a): what usb_await_event records -- the matched
 // event's DWORD3 (xhci_enable_slot reads the slot id from it) and the count
 // of skipped events of the wanted type -- is reached only with the block
@@ -404,7 +404,7 @@ fn usb_await_event(guard: borrow BlockDeviceGuard[&block_device_lock], want: Xhc
 
         if (xhci_event_matches(want, dw0, dw1, dw3)) {
             guarded_ref(guard, xhci_event_seen.last_dw3) = dw3;
-            return (dw2 >> 24) & 0xFF;
+            return dw2;
         }
         if (((dw3 >> 10) & 0x3F) == want.trb_type) {
             guarded_ref(guard, xhci_event_seen.foreign) =
@@ -490,8 +490,7 @@ private fn usb_ctrl_xfer(guard: borrow BlockDeviceGuard[&block_device_lock], bm_
 // ring, then that endpoint's doorbell, then one Transfer Event. ISP
 // (Interrupt on Short Packet) is set so a device that returns fewer
 // bytes than asked still raises the event rather than leaving the
-// transfer outstanding. Returns the completion code -- 1 is Success and
-// 13 is Short Packet, both of which mean the data arrived.
+// transfer outstanding. Returns the Transfer Event's status word.
 // Private for the same reason as usb_ctrl_xfer: an IN transfer is submitted
 // through usb_bulk_in, an OUT one through usb_bulk_out.
 private fn usb_bulk_xfer(guard: borrow BlockDeviceGuard[&block_device_lock], dir_in: bool, buf_dma: usize, length: u32) -> u32 !{unsafe} {
@@ -536,7 +535,7 @@ private fn usb_bulk_xfer(guard: borrow BlockDeviceGuard[&block_device_lock], dir
     td[0] = normal;
     td[1] = normal;
     td[2] = normal;
-    return xhci_ring_submit(guard, ring, guarded_ref(guard, xhci_msc_device.slot_id), dci as u32, trb_idx, trb_idx,
+    return xhci_ring_submit_status(guard, ring, guarded_ref(guard, xhci_msc_device.slot_id), dci as u32, trb_idx, trb_idx,
                             5000, 1, td as [Trb; 3..]);
 }
 
@@ -766,11 +765,11 @@ must_use variant MscDataReceiveResult {
     ControllerUnusable;
 }
 
-private fn msc_csw_receive_attempt(guard: borrow BlockDeviceGuard[&block_device_lock], remaining_stall_retries: usize)
+private fn msc_csw_receive_attempt(guard: borrow BlockDeviceGuard[&block_device_lock], remaining_stall_retries: usize, full_read: bool)
         -> MscCommandResult !{unsafe} {
-    let mut completion: u32 = 0;
+    let mut status: u32 = 0;
     match msc_csw_receive_once(guard) {
-        MscDataReceiveResult::Completed(code) => { completion = code; }
+        MscDataReceiveResult::Completed(word) => { status = word; }
         MscDataReceiveResult::RestartRequired => {
             return MscCommandResult::RestartRequired;
         }
@@ -778,6 +777,7 @@ private fn msc_csw_receive_attempt(guard: borrow BlockDeviceGuard[&block_device_
             return MscCommandResult::ControllerUnusable;
         }
     }
+    let completion: u32 = status >> 24;
     // Any nonzero code came from a final transfer event, even a STALL.
     if (completion == 6 && remaining_stall_retries > 0) {
         // Retry this CSW, not a fresh CBW: the device still owes the CSW
@@ -785,10 +785,18 @@ private fn msc_csw_receive_attempt(guard: borrow BlockDeviceGuard[&block_device_
         // bounded STALL recoveries after a WRITE(10).
         xhci_recover_bulk_stall(guard, true, guarded_ref(guard, xhci_msc_device.msc_bulk_in_ep), guarded_ref(guard, xhci_msc_device.bulk_in_dci));
         delay_us(50000);
-        return msc_csw_receive_attempt(guard, remaining_stall_retries - 1);
+        return msc_csw_receive_attempt(guard, remaining_stall_retries - 1, full_read);
     }
     if (completion != 1 && completion != 13) {
         return MscCommandResult::CompletedError(3);
+    }
+    if (full_read) {
+        match xhci_bulk_receive_length(status, 13) {
+            XhciBulkReceiveLength::Received(actual) => {
+                if (actual != 13) { return MscCommandResult::CompletedError(3); }
+            }
+            XhciBulkReceiveLength::Invalid => { return MscCommandResult::CompletedError(3); }
+        }
     }
     match msc_csw_take() {
         MscCswReceiveAuthority::Cpu(restored) => {
@@ -803,10 +811,16 @@ private fn msc_csw_receive_attempt(guard: borrow BlockDeviceGuard[&block_device_
             let signature_ok: bool = csw_sig == 0x53425355;
             let tag_ok: bool = csw_tag == xhci_transport(guard).msc_tag;
             let status_ok: bool = bytes[12] == 0;
+            let mut residue: u32 = 0;
+            if (full_read) {
+                for i: usize in 0..<4 {
+                    residue = residue | ((bytes[8 + i] as u32) << ((i * 8) as u32));
+                }
+            }
             msc_csw_put(MscCswReceiveAuthority::Cpu(restored));
             if (signature_ok == false) { return MscCommandResult::CompletedError(4); }
             if (tag_ok == false) { return MscCommandResult::CompletedError(5); }
-            if (status_ok == false) { return MscCommandResult::CompletedError(6); }
+            if (status_ok == false || residue != 0) { return MscCommandResult::CompletedError(6); }
             return MscCommandResult::Ok;
         }
         MscCswReceiveAuthority::Device(stale) => {
@@ -817,7 +831,7 @@ private fn msc_csw_receive_attempt(guard: borrow BlockDeviceGuard[&block_device_
 }
 
 private fn msc_read_csw(guard: borrow BlockDeviceGuard[&block_device_lock]) -> MscCommandResult !{unsafe} {
-    return msc_csw_receive_attempt(guard, 8);
+    return msc_csw_receive_attempt(guard, 8, false);
 }
 
 fn msc_run_command(guard: borrow BlockDeviceGuard[&block_device_lock], cbw: sink MscCbw[0])
@@ -843,7 +857,7 @@ fn msc_run_command(guard: borrow BlockDeviceGuard[&block_device_lock], cbw: sink
 
     if (data_len > 0) {
         if (dir_in) {
-            match msc_data_receive_once(guard, data_len) {
+            match msc_data_receive_code(guard, data_len) {
                 MscDataReceiveResult::Completed(code) => {
                     if (code != 1 && code != 13) {
                         return MscCommandResult::CompletedError(2);
@@ -1560,6 +1574,54 @@ fn msc_scsi_lba_cdb(cbw: borrow MscCbw[0], op: u8, sector: u32, sectors: usize) 
     msc_cbw_set(cbw, 23, (sectors & 0xFF) as u8);
 }
 
+// READ(10) keeps the data CPU token until the matching CSW settles.
+private fn msc_run_read10(guard: borrow BlockDeviceGuard[&block_device_lock],
+                          cbw: sink MscCbw[0], output: borrow uninit []u8)
+        -> MscCommandResult
+        ensures match result { MscCommandResult::Ok => init(output), _ => true } {
+    let requested: {0..<65537 as u32} = cbw.data_len;
+    if (requested > 0) {
+        atomic_word_fetch_add(&msc_command_count, 1);
+        match msc_cbw_send_once(guard) {
+            MscDataReceiveResult::Completed(code) => {
+                if (code != 1) { return MscCommandResult::CompletedError(1); }
+            }
+            MscDataReceiveResult::RestartRequired => { return MscCommandResult::RestartRequired; }
+            MscDataReceiveResult::ControllerUnusable => { return MscCommandResult::ControllerUnusable; }
+        }
+        match msc_data_receive_once(guard, requested) {
+            MscReceiveDataResult::Completed(received) => {
+                if (msc_received_data_phase_completed(received) == false) {
+                    msc_received_discard(received);
+                    return MscCommandResult::CompletedError(2);
+                }
+                let result = msc_csw_receive_attempt(guard, 8, true);
+                match result {
+                    MscCommandResult::Ok => {
+                        let copied = msc_received_copy_full(received, output);
+                        return copied;
+                    }
+                    MscCommandResult::CompletedError(code) => {
+                        msc_received_discard(received);
+                        return MscCommandResult::CompletedError(code);
+                    }
+                    MscCommandResult::RestartRequired => {
+                        msc_received_discard(received);
+                        return MscCommandResult::RestartRequired;
+                    }
+                    MscCommandResult::ControllerUnusable => {
+                        msc_received_discard(received);
+                        return MscCommandResult::ControllerUnusable;
+                    }
+                }
+            }
+            MscReceiveDataResult::RestartRequired => { return MscCommandResult::RestartRequired; }
+            MscReceiveDataResult::ControllerUnusable => { return MscCommandResult::ControllerUnusable; }
+        }
+    }
+    return MscCommandResult::CompletedError(2);
+}
+
 // Same retry policy as RPi3's own disk_read/disk_write for completed errors:
 // one attempt, and then a full msc_recover_transport() (Bulk-Only Mass Storage
 // Reset + clear-halt on both bulk endpoints) followed by exactly one
@@ -1584,7 +1646,7 @@ fn disk_read_sectors(guard: borrow BlockDeviceGuard[&block_device_lock], sector:
     let cbw: MscCbw[0] = msc_cbw_header(guard, transfer_len, true, 10);
     msc_scsi_lba_cdb(cbw, 0x28, sector, sectors);
     let mut retry: bool = false;
-    match msc_run_command(guard, cbw) {
+    match msc_run_read10(guard, cbw, buf) {
         MscCommandResult::Ok => { }
         MscCommandResult::CompletedError(_) => { retry = true; }
         MscCommandResult::RestartRequired => { return DiskIoResult::Err(-1); }
@@ -1594,7 +1656,7 @@ fn disk_read_sectors(guard: borrow BlockDeviceGuard[&block_device_lock], sector:
         msc_recover_transport(guard);
         let cbw: MscCbw[0] = msc_cbw_header(guard, transfer_len, true, 10);
         msc_scsi_lba_cdb(cbw, 0x28, sector, sectors);
-        match msc_run_command(guard, cbw) {
+        match msc_run_read10(guard, cbw, buf) {
             MscCommandResult::Ok => { }
             MscCommandResult::CompletedError(_) => {
                 return DiskIoResult::Err(-1);
@@ -1605,20 +1667,6 @@ fn disk_read_sectors(guard: borrow BlockDeviceGuard[&block_device_lock], sector:
             MscCommandResult::ControllerUnusable => {
                 return DiskIoResult::Err(-1);
             }
-        }
-    }
-    match msc_data_take() {
-        MscDataReceiveAuthority::Cpu(cpu) => {
-            let bytes = dma_cpu_slice(cpu, MscDataReceive);
-            for i: usize in 0..<MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE {
-                if (i < buf.len) {
-                    buf[i] = bytes[i];
-                }
-            }
-            msc_data_put(MscDataReceiveAuthority::Cpu(cpu));
-        }
-        MscDataReceiveAuthority::Device(stale) => {
-            msc_data_fail_device(stale);
         }
     }
     return DiskIoResult::Ok;
@@ -1722,5 +1770,5 @@ fn usb_bulk_in(guard: borrow BlockDeviceGuard[&block_device_lock], span: borrow 
 
 fn usb_bulk_out(guard: borrow BlockDeviceGuard[&block_device_lock], span: borrow DmaDeviceSpan) -> u32 !{unsafe} {
     let bus: usize = rp1_span_bus_address(span);
-    return usb_bulk_xfer(guard, false, bus, dma_span_length(span) as u32);
+    return usb_bulk_xfer(guard, false, bus, dma_span_length(span) as u32) >> 24;
 }
