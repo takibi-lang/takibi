@@ -3,10 +3,10 @@
   "event": "incremental",
   "decision": "reuse",
   "source_sha256": "8c6236a54fed5a290222eee1cfdd2f81b0d25e09ad4703f08f198502af7d1816",
-  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 3467e988: this branch's review, rebound to the merged sources (upstream's record was 2026-11-21 incremental/reuse). Ordinary mkdirat wait and restore, with retained private-stack context. Compare normal linked QEMU and RPi5 kernels against 617f5f2d0 and the earlier bounded QEMU occupancy observation.",
+  "workload": "Existing EL0 pipe wrap fixture and fixed-size RPi5 USB READ(10) receipt, measured together in both normal linked images against d9ad31ea0.",
   "evidence": [
-    "docs/ORDINARY_EXT2_MUTATION_WAIT_SPACE.md"
+    "docs/MEMORY_PUBLICATION_BATCH_SPACE.md"
   ],
-  "assessment": "Reuse the ordinary ext2 wait linked-image and process-pool evidence. The fixed-pair probe policy is checked against existing compiler facts after the two kernel builds. Kernel sources and their compile and link inputs, fixture workloads, image contents, allocation and lifetimes are unchanged.",
-  "next_trigger": "Remeasure after reader-drain waiting or allowing an ext2 reader to sleep while registered, and before claiming a real-device timing result."
+  "assessment": "Reuse the published combined pipe and USB measurements. The new compiler tests and documentation do not change production inputs. The Makefile only adds verifier commands after the existing kernel builds. Compiler and linker inputs, target code, fixture contents, allocation and lifetimes are unchanged.",
+  "next_trigger": "Remeasure if the pipe fixture workload or buffer, USB transfer descriptors or DMA aperture layout changes."
 }
