@@ -1,12 +1,12 @@
 {
-  "date": "2026-11-20",
+  "date": "2026-11-21",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "1809ee8767ba5efa1cf0721722dfe26506930fcfc2c344a38a8be8ca3f36be58",
-  "workload": "PMU interrupt collection and stopped-machine sample reset and report. Compare linked QEMU and RPi5 images with baseline fcc42eb95.",
+  "source_sha256": "3210894c64163f55b01ac44e7a32be55cd075950ca291311a57124ae97fc1dcb",
+  "workload": "Successful getrusage tail and sentinel verification in the existing EL0 payload. Compare the payload, fixture disk, normal linked kernels and static stack records with ab24e7bb5.",
   "evidence": [
-    "docs/PMU_SAMPLE_AUTHORITY_SPACE.md"
+    "docs/SCALAR_ABI_TAIL_FIXTURE_SPACE.md"
   ],
-  "assessment": "Sample retention is unchanged at 32832 bytes. Linked text grows by 68 bytes on QEMU and 60 bytes on RPi5. The PMU handler, sample store and report instruction streams and all four measured stack frames are unchanged. The reset path grows by 12 bytes on both targets.",
-  "next_trigger": "Remeasure if the PMU authority mint, sample buffer layout, or interrupt collection path changes."
+  "assessment": "The EL0 payload gains 320 text bytes and a 192-byte probe frame. The entry frame is unchanged. The compressed disk grows by 171 bytes and RPi5 linked read-only data grows by 160 bytes. QEMU linked text, read-only data and data are byte-identical; both usable RAM starts are unchanged.",
+  "next_trigger": "Remeasure when the scalar ABI fixtures change allocation workload or an embedded payload grows across a reservation boundary."
 }
