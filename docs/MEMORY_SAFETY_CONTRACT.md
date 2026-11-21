@@ -158,16 +158,18 @@ This is a source-backed entry inventory, not complete export certification.
 | procfs file reads | `procfs_render_file` initializes `[0, total)`. With `offset < total`, the read copies `min(total - offset, requested)` bytes from the selected scratch slot and then updates the offset | Renderer input provenance, destination faults and file-offset semantics |
 | ext2 file reads | `Ext2ReadResult::Read(n)` establishes the scratch prefix `[0, n)`. Each iteration copies that prefix before updating the file offset and delivered count | Block/device completion and actual byte fulfillment, destination faults and partial-result semantics |
 | syslog snapshot reads | `kernel_log_snapshot_copy` initializes the prefix it returns. The syscall holds one snapshot guard and copies a chunk from the selected scratch slot only after checking `staged == chunk` | Snapshot construction and guard implementation, destination faults and partial-result semantics |
-| prlimit64 | copy_to_user from constructed scratch bytes; the initial RLIMIT_NOFILE read checks both words and adjacent sentinels | Scratch source lifetime and output cases beyond the initial successful read |
-| uname | copy_to_user from constructed scratch bytes; successful field tails and adjacent sentinels checked by the peer TTY fixture | Source initialization and lifetime proof across scratch reacquisition; other field values and faulting destinations |
+| prlimit64 | Two checked 8-byte stores initialize the full 16-byte output in the borrowed scratch slot before `copy_to_user`. The initial successful RLIMIT_NOFILE read checks both words and adjacent sentinels | Physical slot exclusion, destination faults and output cases beyond the initial successful read |
+| uname | The syscall clears its borrowed scratch buffer, writes six fixed-width fields and passes the first 390 bytes to `copy_to_user`. The successful peer TTY fixture checks all six field tails and adjacent sentinels | Physical slot exclusion, other field values and faulting destinations |
 | user_write_byte/u16/u32/u64 and user_zero_fill | Typed scalar inputs or constant zero; range/COW checks and access windows | All callers and all padding/holes of user ABI records; untouched user bytes are not kernel disclosure |
 | Fresh user pages, including exec/stack and COW copies | [User page publication](PAGE_PUBLICATION.md) checks full initialization of the incoming `PageOwner` at `address_space_map_page` | Allocator and frame identity, COW source lifetime, descriptor visibility and TLB ordering |
 | Retained fork/COW mappings, signal frames, shared backing | Existing-page reference or ABI paths | Reference and teardown lifetimes, and record-specific initialization |
 | Raw/assembly/device output paths | Named mint files and external contracts | Audit bypasses of the typed entry set; confinement is not initialization proof |
 
-For these three scratch-backed paths, `owned_by(SyscallSlot.index, 1)`
-ties the staging buffer and source of `copy_to_user_span` to the same live
-slot borrow. Their scratch initialization facts apply within that call.
+For the five scratch-backed paths in this table,
+`owned_by(SyscallSlot.index, 1)` ties the staging buffer and copy source to
+the same live slot borrow. The procfs, ext2 and syslog paths use
+`copy_to_user_span`. The prlimit64 and uname paths establish initialization
+within the invocation and use `copy_to_user` before releasing the slot.
 The maintained compiler controls exercise a live slot's local view and
 reject a different selector or borrowed slot, a wrong token type, a
 contract on a consuming parameter, and a read without initialization in
