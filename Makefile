@@ -2174,6 +2174,7 @@ $(KERNEL_QEMU_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_
 # build pushes past its budget (#1087, ext2_update_regular_file) fails here
 # rather than first inside a kernelcheck lane.
 _kernelbuild-qemu: kernel-lib-check kernel-verify-exception-frame $(KERNEL_QEMU_ELF) $(KERNEL_DEBUG_METADATA) $(KERNEL_CONSOLE_LAYOUT) $(KERNEL_QEMU_MAIN_DEBUG_O)
+	python3 scripts/check_fallback_counters.py $(KERNEL_QEMU_MAIN_O).facts/callgraph.tsv
 
 kernelbuild-qemu: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-qemu
@@ -2315,6 +2316,7 @@ kernel-verify-exception-frame: $(KERNEL_EXC_CONTEXT_OFFSETS)
 .PHONY: _kernelbuild-rpi5
 _kernelbuild-rpi5: kernel-lib-check kernel-verify-exception-frame \
 	$(KERNEL_RPI5_ELF) $(KERNEL_RPI5_SHELL_ELF) $(KERNEL_RPI5_MAIN_DEBUG_O)
+	python3 scripts/check_fallback_counters.py $(KERNEL_RPI5_MAIN_O).facts/callgraph.tsv
 
 kernelbuild-rpi5: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-rpi5

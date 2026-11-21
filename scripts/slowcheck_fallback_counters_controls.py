@@ -6,13 +6,11 @@ held: a counter nothing reads (`process_image_root_fallback_uses`, until
 issue #270 hit the case it counted) and a report that adds a line rather than
 losing one, which no expected file misses. A control that only ran the
 repository would prove neither, since the repository passes -- so each rule is
-exercised against a planted defect in a copy of the tree.
-
-The last two cases are the ones that matter most for a check like this: they
-plant "the check stopped looking" rather than "the tree is wrong", which is
-the failure mode a green build cannot distinguish from success.
+exercised with a controlled call graph or a planted defect in a tree copy.
+The missing row and wholesale rename also test that the check still looks.
 """
 
+from call_graph_table import COLUMNS, FORMAT, HEADER
 from control_patch import replace_once
 import pathlib
 import shutil
@@ -29,9 +27,12 @@ EXPECTED = "kernel/tests/common/views/process_lifecycle.expected"
 POSITIVE = "resources: every pooled record resolved to the slot its handle named"
 
 
-def run(root: pathlib.Path):
+def run(root: pathlib.Path, facts=None):
+    args = [sys.executable, str(root / CHECK)]
+    if facts is not None:
+        args.append(str(facts))
     finished = subprocess.run(
-        [sys.executable, str(root / CHECK)],
+        args,
         cwd=root, capture_output=True, text=True,
         env={"PATH": "/usr/bin:/bin", "PYTHONPATH": str(root / "scripts")})
     return finished.returncode, finished.stdout + finished.stderr
@@ -51,6 +52,32 @@ def rename_all(root: pathlib.Path) -> None:
                        .replace("_fallback_uses(", "_fallback_total("))
         if renamed != text:
             path.write_text(renamed, encoding="ascii")
+
+
+COUNTERS = (
+    "process_image_record_missing_uses", "process_image_root_stale_fallback_uses",
+    "address_space_backing_missing_uses", "unified_fd_record_missing_uses",
+    "scheduled_process_record_missing_uses", "tcp_absent_fallback_uses",
+)
+
+
+def graph_case(name, callees, want=None):
+    """Compare one controlled compiler table with the real source inventory."""
+    CASES.note()
+    row = dict.fromkeys(COLUMNS, "-")
+    row.update(file=GATE_FILE, line="1", end_line="1",
+               name="dead_slot_fallback_uses" if callees is not None else "unrelated_function",
+               callees=",".join(callees) if callees else "-")
+    text = f"{HEADER}{FORMAT}\n" + "\t".join(COLUMNS) + "\n"
+    text += "\t".join(row.values()) + "\n"
+    with tempfile.TemporaryDirectory() as directory:
+        facts = pathlib.Path(directory) / "callgraph.tsv"
+        facts.write_text(text, encoding="ascii")
+        status, report = run(REPO, facts)
+    expected_status = 0 if want is None else 1
+    if status != expected_status or (want is not None and want not in report):
+        return [f"{name}: exit {status}, report {report.strip()!r}"]
+    return []
 
 
 # GitHub issue #526: a control asserts the number of scenarios it ran.
@@ -87,24 +114,24 @@ def main() -> int:
     status, report = run(REPO)
     if status != 0:
         failures.append(f"the repository itself does not pass: {report.strip()!r}")
-    elif "6 dead-slot fallback counter" not in report:
+    elif "6 counters inventoried" not in report:
         failures.append(f"the repository passed about an unexpected count: "
                         f"{report.strip()!r}")
 
-    failures += case(
-        "counter with no reader",
-        lambda root: planted(root, GATE_FILE,
-                             "        + tcp_absent_fallback_uses();",
-                             "        + 0;"),
-        "tcp_absent_fallback_uses() is a dead-slot fallback counter")
+    failures += graph_case("exact callee set", COUNTERS)
+    failures += graph_case("missing direct edge", COUNTERS[:-1],
+                           "does not sum tcp_absent_fallback_uses()")
+    failures += graph_case("unexpected direct edge", (*COUNTERS, "unrelated_function"),
+                           "calls unrelated_function()")
+    failures += graph_case("missing sum row", None,
+                           "expected one compiled dead_slot_fallback_uses(), found 0")
 
-    # GitHub issue #818: a summed call kept only in a comment sums nothing.
     failures += case(
-        "counter summed only in a comment",
+        "report present only in a comment",
         lambda root: planted(root, GATE_FILE,
-                             "        + tcp_absent_fallback_uses();",
-                             "        + 0; // + tcp_absent_fallback_uses()"),
-        "tcp_absent_fallback_uses() is a dead-slot fallback counter")
+                             "    if (dead_slot_fallback_uses() == 0) {",
+                             "    // if (dead_slot_fallback_uses() == 0) {"),
+        "gates no positive report")
 
     failures += case(
         "advisory report",
@@ -119,13 +146,6 @@ def main() -> int:
         "so the boot prints it and nothing notices")
 
     failures += case(
-        "the gate itself deleted",
-        lambda root: planted(root, GATE_FILE,
-                             "private fn dead_slot_fallback_uses() -> usize {",
-                             "private fn retired_fallback_total() -> usize {"),
-        "no `fn dead_slot_fallback_uses()`")
-
-    failures += case(
         "every accessor renamed out from under it",
         rename_all,
         "no dead-slot fallback accessor found")
@@ -138,10 +158,9 @@ def main() -> int:
         return 1
     report_pass(
         "fallback-counters controls",
-        "the repository passes, a counter with no reader or summed only "
-        "in a comment, an advisory "
-        "report, an unexpected positive line, a missing gate, and a "
-        "wholesale rename are each refused",
+        "the exact callee set passes; missing and extra edges, a missing "
+        "sum row, a commented or advisory report, an unexpected positive "
+        "line and a wholesale rename are refused",
         cases=CASES.ran)
     return 0
 

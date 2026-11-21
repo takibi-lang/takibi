@@ -13,7 +13,9 @@ Two things went wrong with that, and this refuses both (GitHub issue #410).
 months. Issue #270 then hit exactly the case it counted -- a teardown
 resolving through root 0, unmapping PID 1 -- and nothing in the boot said so,
 because nothing read the number. So: every accessor of this family must be
-named by the one function that sums them.
+named by the one function that sums them. Both production kernel builds
+check its direct callees using resolved compiler facts. The standalone
+source check inventories accessors and checks the expected boot report.
 
 **A report that cannot fail.** The per-counter reports print only when their
 count is NONZERO, so a boot in which a fallback fired GAINED a line -- and a
@@ -40,6 +42,7 @@ import pathlib
 import re
 import sys
 
+from call_graph_table import TableError, callee_name, read
 from pass_line import report_pass
 from source_scan import code_only, function_header
 
@@ -51,9 +54,6 @@ VIEWS = KERNEL / "tests"
 GATE = "dead_slot_fallback_uses"
 
 ACCESSOR = function_header(r"[a-z0-9_]*(?:missing|fallback)_uses", r"\(", public_only=True)
-GATE_BODY = re.compile(
-    r"fn " + GATE + r"\(\)[^{]*\{(.*?)\n\}", re.DOTALL)
-CALL = re.compile(r"([a-z0-9_]+)\(\)")
 
 
 def kernel_sources():
@@ -61,20 +61,16 @@ def kernel_sources():
 
 
 def code(path: pathlib.Path) -> str:
-    """The file with comments blanked (GitHub issue #818): a summed call or
-    a positive report that survives only in a comment fails no lane."""
+    """Blank comments so a commented-out report cannot satisfy the check."""
     return code_only(path.read_text(encoding="ascii"))
 
 
-def gate_body(sources) -> tuple[str, pathlib.Path]:
-    for path in sources:
-        match = GATE_BODY.search(code(path))
-        if match:
-            return match.group(1), path
-    raise SystemExit(
-        f"FAIL fallback-counters: no `fn {GATE}()` in kernel/. It is what "
-        "makes every dead-slot fallback counter readable by something that "
-        "can fail; without it this check has nothing to compare against.")
+def compiled_sum(path):
+    rows = [row for row in read(path)
+            if row["name"] == GATE and row["file"].startswith("kernel/")]
+    if len(rows) != 1:
+        raise ValueError(f"{path}: expected one compiled {GATE}(), found {len(rows)}")
+    return {callee_name(edge) for edge in rows[0]["callees"]}, rows[0]["file"]
 
 
 def positive_line(sources) -> str | None:
@@ -90,7 +86,7 @@ def positive_line(sources) -> str | None:
     return None
 
 
-def main() -> int:
+def main(facts=None) -> int:
     sources = kernel_sources()
     problems = []
 
@@ -104,24 +100,24 @@ def main() -> int:
             f"{len(sources)} kernel files. Either they were all renamed out "
             "from under this check or it stopped looking; both are failures.")
 
-    body, gate_path = gate_body(sources)
-    summed = set(CALL.findall(body))
-    for name, path in sorted(accessors.items()):
-        if name not in summed:
+    if facts is not None:
+        try:
+            summed, gate_path = compiled_sum(facts)
+        except (OSError, ValueError, TableError) as exc:
+            print(f"FAIL fallback-counters: {exc}", file=sys.stderr)
+            return 1
+        for name in sorted(set(accessors) - summed):
+            path = accessors[name].relative_to(REPO)
+            problems.append(f"{path}: {GATE}() does not sum {name}()")
+        for name in sorted(summed - set(accessors)):
             problems.append(
-                f"{path.relative_to(REPO)}: {name}() is a dead-slot fallback "
-                f"counter that {GATE}() does not sum, so a boot in which it "
-                "fires fails nothing")
-    for name in sorted(summed - set(accessors)):
-        problems.append(
-            f"{gate_path.relative_to(REPO)}: {GATE}() sums {name}(), which is "
-            "not a dead-slot fallback counter; the sum has to be exactly this "
-            "family or the positive line stops meaning what it says")
+                f"{gate_path}: {GATE}() calls {name}(), which is not "
+                "a dead-slot fallback counter")
 
     line = positive_line(sources)
     if line is None:
         problems.append(
-            f"{gate_path.relative_to(REPO)}: {GATE}() gates no positive "
+            f"{GATE}() gates no positive "
             "report. A count printed only when it is nonzero adds an "
             "unmatched line, which no expected file misses")
     else:
@@ -139,12 +135,14 @@ def main() -> int:
         print(f"FAIL fallback-counters: {len(problems)} dead-slot fallback "
               "report(s) cannot fail a lane", file=sys.stderr)
         return 1
-    report_pass("fallback-counters",
-                f"{len(accessors)} dead-slot fallback counter(s) are summed by "
-                f"{GATE}(), whose positive line is expected by a view",
+    verdict = (f"{GATE}() calls exactly the {len(accessors)} inventoried counters"
+               if facts is not None else f"{len(accessors)} counters inventoried")
+    report_pass("fallback-counters", verdict + "; positive boot line expected by a view",
                 counters=len(accessors))
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    if len(sys.argv) > 2:
+        sys.exit("usage: check_fallback_counters.py [callgraph.tsv]")
+    sys.exit(main(sys.argv[1] if len(sys.argv) == 2 else None))

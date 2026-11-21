@@ -119,7 +119,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_model_coverage_controls.py` | `scripts/model_coverage.py`, which `make modelcheck` runs on every fully explored TLC log, refuses an action never taken, an allow-list entry without a reason, a stale or unjudged entry, a log without coverage, and judges only the last coverage report (#802) |
 | `check_expected_line_endings.py` | stdout fixtures use one newline convention |
 | `check_expected_line_endings_controls.py` | Positive and failure-specific controls for expected-line-ending checks |
-| `check_fallback_counters.py` | every dead-slot fallback counter is summed into one positively reported line a view expects, so a fallback that fires loses a line rather than adding one |
+| `check_fallback_counters.py` | inventories the dead-slot fallback accessors and checks the positive boot line a view expects. The QEMU and RPi5 production build targets also require the sum to call exactly those accessors in their resolved compiler call graphs |
 | `check_fd_clone_transaction.py` | the linear fd-clone transaction begins empty, advances exactly through a successful install, preserves failures, and rolls back its recorded prefix |
 | `check_fd_clone_transaction_controls.py` | Negative controls for the fd-clone transaction implementation boundary, including the success fragment present only in a comment (#815) |
 | `check_find_stale_issue_workarounds_controls.py` | Controls for the stale-workaround worklist's matching |
