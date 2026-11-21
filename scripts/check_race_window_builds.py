@@ -25,7 +25,7 @@ CONTROLS_LINE = re.compile(r"^KERNEL_QEMU_RACE_CONTROLS\s*:=.*$", re.MULTILINE)
 
 
 def make_list(makefile, variable):
-    match = re.search(rf"^{variable}\s*:=\s*(.*)$", makefile, re.MULTILINE)
+    match = re.search(rf"^{variable}[ \t]*:=[ \t]*(.*)$", makefile, re.MULTILINE)
     return match.group(1).split() if match else None
 
 
@@ -144,7 +144,8 @@ def main():
     report_pass("race-window-builds",
                 "every race-window kernel a lane or script boots is built by "
                 "kernelbuild-check; an omitted control, an armed boot of a "
-                "reverted-only control and an unknown window are refused",
+                "reverted-only control, a reverted boot of an armed-only fixture "
+                "and an unknown window are refused",
                 kernels=count)
     return 0
 
