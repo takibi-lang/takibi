@@ -2707,7 +2707,7 @@ let expect_region_error fragment src () =
       then Alcotest.failf "no entry contains %S: %s" fragment
           (String.concat " | " (List.map snd errors))
 
-let owner_publication_1513 body = put_back_746 ^ {|
+let owner_publication_1513 ?(helpers = "") body = put_back_746 ^ {|
 fn release746(o: sink Owner746[page]) !{unsafe} {
     region_release(o.frame);
 }
@@ -2728,6 +2728,7 @@ fn fill_variant746(o: borrow Owner746[page], ready: bool) -> Fill746 !{unsafe} {
     return Fill746::Skipped;
 }
 extern fn opaque746(bytes: borrow [u8; 64..]);
+|} ^ helpers ^ {|
 fn check746(arr: borrow places(Frame746)[b, n], ready: bool) !{unsafe} {
     match alloc746(arr, 2) {
         Alloc746::Out => {}
@@ -2736,6 +2737,22 @@ fn check746(arr: borrow places(Frame746)[b, n], ready: bool) !{unsafe} {
         }
     }
 }
+|}
+
+let owner_copy_publication_1513 count =
+  let helpers = Printf.sprintf {|
+fn copy746(owner: borrow Owner746[page], ready: bool) -> bool !{unsafe} {
+    if (ready == false) { return false; }
+    let mut source: [u8; 64];
+    for i: usize in 0..<64 { source[i] = i as u8; }
+    let target = bytes746(owner);
+    for i: usize in 0..<%d { target[i] = source[i]; }
+    return true;
+}
+|} count in
+  owner_publication_1513 ~helpers {|
+            if (copy746(o, ready)) { publish746(o); }
+            else { release746(o); }
 |}
 
 let slot_publication_1513 body = {|
@@ -12950,6 +12967,11 @@ fn use745(held: RegionHeld(Rec745)) -> usize !{unsafe} {
             for i: usize in 0..<63 { bytes[i] = 0; }
             publish746(o);
 |}));
+  Alcotest.test_case "owner publication: full copy succeeds through the helper" `Quick
+    (fun () -> ignore (infer_regions (owner_copy_publication_1513 64)));
+  Alcotest.test_case "owner publication: short copy is rejected at publication" `Quick
+    (expect_region_error "required initialized by 'publish746'"
+       (owner_copy_publication_1513 63));
   Alcotest.test_case "owner publication: refuse initialization of a different owner" `Quick
     (expect_region_error "required initialized by 'publish746'" (owner_publication_1513 {|
             match alloc746(arr, 3) {
