@@ -237,6 +237,16 @@ ext2 exclude that record from any returned prefix. The BusyBox `ls` and
 `ps` checks exercise directory enumeration without inspecting the raw
 padding or partial-store behavior.
 
+The implemented `newfstatat` routes for procfs nodes and ext2
+directories, applet links and files each validate a 128-byte result, zero
+the full span, and write selected scalar fields directly into that span.
+Success requires all the stores to report success, so padding and fields
+without explicit values are zero. Lookup failures before output leave the
+result untouched. A fault once output starts can leave earlier writes
+visible. The BusyBox shell checks exercise pathname metadata such as
+directory size, without comparing every output byte or the surrounding
+extent. The kernel has no separate `fstat` dispatcher arm.
+
 The kernel-only EL0 fixture checks successful scalar ABI output in the
 existing userspace view. For statfs, both the ext2 root and procfs overwrite
 a nonzero 32-byte reserved tail with zero. For sysinfo, all 104 bytes after
