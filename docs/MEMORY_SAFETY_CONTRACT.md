@@ -259,9 +259,10 @@ On success, `pipe2` writes two four-byte descriptors and
 `clock_gettime` writes two eight-byte timespec fields. Both check the
 entire result span before writing. A failed store can leave earlier
 writes visible. On a store fault `pipe2` also closes both descriptors.
-Existing fixtures use both pipe descriptors and read both time fields
-for realtime and monotonic clocks. They do not check adjacent bytes
-or partial-store behavior for these outputs.
+The pipe wrap fixture uses both descriptors and checks eight untouched
+bytes on either side of the pair. The clock fixture reads both fields
+for realtime and monotonic clocks without checking adjacent bytes.
+Neither fixture checks partial-store behavior.
 
 `accept` and `accept4` return the descriptor without accessing their
 address and length arguments. The implemented `getpeername` first

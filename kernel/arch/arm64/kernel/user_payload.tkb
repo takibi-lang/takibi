@@ -1911,13 +1911,16 @@ fn rusage_kernel_probe() !{unsafe} {
 
 // Keep 1024 bytes queued between calls so neither cursor resets to zero.
 fn pipe_wrap_kernel_probe() !{unsafe} {
-    let mut fds: [u8; 8];
-    payload_pipe(src_loc(), fds as []u8);
+    let mut bytes: [u8; 3088];
+    for index: usize in 0..<3088 { bytes[index] = 0xAD; }
+    let fds = bytes[8..<16];
+    payload_pipe(src_loc(), fds);
     let handles: usize = payload_read_u64(fds as *u8, 0);
     let reader: usize = handles & 0xFFFFFFFF;
     let writer: usize = handles >> 32;
-    let mut bytes: [u8; 3088];
-    for index: usize in 0..<3088 { bytes[index] = 0xAD; }
+    for index: usize in 0..<8 {
+        fail_if(src_loc(), bytes[index] != 0xAD || bytes[16 + index] != 0xAD);
+    }
     for index: usize in 8..<2056 { bytes[index] = 0x13; }
     for index: usize in 2056..<3080 { bytes[index] = 0x32; }
     let data: usize = ptr_of(bytes as *u8, 8);
