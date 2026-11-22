@@ -1774,6 +1774,7 @@ private fn scheduled_process_ddb_record(
         ProcessWaitReason::Pipe => { result.wait_reason = 7; }
         ProcessWaitReason::Ext2Mutation => { result.wait_reason = 8; }
         ProcessWaitReason::Ext2ReaderDrain => { result.wait_reason = 9; }
+        ProcessWaitReason::Ext2Directory => { result.wait_reason = 10; }
     }
     result.saved_sp = record.saved_sp;
     result.stack_bottom = 0;
@@ -1939,6 +1940,7 @@ private fn kernel_process_protocol_reason(reason: ProcessWaitReason)
         ProcessWaitReason::Pipe => { return 7; }
         ProcessWaitReason::Ext2Mutation => { return 8; }
         ProcessWaitReason::Ext2ReaderDrain => { return 9; }
+        ProcessWaitReason::Ext2Directory => { return 10; }
     }
 }
 
@@ -2978,6 +2980,7 @@ fn kernel_process_monitor_proc(stopped: borrow MachineStopped[&kernel_world_stop
         ProcessWaitReason::Pipe => { ddb_put_udec(7); }
         ProcessWaitReason::Ext2Mutation => { ddb_put_udec(8); }
         ProcessWaitReason::Ext2ReaderDrain => { ddb_put_udec(9); }
+        ProcessWaitReason::Ext2Directory => { ddb_put_udec(10); }
     }
     ddb_puts(" saved_sp=");
     ddb_put_hex(saved_sp);
@@ -9405,6 +9408,7 @@ private fn kernel_process_block_would_miss(
     if (reason != ProcessWaitReason::None &&
         reason != ProcessWaitReason::Ext2Mutation &&
         reason != ProcessWaitReason::Ext2ReaderDrain &&
+        reason != ProcessWaitReason::Ext2Directory &&
         process_signal_interrupt_of(scheduled_process_record_live_locked(guard, from)) != 0) {
         return true;
     }
@@ -9462,6 +9466,11 @@ private fn kernel_process_block_would_miss(
         }
         ProcessWaitReason::Ext2Mutation => { return ext2_mutation_in_flight() == false; }
         ProcessWaitReason::Ext2ReaderDrain => { return ext2_readers_drained(); }
+        ProcessWaitReason::Ext2Directory => {
+            return ext2_mutation_in_flight() == false ||
+                (scheduled_process_record_live_locked(guard, from).pending_signals &
+                    PROCESS_SIGKILL_BIT) != 0;
+        }
         // Delivered again: the same list's next tick
         // (kernel_process_tick_wake_scan) wakes a Blocked waiter whose
         // deadline has passed, whenever it passed.
@@ -10629,6 +10638,18 @@ fn process_signal_interrupt_of(record: borrow &mut ProcessRecord) -> usize {
     return 0;
 }
 
+// Query without consuming a signal or changing another wait's bookkeeping.
+fn kernel_process_current_directory_signal_pending(
+        current: borrow ProcessCurrent[process, ProcessState::Running]) -> bool {
+    let mut handle: ProcessHandle = process_current_handle(current);
+    let guard = process_run_lock();
+    let record = scheduled_process_record_live_locked(guard, handle);
+    let pending: bool = (record.pending_signals & ~record.signal_mask) != 0 &&
+        process_signal_interrupt_of(record) != 0;
+    process_run_unlock(guard);
+    return pending;
+}
+
 // What syscall_block_interrupt is told about a syscall that is about to
 // block: nothing interrupts it, or `signal` does, with its sa_flags and the
 // deadline the wait had armed (0 for none) for nanosleep's remaining time.
@@ -10752,7 +10773,8 @@ private fn kernel_process_signal_deliver_traced(
     if (scheduled_process_state_of_locked(guard, target) == ProcessSlotState::Blocked) {
         let reason: ProcessWaitReason = scheduled_process_wait_reason_of_locked(guard, target);
         if (reason == ProcessWaitReason::Ext2Mutation ||
-            reason == ProcessWaitReason::Ext2ReaderDrain) {
+            reason == ProcessWaitReason::Ext2ReaderDrain ||
+            (reason == ProcessWaitReason::Ext2Directory && bit != PROCESS_SIGKILL_BIT)) {
             return ProcessSignalSendResult::Delivered;
         }
     }
@@ -11514,9 +11536,13 @@ private fn kernel_process_ext2_wake(reason: ProcessWaitReason) !{unsafe} {
         match cursor {
             ProcessSlotCursor::Done => { walking = false; }
             ProcessSlotCursor::At(slot) => {
+                let waiting: ProcessWaitReason =
+                    scheduled_process_record_wait_reason_locked(guard, slot);
                 if (scheduled_process_record_state_locked(guard, slot) ==
                         ProcessSlotState::Blocked &&
-                    scheduled_process_record_wait_reason_locked(guard, slot) == reason) {
+                    (waiting == reason ||
+                     (reason == ProcessWaitReason::Ext2Mutation &&
+                      waiting == ProcessWaitReason::Ext2Directory))) {
                     match scheduled_process_blocked_take_slot(guard, slot) {
                         ScheduledProcessBlockedTakeResult::Missing => {}
                         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
@@ -13467,6 +13493,7 @@ fn kernel_process_crash_wait_reason() -> usize !{unsafe} {
         ProcessWaitReason::Pipe => { return 7; }
         ProcessWaitReason::Ext2Mutation => { return 8; }
         ProcessWaitReason::Ext2ReaderDrain => { return 9; }
+        ProcessWaitReason::Ext2Directory => { return 10; }
     }
 }
 
@@ -15251,10 +15278,47 @@ private fn kernel_process_ext2_save_address(frame: borrow FrameRef[process, Exce
 
 fn kernel_process_ext2_mutex_park(frame: borrow FrameRef[process, ExceptionLevel::El0],
         original: ProcessWaitIdentity) -> ProcessExt2Park !{may_block, requires_irq_unmasked} {
+    return kernel_process_ext2_ordinary_park(
+        frame, original, ProcessWaitReason::Ext2Mutation, 8);
+}
+
+must_use variant ProcessExt2DirectoryPark { Retry; Cancelled; NoOrdinaryStack; }
+
+private inline fn kernel_process_ext2_directory_cancelled() -> bool {
+    let ProcessCurrentRead::Running(task) = kernel_process_current_read() else {
+        ProcessCurrentRead::Idle => { return false; }
+    };
+    let guard = process_run_lock();
+    let fatal: bool = (scheduled_process_record_live_locked(guard, task).pending_signals &
+                        PROCESS_SIGKILL_BIT) != 0;
+    process_run_unlock(guard);
+    return fatal;
+}
+
+inline fn kernel_process_ext2_directory_park(
+        frame: borrow FrameRef[process, ExceptionLevel::El0],
+        original: ProcessWaitIdentity) -> ProcessExt2DirectoryPark
+        !{may_block, requires_irq_unmasked} {
+    match kernel_process_ext2_ordinary_park(
+            frame, original, ProcessWaitReason::Ext2Directory, 10) {
+        ProcessExt2Park::NoOrdinaryStack => { return ProcessExt2DirectoryPark::NoOrdinaryStack; }
+        ProcessExt2Park::RetryAcquire => {
+            if (kernel_process_ext2_directory_cancelled()) {
+                return ProcessExt2DirectoryPark::Cancelled;
+            }
+            return ProcessExt2DirectoryPark::Retry;
+        }
+    }
+}
+
+private fn kernel_process_ext2_ordinary_park(
+        frame: borrow FrameRef[process, ExceptionLevel::El0],
+        original: ProcessWaitIdentity, reason: ProcessWaitReason, trace_aux: usize)
+        -> ProcessExt2Park !{may_block, requires_irq_unmasked} {
     let address: usize = kernel_process_ext2_save_address(frame, original);
     if (address == 0) { return ProcessExt2Park::NoOrdinaryStack; }
     let mut destination: ProcessOrdinaryDestination[process] = { address };
-    match kernel_process_block_current(frame, ProcessWaitReason::Ext2Mutation, 8) {
+    match kernel_process_block_current(frame, reason, trace_aux) {
         BlockSwitch::Retry => { process_ordinary_destination_end(destination); }
         BlockSwitch::ToIdle(span) => {
             preempt_span_resume(span);
@@ -15307,7 +15371,7 @@ fn kernel_process_ext2_drain_park(
     return ProcessExt2Park::RetryAcquire;
 }
 
-fn kernel_process_ext2_mkdir_begin(
+fn kernel_process_ext2_wait_begin(
         current: sink ProcessCurrent[process, ProcessState::Running]) -> ProcessWaitIdentity {
     let mut handle: ProcessHandle = process_current_handle(current);
     process_current_end(current);
@@ -15315,7 +15379,7 @@ fn kernel_process_ext2_mkdir_begin(
     return identity;
 }
 
-fn kernel_process_ext2_mkdir_complete(original: ProcessWaitIdentity) -> ProcessRunningHere !{unsafe} {
+fn kernel_process_ext2_wait_complete(original: ProcessWaitIdentity) -> ProcessRunningHere !{unsafe} {
     let ProcessCurrentRead::Running(current_task) = kernel_process_current_read() else {
         ProcessCurrentRead::Idle => { return ProcessRunningHere::Idle; }
     };

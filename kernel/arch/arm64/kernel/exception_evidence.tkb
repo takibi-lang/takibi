@@ -2527,6 +2527,7 @@ private fn ddb_wait_reason_name(reason: usize) -> *u8 {
         7 => { return "pipe"; }
         8 => { return "ext2-mutation"; }
         9 => { return "ext2-reader-drain"; }
+        10 => { return "ext2-directory"; }
         _ => { return "unknown"; }
     }
 }

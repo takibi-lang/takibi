@@ -2,11 +2,11 @@
   "date": "2026-11-22",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "38e48c7f10fe0bd8e36f5eb6f6d5fbaeabbae63cd25a8750004b64e8e6e6ae7a",
-  "workload": "Normal linked kernels against 5793c2f77, QEMU bounded boot pool snapshots, and observed mkdirat drain with normal and rejected reader departures.",
+  "source_sha256": "97e17505abbf3be245e9b728dee3d6afdb678ea00f917591f95ca7aff4c9e2b9",
+  "workload": "Normal linked kernels against the completed mkdirat drain at 8ad447f17, plus QEMU directory admission with an active writer and a caught signal or SIGKILL.",
   "evidence": [
     "docs/EXT2_READER_DRAIN_SPACE_REVIEW.md"
   ],
-  "assessment": "Linked text grows 2188 bytes on QEMU and 2212 bytes on RPi5. Data, BSS, usable RAM starts and process record size are unchanged. The writer keeps rank-20 admission across the wait without additional allocated state.",
-  "next_trigger": "Remeasure at the next writer integration, a waiting representation change, or a physical contention measurement."
+  "assessment": "Linked text accounting grows 1176 bytes on QEMU and 1288 bytes on RPi5 against the drain baseline. Data, BSS and usable RAM starts are unchanged. The dispatch frame grows by 80 and 48 bytes respectively and the wait allocates no new state.",
+  "next_trigger": "Remeasure when another syscall parks, directory prefix checking changes, or physical contention is measured."
 }

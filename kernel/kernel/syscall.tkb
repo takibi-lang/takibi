@@ -5875,7 +5875,7 @@ fn syscall_reaches_filesystem(number: usize, fd: usize, flags: usize) -> bool {
     if (number == 63 || number == AARCH64_NR_READV) {
         return kernel_syscall_file_readable(fd);
     }
-    if (number == 61 || number == 21 || number == 48 || number == 439) {
+    if (number == 21 || number == 48 || number == 439) {
         return true;
     }
     return false;
@@ -7776,6 +7776,39 @@ private fn syscall_uname(current_authority: borrow ProcessCurrent[process, Proce
     return action;
 }
 
+private inline fn syscall_getdents_needs_reader(fd: usize, count: usize) -> bool {
+    if (count == 0) { return false; }
+    let inode: usize = kernel_syscall_directory_inode(fd);
+    return inode != 0 && inode != PROCFS_ROOT_INODE && inode != PROCFS_TAKIBI_INODE;
+}
+
+must_use variant Ext2DirectoryAdmission { Counted; Bypass; Cancelled; Refused; }
+
+private fn syscall_getdents_wait_for_reader(
+        frame: borrow FrameRef[process, ExceptionLevel::El0],
+        original: ProcessWaitIdentity, fd: usize, count: usize)
+        -> Ext2DirectoryAdmission !{may_block, requires_irq_unmasked, unsafe} {
+    while (true) {
+        match kernel_process_ext2_directory_park(frame, original) {
+            ProcessExt2DirectoryPark::Cancelled => { return Ext2DirectoryAdmission::Cancelled; }
+            ProcessExt2DirectoryPark::NoOrdinaryStack => { return Ext2DirectoryAdmission::Refused; }
+            ProcessExt2DirectoryPark::Retry => {}
+        }
+        if (syscall_getdents_needs_reader(fd, count) == false) {
+            return Ext2DirectoryAdmission::Bypass;
+        }
+        if (kernel_ext2_read_enter()) { return Ext2DirectoryAdmission::Counted; }
+    }
+    return Ext2DirectoryAdmission::Refused;
+}
+
+private inline fn syscall_take_termination(directory_cancelled: bool) -> ProcessSignalPendingResult {
+    if (directory_cancelled) {
+        return kernel_process_current_signal_take(PROCESS_SIGKILL_BIT);
+    }
+    return kernel_process_current_termination_signal_take();
+}
+
 fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usize,
                            x2: usize, x3: usize, x4: usize, frame: MaybeFrame,
                            ext2_reader: &mut SyscallExt2Reader)
@@ -7850,9 +7883,43 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         }
         syscall_ext2_reader_mark(ext2_reader);
     }
+    let mut directory_cancelled: bool = false;
+    let mut directory_frame: MaybeFrame = frame;
+    let mut directory_current: ProcessRunningHere =
+        ProcessRunningHere::Running(current_authority);
+    if (number == 61 && syscall_getdents_needs_reader(x0, x2)) {
+        if (kernel_ext2_read_enter()) {
+            syscall_ext2_reader_mark(ext2_reader);
+        } else {
+            let ProcessRunningHere::Running(before) = directory_current else {
+                ProcessRunningHere::Idle => { return SyscallAction::Unreachable; }
+            };
+            match directory_frame {
+                MaybeFrame::NoFrame => {
+                    return syscall_finish_current(MaybeFrame::NoFrame, SyscallAction::WaitInterrupt, before);
+                }
+                MaybeFrame::Frame(entry) => {
+                    let mut original: ProcessWaitIdentity =
+                        kernel_process_ext2_wait_begin(before);
+                    match syscall_getdents_wait_for_reader(entry, original, x0, x2) {
+                        Ext2DirectoryAdmission::Counted => { syscall_ext2_reader_mark(ext2_reader); }
+                        Ext2DirectoryAdmission::Bypass => {}
+                        Ext2DirectoryAdmission::Cancelled => { directory_cancelled = true; }
+                        Ext2DirectoryAdmission::Refused => { return SyscallAction::Unreachable; }
+                    }
+                    directory_current = kernel_process_ext2_wait_complete(original);
+                    directory_frame = MaybeFrame::Frame(entry);
+                }
+            }
+        }
+    }
+    let ProcessRunningHere::Running(current_authority) = directory_current else {
+        ProcessRunningHere::Idle => { return SyscallAction::Unreachable; }
+    };
+    let frame = directory_frame;
     kernel_init_boot_fixture_poll(current_authority);
     kernel_syscall_persistent_shell_checkpoint_selected();
-    match kernel_process_current_termination_signal_take() {
+    match syscall_take_termination(directory_cancelled) {
         ProcessSignalPendingResult::Missing => {}
         ProcessSignalPendingResult::Pending(taken) => {
             // A core-0 exit with nowhere to hand the CPU waits and reruns
@@ -7899,6 +7966,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 }
             }
         }
+    }
+    if (directory_cancelled) {
+        return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINTR),
+                                      current_authority);
     }
     if (number == AARCH64_NR_TAKIBI_UART_RX_WAIT) {
         let guard = process_run_lock();
@@ -8108,13 +8179,13 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     if (number == 34) {
         match frame {
             MaybeFrame::Frame(entry) => {
-                let mut original: ProcessWaitIdentity = kernel_process_ext2_mkdir_begin(current_authority);
+                let mut original: ProcessWaitIdentity = kernel_process_ext2_wait_begin(current_authority);
                 let Ext2MkdirMutationTake::Acquired(guard) =
                         ext2_mkdir_mutation_take(entry, original) else {
                     Ext2MkdirMutationTake::Refused => { return SyscallAction::Unreachable; }
                 };
                 let ProcessRunningHere::Running(resumed) =
-                        kernel_process_ext2_mkdir_complete(original) else {
+                        kernel_process_ext2_wait_complete(original) else {
                     ProcessRunningHere::Idle => {
                         kernel_ext2_mutation_give(guard);
                         return SyscallAction::Unreachable;
@@ -10048,6 +10119,15 @@ private inline fn syscall_getdents64_current_with(slot: borrow SyscallSlot[0],
                                     return SyscallAction::Resume(written);
                                 }
                                 return SyscallAction::Resume(LINUX_EINVAL);
+                            }
+                            // An ordinary signal can stop only after a complete
+                            // record. Keep this unread entry as the next position.
+                            if (entry_inode != 0 && written != 0 &&
+                                kernel_process_current_directory_signal_pending(current_authority)) {
+                                if (kernel_syscall_file_set_offset(x0, directory_offset) == false) {
+                                    return SyscallAction::Resume(LINUX_EBADF);
+                                }
+                                return SyscallAction::Resume(written);
                             }
                             let next_offset: usize =
                                 directory_offset + record_length;
