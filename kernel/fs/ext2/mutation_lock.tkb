@@ -129,6 +129,12 @@ fn ext2_mutation_take() -> Ext2MutationGuard[&ext2_mutation_lock]
     return ext2_mutation_wait_for_readers();
 }
 
+// This field records the mint CPU. The guard names the mutex and does
+// not carry CPU-local authority through an ordinary wait.
+private inline fn ext2_mutation_guard_mint_cpu() -> usize {
+    return cpu_id();
+}
+
 // The mutex excludes another writer, but an existing reader can still
 // own access. Only a checked zero-reader transition yields a mutation guard.
 linear struct Ext2DrainGuard[lock: addr] {
@@ -146,7 +152,7 @@ fn ext2_mutation_try_take() -> Ext2DrainAcquire
         return Ext2DrainAcquire::Busy;
     }
     dsb_ish();
-    let mut guard: Ext2DrainGuard[&ext2_mutation_lock] = { cpu_id() };
+    let mut guard: Ext2DrainGuard[&ext2_mutation_lock] = { ext2_mutation_guard_mint_cpu() };
     return Ext2DrainAcquire::Held(guard);
 }
 
@@ -175,7 +181,7 @@ private fn ext2_mutation_wait_for_readers() -> Ext2MutationGuard[&ext2_mutation_
     // count and gone to core 0.
     dsb_ish();
     while (atomic_word_load(&ext2_readers) != 0) { }
-    let mut guard: Ext2MutationGuard[&ext2_mutation_lock] = { cpu_id() };
+    let mut guard: Ext2MutationGuard[&ext2_mutation_lock] = { ext2_mutation_guard_mint_cpu() };
     return guard;
 }
 
