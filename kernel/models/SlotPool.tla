@@ -108,7 +108,7 @@ CanStep(p) ==
 
 \* syscall_slot_acquire, ext2_slot_acquire, block_slot_acquire: one
 \* successful compare-exchange; ext2_mutation_take's lock and its wait for
-\* the readers; ext2_read_enter's count.
+\* the readers; ext2_read_admit's count.
 \* @type: (Str) => Bool;
 Step(p) ==
     /\ cur = p

@@ -1773,6 +1773,7 @@ private fn scheduled_process_ddb_record(
         ProcessWaitReason::UartTx => { result.wait_reason = 6; }
         ProcessWaitReason::Pipe => { result.wait_reason = 7; }
         ProcessWaitReason::Ext2Mutation => { result.wait_reason = 8; }
+        ProcessWaitReason::Ext2ReaderDrain => { result.wait_reason = 9; }
     }
     result.saved_sp = record.saved_sp;
     result.stack_bottom = 0;
@@ -1937,6 +1938,7 @@ private fn kernel_process_protocol_reason(reason: ProcessWaitReason)
         ProcessWaitReason::UartTx => { return 6; }
         ProcessWaitReason::Pipe => { return 7; }
         ProcessWaitReason::Ext2Mutation => { return 8; }
+        ProcessWaitReason::Ext2ReaderDrain => { return 9; }
     }
 }
 
@@ -2975,6 +2977,7 @@ fn kernel_process_monitor_proc(stopped: borrow MachineStopped[&kernel_world_stop
         ProcessWaitReason::UartTx => { ddb_put_udec(6); }
         ProcessWaitReason::Pipe => { ddb_put_udec(7); }
         ProcessWaitReason::Ext2Mutation => { ddb_put_udec(8); }
+        ProcessWaitReason::Ext2ReaderDrain => { ddb_put_udec(9); }
     }
     ddb_puts(" saved_sp=");
     ddb_put_hex(saved_sp);
@@ -4735,8 +4738,7 @@ fn scheduled_process_wake(
         owner: borrow ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Blocked])
         -> ScheduledProcessState[process, ProcessState::Ready] {
-    scheduled_process_wait_settle(
-        scheduled_process_record_owned(owner));
+    scheduled_process_record_owned(owner).pending_block_reason = ProcessWaitReason::None;
     process_state_wake(&scheduled_process_record_owned(owner).state);
     return scheduled_process_wake_ready(guard, owner, state);
 }
@@ -5736,7 +5738,18 @@ private fn kernel_process_orphan_defer(
     }
 }
 
-private fn kernel_process_stack_switch_take(frame: borrow FrameRef[process, level]) {
+struct ProcessDeferredReap {
+    live: bool;
+    child: ProcessHandle;
+    waiting_parent: ProcessHandle;
+    orphan: bool;
+    incoming: ProcessHandle;
+}
+
+// Physical ownership changes before any deferred teardown.
+private inline fn kernel_process_stack_switch_claim(frame: borrow FrameRef[process, level],
+        take_reap: bool)
+        -> ProcessDeferredReap {
     let mut reap_live: bool = false;
     let mut reap_child: ProcessHandle;
     let mut reap_parent: ProcessHandle;
@@ -5771,7 +5784,6 @@ private fn kernel_process_stack_switch_take(frame: borrow FrameRef[process, leve
             ProcessCurrentRead::Idle => {
                 process_run_unlock(guard);
                 kernel_invariant_stop_with_frame(frame);
-                return;
             }
         }
         if (scheduled_process_handle_matches(incoming) == false ||
@@ -5790,15 +5802,22 @@ private fn kernel_process_stack_switch_take(frame: borrow FrameRef[process, leve
         reap_live = execution_state[execution_cpu].deferred_reap_live;
         reap_child = execution_state[execution_cpu].deferred_reap_handle;
         reap_parent = execution_state[execution_cpu].deferred_reap_parent;
-        execution_state[execution_cpu].deferred_reap_live = false;
+        if (take_reap) { execution_state[execution_cpu].deferred_reap_live = false; }
         process_run_unlock(guard);
     }
-    if (reap_live) {
+    let mut result: ProcessDeferredReap = { reap_live, reap_child, reap_parent, orphan_deferred, incoming };
+    return result;
+}
+
+private fn kernel_process_stack_switch_take(frame: borrow FrameRef[process, level]) {
+    let mut reap: ProcessDeferredReap = kernel_process_stack_switch_claim(frame, true);
+    let mut incoming: ProcessHandle = reap.incoming;
+    if (reap.live) {
         let reaped_status: ProcessEnd =
-            kernel_process_reap_zombie(reap_parent, reap_child);
+            kernel_process_reap_zombie(reap.waiting_parent, reap.child);
         incoming = kernel_process_current_required();
         // The incoming process did not reap an orphan, whatever it is.
-        if (orphan_deferred == false) {
+        if (reap.orphan == false) {
             kernel_init_boot_fixture_reaped(
                 scheduled_process_pid_of_handle(incoming), reaped_status);
         }
@@ -9385,6 +9404,7 @@ private fn kernel_process_block_would_miss(
     // kernel/models/Wait4Block.tla checks this re-check (SIGRECHECK).
     if (reason != ProcessWaitReason::None &&
         reason != ProcessWaitReason::Ext2Mutation &&
+        reason != ProcessWaitReason::Ext2ReaderDrain &&
         process_signal_interrupt_of(scheduled_process_record_live_locked(guard, from)) != 0) {
         return true;
     }
@@ -9441,6 +9461,7 @@ private fn kernel_process_block_would_miss(
             return scheduled_process_record_live_locked(guard, from).pipe_wait == 0;
         }
         ProcessWaitReason::Ext2Mutation => { return ext2_mutation_in_flight() == false; }
+        ProcessWaitReason::Ext2ReaderDrain => { return ext2_readers_drained(); }
         // Delivered again: the same list's next tick
         // (kernel_process_tick_wake_scan) wakes a Blocked waiter whose
         // deadline has passed, whenever it passed.
@@ -10727,11 +10748,13 @@ private fn kernel_process_signal_deliver_traced(
         record.signal_sender[index] = sender_pid as u32;
     }
     process_signal_pending_raise(guard, record, bit);
-    // Ordinary ext2 mutex waits end when the lock is released. Both fatal
-    // and caught signals stay pending for the eventual syscall return.
-    if (scheduled_process_state_of_locked(guard, target) == ProcessSlotState::Blocked &&
-        scheduled_process_wait_reason_of_locked(guard, target) == ProcessWaitReason::Ext2Mutation) {
-        return ProcessSignalSendResult::Delivered;
+    // Both ext2 writer waits defer fatal and caught signals to syscall return.
+    if (scheduled_process_state_of_locked(guard, target) == ProcessSlotState::Blocked) {
+        let reason: ProcessWaitReason = scheduled_process_wait_reason_of_locked(guard, target);
+        if (reason == ProcessWaitReason::Ext2Mutation ||
+            reason == ProcessWaitReason::Ext2ReaderDrain) {
+            return ProcessSignalSendResult::Delivered;
+        }
     }
     // A fatal signal must interrupt a blocked target too, not wait for its
     // deadline or an unrelated input byte: the rerun of its syscall takes
@@ -11456,12 +11479,34 @@ fn kernel_process_uart_tx_wake_all(guard: borrow ProcessRunGuard[&scheduled_proc
 // Release the filesystem guard before making its ordinary waiters Ready.
 fn kernel_ext2_mutation_give(guard: sink Ext2MutationGuard[&ext2_mutation_lock]) {
     ext2_mutation_give(guard);
-    kernel_process_ext2_mutation_wake();
+    kernel_process_ext2_wake(ProcessWaitReason::Ext2Mutation);
+}
+
+fn kernel_ext2_mutation_abort_drain(guard: sink Ext2DrainGuard[&ext2_mutation_lock]) {
+    ext2_mutation_abort_drain(guard);
+    kernel_process_ext2_wake(ProcessWaitReason::Ext2Mutation);
 }
 
 // Recheck and Blocked publication hold the same run lock as this wake.
 // An early wake cannot select a task whose private stack is still owned.
-private fn kernel_process_ext2_mutation_wake() !{unsafe} {
+fn kernel_ext2_read_enter() -> bool !{unsafe} {
+    match ext2_read_admit() {
+        Ext2ReaderAdmission::Counted => { return true; }
+        Ext2ReaderAdmission::Refused => { return false; }
+        Ext2ReaderAdmission::RefusedLastReader => {
+            kernel_process_ext2_wake(ProcessWaitReason::Ext2ReaderDrain);
+            return false;
+        }
+    }
+}
+
+fn kernel_ext2_read_leave() !{unsafe} {
+    if (ext2_read_leave()) {
+        kernel_process_ext2_wake(ProcessWaitReason::Ext2ReaderDrain);
+    }
+}
+
+private fn kernel_process_ext2_wake(reason: ProcessWaitReason) !{unsafe} {
     let guard = process_run_lock();
     let mut cursor = scheduled_process_first_slot();
     let mut walking: bool = true;
@@ -11471,8 +11516,7 @@ private fn kernel_process_ext2_mutation_wake() !{unsafe} {
             ProcessSlotCursor::At(slot) => {
                 if (scheduled_process_record_state_locked(guard, slot) ==
                         ProcessSlotState::Blocked &&
-                    scheduled_process_record_wait_reason_locked(guard, slot) ==
-                        ProcessWaitReason::Ext2Mutation) {
+                    scheduled_process_record_wait_reason_locked(guard, slot) == reason) {
                     match scheduled_process_blocked_take_slot(guard, slot) {
                         ScheduledProcessBlockedTakeResult::Missing => {}
                         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
@@ -13422,6 +13466,7 @@ fn kernel_process_crash_wait_reason() -> usize !{unsafe} {
         ProcessWaitReason::UartTx => { return 6; }
         ProcessWaitReason::Pipe => { return 7; }
         ProcessWaitReason::Ext2Mutation => { return 8; }
+        ProcessWaitReason::Ext2ReaderDrain => { return 9; }
     }
 }
 
@@ -13887,37 +13932,50 @@ fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, Pro
                     }
                 }
             }
+            let mut idle_before_drain: bool = false;
             if (parent_linked && kernel_process_cpu_allows_slot(exit_guard,
                     cpu_id(), process_slot_of(parent.pool_index))) {
-            match scheduled_process_ready_take(exit_guard, parent) {
-                ScheduledProcessReadyTakeResult::Missing => {}
-                ScheduledProcessReadyTakeResult::Ready(parent_resources) => {
-                    let (parent_owner, parent_ready) = parent_resources;
-                    let parent_running =
-                        scheduled_process_start(parent_owner, parent_ready);
-                    process_run_unlock(exit_guard);
-                    { let mut __running_result: ExitSwitch = kernel_process_exit_reserved(
-                        child, parent, parent_owner, parent_running, false,
-                        auto_reap, span); return __running_result; }
-                }
-            }
-            }
-            // GitHub issue #448: a background child's parent may be blocked
-            // elsewhere. Reserve the scheduler's next Ready process instead.
-            match kernel_process_next_ready(exit_guard, child, cpu_id()) {
-                ProcessNextReadyResult::Missing => {}
-                ProcessNextReadyResult::Next(successor) => {
-                    match scheduled_process_ready_take(exit_guard, successor) {
-                        ScheduledProcessReadyTakeResult::Missing => {}
-                        ScheduledProcessReadyTakeResult::Ready(successor_resources) => {
-                            let (successor_owner, successor_ready) =
-                                successor_resources;
-                            let successor_running = scheduled_process_start(
-                                successor_owner, successor_ready);
+                match scheduled_process_ready_take(exit_guard, parent) {
+                    ScheduledProcessReadyTakeResult::Missing => {}
+                    ScheduledProcessReadyTakeResult::Ready(parent_resources) => {
+                        let (parent_owner, parent_ready) = parent_resources;
+                        if (scheduled_process_wait_reason_of_locked(exit_guard, parent) ==
+                                ProcessWaitReason::Ext2ReaderDrain) {
+                            scheduled_process_release(parent_owner, parent_ready);
+                            idle_before_drain = true;
+                        } else {
+                            let parent_running =
+                                scheduled_process_start(parent_owner, parent_ready);
                             process_run_unlock(exit_guard);
                             { let mut __running_result: ExitSwitch = kernel_process_exit_reserved(
-                                child, parent, successor_owner,
-                                successor_running, false, auto_reap, span); return __running_result; }
+                                child, parent, parent_owner, parent_running, false,
+                                auto_reap, span); return __running_result; }
+                        }
+                    }
+                }
+            }
+            // Leave the exiting stack and finish any deferred reap on the
+            // idle stack before selecting a drain continuation.
+            if (idle_before_drain == false) {
+                match kernel_process_next_ready(exit_guard, child, cpu_id()) {
+                    ProcessNextReadyResult::Missing => {}
+                    ProcessNextReadyResult::Next(successor) => {
+                        match scheduled_process_ready_take(exit_guard, successor) {
+                            ScheduledProcessReadyTakeResult::Missing => {}
+                            ScheduledProcessReadyTakeResult::Ready(successor_resources) => {
+                                let (successor_owner, successor_ready) = successor_resources;
+                                if (scheduled_process_wait_reason_of_locked(exit_guard, successor) ==
+                                        ProcessWaitReason::Ext2ReaderDrain) {
+                                    scheduled_process_release(successor_owner, successor_ready);
+                                } else {
+                                    let successor_running = scheduled_process_start(
+                                        successor_owner, successor_ready);
+                                    process_run_unlock(exit_guard);
+                                    { let mut __running_result: ExitSwitch = kernel_process_exit_reserved(
+                                        child, parent, successor_owner,
+                                        successor_running, false, auto_reap, span); return __running_result; }
+                                }
+                            }
                         }
                     }
                 }
@@ -15100,7 +15158,8 @@ private fn process_resume_discard(prepared: sink ProcessResumePrepared[process])
 private fn process_resume_commit(
         owner: borrow ScheduledProcessOwner[process],
         permit: sink ProcessOrdinaryPermit[process]) -> ProcessOrdinaryTarget[process] {
-    scheduled_process_record_owned(owner).ordinary_saved_sp = 0;
+    let record = scheduled_process_record_owned(owner);
+    record.ordinary_saved_sp = 0;
     let mut selected: ProcessOrdinaryTarget[process] = { permit.sp };
     return selected;
 }
@@ -15116,9 +15175,24 @@ private fn process_wait_identity_matches(identity: ProcessWaitIdentity,
         identity.generation == handle.generation;
 }
 
-private fn kernel_process_ordinary_complete(
+// The drain continuation owns rank 20. Finish the physical handoff,
+// but leave all ASID-capable reap work to a route that does not hold it.
+private fn kernel_process_ext2_drain_land(
+        frame: borrow FrameRef[process, ExceptionLevel::El0], from_irq: usize) {
+    let mut reap: ProcessDeferredReap = kernel_process_stack_switch_claim(frame, false);
+    kernel_process_root_authorities_check(reap.incoming, frame);
+    let guard = process_run_lock();
+    process_state_commit_ext2_drain(
+        &scheduled_process_record_live_locked(guard, reap.incoming).state);
+    process_run_unlock(guard);
+    if (from_irq != 0) { el1_preempt_irq_return_resume_note(); }
+    if (reap.live) { kernel_invariant_stop_with_frame(frame); }
+    enable_irq(); // The drain landing checked the deferred reap.
+}
+
+private fn kernel_process_ordinary_validate(
         frame: borrow FrameRef[process, ExceptionLevel::El0],
-        original: ProcessWaitIdentity, from_irq: usize) {
+        original: ProcessWaitIdentity) {
     // The architecture has restored SP and still masks IRQs. Check the
     // original task and its retained frame before taking the physical stack.
     let restored: bool = match kernel_process_current_read() {
@@ -15131,6 +15205,12 @@ private fn kernel_process_ordinary_complete(
     if (restored == false) {
         kernel_invariant_stop_with_frame(frame);
     }
+}
+
+private fn kernel_process_ordinary_complete(
+        frame: borrow FrameRef[process, ExceptionLevel::El0],
+        original: ProcessWaitIdentity, from_irq: usize) {
+    kernel_process_ordinary_validate(frame, original);
     preempt_count_after_switch();
     kernel_process_stack_switch_take(frame);
     if (from_irq != 0) { el1_preempt_irq_return_resume_note(); }
@@ -15142,8 +15222,8 @@ must_use variant ProcessExt2Park {
     NoOrdinaryStack;
 }
 
-fn kernel_process_ext2_mutex_park(frame: borrow FrameRef[process, ExceptionLevel::El0],
-        original: ProcessWaitIdentity) -> ProcessExt2Park !{may_block, requires_irq_unmasked} {
+private fn kernel_process_ext2_save_address(frame: borrow FrameRef[process, ExceptionLevel::El0],
+        original: ProcessWaitIdentity) -> usize {
     static_assert(sizeof(ProcessOrdinaryDestination[process]) == sizeof(usize),
                   "ordinary save destination is one machine word");
     let mut address: usize = 0;
@@ -15166,6 +15246,12 @@ fn kernel_process_ext2_mutex_park(frame: borrow FrameRef[process, ExceptionLevel
         }
         process_run_unlock(guard);
     }
+    return address;
+}
+
+fn kernel_process_ext2_mutex_park(frame: borrow FrameRef[process, ExceptionLevel::El0],
+        original: ProcessWaitIdentity) -> ProcessExt2Park !{may_block, requires_irq_unmasked} {
+    let address: usize = kernel_process_ext2_save_address(frame, original);
     if (address == 0) { return ProcessExt2Park::NoOrdinaryStack; }
     let mut destination: ProcessOrdinaryDestination[process] = { address };
     match kernel_process_block_current(frame, ProcessWaitReason::Ext2Mutation, 8) {
@@ -15188,6 +15274,36 @@ fn kernel_process_ext2_mutex_park(frame: borrow FrameRef[process, ExceptionLevel
             kernel_process_ordinary_complete(frame, original, from_irq);
         }
     }
+    return ProcessExt2Park::RetryAcquire;
+}
+
+// Do not reserve a successor here: installing that successor can require an
+// ASID rollover on the caller's rank-20 stack.
+fn kernel_process_ext2_drain_park(
+        admission: borrow Ext2DrainGuard[&ext2_mutation_lock],
+        frame: borrow FrameRef[process, ExceptionLevel::El0],
+        original: ProcessWaitIdentity) -> ProcessExt2Park
+        !{may_block, requires_irq_unmasked} {
+    let address: usize = kernel_process_ext2_save_address(frame, original);
+    if (address == 0) { return ProcessExt2Park::NoOrdinaryStack; }
+    let ProcessCurrentRead::Running(current_task) = kernel_process_current_read() else {
+        ProcessCurrentRead::Idle => { return ProcessExt2Park::NoOrdinaryStack; }
+    };
+    let span = preempt_span_begin();
+    let guard = process_run_lock();
+    let parked: bool = kernel_process_block_to_idle(
+        guard, current_task, frame, ProcessWaitReason::Ext2ReaderDrain, 9);
+    process_run_unlock(guard);
+    if (parked == false) {
+        preempt_span_end(span);
+        return ProcessExt2Park::RetryAcquire;
+    }
+    let mut destination: ProcessOrdinaryDestination[process] = { address };
+    preempt_span_resume(span);
+    let from_irq: usize = arm64_ordinary_depart_idle(destination);
+    kernel_process_ordinary_validate(frame, original);
+    preempt_count_after_switch();
+    kernel_process_ext2_drain_land(frame, from_irq);
     return ProcessExt2Park::RetryAcquire;
 }
 

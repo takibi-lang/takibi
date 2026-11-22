@@ -185,6 +185,41 @@ def planted(rows: list[dict], name: str, column: str, change) -> list[dict]:
     return copy
 
 
+DRAIN_PARK = "kernel_process_ext2_drain_park"
+DRAIN_LANDING = "kernel_process_ext2_drain_land"
+DRAIN_FORBIDDEN = {
+    "kernel_process_reap_zombie",
+    "arm64_ordinary_depart_exception",
+    "arm64_ordinary_depart_ordinary",
+    "kernel_process_rollover_backoff",
+    "asid_rollover_stopped",
+    "world_stop_machine_begin",
+    "world_stop_machine_begin_holding_probe",
+    "world_stop_machine_begin_kind",
+    "*",
+}
+
+
+def drain_landing_problems(rows: list[dict]) -> list[str]:
+    callees: dict[str, set[str]] = {}
+    for row in rows:
+        callees.setdefault(row["name"], set()).update(
+            call_graph_table.callee_name(entry) for entry in row["callees"])
+    if DRAIN_PARK not in callees or DRAIN_LANDING not in callees[DRAIN_PARK]:
+        return ["reader-drain park must reach its dedicated landing directly"]
+    if "arm64_ordinary_depart_idle" not in callees[DRAIN_PARK]:
+        return ["reader-drain park must directly depart to idle"]
+    visited = set()
+    pending = [DRAIN_PARK]
+    while pending:
+        name = pending.pop()
+        if name not in visited:
+            visited.add(name)
+            pending.extend(callees.get(name, ()))
+    return [f"reader-drain park reaches {name} with the mutation guard held"
+            for name in sorted(visited & DRAIN_FORBIDDEN)]
+
+
 def controls_fail(rows: list[dict]) -> list[str]:
     """Defects planted in the table that must be refused; the ones that are not."""
     failed = []
@@ -215,6 +250,11 @@ def controls_fail(rows: list[dict]) -> list[str]:
     dropped = tuple(m for m in MUTATORS if m != "ext2_write_regular_file_range")
     if not guard_problems(rows, dropped)[0]:
         failed.append("a block-writing mutator missing from MUTATORS")
+    for name in sorted(DRAIN_FORBIDDEN):
+        changed = planted(rows, DRAIN_LANDING, "callees",
+                          lambda callees: callees + [name if name == "*" else name + "@-"])
+        if not drain_landing_problems(changed):
+            failed.append(f"reader-drain landing reaching {name}")
     return failed
 
 
@@ -228,6 +268,7 @@ def main() -> int:
         print(f"FAIL ext2-mutation-guard: {error}")
         return 1
     problems, guarded = guard_problems(rows)
+    problems += drain_landing_problems(rows)
     for problem in problems:
         print(f"ERROR ext2-mutation-guard: {problem}")
     if problems:

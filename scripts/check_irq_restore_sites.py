@@ -68,6 +68,9 @@ ALLOWED = {
             "on for the first time in the boot",
     },
     "kernel/kernel/process.tkb": {
+        "enable_irq(); // The drain landing checked the deferred reap.":
+            "kernel_process_ext2_drain_land: the restored task takes its "
+            "physical stack, retains its active root and has no deferred reap",
         "enable_irq(); // The ordinary landing owns the IRQ mask.":
             "kernel_process_ordinary_complete: the waiter entered unmasked; "
             "the linked AArch64 restore masks IRQs before changing SP. "

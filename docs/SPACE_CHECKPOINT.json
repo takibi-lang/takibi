@@ -1,12 +1,12 @@
 {
-  "date": "2026-11-21",
-  "event": "incremental",
+  "date": "2026-11-22",
+  "event": "milestone",
   "decision": "measured",
-  "source_sha256": "07ca82bd07b0ba58aec05d7742670005244c526daf3d52553f4aafd102034877",
-  "workload": "Normal QEMU and RPi5 kernels linked against ab79a8441. The existing FDT boot log reads the first bank through the region result.",
+  "source_sha256": "304c222cec74411cf823bac787939bdbdc7a3ea29b9ed8b4df784ed2043cd6e4",
+  "workload": "Normal linked kernels against 5793c2f77, QEMU bounded boot pool snapshots, and observed mkdirat drain with normal and rejected reader departures.",
   "evidence": [
-    "docs/FRAME_API_SPACE_REVIEW.md"
+    "docs/EXT2_READER_DRAIN_SPACE_REVIEW.md"
   ],
-  "assessment": "Linked text falls by 64 bytes on QEMU and 56 bytes on RPi5. Data, BSS, usable RAM starts and five allocator expectations are unchanged.",
-  "next_trigger": "Remeasure when FDT region logging or memory-bank allocation changes."
+  "assessment": "Linked text grows 2184 bytes on QEMU and 2208 bytes on RPi5. Data, BSS, usable RAM starts and process record size are unchanged. The writer keeps rank-20 admission across the wait without additional allocated state.",
+  "next_trigger": "Remeasure at the next writer integration, a waiting representation change, or a physical contention measurement."
 }

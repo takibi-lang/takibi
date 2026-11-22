@@ -115,7 +115,7 @@ fn ext2_mutation_contention_secondary_run(cpu: usize) !{unsafe} {
 
 // GitHub issue #559: a peer reader that core 0's mutation must wait for.
 private fn ext2_mutation_probe_reader(cpu: usize) !{unsafe} {
-    if (ext2_read_enter()) {
+    if (kernel_ext2_read_enter()) {
         peer_tally_set(&ext2_mutation_probe_inside, cpu, 1);
         // Stay inside until core 0 has started taking the lock, then a
         // little longer, so a take that did not wait has time to return.
@@ -142,7 +142,7 @@ private fn ext2_mutation_probe_reader(cpu: usize) !{unsafe} {
         if (atomic_word_load(&ext2_mutation_probe_taken) == 1) {
             peer_tally_set(&ext2_mutation_probe_overlapped, cpu, 1);
         }
-        ext2_read_leave();
+        kernel_ext2_read_leave();
         peer_tally_set(&ext2_mutation_probe_inside, cpu, 2);
     }
 }
@@ -230,7 +230,7 @@ private fn ext2_mutation_probe_core0_reader(phase: usize) -> usize
     atomic_word_store(&ext2_mutation_probe_trying, 0);
     atomic_word_store(&ext2_mutation_probe_taken, 0);
     atomic_word_store(&ext2_mutation_probe_left, 0);
-    if (ext2_read_enter() == false) { return 2; }
+    if (kernel_ext2_read_enter() == false) { return 2; }
     let sequence: usize = ext2_mutation_probe_arm(phase);
     // peer-window-ok: any one peer's store ends the wait, and the window's
     // peer is itself one of the peers that store it (any-of, not all-of).
@@ -253,7 +253,7 @@ private fn ext2_mutation_probe_core0_reader(phase: usize) -> usize
     while (read_cntpct() - linger < (read_cntfrq() >> 6)) { }
     let overlapped: usize = atomic_word_load(&ext2_mutation_probe_taken);
     atomic_word_store(&ext2_mutation_probe_left, 1);
-    ext2_read_leave();
+    kernel_ext2_read_leave();
     let finished: bool = ext2_mutation_probe_finish(sequence);
     if (started == 0 || finished == false) { return 2; }
     return overlapped;

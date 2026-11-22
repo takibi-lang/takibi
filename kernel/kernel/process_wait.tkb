@@ -6,7 +6,7 @@
 // when it only meant to block (#603 path 2), and every child's exit wrote
 // the parent's last_child_pid from whichever CPU it ran on, so a sibling
 // retargeted a pending wait4 (#633). Now the wait is the payload of the
-// state that has it, so a Running process carries none by construction:
+// state that has it. A started process retains an unsettled continuation:
 //
 //   Blocked(reason)    blocked, waiting for `reason`
 //   ReadyWait4(child)  a wait4 parent woken by `child`'s exit on a CPU that
@@ -15,6 +15,8 @@
 //                      CPU settles the continuation; a refused start yields
 //                      it back to ReadyWait4, so no other CPU reaps the
 //                      child while its exit is still on its kernel stack
+//   ReadyExt2Drain    an ext2 writer woken after its counted readers drain
+//   ResumingExt2Drain a drain continuation reserved for ordinary resume
 //   Reaping            an Exited record one reaper has taken. It stays held
 //                      through the teardown, outside the run lock, and only
 //                      that reaper removes it, so a second take finds no
@@ -22,7 +24,8 @@
 //
 // Readers ask through process_state_kind and process_wait_reason, which
 // answer as the two fields did: ReadyWait4 is Ready and Resuming is
-// Running, both with ChildExit. The fields are private, so the transitions
+// Running, both with ChildExit. The two drain states similarly retain
+// Ext2ReaderDrain until ordinary resume commits. The fields are private, so the transitions
 // below are the only writers; which transition a caller may make is the
 // state token's business in process.tkb.
 //
@@ -40,7 +43,7 @@
 // on the pipe its record's pipe_wait names. Added at the end so the codes
 // the DDB and crash reports print for the others are unchanged.
 enum ProcessWaitReason: u8 {
-    None; UartRx; ChildExit; NetRx; Deadline; Signal; UartTx; Pipe; Ext2Mutation;
+    None; UartRx; ChildExit; NetRx; Deadline; Signal; UartTx; Pipe; Ext2Mutation; Ext2ReaderDrain;
 }
 
 // The kind of state, as readers compare it.
@@ -58,6 +61,8 @@ variant ProcessRecordState {
     ReadyWait4(usize);
     Resuming(usize);
     Reaping;
+    ReadyExt2Drain;
+    ResumingExt2Drain;
 }
 
 struct ProcessStateCell {
@@ -82,6 +87,8 @@ fn process_state_kind(cell: borrow &ProcessStateCell) -> ProcessSlotState {
         ProcessRecordState::ReadyWait4(_) => { return ProcessSlotState::Ready; }
         ProcessRecordState::Resuming(_) => { return ProcessSlotState::Running; }
         ProcessRecordState::Reaping => { return ProcessSlotState::Reaping; }
+        ProcessRecordState::ReadyExt2Drain => { return ProcessSlotState::Ready; }
+        ProcessRecordState::ResumingExt2Drain => { return ProcessSlotState::Running; }
     }
 }
 
@@ -93,6 +100,12 @@ fn process_wait_reason(cell: borrow &ProcessStateCell) -> ProcessWaitReason {
         }
         ProcessRecordState::Resuming(_) => {
             return ProcessWaitReason::ChildExit;
+        }
+        ProcessRecordState::ReadyExt2Drain => {
+            return ProcessWaitReason::Ext2ReaderDrain;
+        }
+        ProcessRecordState::ResumingExt2Drain => {
+            return ProcessWaitReason::Ext2ReaderDrain;
         }
         _ => { return ProcessWaitReason::None; }
     }
@@ -155,6 +168,9 @@ fn process_state_start(cell: &mut ProcessStateCell) {
         ProcessRecordState::ReadyWait4(child) => {
             (*cell).value = ProcessRecordState::Resuming(child);
         }
+        ProcessRecordState::ReadyExt2Drain => {
+            (*cell).value = ProcessRecordState::ResumingExt2Drain;
+        }
         _ => { (*cell).value = ProcessRecordState::Running; }
     }
 }
@@ -166,6 +182,9 @@ fn process_state_yield(cell: &mut ProcessStateCell) {
         ProcessRecordState::Resuming(child) => {
             (*cell).value = ProcessRecordState::ReadyWait4(child);
         }
+        ProcessRecordState::ResumingExt2Drain => {
+            (*cell).value = ProcessRecordState::ReadyExt2Drain;
+        }
         _ => { (*cell).value = ProcessRecordState::Ready; }
     }
 }
@@ -176,9 +195,28 @@ fn process_state_block(cell: &mut ProcessStateCell, reason: ProcessWaitReason) {
     (*cell).value = ProcessRecordState::Blocked(reason);
 }
 
+// Preserve a drain continuation's scheduling restriction until commit.
 // A wake leaves nothing pending.
 fn process_state_wake(cell: &mut ProcessStateCell) {
-    (*cell).value = ProcessRecordState::Ready;
+    match (*cell).value {
+        ProcessRecordState::Blocked(reason) => {
+            if (reason == ProcessWaitReason::Ext2ReaderDrain) {
+                (*cell).value = ProcessRecordState::ReadyExt2Drain;
+            } else {
+                (*cell).value = ProcessRecordState::Ready;
+            }
+        }
+        _ => { (*cell).value = ProcessRecordState::Ready; }
+    }
+}
+
+fn process_state_commit_ext2_drain(cell: &mut ProcessStateCell) {
+    match (*cell).value {
+        ProcessRecordState::ResumingExt2Drain => {
+            (*cell).value = ProcessRecordState::Running;
+        }
+        _ => {}
+    }
 }
 
 // A ChildExit waiter woken by `child` that cannot be resumed now: it stays

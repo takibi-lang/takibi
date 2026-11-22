@@ -59,7 +59,7 @@
 // - BOTH WINDOWS ARE CLOSED FOR EVERY READER (GitHub issues #559, #597).
 //   A read starting during a mutation is refused at syscall entry; a
 //   mutation starting during a read waits for the reader count
-//   (ext2_read_enter / ext2_read_leave) to drain. Every CPU's readers are
+//   (ext2_read_admit / ext2_read_leave) to drain. Every CPU's readers are
 //   counted since mutation runs on a peer too, and an execve's registration
 //   is held until its child exec prepare has streamed the image.
 // - A READER OUTSIDE A SYSCALL IS NOT COUNTED. The count is taken by the
@@ -108,7 +108,7 @@ linear struct Ext2MutationGuard[lock: addr] {
 }
 
 // GitHub issue #559: readers inside ext2 right now. A reader adds one at
-// syscall entry (ext2_read_enter) and takes it away when the syscall is
+// syscall entry (ext2_read_admit) and takes it away when the syscall is
 // done (ext2_read_leave); a mutator, holding the lock, waits for it to reach
 // zero. So a mutation starting while a read is in flight waits for that
 // read, which the entry question alone did not do. Readers stay concurrent
@@ -129,24 +129,47 @@ fn ext2_mutation_take() -> Ext2MutationGuard[&ext2_mutation_lock]
     return ext2_mutation_wait_for_readers();
 }
 
-// Busy retains no guard. Acquired includes the existing registered-reader drain.
-must_use variant Ext2MutationTry {
-    Busy;
-    Acquired(Ext2MutationGuard[&ext2_mutation_lock]);
+// The mutex excludes another writer, but an existing reader can still
+// own access. Only a checked zero-reader transition yields a mutation guard.
+linear struct Ext2DrainGuard[lock: addr] {
+    private cpu: usize;
 }
 
-fn ext2_mutation_try_take() -> Ext2MutationTry
+must_use variant Ext2DrainAcquire {
+    Busy;
+    Held(Ext2DrainGuard[&ext2_mutation_lock]);
+}
+
+fn ext2_mutation_try_take() -> Ext2DrainAcquire
         !{acquires_lock_20_ext2_mutation, lock_guard_20_ext2_mutation, unsafe} {
     if (task_mutex_trylock(&ext2_mutation_lock) == false) {
-        return Ext2MutationTry::Busy;
+        return Ext2DrainAcquire::Busy;
     }
-    return Ext2MutationTry::Acquired(ext2_mutation_wait_for_readers());
+    dsb_ish();
+    let mut guard: Ext2DrainGuard[&ext2_mutation_lock] = { cpu_id() };
+    return Ext2DrainAcquire::Held(guard);
+}
+
+must_use variant Ext2DrainCheck {
+    ActiveReaders(Ext2DrainGuard[&ext2_mutation_lock]);
+    Drained(Ext2MutationGuard[&ext2_mutation_lock]);
+}
+
+fn ext2_mutation_check_drain(guard: sink Ext2DrainGuard[&ext2_mutation_lock])
+        -> Ext2DrainCheck !{lock_guard_20_ext2_mutation} {
+    if (ext2_readers_drained() == false) { return Ext2DrainCheck::ActiveReaders(guard); }
+    let mut ready: Ext2MutationGuard[&ext2_mutation_lock] = { guard.cpu };
+    return Ext2DrainCheck::Drained(ready);
+}
+
+fn ext2_mutation_abort_drain(guard: sink Ext2DrainGuard[&ext2_mutation_lock]) {
+    task_mutex_release(&ext2_mutation_lock);
 }
 
 private fn ext2_mutation_wait_for_readers() -> Ext2MutationGuard[&ext2_mutation_lock]
         !{lock_guard_20_ext2_mutation, unsafe} {
     // The Dekker half: the lock is visibly held before the count is read,
-    // and ext2_read_enter publishes its count before it reads the lock, so
+    // and ext2_read_admit publishes its count before it reads the lock, so
     // at least one side sees the other. A reader that saw the lock free is
     // counted here and waited for; one that saw it held has undone its
     // count and gone to core 0.
@@ -171,22 +194,40 @@ fn ext2_mutation_take_without_readers_unchecked()
 // A reader's arrival. True: counted and admitted, and ext2_read_leave is
 // owed. False: a mutation is in flight, nothing is owed, and the caller
 // reruns the syscall -- on core 0 from a peer, after an interrupt on core 0.
-fn ext2_read_enter() -> bool !{unsafe} {
+must_use variant Ext2ReaderAdmission {
+    Counted;
+    Refused;
+    RefusedLastReader;
+}
+
+fn ext2_read_admit() -> Ext2ReaderAdmission !{unsafe} {
     let before: usize = atomic_word_fetch_add(&ext2_readers, 1);
     dsb_ish();
     if (task_mutex_is_held(&ext2_mutation_lock)) {
-        let counted: usize =
-            atomic_word_fetch_add(&ext2_readers, 0xFFFFFFFFFFFFFFFF);
-        return false;
+        if (ext2_read_drop_should_wake()) { return Ext2ReaderAdmission::RefusedLastReader; }
+        return Ext2ReaderAdmission::Refused;
     }
-    return true;
+    return Ext2ReaderAdmission::Counted;
+}
+
+// Only the last reader can wake a drain writer. Pair the barrier after
+// our decrement and before the mutex load with the writer's barrier
+// after taking the mutex and before checking the reader count.
+private fn ext2_read_drop_should_wake() -> bool !{unsafe} {
+    let counted: usize = atomic_word_fetch_add(&ext2_readers, 0xFFFFFFFFFFFFFFFF);
+    if (counted != 1) { return false; }
+    dsb_ish();
+    return ext2_mutation_in_flight();
 }
 
 // Every ext2 access of the syscall is complete before the count drops.
-fn ext2_read_leave() !{unsafe} {
+fn ext2_read_leave() -> bool !{unsafe} {
     dsb_ish();
-    let counted: usize =
-        atomic_word_fetch_add(&ext2_readers, 0xFFFFFFFFFFFFFFFF);
+    return ext2_read_drop_should_wake();
+}
+
+fn ext2_readers_drained() -> bool {
+    return atomic_word_load(&ext2_readers) == 0;
 }
 
 fn ext2_mutation_give(guard: sink Ext2MutationGuard[&ext2_mutation_lock]) {

@@ -5001,7 +5001,7 @@ fn kernel_syscall_child_exec_return(frame: FrameRef[process, ExceptionLevel::El0
         kernel_process_child_exec_prepare(current_authority, args_page);
     // GitHub issue #597: the prepare was the last ext2 read of this execve.
     if (syscall_ext2_reader_take(ext2_reader)) {
-        ext2_read_leave();
+        kernel_ext2_read_leave();
     }
     // GitHub issue #1058 classified these arms; #1079 (maintainer decision
     // 2026-10-25, option c) retired the reachable ones. The point of no
@@ -5313,14 +5313,39 @@ private fn ext2_mkdir_mutation_take(frame: borrow FrameRef[process, ExceptionLev
           lock_guard_20_ext2_mutation, unsafe} {
     while (true) {
         match ext2_mutation_try_take() {
-            Ext2MutationTry::Acquired(guard) => { return Ext2MkdirMutationTake::Acquired(guard); }
-            Ext2MutationTry::Busy => {}
+            Ext2DrainAcquire::Held(admission) => {
+                return ext2_mkdir_wait_for_drain(frame, original, admission);
+            }
+            Ext2DrainAcquire::Busy => {}
         }
         match kernel_process_ext2_mutex_park(frame, original) {
             ProcessExt2Park::RetryAcquire => {}
             ProcessExt2Park::NoOrdinaryStack => { return Ext2MkdirMutationTake::Refused; }
         }
     }
+    return Ext2MkdirMutationTake::Refused;
+}
+
+private fn ext2_mkdir_wait_for_drain(
+        frame: borrow FrameRef[process, ExceptionLevel::El0],
+        original: ProcessWaitIdentity,
+        initial: sink Ext2DrainGuard[&ext2_mutation_lock]) -> Ext2MkdirMutationTake
+        !{may_block, requires_irq_unmasked, lock_guard_20_ext2_mutation} {
+    let mut admission: Ext2DrainGuard[&ext2_mutation_lock] = initial;
+    while (true) {
+        match ext2_mutation_check_drain(admission) {
+            Ext2DrainCheck::Drained(guard) => { return Ext2MkdirMutationTake::Acquired(guard); }
+            Ext2DrainCheck::ActiveReaders(waiting) => { admission = waiting; }
+        }
+        match kernel_process_ext2_drain_park(admission, frame, original) {
+            ProcessExt2Park::RetryAcquire => {}
+            ProcessExt2Park::NoOrdinaryStack => {
+                kernel_ext2_mutation_abort_drain(admission);
+                return Ext2MkdirMutationTake::Refused;
+            }
+        }
+    }
+    kernel_ext2_mutation_abort_drain(admission);
     return Ext2MkdirMutationTake::Refused;
 }
 
@@ -6896,7 +6921,7 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     // that is -- Block and Migrate included. An execve that succeeded is the
     // exception (#597) and never returns here: its prepare reads the image,
     // and kernel_syscall_child_exec_return releases the registration then.
-    if (syscall_ext2_reader_take(&ext2_reader)) { ext2_read_leave(); }
+    if (syscall_ext2_reader_take(&ext2_reader)) { kernel_ext2_read_leave(); }
     let (action_code, action_value) = syscall_action_encode(action, SyscallCompletion::Dispatch(number));
     if (action_code == 6) {
         workload_profile_syscall_wait(number);
@@ -7817,7 +7842,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // starts meanwhile waits for it -- the entry question alone let a
     // mutation start during an admitted read.
     if (syscall_reaches_filesystem(number, x0, x2)) {
-        if (ext2_read_enter() == false) {
+        if (kernel_ext2_read_enter() == false) {
             // GitHub issue #775: every core waits in place. A peer used to
             // hand the call to core 0 to wait there, which changed the
             // process's placement for a condition no core owns.

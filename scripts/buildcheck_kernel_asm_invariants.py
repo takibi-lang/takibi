@@ -938,6 +938,9 @@ ORDINARY_LANDINGS = {
 }
 ORDINARY_EDGES = {
     **{name: {"kernel_process_ext2_mutex_park"} for name in ORDINARY_DEPARTURES},
+    "arm64_ordinary_depart_idle": {
+        "kernel_process_ext2_mutex_park", "kernel_process_ext2_drain_park",
+    },
     "arm64_ordinary_resume_from_process": {
         "arm64_ordinary_depart_ordinary", "kernel_idle_loop",
         "kernel_syscall_block_return", "kernel_syscall_resume_tail",
@@ -1024,6 +1027,7 @@ def ordinary_context_predecessor_controls():
         (40, f"b 0x600 <{ORDINARY_RESUME}>", "arm64_ordinary_resume_from_irq"),
         (44, "bl 0x4 <arm64_ordinary_depart_exception>", "kernel_process_ext2_mutex_park"),
         (48, "bl 0xc <arm64_ordinary_depart_idle>", "kernel_process_ext2_mutex_park"),
+        (50, "bl 0xc <arm64_ordinary_depart_idle>", "kernel_process_ext2_drain_park"),
         (52, "bl 0x14 <arm64_ordinary_depart_ordinary>", "kernel_process_ext2_mutex_park"),
         (56, "b 0x1c <arm64_ordinary_resume_from_process>", "kernel_idle_loop"),
         (68, "b 0x1c <arm64_ordinary_resume_from_process>", "kernel_syscall_block_return"),
