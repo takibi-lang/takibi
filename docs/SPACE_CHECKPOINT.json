@@ -1,12 +1,12 @@
 {
   "date": "2026-11-23",
-  "event": "milestone",
-  "decision": "measured",
-  "source_sha256": "96884dc40e2457ac5ef12971442e24b3803435cbe841bba89917265c37d12aa2",
-  "workload": "Normal linked kernels against fe2491d92 and focused QEMU unlinkat with AT_REMOVEDIR held at the reader-drain wait until a counted reader leaves.",
+  "event": "incremental",
+  "decision": "reuse",
+  "source_sha256": "633ba1cf57e2a30cf72244d940e5a00341cda7ce6d051c220e68aa29d1fb5055",
+  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 05a63559: this branch's review, rebound to the merged sources (upstream's record was 2026-11-23 milestone/measured). Normal linked QEMU and RPi5 kernels compared with 9a806133c. Existing kernel callers and workload stay the same.",
   "evidence": [
-    "docs/EXT2_READER_DRAIN_SPACE_REVIEW.md"
+    "docs/PROJECTED_LOCK_SPACE_REVIEW.md"
   ],
-  "assessment": "The shared post-acquisition path reduces linked text accounting by 28 bytes on each target. Data and BSS sizes, usable RAM starts and dispatch frames are unchanged. The wait adds no retained state.",
-  "next_trigger": "Remeasure when another ext2 syscall parks, the waiting representation changes, or physical contention is measured."
+  "assessment": "The new direct call proof erases. Both platforms produce byte-identical main.o and kernel.elf artifacts relative to the bounded cursor review.",
+  "next_trigger": "Remeasure when write evidence or ring copy paths change the linked workload."
 }
