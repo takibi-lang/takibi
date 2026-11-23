@@ -3023,6 +3023,131 @@ let expect_type_error_files fragment files () =
       then Alcotest.failf "no entry of the MultiTypeError contains %S: %s"
           fragment (String.concat " | " (List.map snd errors))
 
+let projected_lock_fixture = atomic_word_fixture ^ {|
+struct no_copy ProofMutex { private word: AtomicWord lockword(0, 1); }
+struct ProofRecord { mutex: ProofMutex; sibling: ProofMutex; }
+linear struct ProofOwner[p: addr, k: usize] {
+    private pin: RegionPin(ProofRecord)[p,k] owns_lock(region_pin_record, mutex);
+}
+must_use variant ProofTaken {
+    Ready(exists p: addr. exists k: usize. ProofOwner[p,k]);
+}
+fn lock_cell(m: *ProofMutex @ address) !{locks, unsafe, acquires(m)} {
+    while (atomic_word_compare_exchange(&m.word, 0, 1) == false) {}
+}
+fn unlock_cell(m: *ProofMutex @ address) !{locks, unsafe, releases(m)} {
+    atomic_word_store(&m.word, 0);
+}
+fn mint(pin: sink RegionPin(ProofRecord)[p,k]) -> ProofOwner[p,k] {
+    let mut owner: ProofOwner[p,k] = { pin };
+    return owner;
+}
+|}
+
+let projected_lock_tests =
+  let open Alcotest in
+  let take = {|
+fn take(pin: sink RegionPin(ProofRecord)[p,k]) -> ProofTaken !{locks,unsafe} {
+    lock_cell(&region_pin_record(pin).mutex);
+    return ProofTaken::Ready(mint(pin));
+}
+|} in
+  [test_case "owner carries the lock through a variant" `Quick (fun () ->
+     ignore (infer_regions (projected_lock_fixture ^ take ^ {|
+fn use_taken(taken: sink ProofTaken) !{locks,unsafe} {
+    match taken {
+        ProofTaken::Ready(owner) => {
+            let pin = owner.pin;
+            unlock_cell(&region_pin_record(pin).mutex);
+            match region_unpin(pin) {
+                RegionUnpin(ProofRecord)::Unpinned => {}
+                RegionUnpin(ProofRecord)::Last(slot) => { region_slot_abandon(slot); }
+            }
+        }
+    }
+}
+|})));
+   test_case "mint needs the same pin" `Quick
+     (expect_region_error "owner factory needs the same live pin" (projected_lock_fixture ^ {|
+fn wrong(first: sink RegionPin(ProofRecord)[p,k],
+         second: sink RegionPin(ProofRecord)[q,j]) -> (ProofOwner[q,j], RegionPin(ProofRecord)[p,k]) !{locks,unsafe} {
+    lock_cell(&region_pin_record(first).mutex);
+    return (mint(second), first);
+}
+|}));
+   test_case "a sibling lock field cannot authorize the owner" `Quick
+     (expect_region_error "owner factory needs the same live pin" (projected_lock_fixture ^ {|
+linear struct SiblingOwner[p: addr, k: usize] {
+    private pin: RegionPin(ProofRecord)[p,k] owns_lock(region_pin_record, sibling);
+}
+fn sibling_mint(pin: sink RegionPin(ProofRecord)[p,k]) -> SiblingOwner[p,k] {
+    let mut owner: SiblingOwner[p,k] = { pin };
+    return owner;
+}
+fn wrong(pin: sink RegionPin(ProofRecord)[p,k]) -> SiblingOwner[p,k] !{locks,unsafe} {
+    lock_cell(&region_pin_record(pin).mutex);
+    return sibling_mint(pin);
+}
+|}));
+   test_case "release requires the same held pin" `Quick
+     (expect_region_error "release needs the same live pin" (projected_lock_fixture ^ {|
+fn wrong(first: sink RegionPin(ProofRecord)[p,k],
+         second: sink RegionPin(ProofRecord)[q,j])
+         -> (RegionPin(ProofRecord)[p,k], RegionPin(ProofRecord)[q,j]) !{locks,unsafe} {
+    lock_cell(&region_pin_record(first).mutex);
+    unlock_cell(&region_pin_record(second).mutex);
+    return (first, second);
+}
+|}));
+   test_case "release before mint loses the right" `Quick
+     (expect_region_error "owner factory needs the same live pin" (projected_lock_fixture ^ {|
+fn wrong(pin: sink RegionPin(ProofRecord)[p,k]) -> ProofTaken !{locks,unsafe} {
+    lock_cell(&region_pin_record(pin).mutex);
+    unlock_cell(&region_pin_record(pin).mutex);
+    return ProofTaken::Ready(mint(pin));
+}
+|}));
+   test_case "failed compare-exchange is not an acquire" `Quick
+     (expect_type_error "does not make the declared transition" (atomic_word_fixture ^ {|
+struct no_copy ProofMutex { private word: AtomicWord lockword(0, 1); }
+fn wrong(m: *ProofMutex @ address) !{locks,unsafe,acquires(m)} {
+    if (atomic_word_compare_exchange(&m.word, 0, 1)) { return; }
+}
+|}));
+   test_case "an external cannot forge a protected owner" `Quick
+     (expect_region_error "external declaration cannot carry a protected owner" (projected_lock_fixture ^ {|
+extern fn foreign_owner() -> ProofOwner[p,k];
+|}));
+   test_case "an external cannot receive the containing record" `Quick
+     (expect_region_error "external declaration cannot carry a protected owner, pin, or record"
+        (projected_lock_fixture ^ {|
+extern fn foreign_record(record: *ProofRecord);
+|}));
+   test_case "alignment does not erase the protected record" `Quick
+     (expect_region_error "external declaration cannot carry a protected owner, pin, or record"
+        (projected_lock_fixture ^ {|
+extern fn foreign_aligned(record: *align(8) ProofRecord);
+|}));
+   test_case "a borrowed protected pin cannot cross an external boundary" `Quick
+     (expect_region_error "external declaration cannot carry a protected owner, pin, or record"
+        (projected_lock_fixture ^ {|
+extern fn foreign_pin(pin: borrow RegionPin(ProofRecord)[p,k]);
+fn forward_pin(pin: borrow RegionPin(ProofRecord)[p,k]) {
+    foreign_pin(pin);
+}
+fn inspect(owner: borrow ProofOwner[p,k]) {
+    forward_pin(owner.pin);
+}
+|}));
+   test_case "lock address cannot reach an unverified helper" `Quick
+     (expect_region_error "projected lock address escapes" (projected_lock_fixture ^ {|
+fn legacy(m: *ProofMutex @ address) !{locks,unsafe} { atomic_word_store(&m.word, 0); }
+fn wrong(pin: sink RegionPin(ProofRecord)[p,k]) !{locks,unsafe} {
+    legacy(&region_pin_record(pin).mutex);
+    region_unpin(pin);
+}
+|}))]
+
 let stack_proof_fixture =
   "enum ProcessState: u8 { Ready; Startable; Running; Blocked; Exited;
                            Reapable; }
@@ -35411,6 +35536,7 @@ let named_groups_unisolated = [
   "production-nic-rx-look", production_nic_rx_look_tests;
   "region-inspection", region_inspection_tests;
   "slot-publication", slot_publication_tests;
+  "projected-lock", projected_lock_tests;
   "protocol-declarations", protocol_tests;
   "device-protocols", device_protocol_tests;
   "protocol-snapshots", snapshot_tests;

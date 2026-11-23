@@ -494,6 +494,7 @@ item:
       Dma_fixed_registry.finish name fields;
       Per_cpu_registry.finish name fields;
       Guarded_registry.finish name;
+      Projected_lock_decl.finish name (function Projected_lock_decl.Word _ -> true | _ -> false);
       StructDef (name, fields, is_packed, align_opt, private_fields, $symbolstartpos) }
   | owned_struct_intro LBRACE struct_fields RBRACE
     { let (name, kind, static_params, is_private) = $1 in
@@ -505,6 +506,9 @@ item:
       if Guarded_registry.take_pending () <> [] then
         raise (Types.TypeError ($symbolstartpos,
           "guarded_by is accepted on a Place field of a plain struct only"));
+      Projected_lock_decl.finish name (function
+        | Projected_lock_decl.Owner _ -> kind = KindLinear
+        | _ -> false);
       OwnedStructDef
         (name, kind, static_params, fields, false, None, private_fields,
          is_private, $symbolstartpos) }
@@ -801,6 +805,20 @@ struct_fields:
   | PRIVATE f = IDENT COLON t = type_expr GUARDED_BY LPAREN lock = IDENT RPAREN SEMI
     rest = struct_fields
     { Guarded_registry.note f lock; (f, t, true) :: rest }
+  | PRIVATE field = IDENT COLON ty = type_expr modifier = IDENT
+    LPAREN free = INT COMMA held = INT RPAREN SEMI rest = struct_fields
+    { let loc = $symbolstartpos in
+      if modifier <> "lockword" then
+        raise (Types.TypeError (loc, "expected lockword(free, held)"));
+      Projected_lock_decl.note (Projected_lock_decl.Word {field; free; held}) loc;
+      (field, ty, true) :: rest }
+  | PRIVATE field = IDENT COLON ty = type_expr modifier = IDENT
+    LPAREN projector = IDENT COMMA lock = IDENT RPAREN SEMI rest = struct_fields
+    { let loc = $symbolstartpos in
+      if modifier <> "owns_lock" then
+        raise (Types.TypeError (loc, "expected owns_lock(projector, lock)"));
+      Projected_lock_decl.note (Projected_lock_decl.Owner {field; projector; lock}) loc;
+      (field, ty, true) :: rest }
 
 vector_table_entries:
   | /* empty */ { [] }
@@ -830,28 +848,31 @@ variant_cases:
 func_def:
   | p = private_flag FN IDENT LPAREN params RPAREN ret_type_opt effects_opt w = where_opt bc = borrow_contract_opt cs = contracts_opt LBRACE body_stmts = stmts RBRACE
     {
+      let effects = Projected_lock_decl.finish_function $symbolstartpos $8 in
       Init_state.set_contracts $symbolstartpos cs;
       Init_state.finish_func $symbolstartpos $5;
       Def_extent.record $symbolstartpos $endpos;
-      Ast.{ name = $3; params = $5; ret_type = $7; effects = $8;
+      Ast.{ name = $3; params = $5; ret_type = $7; effects;
             body = body_stmts; is_inline = false; is_noinline = false; is_private = p;
             where_clauses = w; borrow_contract = bc; def_loc = $symbolstartpos }
     }
   | p = private_flag INLINE FN IDENT LPAREN params RPAREN ret_type_opt effects_opt w = where_opt bc = borrow_contract_opt cs = contracts_opt LBRACE body_stmts = stmts RBRACE
     {
+      let effects = Projected_lock_decl.finish_function $symbolstartpos $9 in
       Init_state.set_contracts $symbolstartpos cs;
       Init_state.finish_func $symbolstartpos $6;
       Def_extent.record $symbolstartpos $endpos;
-      Ast.{ name = $4; params = $6; ret_type = $8; effects = $9;
+      Ast.{ name = $4; params = $6; ret_type = $8; effects;
             body = body_stmts; is_inline = true; is_noinline = false; is_private = p;
             where_clauses = w; borrow_contract = bc; def_loc = $symbolstartpos }
     }
   | p = private_flag NOINLINE FN IDENT LPAREN params RPAREN ret_type_opt effects_opt w = where_opt bc = borrow_contract_opt cs = contracts_opt LBRACE body_stmts = stmts RBRACE
     {
+      let effects = Projected_lock_decl.finish_function $symbolstartpos $9 in
       Init_state.set_contracts $symbolstartpos cs;
       Init_state.finish_func $symbolstartpos $6;
       Def_extent.record $symbolstartpos $endpos;
-      Ast.{ name = $4; params = $6; ret_type = $8; effects = $9;
+      Ast.{ name = $4; params = $6; ret_type = $8; effects;
             body = body_stmts; is_inline = false; is_noinline = true; is_private = p;
             where_clauses = w; borrow_contract = bc; def_loc = $symbolstartpos }
     }
@@ -948,6 +969,10 @@ effects:
 effect_name:
   | IDENT { $1 }
   | UNSAFE { "unsafe" }
+  | verb = IDENT LPAREN parameter = IDENT RPAREN
+    { if verb <> "acquires" && verb <> "releases" then
+        raise (Types.TypeError ($symbolstartpos, "expected acquires or releases"));
+      verb ^ "(" ^ parameter ^ ")" }
 
 stmts:
   | /* empty */ { [] }

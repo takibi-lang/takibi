@@ -3026,6 +3026,9 @@ let check_private_type_construction (loc : Ast.loc) (target : Ast.type_expr) =
   in
   walk target
 
+let projected_lock_constructors : (Ast.loc, string) Hashtbl.t = Hashtbl.create 4
+let projected_lock_addresses : (Ast.loc, string * string) Hashtbl.t = Hashtbl.create 8
+
 let check_private_field_access (loc : Ast.loc) (sname : string) (fname : string) =
   match Hashtbl.find_opt private_struct_fields (sname, fname) with
   | Some _ when Per_cpu_registry.rewritten_global loc <> None
@@ -7155,6 +7158,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  raise (TypeError (e.loc,
                    Printf.sprintf "unknown struct type '%s'" sname))
            in
+           if Projected_lock_decl.owner_field sname = Some fname then
+             raise (TypeError (e.loc, "projected lock: cannot replace an owner's protected pin"));
            check_private_field_access e.loc sname fname;
            check_guarded_plain_access e.loc sname fname;
            if is_stable_owner_field sname fname then
@@ -7372,6 +7377,10 @@ and infer_addrof_wrapped senv eenv tyenv fenv (e : Ast.expr) (inner : Ast.expr)
          | None -> raise (TypeError (e.loc,
              Printf.sprintf "unknown struct type '%s'" sname))
        in
+       if Projected_lock_decl.owner_field sname = Some fname then
+         raise (TypeError (e.loc, "projected lock: cannot address an owner's protected pin"));
+       if Projected_lock_decl.projects_member fname then
+         Hashtbl.replace projected_lock_addresses e.loc (sname, fname);
        check_private_field_access e.loc sname fname;
        check_guarded_plain_access e.loc sname fname;
        if is_stable_owner_field sname fname then
@@ -7842,6 +7851,8 @@ and check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : ty =
       ) fields exprs;
       expected
   | StructLit exprs, TIndexedStruct (sname, static_args) ->
+      if Projected_lock_decl.owner_field sname <> None then
+        Hashtbl.replace projected_lock_constructors e.loc sname;
       let fields = match StringMap.find_opt sname senv with
         | Some (fs, _, _) -> fs
         | None -> raise (TypeError (e.loc,
@@ -9698,6 +9709,8 @@ let validate_per_cpu (prog : Ast.toplevel list) =
    call before parsing, so a policy pass that reads these site tables
    without type-checking first never sees an earlier compilation's. *)
 let reset_compilation_state () =
+  Hashtbl.clear projected_lock_constructors;
+  Hashtbl.clear projected_lock_addresses;
   Line_owner.reset ();
   Hashtbl.reset stopped_read_indices;
   guarded_ref_permit := None;
@@ -12402,6 +12415,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           | None -> StringMap.find_opt key (Lazy.force init_write_definitions) in
         Option.map (fun f -> (f, info)) definition in
   let init_call_target e = StringMap.find_opt (loc_key e.Ast.loc) !resolved_call_targets in
+  if Projected_lock_decl.enabled () then
+    Projected_lock.check ~program:prog ~functions ~definition:init_definition ~target:init_call_target
+      ~function_values:!resolved_function_values ~fields:init_struct_fields
+      ~variants:(Hashtbl.find_opt variant_defs) ~constructors:projected_lock_constructors ~addresses:projected_lock_addresses;
   let owner_summaries = ref StringMap.empty in
   let owner_scope = ref None in
   let discovering_owner_facts = ref false in

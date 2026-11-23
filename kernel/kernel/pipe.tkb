@@ -70,7 +70,7 @@ private let mut pipe_pool: RegionPool(Pipe);
 const PIPE_CHUNK_PAGES: usize = 3;
 
 linear struct PipeOwner[pool: addr, pipe: usize] {
-    private pin: RegionPin(Pipe)[pool, pipe];
+    private pin: RegionPin(Pipe)[pool, pipe] owns_lock(region_pin_record, lock);
 }
 
 // A change a reader or writer may be waiting for: bytes consumed, bytes
@@ -228,14 +228,27 @@ fn pipe_pool_space_stats() -> (usize, usize, usize, usize) !{unsafe} {
     return sample;
 }
 
+private inline fn pipe_lock(mutex: *TaskMutex @ id)
+        !{locks, may_block, unsafe, acquires_lock_30_connection, acquires(mutex)} {
+    task_mutex_acquire(mutex);
+}
+
+private inline fn pipe_unlock(mutex: *TaskMutex @ id)
+        !{locks, unsafe, releases(mutex)} {
+    task_mutex_release(mutex);
+}
+
 private fn pipe_owner_new(pin: sink RegionPin(Pipe)[p, k])
         -> PipeOwner[p, k] !{lock_guard_30_connection} {
     let mut owner: PipeOwner[p, k] = { pin };
     return owner;
 }
 
-private fn pipe_owner_release(owner: sink PipeOwner[p, k]) -> RegionPin(Pipe)[p, k] {
-    return owner.pin;
+private inline fn pipe_owner_release(owner: sink PipeOwner[p, k]) -> RegionPin(Pipe)[p, k]
+        !{locks, unsafe} {
+    let pin = owner.pin;
+    pipe_unlock(&region_pin_record(pin).lock);
+    return pin;
 }
 
 // The pipe an owner holds; it dies with the borrow of the owner.
@@ -249,9 +262,9 @@ fn pipe_take(address: usize, generation: usize) -> PipeTakeResult !{unsafe} {
     let RegionPinned(Pipe)::Pinned(pin) = pipe_pin(&pipe_pool, address, generation) else {
         RegionPinned(Pipe)::Stale => { return PipeTakeResult::Missing; }
     };
-    task_mutex_acquire(&region_pin_record(pin).lock);
+    pipe_lock(&region_pin_record(pin).lock);
     if (region_pin_record(pin).retired) {
-        task_mutex_release(&region_pin_record(pin).lock);
+        pipe_unlock(&region_pin_record(pin).lock);
         pipe_unpin(pin);
         return PipeTakeResult::Missing;
     }
@@ -263,7 +276,6 @@ fn pipe_take(address: usize, generation: usize) -> PipeTakeResult !{unsafe} {
 // For a look that changed nothing; a change goes through pipe_put_changed.
 fn pipe_put(owner: sink PipeOwner[p, pipe]) !{unsafe} {
     let pin = pipe_owner_release(owner);
-    task_mutex_release(&region_pin_record(pin).lock);
     pipe_unpin(pin);
 }
 
@@ -301,7 +313,6 @@ private fn pipe_free(owner: sink PipeOwner[p, pipe], change: sink PipeChange[pip
     let changed: bool = change.changed;
     region_pin_record(owner.pin).retired = true;
     let pin = pipe_owner_release(owner);
-    task_mutex_release(&region_pin_record(pin).lock);
     match region_retire(pin) {
         RegionRetire(Pipe)::Pending => {}
         RegionRetire(Pipe)::Retired(slot) => { pipe_slot_free(slot); }

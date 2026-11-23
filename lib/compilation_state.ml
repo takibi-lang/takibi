@@ -16,6 +16,7 @@ let reset () =
   Per_cpu_registry.reset ();
   Atomic_enum_registry.reset ();
   Init_state.reset ();
+  Projected_lock_decl.reset ();
   Region_backing.reset ();
   Guarded_registry.reset ();
   Owned_by_registry.reset ();

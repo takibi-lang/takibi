@@ -21,7 +21,7 @@
 // where the lock is; a separate type is that declaration, and reaching for
 // the wrong acquire is not expressible rather than merely wrong.
 //
-// Current limitations (2026-11-10). Keep this list current as call sites
+// Current limitations (2026-11-23). Keep this list current as call sites
 // change; a limitation that goes stale here is worse than none, since it
 // invites relying on a guarantee that quietly stopped holding.
 // - THE INTERRUPT RULE IS CHECKED for the spinning acquire entries:
@@ -55,12 +55,14 @@
 //   boot factory also returns the existing KernelLogSnapshotGuard tied to
 //   its borrowed phase. A linear wrapper's consumption does not itself
 //   prove that its implementation unlocks the correct physical word.
+//   The Pipe adapters opt into the lockword contract and check this pairing
+//   for the lock projected from each live Pipe pin.
 use "kernel/lib/spinlock.tkb";
 use "kernel/lib/boot_once.tkb";
 
 // One field, at offset 0, for the same reason Mutex has one: a lock address
 // names its AtomicWord lock word.
-struct no_copy TaskMutex { private word: AtomicWord; }
+struct no_copy TaskMutex { private word: AtomicWord lockword(0, 1); }
 
 // Free. Call once, before it is reachable by anything else.
 fn task_mutex_init(m: *TaskMutex @ id)  borrows(m) {

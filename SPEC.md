@@ -1583,6 +1583,68 @@ the retired `examples/common/http_conn_state.tkb` for the non-indexed
 `PendingTcpEvent` use and `linux_user/indexed_view` for integer-indexed view
 change.
 
+### Checked projected locks
+
+A checked projected lock associates the existing pin of a linear owner with
+an exclusive hold. The hold is erased. It has no representation in the
+owner, in a case carrying the owner, or in the calling convention.
+
+```takibi
+struct no_copy RecordMutex {
+    private word: AtomicWord lockword(0, 1);
+}
+struct Record { mutex: RecordMutex; }
+linear struct HeldRecord[pool: addr, record: usize] {
+    private pin: RegionPin(Record)[pool, record]
+        owns_lock(region_pin_record, mutex);
+}
+```
+
+A lockword is a private AtomicWord member of a no_copy plain struct. Its
+distinct literals specify the free and held states. A linear owner can
+declare one private pin field with owns_lock. The named generated pin
+projector must resolve to the field's RegionPin specialization. The
+projected member must have a declared lockword. The declaration relies on
+the existing generated projection and pin-to-address correspondence.
+
+A function with one lock pointer parameter and no value result can declare
+acquires(parameter) or releases(parameter) alongside the locks effect. The
+checker resolves its body and direct forwarding calls. Every normal path
+returning from acquire must establish the hold. Only a successful Acquire
+or AcqRel compare-exchange from the declared free value to the declared held
+value establishes it. Failure and polling loads establish no hold. A
+release requires a hold on entry and must discharge it on every normal
+return with a Release store of the free value to that same cell. Ordinary
+rank effects, such as acquires_lock_30_connection, remain independent.
+
+At a call to such a function the address must be the declared lock
+projection of a live local pin. The fact is tied to that pin binding, the resolved projector, and the
+exact lock member. Constructing the declared linear owner moves the fact into the
+owner along with the pin. A direct factory that constructs the owner from a
+sink pin and returns it inherits the same input requirement. Ordinary moves,
+returns and variant payload transfers of the owner retain its obligation.
+Moving its pin field into a local binding exposes the obligation again. A
+bare pin with that obligation cannot escape or be consumed before transfer
+into an owner or release of the same lock. A borrowed pin can be used by
+resolved borrowing calls without transferring the obligation.
+
+Replacing or addressing the protected pin field is rejected. The
+projected lock address can only be taken for a checked transition. Unknown
+transfers cannot erase the contract. A foreign declaration cannot carry the protected owner, its generated pin
+specialization, the projected record, or an aggregate or reference
+carrying any of them. Lock transitions,
+charged factories, and functions whose type carries these protected values
+cannot be used as function values in this slice. Branches must agree on the outstanding
+bare-pin obligations at a join.
+
+This slice checks direct forwarding, the test-and-test-and-set loop, and the
+normal control-flow paths of the projected owner. There is no implicit
+unlock. A handler does not inherit the interrupted function's local
+obligation. The machine lock instructions, scheduler, pool and explicit raw
+authority retain their existing trust boundaries. Initializing an unpublished
+slot still uses its existing trusted zeroing. Unrelated uses of the mutex
+type keep their ordinary locking rules.
+
 ## Closed Variants and Existential Owners (Takibi Core Slice 3)
 
 `variant` declares a closed tagged sum. Unlike a numeric `enum`, it may
