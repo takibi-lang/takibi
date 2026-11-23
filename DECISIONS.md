@@ -1,5 +1,11 @@
 # Maintainer decisions
 
+- 2026-11-23 For bounded Pipe field stores, first test the actual arithmetic
+  goals with the current OCaml affine proof. Connect successful existing
+  path proofs to field stores and replay their arithmetic obligations with
+  the existing Z3 gate. Do not add runtime checks or extend proof search
+  without a separate decision. [active] #1513
+
 - 2026-11-17 Initialize the 32-byte local buffer in the native alignment
   fixture before inspecting its address. This test-only clear preserves the
   alignment verdict; it does not authorize runtime initialization fallbacks

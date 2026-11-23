@@ -29563,6 +29563,54 @@ fn caller() -> usize {
 }|}));
   ]
 
+let refined_field_path_tests =
+  let t name f = Alcotest.test_case name `Quick
+      (fun () -> with_codegen_target "aarch64-none-elf" f) in
+  let record = "struct Cursor { length: {0..<17 as usize}; }
+" in
+  [
+    t "a bounded snapshot and guard prove the store and its subsequent index"
+      (expect_trap_sites 0 (record ^ {|fn trim(cursor: borrow &mut Cursor, amount: usize,
+        values: borrow [u8; 17..]) -> u8 {
+  let length = cursor.length;
+  if (amount > length) { return 0; }
+  cursor.length = length - amount;
+  return values[cursor.length];
+}|}));
+    t "a checked where clause proves the store"
+      (expect_codegen_ok (record ^ {|fn append(cursor: borrow &mut Cursor,
+        length: usize @ l, amount: usize @ n) where l + n <= 16 {
+  cursor.length = length + amount;
+}|}));
+    t "subtraction without the lower-bound guard rejects"
+      (expect_type_error "cannot prove refined field store"
+        (record ^ {|fn trim(cursor: borrow &mut Cursor, amount: usize) {
+  let length = cursor.length;
+  cursor.length = length - amount;
+}|}));
+    t "the upper bound stays strict"
+      (expect_type_error "cannot prove refined field store"
+        (record ^ {|fn append(cursor: borrow &mut Cursor,
+        length: usize @ l, amount: usize @ n) where l + n <= 17 {
+  cursor.length = length + amount;
+}|}));
+    t "a wrapping intermediate cannot prove a bounded mathematical result"
+      (expect_type_error "cannot prove refined field store"
+        ({|struct Cursor { length: {0..<4097 as usize}; }
+fn append(cursor: borrow &mut Cursor, amount: usize) {
+  cursor.length = (amount + 4096) - amount;
+}|}));
+    t "an old guard cannot authorize a reassigned local"
+      (expect_type_error "cannot prove refined field store"
+        (record ^ {|fn trim(cursor: borrow &mut Cursor, amount: usize, next: usize) {
+  let length = cursor.length;
+  let mut step: usize = amount;
+  if (step > length) { return; }
+  step = next;
+  cursor.length = length - step;
+}|}));
+  ]
+
 let init_slot_identity_tests =
   let t name f = Alcotest.test_case name `Quick f in
   let base = {|linear struct Lease1512[u: usize] { index: {0..<2 as usize}; }
@@ -35520,6 +35568,7 @@ let named_groups_unisolated = [
   "loan-transfer", loan_transfer_tests;
   "indexed-reference", indexed_reference_tests;
   "definite-init", definite_init_tests;
+  "refined-field-path", refined_field_path_tests;
   "init-contracts", init_publish_output_tests @ init_result_field_tests @ init_slot_identity_tests @ init_record_contract_tests @ init_contract_tests;
   "init-path-facts", init_path_fact_tests;
   "raw-authority-policy", raw_authority_policy_tests;

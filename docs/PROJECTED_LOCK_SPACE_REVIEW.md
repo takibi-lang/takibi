@@ -29,3 +29,26 @@ The comparison uses llvm-size-19, the linked usable_ram_start symbol,
 LLVM stack-size records in main.o, and the compiled struct layout facts.
 Remeasure when the lock or owner gains runtime storage, or when the Pipe
 ring and write-effect changes alter the linked copy paths.
+
+## Bounded cursor field stores
+
+The follow-up measures the normal linked QEMU and RPi5 kernels against
+projected-lock commit `82818a0d3`. It narrows the existing fields and
+uses the same kernel copy and allocation workload.
+
+| Boundary | QEMU before -> after | RPi5 before -> after |
+| --- | ---: | ---: |
+| Linked text accounting (bytes) | 843740 -> 843732 | 4239384 -> 4239376 |
+| Linked executable .text (bytes) | 663536 -> 663536 | 708260 -> 708260 |
+| Linked .eh_frame (bytes) | 124964 -> 124956 | 135900 -> 135892 |
+| main.o text accounting (bytes) | 842175 -> 842163 | 4227193 -> 4227185 |
+| pipe_consume frame (bytes) | 32 -> 32 | 32 -> 32 |
+| pipe_produce frame (bytes) | 48 -> 32 | 48 -> 32 |
+| pipe_consume conditional branches | 1 -> 1 | 1 -> 1 |
+| pipe_produce conditional branches | 1 -> 1 | 1 -> 1 |
+
+`llvm-size-19` reports the linked and object accounting.
+`llvm-objdump-19` shows the frames and conditional branches. Data and BSS
+sizes, the usable RAM start, and the compiler-reported 4128-byte Pipe and
+16-byte PipeOwner layouts stay the same on each target. Remeasure when
+write evidence or ring copy paths change the linked workload.

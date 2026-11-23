@@ -167,6 +167,7 @@ let owner_leaf_type = function
   | SlotFields -> Ast.TypeBool
 
 let check
+    ?refined_field_store
     ~(struct_fields : string -> (string * Ast.type_expr) list option)
     ~(callee : string -> Ast.expr -> ((Ast.ident * Ast.type_expr option) list * Ast.loc) option)
     ~(scratch : (string * Ast.type_expr) list)
@@ -202,6 +203,7 @@ let check
      changes a verdict: any recorded error rejects the function. *)
   let errors = ref [] in
   let in_trial = ref false in
+  let prove_field_stores = Option.is_some refined_field_store in
   let error loc msg = errors := (loc, msg) :: !errors in
   let size_of t = !layout_size t in
   (* Unknown layout counts as padded: viewing it as bytes then needs a
@@ -805,6 +807,29 @@ let check
         add_fact (add_fact st (Init_pred.sub atom (Init_pred.const lo)))
           (Init_pred.sub (Init_pred.const (hi - 1)) atom)
     | _ -> st in
+  let check_field_store st store rhs =
+    if not !in_trial then
+      Option.iter (fun (lo, hi) ->
+        let proof = checked (fun () ->
+          Option.map (fun value ->
+            let facts = Init_pred.normalize_facts st.eqs st.facts in
+            let value = Init_pred.normalize st.eqs value in
+            let low = Init_pred.const lo and high = Init_pred.const hi in
+            if Init_pred.entails facts (Init_pred.sub value low) &&
+               Init_pred.entails facts (Init_pred.sub
+                 (Init_pred.const (hi - 1)) value) then begin
+              let obligation claim ~index ~len =
+                Range_obligation.record_text rhs.Ast.loc
+                  (Init_pred.index_obligation ~claim ~facts [] ~index ~len) in
+              obligation "refined field store lower bound"
+                ~index:(Init_pred.sub low (Init_pred.const 1)) ~len:value;
+              obligation "refined field store upper bound" ~index:value ~len:high;
+              true
+            end else false) (lin st rhs)) in
+        if proof <> Some true then
+          error rhs.Ast.loc (Printf.sprintf
+            "cannot prove refined field store lies in [%d, %d) on this path" lo hi))
+        (Option.bind refined_field_store (fun bounds -> bounds store)) in
   (* The state on the path where condition [c] evaluated to [b]. Operands
      of `&&` (true) and `||` (false) are assumed left to right, so a later
      operand's subtraction may rely on an earlier operand. *)
@@ -1838,6 +1863,7 @@ let check
          | None -> st)
     | Ast.Assign (lhs, rhs) ->
         let st = expr st rhs in
+        check_field_store st e rhs;
         (match place lhs with
          | Some p ->
              let st = place_subexprs st lhs in
@@ -2632,6 +2658,11 @@ let check
      | _ -> ());
     let before = !unsafe_uses in
     let r = stmt_inner st s in
+    let r = if not prove_field_stores then r else
+      match s.desc, Local_bindings.ids_for_stmt bindings s with
+      | Ast.Let (false, name, _, Some _, _), [id] when immutable_var name id ->
+          add_declared_bounds (fst r) id (v_atom id), snd r
+      | _ -> r in
     let r = if not linked_contract && Init_link.Values.is_empty (fst r).extras.links then r
       else match s.desc, Local_bindings.ids_for_stmt bindings s with
       | Ast.Let (_, _, _, Some rhs, _), id :: _ ->
@@ -3072,6 +3103,10 @@ let check
     else Leaves.add (root, []) uninit) entry_owners entry_u in
   let entry = { extras = {empty_extras with owners = entry_owners}; u = entry_u; iv = []; eqs = []; facts = Init_pred.no_facts;
                 vers = Types.IntMap.empty } in
+  let entry = if not prove_field_stores then entry else
+    List.fold_left (fun st (name, id) ->
+      if immutable_var name id then add_declared_bounds st id (v_atom id)
+      else st) entry param_ids in
   (* A where clause is already checked at every call. Import only scalar
      unsigned singleton parameters whose bindings cannot be changed by alias. *)
   let static_params = if fdef.Ast.where_clauses = [] then [] else List.filter_map (fun (name, ty) ->

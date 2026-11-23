@@ -58,8 +58,8 @@ struct Pipe {
     // (pipe_put_changed). A change nobody waits for walks no process.
     waiting: bool;
     // The ring: `length` bytes starting at `start`, wrapping at the end.
-    start: usize;
-    length: usize;
+    start: {0..<PIPE_BUFFER_BYTES as usize};
+    length: {0..<PIPE_BUFFER_BYTES + 1 as usize};
     buffer: [u8; PIPE_BUFFER_BYTES];
 }
 private let mut pipe_pool: RegionPool(Pipe);
@@ -363,9 +363,11 @@ fn pipe_read_plan(pipe: borrow &mut Pipe, wanted: usize) -> (usize, usize, usize
 fn pipe_consume(owner: borrow PipeOwner[p, pipe], amount: usize) -> PipeChange[pipe] !{unsafe} {
     let record: &mut Pipe = pipe_of(owner);
     let mut change: PipeChange[pipe] = { amount != 0 };
-    if (amount > record.length) { return change; }
-    record.length = record.length - amount;
-    let moved: usize = record.start + amount;
+    let length = record.length;
+    let head = record.start;
+    if (amount > length) { return change; }
+    record.length = length - amount;
+    let moved: usize = head + amount;
     if (moved >= PIPE_BUFFER_BYTES) {
         record.start = moved - PIPE_BUFFER_BYTES;
     } else {
@@ -396,8 +398,9 @@ fn pipe_write_plan(pipe: borrow &mut Pipe, amount: usize) -> (usize, usize, usiz
 fn pipe_produce(owner: borrow PipeOwner[p, pipe], amount: usize) -> PipeChange[pipe] !{unsafe} {
     let record: &mut Pipe = pipe_of(owner);
     let mut change: PipeChange[pipe] = { amount != 0 };
-    if (amount > pipe_room(record)) { return change; }
-    record.length = record.length + amount;
+    let length = record.length;
+    if (amount > PIPE_BUFFER_BYTES - length) { return change; }
+    record.length = length + amount;
     return change;
 }
 

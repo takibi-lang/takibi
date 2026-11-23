@@ -685,6 +685,14 @@ linear struct Name[n: usize] { field: T; }   // indexed runtime obligation
   whose literal is a 64-bit pattern above the signed range, such as
   `0xFFFFFFFFFFFFFFFF / 64`. Range propagation folds constant operands the
   same way, so such an operand derives no range.
+  On 64-bit targets, a direct field assignment to a refined `usize` can
+  also use the affine path proof. The right-hand side may use stable
+  locals, constants, and addition, subtraction, or multiplication by a
+  constant. Each intermediate operation must fit the machine width, and
+  the target's lower and strict upper bounds must both follow from the
+  path facts. An aliased load can be bound to an immutable scalar first.
+  This proof emits no runtime check; its bounds and no-wrap claims use the
+  existing Z3 replay.
 - **`opaque struct Name;`** has no constructible value, fields, or size
   -- usable only behind a pointer. Intended for driver-owned state
   handles the application never inspects directly. Two distinct opaque

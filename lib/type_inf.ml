@@ -224,6 +224,18 @@ let runtime_slice_index_proven_at : (string * Lexing.position, unit) Hashtbl.t =
   Hashtbl.create 64
 let arithmetic_array_index_proven_at : (string * Lexing.position, unit) Hashtbl.t = Hashtbl.create 16
 let active_runtime_bounds_key = ref ""
+let pending_refined_field_stores : (int * int) Local_bindings.Expr_table.t StringMap.t ref =
+  ref StringMap.empty
+
+(* The later path check models stable usize locals and their pure arithmetic.
+   Keep other expressions, including casts and field loads, on the ordinary
+   type-checking path. *)
+let rec affine_store_rhs (e : Ast.expr) = match e.desc with
+  | Ast.Var _ | Ast.IntLit _ -> true
+  | Ast.BinOp ((Ast.Add | Ast.Sub | Ast.Mul), lhs, rhs) ->
+      affine_store_rhs lhs && affine_store_rhs rhs
+  | _ -> false
+
 (* GitHub issue #797: why an index's range fact was not available, keyed
    like the proof tables (bounds key, index location). llvm_gen.ml appends
    it to the trap-site report; it is part of that error, not
@@ -7175,7 +7187,25 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            reject_no_copy_whole_store senv e.loc field_ty;
            if contains_publish_value_ty senv field_ty then
              raise (TypeError (e.loc, publish_whole_store_message));
-           let vt = check_expr senv eenv tyenv fenv rhs (strip_io field_ty) in
+           let expected = strip_io field_ty in
+           let vt = match repr expected with
+             | TRefinedInt (lo, hi, TUsize) when lo >= 0 && hi <= Init_pred.limit &&
+                 Target_info.pointer_bit_width () = 64 && affine_store_rhs rhs &&
+                 !active_runtime_bounds_key <> "" ->
+                 (try check_expr senv eenv tyenv fenv rhs expected with
+                  | TypeError _ ->
+                      let vt = check_expr senv eenv tyenv fenv rhs TUsize in
+                      let key = !active_runtime_bounds_key in
+                      let stores = match StringMap.find_opt key !pending_refined_field_stores with
+                        | Some stores -> stores
+                        | None ->
+                            let stores = Local_bindings.Expr_table.create 4 in
+                            pending_refined_field_stores :=
+                              StringMap.add key stores !pending_refined_field_stores;
+                            stores in
+                      Local_bindings.Expr_table.replace stores e (lo, hi);
+                      vt)
+             | _ -> check_expr senv eenv tyenv fenv rhs expected in
            if contains_view_ty vt then
              raise (TypeError (rhs.loc,
                "cannot store an erased view into a struct field"));
@@ -9718,6 +9748,7 @@ let reset_compilation_state () =
   guarded_ref_values := [];
   runtime_bounds_regions := StringSet.empty;
   active_runtime_bounds_key := "";
+  pending_refined_field_stores := StringMap.empty;
   runtime_bounds := Runtime_bounds.empty;
   runtime_bounds_address_taken := [];
   unsafe_depth := 0;  (* see its comment: fresh per compilation / per unit test *)
@@ -12643,7 +12674,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         "entry '%s' would erase projected initialization requirements" f.name)
         :: !collected_type_errors) (init_definition key)) projected_init_requirements;
   let run_init separated (fdef : Ast.func) (finfo : Types.func_info) =
+    let stores = Option.map (fun stores -> stores, Local_bindings.Expr_table.create 4)
+      (StringMap.find_opt (overload_key fdef.name fdef.params)
+        !pending_refined_field_stores) in
     Init_flow.check
+    ?refined_field_store:(Option.map (fun (stores, seen) expr ->
+      Option.map (fun bounds ->
+        Local_bindings.Expr_table.replace seen expr ();
+        bounds) (Local_bindings.Expr_table.find_opt stores expr)) stores)
     ~separated
     ~owner_parameters:(if not track_projected_owners then [] else
       let key = overload_key fdef.name fdef.params in
@@ -12733,7 +12771,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             (r ^ " (#1007: an index into an immutable slice \
                   binding is decided by the init-flow checker \
                   alone)"))
-    finfo fdef in
+    finfo fdef;
+    Option.iter (fun (stores, seen) ->
+      Local_bindings.Expr_table.iter (fun store _ ->
+        if not (Local_bindings.Expr_table.mem seen store) then
+          raise (TypeError (store.Ast.loc,
+            "no affine path proof reaches this refined field store"))) stores) stores in
   if List.exists (function Ast.FuncDef f -> Growth_body.is_candidate f | _ -> false) prog then begin
   let address_extents = Address_extent.run ~functions ~key_of:(fun f -> overload_key f.Ast.name f.params)
     ~struct_fields:init_struct_fields ~global_type:init_global_type prog in
