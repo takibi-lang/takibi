@@ -27,7 +27,7 @@ work from the current milestone. Land finished branches one at a time.
 
 | Milestone | Territory A | Territory B | Integration dependencies |
 | --- | --- | --- | --- |
-| 1: kernel landed | Complete the scoped memory-safety contract (#1513), then the remaining globals ratchet (#1159) and preemption integration (#638). | Complete the approved TaskMutex sequence (#1481). Triage #667 when a qualifying capture is available. Prepare the matched cold-boot comparison (#1158) without the board and run the RPi5 benchmark at the final stage of Milestone 1. | #638 flips after #1159 and #1481 meet their gates. Coordinate shared scheduler interfaces and four-core RPi5 regression evidence at these boundaries. |
+| 1: kernel landed | Complete the scoped memory-safety contract (#1513), then the remaining globals ratchet (#1159) and preemption integration (#638). | Complete the approved TaskMutex sequence (#1481). Triage #667 when a qualifying capture is available. Board-free preparation for the matched cold-boot comparison (#1158) is complete. Run the RPi5 benchmark on the final Milestone 1 candidate. | #638 flips after #1159 and #1481 meet their gates. Coordinate shared scheduler interfaces and four-core RPi5 regression evidence at these boundaries. |
 | 2: language settled | Implement the lossless printer and formatter entry point (#1010). | Develop round-trip and linked-kernel equivalence checks (#1010) against the agreed printer interface. Prepare source inventories and acceptance controls for #1009. | Integrate the printer and its checks before #1009. Use one branch for the syntax migration in the approved order, with the other territory reviewing round-trip and generated-code evidence. Review #1514 before finalizing the relevant syntax. |
 
 This allocation takes precedence over the standing queues. Publish shared
@@ -123,7 +123,7 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
   v6.12 booting the same rootfs (#1158); the RPi5's column waits for a run under
   Raspberry Pi OS. #1014 (run-lock contention, parked) is measured on this load
   and nowhere else. Stages 2 and 3 (threads: CLONE_VM, futex, TLS, TLB
-  shootdown, #202's sibling-thread case) wait for the #638 flip.
+  shootdown) wait for the #638 flip.
 - #584's soak at natural boundaries; #702 (dedicated soak hardware) is the
   maintainer's decision. Every QEMU lane runs four vCPUs since 2026-10-11.
 - The parked triggers #680 and #812 are watched by the RPi5 lane
@@ -136,6 +136,8 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
 the common mapping entry. Pipe handle publication checks initialized fields
 of the current slot, and lazy L3 table publication checks all bytes of
 the live table owner. Continue the remaining kernel coverage in #1513.
+The Pipe prototype checks copy-result handoff on the current owner.
+Review the remaining alias, mutation, and reset boundaries before adoption.
 This is a Milestone 1 gate and takes precedence over the
 remaining preemption review and flip. Territory A takes its dependency
 chain through #203, #637, #954, #986, #132 and #638, coordinating shared
@@ -161,9 +163,10 @@ retained TX work. Busy/Partial refusals serialize UART output or retain a
 diagnostic record (#1494). Typed UART callback registration under #1159
 now snapshots under its IRQ-safe guard and invokes after release.
 The wider DDB safety review (#1286) remains open.
-Investigate explicit linear ownership for CPU-independent exec reservations
-using existing types first; add no reservation workaround. Continue
-independent raw-CPU reader review while a concrete new decision is parked.
+Exec allocations now debit the CPU that issued the borrowed reservation.
+Continue independent raw-CPU reader review while a concrete new decision
+is parked. Measure the approved #638 migration path both at matched
+internal boundaries and end to end before the flip.
 
 **Ownership review update, 2026-11-10.** The pending TCP chain probe owns
 its fully zeroed frame locally through the existing nonretaining copy API;
@@ -254,24 +257,27 @@ owners are TaskMutex, the spare stack stays masked). #980
    is refined to the user-window interval; `el1_read_user` is the
    negative control), then DMA confinement (RPi5: RP1 confined to one
    arena by the PCIe inbound window, since the DTB gives GEM and xHCI no
-   IOMMU; then QEMU `smmuv3`),
+   IOMMU; then staged QEMU PCI virtio and `smmuv3`, starting with block
+   and retaining MMIO coverage),
    which narrows the device-semantics claims of
    `kernel/DEVICE_SEMANTICS_FILES` from trusted toward enforced. Each step
    has a negative control and an RPi5 measurement.
 
 ### Territory B: supporting the pillars, by priority
 
-Prepare the approved Linux cold handoff and matched raw ext2 USB root
-comparison without the board (#1158). Run the comparison on RPi5 at the
-final stage of Milestone 1. The LLVM static frame
+Board-free preparation for the approved Linux cold handoff and matched
+raw ext2 USB root comparison is complete (#1158). Run the comparison on
+the final Milestone 1 candidate on RPi5. The LLVM static frame
 gate now requires stack-size metadata for normal and debug kernel objects
 on both targets, with the 2048 B ordinary ceiling.
 The board-free RPi5 reset and loader controls now distinguish OpenOCD
 commands from checkout paths (#1503).
 **Waiting Mutex order, 2026-11-19.** Complete #1481 before the #638
 preemption flip. Within #1481, sequence EL1 continuation save and resume,
-ext2 reader-drain wait and wake, then sleeping ext2 readers. The drain
-must support progress before a reader can sleep while registered.
+ext2 reader-drain wait and wake, then sleeping ext2 readers. The mkdirat
+drain and killable getdents64 candidates passed focused and ordinary
+regression checks and await integration. The drain must support progress
+before a reader can sleep while registered.
 
 **Assigned queue (maintainer, 2026-10-23, re-cut 2026-10-25).**
 Low-dependency issues A does not hold, in this order; compiler work in
@@ -345,11 +351,10 @@ next one taken. The done record of the previous queue is in HISTORY.md
    acknowledges its source; done 2026-10-30, per-source linear claims), #752 (typestate in more of the kernel), #755
    (an immutable integer binding keeps one static; done 2026-10-30), #751 (per-element
    witnesses, deferred until a consumer needs them),
-   #769 (every use of a global, done 2026-10-30 as --emit-globals' uses table), #747 (host GDB
-   test). Audit follow-ups filed 2026-10-23 to 2026-10-25: #901, #902,
-   #898, #899, #904 (named failures at counted fixture poll bounds, controls patched inside their function; done 2026-11-06), #905 (done 2026-11-06), #903 (done 2026-11-06), #1025 (done 2026-10-26 by 9fd64f7f), #1029 (done 2026-11-06), #1030 (done 2026-11-06: #1016's payload, fixed in b30e30d6).
+   #769 (every use of a global, done 2026-10-30 as --emit-globals' uses table).
+   The host GDB test (#747) remains deferred. The remaining audit follow-up from the October batch is #898.
 7. **Time measurement, then the optimizations waiting on it** (maintainer,
-   2026-10-08: space and time are both kept): #502; then #520 (TCP
+   2026-10-08: space and time are both kept): #520 (TCP
    throughput, with #972: submit-only NIC TX), #741 (RPi5 HTTP SYN
    retransmission tails), then #680, #682 (region_pool lock-free
    validation, false sharing, pinless single-user pools), #711, #718, #386.
@@ -362,7 +367,10 @@ next one taken. The done record of the previous queue is in HISTORY.md
    mode leases), #648.
 10. **Compiler and language research, independent of the ownership
    checker:** #201, #282, #129, #417, #155, #28, #8, #200.
-11. **Toolchain and portability:** #123, #124, #122, #95, #51, #50, #85.
+11. **Toolchain and portability:** #123, #51, #50, #85. The #95 research
+   target is type-contract validation across separately compiled objects,
+   with implementation deferred until needed. #122 waits for #1009.
+   #124 is lowest priority, with DDB ahead of GDB.
 
 Items are ordered within each band as well as between bands.
 
@@ -374,17 +382,17 @@ by the repository (`.github/workflows/milestone.yml` opens one issue,
 assigned to the maintainer, when a milestone's last issue closes) rather
 than noticed by whoever happens to be reading.
 
-- **kernel landed** (milestone 1): #638 and its stages #992 and #993 (the
-  preemption flip), on #1159 (the globals ratchet at zero, the flip's
-  precondition); #1157 (the trusted-base ledger as a dated series, #986
-  slice 1); #1160 (verification stage 2 complete, #954); #1158 (the
-  distribution-benchmark load recorded beside Linux, #742 stage 1).
-  The milestone also includes the scoped memory-safety contract (#1513)
-  and the settings-wake intermittent (#667). When all are closed, the
-  maintainer posts the kernel to Hacker News and starts the first paper.
+- **kernel landed** (milestone 1): remaining milestone issues are the
+  scoped memory-safety contract (#1513), globals at zero (#1159), the
+  preemption flip (#638), the settings-wake intermittent (#667), and the
+  final distribution-benchmark comparison with Linux (#1158). The
+  TaskMutex sequence (#1481) is a prerequisite for the flip. When the
+  milestone closes, the maintainer posts the kernel to Hacker News and
+  starts the first paper.
 - **language settled** (milestone 2): #1010 (the lossless printer and
-  `takibi fmt`), then #1009 (the syntax edition). When both are closed: the
-  maintainer starts looking for co-authors and co-developers in earnest.
+  `takibi fmt`), #1514 (the generic-constraints evaluation), and #1009 (the
+  syntax edition). When the milestone closes, the maintainer starts looking
+  for co-authors and co-developers in earnest.
 
 A worker that closes one of these issues says so on the issue; the
 coordinator checks the milestone after the land (`coordinate` skill).
