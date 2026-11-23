@@ -34,7 +34,8 @@ FUNCTION = function_header()
 # function -> (count, reason)
 ALLOWED = {
     "kernel_syscall_dispatch_action": (
-        7, "transient: ext2 mutation in flight, listener claim busy, wait4 "
+        8, "transient: ext2 mutation in flight (including getdents without an "
+           "ordinary EL0 frame), listener claim busy, wait4 "
            "zombie stack held or zombie pick race, and the pass-through of "
            "an exit with no successor"),
     "syscall_ppoll_dispatch": (
