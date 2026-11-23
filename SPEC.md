@@ -4933,6 +4933,14 @@ A function may state constraints on its static indices before its body:
 the constraints; a false or unprovable constraint is a compile error, with
 no runtime fallback. `where` is a keyword.
 
+On 64-bit targets, a directly resolved Takibi call can also discharge an
+affine `where` constraint with path facts about its actual arguments.
+This path covers addition and subtraction over fitting integer literals
+and immutable, non-address-taken `usize` scalar bindings. Arithmetic
+that supplies a local value must already be proved free of machine wrap.
+Unresolved or unproved obligations remain errors. Accepted affine call
+proofs emit an obligation for the existing Z3 replay.
+
 Const-generic values inferred from a parameter's generic struct type are
 substituted in these constraints separately for each instantiation. For
 example, `where k < N` on a function taking `Buffer(N)` becomes `k < 4`

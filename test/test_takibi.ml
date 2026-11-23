@@ -29563,6 +29563,36 @@ fn caller() -> usize {
 }|}));
   ]
 
+let affine_call_where_tests =
+  let t name f = Alcotest.test_case name `Quick
+      (fun () -> with_codegen_target "aarch64-none-elf" f) in
+  let fit = "fn fit(offset: usize @ o, count: usize @ n) where o + n <= 8 {}\n" in
+  let guarded finish = fit ^ {|fn use_fit(offset: usize, count: usize) {
+  if (offset > 8) { return; }
+  let tail: usize = 8 - offset;
+  if (count > tail) { return; }
+|} ^ finish ^ "}" in
+  let reject = expect_type_error "which cannot be shown here" in
+  [
+    t "guarded snapshots prove a directly resolved affine call"
+      (expect_trap_sites 0 (guarded "fit(offset, count);"));
+    t "a missing path premise keeps the call error"
+      (reject (fit ^ "fn use_fit(offset: usize, count: usize) { fit(offset, count); }"));
+    t "an opaque result is outside deferred affine calls"
+      (reject ("extern fn unknown() -> usize; " ^ guarded "fit(offset, unknown());"));
+    t "mutable actuals are outside deferred affine calls"
+      (reject (guarded "let mut changed: usize = count; fit(offset, changed);"));
+    t "strict affine preconditions do not include the endpoint"
+      (reject ({|fn strict_fit(offset: usize @ o, count: usize @ n) where o + n < 8 {}
+fn use_fit(offset: usize) {
+  if (offset > 8) { return; }
+  let tail: usize = 8 - offset;
+  strict_fit(offset, tail);
+}|}));
+    t "an immediately false constant retains its distinct diagnostic"
+      (expect_type_error "which is false here" (fit ^ "fn use_fit() { fit(7, 2); }"));
+  ]
+
 let refined_field_path_tests =
   let t name f = Alcotest.test_case name `Quick
       (fun () -> with_codegen_target "aarch64-none-elf" f) in
@@ -35568,6 +35598,7 @@ let named_groups_unisolated = [
   "loan-transfer", loan_transfer_tests;
   "indexed-reference", indexed_reference_tests;
   "definite-init", definite_init_tests;
+  "affine-call-where", affine_call_where_tests;
   "refined-field-path", refined_field_path_tests;
   "init-contracts", init_publish_output_tests @ init_result_field_tests @ init_slot_identity_tests @ init_record_contract_tests @ init_contract_tests;
   "init-path-facts", init_path_fact_tests;

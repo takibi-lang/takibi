@@ -484,7 +484,7 @@ let monomial_lower_bound bounds c atoms =
 (* Constant/interval fast paths complement the order graph. The existing
    normalized difference must have a non-negative lower bound, or a stable
    relational path must discharge the obligation. No runtime fallback. *)
-let check_where_clause loc fname bounds names relations cmp a b =
+let check_where_clause ~defer loc fname bounds names relations cmp a b =
   let relational = match bounds_static_node a, bounds_static_node b with
     | Some a, Some b -> Runtime_bounds.proves relations a cmp b
     | _ -> false in
@@ -518,10 +518,11 @@ let check_where_clause loc fname bounds names relations cmp a b =
         "%s requires %s %s %s, which is false here"
         fname (describe a) (where_cmp_text cmp) (describe b)))
   | _ ->
-      raise (TypeError (loc, Printf.sprintf
+      let diagnostic = Printf.sprintf
         "%s requires %s %s %s, which cannot be shown here; pass a constant, \
          a value whose refinement proves it, or use the run-time checked form"
-        fname (describe a) (where_cmp_text cmp) (describe b)))
+        fname (describe a) (where_cmp_text cmp) (describe b) in
+      if not (defer diagnostic) then raise (TypeError (loc, diagnostic))
 
 let value_static_identities : static_term StringMap.t ref = ref StringMap.empty
 (* GitHub issue #755: the current function's parameters that its body never
@@ -2595,6 +2596,43 @@ let is_variant_ty t = match repr t with
 (* Direct calls are resolved during inference.  Codegen must consume this
    exact decision rather than attempting a second overload resolution. *)
 let resolved_call_targets = ref StringMap.empty
+let pending_call_where :
+    Init_flow.call_where_goal list Local_bindings.Expr_table.t StringMap.t ref =
+  ref StringMap.empty
+
+let defer_affine_call_where call params args cmp a b diagnostic =
+  let arg_for key =
+    List.find_map (fun (param, (arg : Ast.expr)) ->
+      match repr param, arg.desc with
+      | TSingleton (TUsize, value), (Ast.Var _ | Ast.IntLit _)
+        when static_atom_key value = Some key -> Some arg
+      | _ -> None) (List.combine params args) in
+  let rec translate sign (constant, operands) term =
+    match static_repr term with
+    | SConst n when n >= -Init_pred.limit && n <= Init_pred.limit ->
+        Option.map (fun constant -> constant, operands) (checked_add constant (sign * n))
+    | SAdd (left, right) | SSub (left, right) as term ->
+        Option.bind (translate sign (constant, operands) left) (fun partial ->
+          translate (match term with SSub _ -> -sign | _ -> sign) partial right)
+    | (SParam _ | SVar _) as term ->
+        Option.bind (static_atom_key term) (fun key ->
+          Option.map (fun arg -> constant, (sign, arg) :: operands) (arg_for key))
+    | _ -> None in
+  let constant = if cmp = Ast.WhereLt then -1 else 0 in
+  match translate 1 (constant, []) (SSub (b, a)) with
+  | Some (constant, (_ :: _ as operands))
+    when constant >= -Init_pred.limit && constant <= Init_pred.limit ->
+      let key = !active_runtime_bounds_key in
+      let table = match StringMap.find_opt key !pending_call_where with
+        | Some table -> table
+        | None ->
+            let table = Local_bindings.Expr_table.create 4 in
+            pending_call_where := StringMap.add key table !pending_call_where;
+            table in
+      let old = Option.value ~default:[] (Local_bindings.Expr_table.find_opt table call) in
+      Local_bindings.Expr_table.replace table call (Init_flow.{constant; operands; diagnostic} :: old);
+      true
+  | _ -> false
 let resolved_function_values = ref StringMap.empty
 let resolved_indirect_call_effects : string list option StringMap.t ref =
   ref StringMap.empty
@@ -6914,7 +6952,12 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                       | TView (_, terms) ->
                           let rec pairs cs ts = match cs, ts with
                             | c :: cs, a :: b :: ts ->
-                                check_where_clause e.loc fname bounds names relations c a b;
+                                let defer diagnostic =
+                                  Target_info.pointer_bit_width () = 64 &&
+                                  !active_runtime_bounds_key <> "" &&
+                                  StringMap.find_opt (loc_key e.loc) !resolved_call_targets = Some target &&
+                                  defer_affine_call_where e param_tys args c a b diagnostic in
+                                check_where_clause ~defer e.loc fname bounds names relations c a b;
                                 pairs cs ts
                             | _ -> () in
                           pairs cmps terms
@@ -9749,6 +9792,7 @@ let reset_compilation_state () =
   runtime_bounds_regions := StringSet.empty;
   active_runtime_bounds_key := "";
   pending_refined_field_stores := StringMap.empty;
+  pending_call_where := StringMap.empty;
   runtime_bounds := Runtime_bounds.empty;
   runtime_bounds_address_taken := [];
   unsafe_depth := 0;  (* see its comment: fresh per compilation / per unit test *)
@@ -12677,7 +12721,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     let stores = Option.map (fun stores -> stores, Local_bindings.Expr_table.create 4)
       (StringMap.find_opt (overload_key fdef.name fdef.params)
         !pending_refined_field_stores) in
+    let calls = Option.map (fun goals -> goals, Local_bindings.Expr_table.create 4)
+      (StringMap.find_opt (overload_key fdef.name fdef.params) !pending_call_where) in
     Init_flow.check
+    ?affine_call_where:(Option.map (fun (calls, seen) call ->
+      match Local_bindings.Expr_table.find_opt calls call with
+      | Some goals -> Local_bindings.Expr_table.replace seen call (); goals
+      | None -> []) calls)
     ?refined_field_store:(Option.map (fun (stores, seen) expr ->
       Option.map (fun bounds ->
         Local_bindings.Expr_table.replace seen expr ();
@@ -12776,7 +12826,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       Local_bindings.Expr_table.iter (fun store _ ->
         if not (Local_bindings.Expr_table.mem seen store) then
           raise (TypeError (store.Ast.loc,
-            "no affine path proof reaches this refined field store"))) stores) stores in
+            "no affine path proof reaches this refined field store"))) stores) stores;
+    Option.iter (fun (calls, seen) ->
+      Local_bindings.Expr_table.iter (fun call goals ->
+        match goals with
+        | goal :: _ when not (Local_bindings.Expr_table.mem seen call) ->
+            raise (TypeError (call.Ast.loc, goal.Init_flow.diagnostic))
+        | _ -> ()) calls) calls in
   if List.exists (function Ast.FuncDef f -> Growth_body.is_candidate f | _ -> false) prog then begin
   let address_extents = Address_extent.run ~functions ~key_of:(fun f -> overload_key f.Ast.name f.params)
     ~struct_fields:init_struct_fields ~global_type:init_global_type prog in

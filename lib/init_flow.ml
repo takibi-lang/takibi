@@ -166,8 +166,15 @@ let owner_leaf_type = function
   | OwnerBytes size -> Ast.TypeArray (Ast.TypeU8, size)
   | SlotFields -> Ast.TypeBool
 
+type call_where_goal = {
+  constant : int;
+  operands : (int * Ast.expr) list;
+  diagnostic : string;
+}
+
 let check
     ?refined_field_store
+    ?affine_call_where
     ~(struct_fields : string -> (string * Ast.type_expr) list option)
     ~(callee : string -> Ast.expr -> ((Ast.ident * Ast.type_expr option) list * Ast.loc) option)
     ~(scratch : (string * Ast.type_expr) list)
@@ -203,7 +210,8 @@ let check
      changes a verdict: any recorded error rejects the function. *)
   let errors = ref [] in
   let in_trial = ref false in
-  let prove_field_stores = Option.is_some refined_field_store in
+  let prove_affine_paths = Option.is_some refined_field_store ||
+    Option.is_some affine_call_where in
   let error loc msg = errors := (loc, msg) :: !errors in
   let size_of t = !layout_size t in
   (* Unknown layout counts as padded: viewing it as bytes then needs a
@@ -830,6 +838,34 @@ let check
           error rhs.Ast.loc (Printf.sprintf
             "cannot prove refined field store lies in [%d, %d) on this path" lo hi))
         (Option.bind refined_field_store (fun bounds -> bounds store)) in
+  let check_call_where st (call : Ast.expr) =
+    if not !in_trial then
+      Option.iter (fun goals ->
+        let stable (arg : Ast.expr) = match arg.desc with
+          | Ast.IntLit _ -> lin st arg
+          | Ast.Var name ->
+              (match Local_bindings.id_for_expr bindings arg with
+               | Some id when immutable_var name id &&
+                   not (Hashtbl.mem addr_taken id) && unsigned_id id -> lin st arg
+               | None -> lin st arg
+               | _ -> None)
+          | _ -> None in
+        List.iter (fun goal ->
+          let proved = checked (fun () ->
+            let term = List.fold_left (fun partial (factor, arg) ->
+              Option.bind partial (fun term ->
+                Option.map (fun arg -> Init_pred.add term (Init_pred.scale factor arg))
+                  (stable arg))) (Some (Init_pred.const goal.constant)) goal.operands in
+            Option.map (fun term ->
+              let facts = Init_pred.normalize_facts st.eqs st.facts in
+              let normalized = Init_pred.normalize st.eqs term in
+              let proved = Init_pred.entails facts normalized in
+              if proved then
+                Range_obligation.record_text call.loc
+                  (Init_pred.call_where_obligation ~facts:st.facts st.eqs term);
+              proved) term) in
+          if proved <> Some true then error call.loc goal.diagnostic) (goals call))
+        affine_call_where in
   (* The state on the path where condition [c] evaluated to [b]. Operands
      of `&&` (true) and `||` (false) are assumed left to right, so a later
      operand's subtraction may rely on an earlier operand. *)
@@ -1963,6 +1999,7 @@ let check
      the call and the facts that hold only for some results. [result] is
      the term the caller binds the result to, if any. *)
   and call st (e : Ast.expr) ~result : state * guarded list =
+    check_call_where st e;
     let st = match e.desc with
       | Ast.Call (("slice_copy" | "publish_copy"), _) when not (Init_link.Values.is_empty st.extras.links) ->
           set_links st Init_link.empty
@@ -2658,7 +2695,7 @@ let check
      | _ -> ());
     let before = !unsafe_uses in
     let r = stmt_inner st s in
-    let r = if not prove_field_stores then r else
+    let r = if not prove_affine_paths then r else
       match s.desc, Local_bindings.ids_for_stmt bindings s with
       | Ast.Let (false, name, _, Some _, _), [id] when immutable_var name id ->
           add_declared_bounds (fst r) id (v_atom id), snd r
@@ -3103,7 +3140,7 @@ let check
     else Leaves.add (root, []) uninit) entry_owners entry_u in
   let entry = { extras = {empty_extras with owners = entry_owners}; u = entry_u; iv = []; eqs = []; facts = Init_pred.no_facts;
                 vers = Types.IntMap.empty } in
-  let entry = if not prove_field_stores then entry else
+  let entry = if not prove_affine_paths then entry else
     List.fold_left (fun st (name, id) ->
       if immutable_var name id then add_declared_bounds st id (v_atom id)
       else st) entry param_ids in

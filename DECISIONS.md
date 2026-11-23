@@ -1,5 +1,11 @@
 # Maintainer decisions
 
+- 2026-11-23 Reuse the existing affine path proof for unresolved direct
+  Takibi `where` obligations over stable 64-bit `usize` arguments. Keep
+  static and order-graph checks first, replay accepted arithmetic with Z3,
+  and reject any unresolved obligation without adding runtime checks,
+  trust, or proof search. [active] #1513
+
 - 2026-11-23 For bounded Pipe field stores, first test the actual arithmetic
   goals with the current OCaml affine proof. Connect successful existing
   path proofs to field stores and replay their arithmetic obligations with

@@ -52,3 +52,7 @@ uses the same kernel copy and allocation workload.
 sizes, the usable RAM start, and the compiler-reported 4128-byte Pipe and
 16-byte PipeOwner layouts stay the same on each target. Remeasure when
 write evidence or ring copy paths change the linked workload.
+
+The direct affine call proof reuses this review. Both default `main.o` and
+linked `kernel.elf` files are byte-identical to `9a806133c` on QEMU and
+RPi5. The proof is erased and the existing workloads are unchanged.

@@ -315,6 +315,13 @@ let index_obligation ~claim ~facts eqs ~(index : lin) ~(len : lin) =
   line "(check-sat)";
   Buffer.contents buf
 
+let call_where_obligation ~facts eqs goal =
+  let buf, line = prelude ~rule:"affine-call-where"
+    ~claim:"direct call where clause" ~facts eqs [goal] in
+  line (Printf.sprintf "(assert (< %s 0))" (smt goal));
+  line "(check-sat)";
+  Buffer.contents buf
+
 (* GitHub issue #960: the checker's reading of a literal or const leaf
    against the literal itself. [pattern] is the source's 64-bit pattern;
    this obligation spells it as the unsigned value at [bits] (usize), never
