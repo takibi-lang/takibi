@@ -274,8 +274,8 @@ The board-free RPi5 reset and loader controls now distinguish OpenOCD
 commands from checkout paths (#1503).
 **Waiting Mutex order, 2026-11-19.** Complete #1481 before the #638
 preemption flip. Within #1481, sequence EL1 continuation save and resume,
-ext2 reader-drain wait and wake, then sleeping ext2 readers. The mkdirat
-and unlinkat paths now park while admitted readers drain, and ext2
+ext2 reader-drain wait and wake, then sleeping ext2 readers. The mkdirat,
+unlinkat and renameat paths park while admitted readers drain, and ext2
 getdents64 parks at admission with SIGKILL cancellation. Complete the
 remaining eligible reader and writer paths, then measure uncontended
 and contended acquisition on RPi5 before closing #1481.

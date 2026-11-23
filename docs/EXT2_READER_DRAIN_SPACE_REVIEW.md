@@ -102,3 +102,26 @@ reservation without a linker layout change. No data or BSS symbol changed
 size. The wait uses the existing task and guard state. Scratch acquisition
 still follows reader drain. Peak stack depth and real contention timing
 remain unmeasured.
+
+## Sleeping renameat
+
+The normal linked kernel baseline is `77a3289f3`. The candidate joins
+renameat to the existing pathname mutation wait. In the focused QEMU
+workload, a counted reader holds the wait open until renameat reaches
+the ordinary drain park. After that reader leaves, the observer checks
+the same frame, process slot and generation. The syscall uses separate
+source and destination pathnames. Removing the destination and recreating
+the source verify that the rename completed.
+
+| Accounting boundary | QEMU baseline and candidate | RPi5 baseline and candidate |
+| --- | ---: | ---: |
+| Linked text accounting (bytes) | 843704 | 4239348 |
+| Linked data (bytes) | 4624 | 5600 |
+| Linked BSS (bytes) | 1310720 | 1896448 |
+| Usable RAM start | 0x40210000 | 0x7e0000 |
+| Dispatch frame (bytes) | 320 | 288 |
+
+All data and BSS symbols retain their sizes. The wait uses the existing
+task and guard state. Scratch acquisition follows reader drain, and
+fixture progress is reported after guard release. Peak depth and physical
+contention timing remain unmeasured.
