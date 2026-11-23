@@ -53,9 +53,10 @@ RELEASERS = ("kernel_syscall_dispatch", "kernel_syscall_child_exec_return")
 # numbers they serve. Each number must be one syscall_reaches_filesystem
 # answers false for; that function's comment says why.
 MUTATING_ARMS = {
-    TAKE: "taken inline by REGISTRAR for no-frame mkdirat (34), unlinkat (35), "
-          "renameat (38) and openat with O_CREAT (56, #967)",
-    MKDIR_TAKE: "taken inline by REGISTRAR for ordinary mkdirat (34)",
+    TAKE: "taken inline by REGISTRAR for no-frame mkdirat (34) and unlinkat (35), "
+          "renameat (38), truncate (45), ftruncate (46), and "
+          "openat with O_CREAT or O_TRUNC (56, #967/#1016)",
+    MKDIR_TAKE: "taken inline by REGISTRAR for ordinary mkdirat (34) and unlinkat (35)",
     "syscall_write_segment": "write (64) and sendto with no address (206) "
                              "to an ext2 file, through syscall_ext2_write_locked",
     "syscall_writev_current": "writev (66) to an ext2 file, through "

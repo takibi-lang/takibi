@@ -76,3 +76,29 @@ from 240 on both. The directory body retains its syscall scratch slot
 only after admission. Its prefix check takes the existing process run
 lock after a record exists. Timing and peak stack depth were not
 measured.
+
+## Sleeping unlinkat
+
+The normal linked kernel baseline is `fe2491d92`, with the mkdirat drain
+and getdents64 admission waits in place. The candidate shares the
+post-acquisition path between mkdirat and unlinkat. The focused QEMU
+workload holds a counted reader, runs an actual unlinkat with
+`AT_REMOVEDIR`, and observes the same frame, process slot and generation
+at resume after that reader releases. Recreating the removed directory
+checks that the operation completed. This orders the events with GDB.
+
+| Accounting boundary | QEMU baseline | QEMU candidate | RPi5 baseline | RPi5 candidate |
+| --- | ---: | ---: | ---: | ---: |
+| Linked text accounting (bytes) | 843780 | 843752 | 4239408 | 4239380 |
+| Linked data (bytes) | 4624 | 4624 | 5600 | 5600 |
+| Linked BSS (bytes) | 1310720 | 1310720 | 1896448 | 1896448 |
+| Usable RAM start | 0x40210000 | 0x40210000 | 0x7e0000 | 0x7e0000 |
+| Dispatch frame (bytes) | 320 | 320 | 288 | 288 |
+
+The initial candidate duplicated the post-acquisition body and moved the
+QEMU static stack alignment by 32768 bytes. Joining the two control paths
+after acquisition and inlining the small dispatch helpers recovers that
+reservation without a linker layout change. No data or BSS symbol changed
+size. The wait uses the existing task and guard state. Scratch acquisition
+still follows reader drain. Peak stack depth and real contention timing
+remain unmeasured.

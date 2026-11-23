@@ -1,12 +1,12 @@
 {
-  "date": "2026-11-22",
+  "date": "2026-11-23",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "97e17505abbf3be245e9b728dee3d6afdb678ea00f917591f95ca7aff4c9e2b9",
-  "workload": "Normal linked kernels against the completed mkdirat drain at 8ad447f17, plus QEMU directory admission with an active writer and a caught signal or SIGKILL.",
+  "source_sha256": "96884dc40e2457ac5ef12971442e24b3803435cbe841bba89917265c37d12aa2",
+  "workload": "Normal linked kernels against fe2491d92 and focused QEMU unlinkat with AT_REMOVEDIR held at the reader-drain wait until a counted reader leaves.",
   "evidence": [
     "docs/EXT2_READER_DRAIN_SPACE_REVIEW.md"
   ],
-  "assessment": "Linked text accounting grows 1176 bytes on QEMU and 1288 bytes on RPi5 against the drain baseline. Data, BSS and usable RAM starts are unchanged. The dispatch frame grows by 80 and 48 bytes respectively and the wait allocates no new state.",
-  "next_trigger": "Remeasure when another syscall parks, directory prefix checking changes, or physical contention is measured."
+  "assessment": "The shared post-acquisition path reduces linked text accounting by 28 bytes on each target. Data and BSS sizes, usable RAM starts and dispatch frames are unchanged. The wait adds no retained state.",
+  "next_trigger": "Remeasure when another ext2 syscall parks, the waiting representation changes, or physical contention is measured."
 }

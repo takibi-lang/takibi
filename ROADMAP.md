@@ -275,10 +275,10 @@ commands from checkout paths (#1503).
 **Waiting Mutex order, 2026-11-19.** Complete #1481 before the #638
 preemption flip. Within #1481, sequence EL1 continuation save and resume,
 ext2 reader-drain wait and wake, then sleeping ext2 readers. The mkdirat
-path now parks while admitted readers drain, and ext2 getdents64 parks at
-admission with SIGKILL cancellation. Complete the remaining eligible
-reader and writer paths, then measure uncontended and contended
-acquisition on RPi5 before closing #1481.
+and unlinkat paths now park while admitted readers drain, and ext2
+getdents64 parks at admission with SIGKILL cancellation. Complete the
+remaining eligible reader and writer paths, then measure uncontended
+and contended acquisition on RPi5 before closing #1481.
 
 **Assigned queue (maintainer, 2026-10-23, re-cut 2026-10-25).**
 Low-dependency issues A does not hold, in this order; compiler work in
