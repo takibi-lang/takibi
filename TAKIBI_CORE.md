@@ -558,6 +558,14 @@ call preconditions before adding inference rules. Keep the encoding of
 program facts independently reviewable, since rechecking a formula cannot
 validate a premise that was incorrectly extracted from the program.
 
+Takibi prioritizes extending the compile-time safety guarantees exercised by
+its Unix-like kernel. For arithmetic judgments, use independent Z3 rechecks
+wherever the compiler can emit precise, reviewable obligations. Include
+negative controls that show the recheck can detect invalid judgments. The
+OCaml checker remains responsible for extracting valid premises and deciding
+acceptance. Revisit formal verification of a checker component when a concrete
+kernel case or recurring checker defect demonstrates the benefit.
+
 When concrete callers require a second implementation of proof search,
 evaluate external search on a small, decidable fragment first. An experiment
 may ask Z3 for a derivation with a compact certificate that a separate
