@@ -544,6 +544,60 @@ def check_pan_writes(insns):
     return failures
 
 
+# The kernel compiler's internal memory-frame mode uses only these two
+# externally defined leaves. Verify the complete resolved symbol body,
+# including the linked instruction words, before accepting a kernel image.
+PAN_LEAF_WORDS = {
+    "user_access_open": (0xd500409f, 0xd65f03c0),
+    "user_access_close": (0xd500419f, 0xd65f03c0),
+}
+
+
+def pan_leaf_frame_problems(symbols, instructions):
+    failures = []
+    for name, expected in PAN_LEAF_WORDS.items():
+        matches = symbols.get(name, [])
+        if len(matches) != 1:
+            failures.append(f"expected one defined PAN function {name}")
+            continue
+        address, size, kind, binding, visibility, section = matches[0]
+        if (size, kind, binding, visibility) != (8, "FUNC", "GLOBAL", "DEFAULT") or not section.isdigit():
+            failures.append(f"PAN leaf {name} must be a strong defined 8-byte function")
+            continue
+        if instructions.get(name) != [(address, expected[0]), (address + 4, expected[1])]:
+            failures.append(f"PAN leaf {name} must contain exactly its PAN write and RET")
+    return failures
+
+
+def check_pan_leaf_frame(elf_path):
+    with open(elf_path, "rb") as elf:
+        header = elf.read(20)
+    if header[:7] != b"\x7fELF\x02\x01\x01" or header[16:20] != b"\x02\x00\xb7\x00":
+        return ["PAN leaf frame verification requires a linked little-endian AArch64 ELF"]
+    table = subprocess.run(
+        ["llvm-readelf-19", "--symbols", "--wide", elf_path], check=True,
+        capture_output=True, text=True).stdout
+    symbols = {}
+    for line in table.splitlines():
+        fields = line.split()
+        if len(fields) == 8 and fields[7] in PAN_LEAF_WORDS:
+            _, address, size, kind, binding, visibility, section, name = fields
+            symbols.setdefault(name, []).append(
+                (int(address, 16), int(size), kind, binding, visibility, section))
+    instructions = {}
+    for name, matches in symbols.items():
+        if len(matches) != 1 or matches[0][1] != 8:
+            continue
+        address = matches[0][0]
+        text = subprocess.run(
+            [LLVM_OBJDUMP, "-d", f"--start-address={address:#x}",
+             f"--stop-address={address + 8:#x}", elf_path], check=True,
+            capture_output=True, text=True).stdout
+        instructions[name] = [(int(addr, 16), int(word, 16)) for addr, word in
+            re.findall(r"^\s*([0-9a-f]+):\s+([0-9a-f]{8})\s", text, re.MULTILINE)]
+    return pan_leaf_frame_problems(symbols, instructions)
+
+
 # GitHub issue #451/#449: mutex_acquire must MASK BEFORE IT TAKES.
 #
 # That order is the entire reason an interrupt handler may take one of
@@ -1462,6 +1516,11 @@ def check_mmu_off_from_graph(insns, takibi_object):
 
 def main():
     args = sys.argv[1:]
+    if len(args) == 2 and args[0] == "--pan-leaves-only":
+        failures = check_pan_leaf_frame(args[1])
+        for failure in failures:
+            print(f"FAIL kernel/PAN-leaf-frame: {failure}", file=sys.stderr)
+        return 1 if failures else 0
     entries = None
     takibi_object = None
     asm_objects = []
@@ -1507,6 +1566,7 @@ def main():
         + check_sctlr_sets_wxn(insns)
         + check_sctlr_clears_span(insns)
         + check_pan_writes(insns)
+        + check_pan_leaf_frame(elf_path)
         + check_mutex_masks_before_taking(insns)
         + check_tlb_invalidate_all_is_broadcast(insns)
         + check_exception_stacks_are_per_core(insns)

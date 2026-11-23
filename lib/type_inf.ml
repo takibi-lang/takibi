@@ -12500,7 +12500,20 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let owner_returns = ref [] in
   let pointer_store_origins = Local_bindings.Expr_table.create 16 in
   let init_origin = ref (fun _ _ _ -> None) in
+  (* The maintained AArch64 link verifies both entire symbol bodies. No
+     regular language build or user-declared external gets this frame. *)
+  let checked_pan_externs =
+    if not !Target_info.checked_kernel_pan_frame then StringSet.empty else
+    let declaration = "kernel/arch/arm64/kernel/user_access_extern.tkb" in
+    List.fold_left (fun result -> function
+      | Ast.ExternFuncDef (("user_access_open" | "user_access_close") as name,
+                           [], None, None, loc)
+        when let source = Ast.source_file_of_loc loc in
+             source = declaration || String.ends_with ~suffix:("/" ^ declaration) source ->
+          StringSet.add (overload_key ~loc name []) result
+      | _ -> result) StringSet.empty prog in
   let init_write_footprint = Init_writes.infer
+    ~checked_extern:(fun key -> StringSet.mem key checked_pan_externs)
     ~global_view_origin:(fun info f e -> !init_origin info f e)
     ~global_type:init_global_type ~struct_fields:init_struct_fields
     ~definition:init_definition ~target:init_call_target () in

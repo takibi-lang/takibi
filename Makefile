@@ -1972,8 +1972,9 @@ $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(
 # this target's own hand-written prerequisite list above.
 -include $(KERNEL_RPI5_MAIN_O).facts/deps.d
 
-$(KERNEL_RPI5_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_RPI5_LINK_LD) $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld scripts/buildcheck_asid_boot_config.py scripts/check_asid_boot_config.py scripts/struct_layout_gdb.py
+$(KERNEL_RPI5_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_RPI5_LINK_LD) $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld scripts/buildcheck_asid_boot_config.py scripts/check_asid_boot_config.py scripts/struct_layout_gdb.py scripts/buildcheck_kernel_asm_invariants.py
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $(KERNEL_RPI5_MAIN_O) -o $@ $(KERNEL_GC_LIST)
+	python3 scripts/buildcheck_kernel_asm_invariants.py --pan-leaves-only $@
 	python3 scripts/buildcheck_rp1_dma_arena.py $@
 	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 2 --asm-entries "$(KERNEL_ASM_ENTRIES)" --takibi-object $(KERNEL_RPI5_MAIN_O) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O)
 	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool_cell 16
@@ -2009,7 +2010,7 @@ $(KERNEL_RPI5_MAIN_DEBUG_O): $(KERNEL_RPI5_MAIN_O) scripts/buildcheck_frame_size
 
 -include $(KERNEL_RPI5_MAIN_DEBUG_O).facts/deps.d
 
-$(KERNEL_RPI5_DEBUG_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $(KERNEL_RPI5_MAIN_DEBUG_O) $(KERNEL_RPI5_LINK_LD) $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld scripts/buildcheck_asid_boot_config.py scripts/check_asid_boot_config.py scripts/struct_layout_gdb.py
+$(KERNEL_RPI5_DEBUG_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $(KERNEL_RPI5_MAIN_DEBUG_O) $(KERNEL_RPI5_LINK_LD) $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld scripts/buildcheck_asid_boot_config.py scripts/check_asid_boot_config.py scripts/struct_layout_gdb.py scripts/buildcheck_kernel_asm_invariants.py
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $(KERNEL_RPI5_MAIN_DEBUG_O) -o $@
 	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 2
 	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool_cell 16
@@ -2140,12 +2141,14 @@ $(KERNEL_QEMU_BUILD_DIR)/race-%-reverted-main.o: $(KERNEL_QEMU_MAIN_O) scripts/b
 	python3 scripts/build_qemu_race_window.py . _build/qemu-race-window-$*-reverted $* --revert
 	cd _build/qemu-race-window-$*-reverted && $(NICE_HEAVY) $(abspath $(TAKIBI)) kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb kernel/platform/qemu/usb_disk_absent.tkb kernel/platform/qemu/mmu_layout.tkb kernel/boot/fdt.tkb kernel/platform/qemu/memory.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/block/virtio_blk.tkb kernel/platform/qemu/init.tkb $(KERNEL_QEMU_COMPILE_FLAGS) --internal-allow-unused -o $(abspath $@)
 
-$(KERNEL_QEMU_BUILD_DIR)/kernel-race-%.elf: $(KERNEL_QEMU_BUILD_DIR)/race-%-main.o $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_LINK_LD)
+$(KERNEL_QEMU_BUILD_DIR)/kernel-race-%.elf: $(KERNEL_QEMU_BUILD_DIR)/race-%-main.o $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_LINK_LD) scripts/buildcheck_kernel_asm_invariants.py
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $< -o $@
+	python3 scripts/buildcheck_kernel_asm_invariants.py --pan-leaves-only $@
 	python3 scripts/buildcheck_gdb_helper_names.py $@ --only stall_probe.gdb
 
-$(KERNEL_QEMU_NET_WAKE_CONTROL_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_NET_WAKE_CONTROL_O) $(KERNEL_QEMU_LINK_LD) $(KERNEL_RPI5_LINK_LD)
+$(KERNEL_QEMU_NET_WAKE_CONTROL_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_NET_WAKE_CONTROL_O) $(KERNEL_QEMU_LINK_LD) $(KERNEL_RPI5_LINK_LD) scripts/buildcheck_kernel_asm_invariants.py
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_NET_WAKE_CONTROL_O) -o $@
+	python3 scripts/buildcheck_kernel_asm_invariants.py --pan-leaves-only $@
 
 # GitHub issue #306: the hand-written prerequisite list on $(KERNEL_QEMU_MAIN_O)
 # above is a second, independently-maintained copy of exactly what the
@@ -2161,7 +2164,7 @@ $(KERNEL_QEMU_NET_WAKE_CONTROL_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_E
 # clean-build bootstrap behavior.
 -include $(KERNEL_QEMU_MAIN_O).facts/deps.d
 
-$(KERNEL_QEMU_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_MAIN_O) $(KERNEL_QEMU_LINK_LD) $(KERNEL_RPI5_LINK_LD) scripts/buildcheck_asid_boot_config.py scripts/check_asid_boot_config.py scripts/struct_layout_gdb.py
+$(KERNEL_QEMU_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_MAIN_O) $(KERNEL_QEMU_LINK_LD) $(KERNEL_RPI5_LINK_LD) scripts/buildcheck_asid_boot_config.py scripts/check_asid_boot_config.py scripts/struct_layout_gdb.py scripts/buildcheck_kernel_asm_invariants.py
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_MAIN_O) -o $@ $(KERNEL_GC_LIST)
 	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 1 --asm-entries "$(KERNEL_ASM_ENTRIES)" --takibi-object $(KERNEL_QEMU_MAIN_O) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O)
 	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool_cell 16
@@ -2222,7 +2225,7 @@ $(KERNEL_QEMU_MAIN_DEBUG_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_T
 # this target's own hand-written prerequisite list above.
 -include $(KERNEL_QEMU_MAIN_DEBUG_O).facts/deps.d
 
-$(KERNEL_QEMU_DEBUG_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_MAIN_DEBUG_O) $(KERNEL_QEMU_LINK_LD) $(KERNEL_RPI5_LINK_LD) scripts/buildcheck_asid_boot_config.py scripts/check_asid_boot_config.py scripts/struct_layout_gdb.py
+$(KERNEL_QEMU_DEBUG_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_MAIN_DEBUG_O) $(KERNEL_QEMU_LINK_LD) $(KERNEL_RPI5_LINK_LD) scripts/buildcheck_asid_boot_config.py scripts/check_asid_boot_config.py scripts/struct_layout_gdb.py scripts/buildcheck_kernel_asm_invariants.py
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_MAIN_DEBUG_O) -o $@
 	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 1
 	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool_cell 16
@@ -3292,7 +3295,8 @@ KERNEL_DEVICE_SEMANTICS := $(foreach f,$(KERNEL_DEVICE_SEMANTICS_FILES),--device
 # scripts/check_kernel_compile_flags.py refuses a kernel invocation that
 # names a kernel target without these. Per-image options (raw confinement,
 # unused checks, emit modes, -g) stay at the call site.
-KERNEL_COMPILE_FLAGS := --regions $(KERNEL_DEVICE_SEMANTICS)
+# The internal compiler frame is valid only after the linked PAN bodies pass.
+KERNEL_COMPILE_FLAGS := --regions --internal-kernel-pan-frame $(KERNEL_DEVICE_SEMANTICS)
 KERNEL_QEMU_COMPILE_FLAGS := --target $(QEMU_TARGET) --cpu $(QEMU_CPU) $(KERNEL_COMPILE_FLAGS)
 KERNEL_RPI5_COMPILE_FLAGS := --target $(RPI5_TARGET) --cpu $(RPI5_CPU) $(KERNEL_COMPILE_FLAGS)
 ## rpi5-jtag-stub: the SD card's kernel_2712.img, a DTB-capturing spin stub
@@ -3321,8 +3325,9 @@ $(KERNEL_QEMU_BUILD_DIR)/dma-fixture-%.o: $(KERNEL_QEMU_MAIN_O) scripts/build_qe
 	cd _build/qemu-dma-fixture-$* && $(NICE_HEAVY) $(abspath $(TAKIBI)) $(KERNEL_DMA_SRCS) $(KERNEL_DMA_FLAGS) --facts $(abspath $@).facts -o $(abspath $@)
 	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.facts/deps.d
 	python3 scripts/measure_trusted_base.py --check-raw-deref qemu $@.facts/rawderef.tsv $@.facts/deps.d
-$(KERNEL_QEMU_BUILD_DIR)/kernel-dma-fixture-%.elf: $(KERNEL_QEMU_BUILD_DIR)/dma-fixture-%.o $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_LINK_LD)
+$(KERNEL_QEMU_BUILD_DIR)/kernel-dma-fixture-%.elf: $(KERNEL_QEMU_BUILD_DIR)/dma-fixture-%.o $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_LINK_LD) scripts/buildcheck_kernel_asm_invariants.py
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $< -o $@
+	python3 scripts/buildcheck_kernel_asm_invariants.py --pan-leaves-only $@
 _kernelbuild-dma-qemu: $(KERNEL_DMA_ELF)
 kernelbuild-dma-qemu: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-dma-qemu
@@ -3337,7 +3342,7 @@ $(KERNEL_QEMU_BUILD_DIR)/invariant-fixture.o: $(KERNEL_QEMU_MAIN_O) scripts/buil
 	cd _build/qemu-invariant-fixture && $(NICE_HEAVY) $(abspath $(TAKIBI)) $(KERNEL_DMA_SRCS) $(KERNEL_QEMU_COMPILE_FLAGS) --external-entry main --check-unused-file kernel/tests/qemu/invariant_stop/fixture.tkb --facts $(abspath $@).facts -o $(abspath $@)
 	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.facts/deps.d
 	python3 scripts/measure_trusted_base.py --check-raw-deref qemu $@.facts/rawderef.tsv $@.facts/deps.d
-$(KERNEL_INVARIANT_ELF): $(KERNEL_QEMU_BUILD_DIR)/invariant-fixture.o $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_LINK_LD)
+$(KERNEL_INVARIANT_ELF): $(KERNEL_QEMU_BUILD_DIR)/invariant-fixture.o $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $(KERNEL_QEMU_LINK_LD) scripts/buildcheck_kernel_asm_invariants.py
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_CALLER_FRAME_O) $(KERNEL_QEMU_CACHE_GEOMETRY_O) $< -o $@
 	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 1
 _kernelbuild-invariant-qemu: $(KERNEL_INVARIANT_ELF)
@@ -3359,8 +3364,9 @@ $(KERNEL_BUILD_DIR)/gem-tx-fixture-%.o: $(KERNEL_RPI5_MAIN_O) scripts/build_rpi5
 	cd _build/rpi5-gem-tx-$* && $(NICE_HEAVY) $(abspath $(TAKIBI)) $(KERNEL_GEM_TX_SRCS) $(KERNEL_GEM_TX_FLAGS) --check-unused-file $(if $(filter irq-%,$*),kernel/tests/rpi5/gem_tx/irq_fixture.tkb,kernel/tests/rpi5/gem_tx/fixture.tkb) --facts $(abspath $@).facts -o $(abspath $@)
 	python3 scripts/buildcheck_kernel_unused_coverage.py rpi5 $@.facts/deps.d
 	python3 scripts/measure_trusted_base.py --check-raw-deref rpi5 $@.facts/rawderef.tsv $@.facts/deps.d
-$(KERNEL_BUILD_DIR)/kernel-gem-tx-fixture-%.elf: $(KERNEL_BUILD_DIR)/gem-tx-fixture-%.o $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $(KERNEL_RPI5_LINK_LD)
+$(KERNEL_BUILD_DIR)/kernel-gem-tx-fixture-%.elf: $(KERNEL_BUILD_DIR)/gem-tx-fixture-%.o $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $(KERNEL_RPI5_LINK_LD) scripts/buildcheck_kernel_asm_invariants.py
 	$(LLD) $(KERNEL_LDFLAGS) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_CALLER_FRAME_O) $(KERNEL_RPI5_CACHE_GEOMETRY_O) $< -o $@
+	python3 scripts/buildcheck_kernel_asm_invariants.py --pan-leaves-only $@
 _kernelbuild-gem-tx-rpi5: $(KERNEL_GEM_TX_ELFS)
 kernelbuild-gem-tx-rpi5: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-gem-tx-rpi5

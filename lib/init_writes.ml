@@ -42,7 +42,8 @@ let builtin_has_no_writes name =
    path below its leaf. This deliberately overapproximates element writes. *)
 type place = { root : root; path : string list; ty : Ast.type_expr; indexed : bool }
 type context = { info : Types.func_info; fdef : Ast.func; aliases : Ast.expr Types.IntMap.t ref }
-let infer ?(global_view_origin = fun _ _ _ -> None) ~definition ~target ~struct_fields ~global_type () =
+let infer ?(global_view_origin = fun _ _ _ -> None)
+    ?(checked_extern = fun _ -> false) ~definition ~target ~struct_fields ~global_type () =
   let cache = ref StringMap.empty in
   let binding info e =
     Local_bindings.Expr_table.find_opt info.Types.bindings.expr_ids e in
@@ -105,6 +106,7 @@ let infer ?(global_view_origin = fun _ _ _ -> None) ~definition ~target ~struct_
         cache := StringMap.add key result !cache;
         result
   and call e = match target e with
+    | Some key when checked_extern key -> empty
     | Some key -> function_writes key
     | None -> (match e.Ast.desc with
         | Ast.Call (name, _) when builtin_has_no_writes name -> empty

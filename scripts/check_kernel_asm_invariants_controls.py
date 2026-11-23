@@ -128,6 +128,32 @@ def main():
         print("FAIL kernel-asm-pan control: a missing window opener passed")
         return 1
 
+    # A PAN leaf used as a memory frame must match its entire symbol.
+    pan_symbols = {
+        "user_access_open": [(0x7000, 8, "FUNC", "GLOBAL", "DEFAULT", "1")],
+        "user_access_close": [(0x7008, 8, "FUNC", "GLOBAL", "DEFAULT", "1")],
+    }
+    pan_words = {
+        "user_access_open": [(0x7000, 0xd500409f), (0x7004, 0xd65f03c0)],
+        "user_access_close": [(0x7008, 0xd500419f), (0x700c, 0xd65f03c0)],
+    }
+    CASES.note()
+    assert not checker.pan_leaf_frame_problems(pan_symbols, pan_words)
+    for size, kind, binding in ((12, "FUNC", "GLOBAL"), (8, "NOTYPE", "GLOBAL"),
+                                 (8, "FUNC", "WEAK")):
+        mutated = dict(pan_symbols, user_access_open=[
+            (0x7000, size, kind, binding, "DEFAULT", "1")])
+        CASES.note()
+        assert checker.pan_leaf_frame_problems(mutated, pan_words)
+    for word in (0xf9000000, 0x94000000, 0xd500419f):
+        mutated = dict(pan_words, user_access_open=[
+            (0x7000, 0xd500409f), (0x7004, word)])
+        CASES.note()
+        assert checker.pan_leaf_frame_problems(pan_symbols, mutated)
+    CASES.note()
+    assert checker.pan_leaf_frame_problems({"user_access_close": pan_symbols["user_access_close"]},
+                                           pan_words)
+
     # GitHub issue #920: every EL0 eret resets the GIC priority mask.
     pmr_ok = [
         (0x3000, "bl 0x4000 <irq_mask_reset_el0>", "kernel_process_stack_switch_complete"),

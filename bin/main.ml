@@ -84,6 +84,7 @@ let () =
   let input_files  = ref [] in
   let output_file = ref "" in
   let target_triple = ref "" in
+  let kernel_pan_frame = ref false in
   let target_cpu = ref "" in
   let debug_info = ref false in
   let forbid_trap = ref true in
@@ -189,6 +190,8 @@ let () =
          Takibi.Range_obligation.fault_overlay_short := true;
          Takibi.Range_obligation.fault_type_size := true))
       "plant known-unsound range rules (z3 check's failing control)";
+    flag "--internal-kernel-pan-frame" Development (on kernel_pan_frame)
+      "use the PAN leaf frame, requiring the maintained linked-body validation";
     flag "--internal-allow-unused" Development (off reject_unused_functions)
       "accept a function nothing reachable uses (rejected by default)";
   ] in
@@ -245,6 +248,11 @@ let () =
     Llvm_gen.setup_target ~triple:!target_triple ~cpu:!target_cpu
       ()
   in
+  if !kernel_pan_frame && !target_triple <> "aarch64-none-elf" then begin
+    Printf.eprintf "Error: --internal-kernel-pan-frame requires aarch64-none-elf\n";
+    exit 1
+  end;
+  Target_info.checked_kernel_pan_frame := !kernel_pan_frame;
   if !debug_info then Llvm_gen.enable_debug_info (List.hd input_files);
   Llvm_gen.set_frame_pointers !frame_pointers;
   Llvm_gen.set_function_sections !function_sections;

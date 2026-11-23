@@ -23,8 +23,10 @@ type vector_table_contract =
 let dma_cache = ref (Cache_line 32)
 let vector_table = ref Unsupported
 let pointer_bits = ref 32
+let checked_kernel_pan_frame = ref false
 
 let reset () =
+  checked_kernel_pan_frame := false;
   dma_cache := Cache_line 32;
   vector_table := Unsupported;
   pointer_bits := 32
