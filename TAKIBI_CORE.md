@@ -550,6 +550,23 @@ decides: a goal the checker cannot entail is rejected even if a solver
 could prove it, and acceptance never depends on a solver's search.
 Syntactic equality and interval propagation remain the fast paths.
 
+**Provisional policy for extending arithmetic checks.** The OCaml checker
+extracts premises from typed code, preserves machine widths and wraparound
+semantics, and reuses its existing arithmetic checks at new proof boundaries.
+For example, share an existing bounds check between refined assignments and
+call preconditions before adding inference rules. Keep the encoding of
+program facts independently reviewable, since rechecking a formula cannot
+validate a premise that was incorrectly extracted from the program.
+
+When concrete callers require a second implementation of proof search,
+evaluate external search on a small, decidable fragment first. An experiment
+may ask Z3 for a derivation with a compact certificate that a separate
+checker can replay against the actual premises and goal. Measure both
+per-query and build-wide cost, and include invalid premises and altered
+certificates as negative controls. Missing, unsupported, or over-budget
+evidence cannot justify acceptance. The current acceptance rule above
+continues to apply until a change is separately reviewed.
+
 The boundary is fixed and guarded (DECISIONS 2026-10-25, #1055):
 obligations stay in decidable quantifier-free fragments; no quantifier,
 no product of two non-constant terms, no uninterpreted function stands for
