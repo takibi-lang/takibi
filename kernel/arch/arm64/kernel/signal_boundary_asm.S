@@ -7,6 +7,8 @@
 .equ BOUNDARY_SIGFRAME_SIZE, 4688
 .equ BOUNDARY_UC_STACK_PADDING, 156
 .equ BOUNDARY_FPSIMD_END, 592 + 528
+.equ BOUNDARY_RESERVED_SUFFIX, BOUNDARY_FPSIMD_END + 8
+.equ BOUNDARY_RESERVED_WORDS, (BOUNDARY_SIGFRAME_SIZE - BOUNDARY_RESERVED_SUFFIX) / 8
 
 .section .text, "ax"
 .global signal_boundary_run
@@ -91,6 +93,12 @@ signal_boundary_run:
     mov x9, #-1
     str w9, [sp, #BOUNDARY_UC_STACK_PADDING]
     str x9, [sp, #BOUNDARY_FPSIMD_END]
+    add x10, sp, #BOUNDARY_RESERVED_SUFFIX
+    mov x11, #BOUNDARY_RESERVED_WORDS
+.Lboundary_seed_suffix:
+    str x9, [x10], #8
+    subs x11, x11, #1
+    b.ne .Lboundary_seed_suffix
     mov sp, x20
 .Lboundary_prepare_suspend:
     add x0, sp, #168
@@ -219,6 +227,14 @@ signal_boundary_handler:
     // Both 32-bit aarch64_ctx terminator fields must be zero.
     ldr x9, [x1, #BOUNDARY_FPSIMD_END]
     cbnz x9, .Lboundary_handler_done
+    // The frame writer also clears the reserved bytes after the terminator.
+    add x10, x1, #BOUNDARY_RESERVED_SUFFIX
+    mov x11, #BOUNDARY_RESERVED_WORDS
+.Lboundary_check_suffix:
+    ldr x9, [x10], #8
+    cbnz x9, .Lboundary_handler_done
+    subs x11, x11, #1
+    b.ne .Lboundary_check_suffix
 .Lboundary_handler_witness:
     // Signal return restores x21 from mcontext, so store the verdict there.
     mov x9, #1

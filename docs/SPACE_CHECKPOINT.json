@@ -2,11 +2,11 @@
   "date": "2026-11-24",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "b319d8d344474d4d224288251c3539636ddf866a5359f679f3b93deed6073adf",
-  "workload": "Compare the normal linked QEMU and RPi5 images and the existing EL0 shared-mapping fixture against 148f795d7, covering the wait4 output with adjacent canaries.",
+  "source_sha256": "9c26c60d23471240c9d61cc86c4c09c41c819b63072a6b6ab1d2ead0ac5929a7",
+  "workload": "Compare the normal linked QEMU and RPi5 kernels and ordinary signal-boundary fixture against 7f4dddcd4, with the wait4 fixture included in the rebuilt ext2 image.",
   "evidence": [
     "docs/MEMORY_SAFETY_CONTRACT.md"
   ],
-  "assessment": "The fixture adds 16 bytes of local stack and 128 bytes of executable text, with the same mapped end. The QEMU kernel ELF is byte-identical. RPi5 linked text accounting grows 16 bytes for the embedded fixture without moving usable RAM or changing data and BSS sizes.",
-  "next_trigger": "Measure again when an EL0 fixture changes its mapped extent or the kernel changes storage or allocation behavior."
+  "assessment": "The signal fixture adds 44 executable bytes within the same mapped extent and stack reservation. The wait4 payload and QEMU kernel ELF are byte-identical. The packed ext2 fixture makes RPi5 read-only data 1456 bytes smaller. The RPi5 executable section size, data and BSS sizes, and usable RAM boundary are unchanged.",
+  "next_trigger": "Measure again when a signal frame or EL0 fixture changes its extent, or the kernel changes storage or allocation behavior."
 }

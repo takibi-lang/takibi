@@ -179,6 +179,18 @@ builds. Physical slot exclusion depends on the acquire compare-exchange
 and release store. Destination mapping, COW and the PAN access window
 retain the premises of the common copy-out boundary.
 
+The signal-frame writer clears the checked 4688-byte destination before
+storing the populated fields. Ordinary and alternate-stack delivery use
+the same writer. In the ordinary signal-boundary fixture, the handler
+verifies that all 3560 prefilled bytes after the FPSIMD terminator are zero.
+The fixture also checks the terminator and `uc_stack` padding. This
+observes the successful ordinary frame; it leaves alternate-stack padding
+and unsuccessful writes outside the measured coverage.
+The EL0 fixture adds 44 executable bytes and keeps its mapped extent and
+stack reservation. The normal QEMU kernel ELF is byte-identical. RPi5
+executable section size and usable RAM start agree with the baseline;
+its packed ext2 image changes the linked read-only data size.
+
 Both normal kernel links validate the complete resolved PAN open and close
 leaves before using the compiler's narrow write-frame assumption in a
 kernel artifact. Each leaf must be a strong defined function containing
