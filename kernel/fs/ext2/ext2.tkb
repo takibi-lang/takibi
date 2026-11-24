@@ -213,35 +213,6 @@ struct Ext2Mount {
 must_use variant Ext2MountResult { Invalid; Mounted(Ext2Mount); }
 must_use variant Ext2MountDriverResult { Busy; Invalid; Mounted(Ext2Mount); }
 
-private let mut ext2_driver_mounts: AtomicWord;
-private let mut ext2_driver_mount_ready: AtomicWord;
-private let mut ext2_driver_mount_busy: AtomicWord;
-private let mut ext2_driver_mount_invalid: AtomicWord;
-private let mut ext2_driver_mount_header_ticks: AtomicWord;
-private let mut ext2_driver_mount_descriptor_ticks: AtomicWord;
-private let mut ext2_driver_mount_total_ticks: AtomicWord;
-struct Ext2DriverMountStats {
-    attempts: usize;
-    ready: usize;
-    busy: usize;
-    invalid: usize;
-    header_ticks: usize;
-    descriptor_ticks: usize;
-    total_ticks: usize;
-}
-fn ext2_driver_mount_stats() -> Ext2DriverMountStats {
-    let mut stats: Ext2DriverMountStats = {
-        atomic_word_load(&ext2_driver_mounts),
-        atomic_word_load(&ext2_driver_mount_ready),
-        atomic_word_load(&ext2_driver_mount_busy),
-        atomic_word_load(&ext2_driver_mount_invalid),
-        atomic_word_load(&ext2_driver_mount_header_ticks),
-        atomic_word_load(&ext2_driver_mount_descriptor_ticks),
-        atomic_word_load(&ext2_driver_mount_total_ticks)
-    };
-    return stats;
-}
-
 // Parsed geometry only; a mount is not published until the descriptor validates.
 struct Ext2MountHeader {
     inode_count: usize;
@@ -250,19 +221,6 @@ struct Ext2MountHeader {
     inode_size: usize;
 }
 must_use variant Ext2MountHeaderResult { Invalid; Header(Ext2MountHeader); }
-
-// Comparing the two measured mounts publishes no new device authority.
-fn ext2_mount_same_geometry(left: Ext2Mount, right: Ext2Mount) -> bool {
-    if (block_device_same(left.device, right.device) == false) { return false; }
-    if (left.inode_count != right.inode_count) { return false; }
-    if (left.filesystem_blocks != right.filesystem_blocks) { return false; }
-    if (left.inodes_per_group != right.inodes_per_group) { return false; }
-    if (left.inode_size != right.inode_size) { return false; }
-    if (left.inode_table_block != right.inode_table_block) { return false; }
-    if (left.block_bitmap_block != right.block_bitmap_block) { return false; }
-    if (left.inode_bitmap_block != right.inode_bitmap_block) { return false; }
-    return true;
-}
 
 // Total on-disk block count, including metadata, for exhaustion diagnostics.
 fn ext2_block_capacity(mount: Ext2Mount) -> usize {
@@ -535,27 +493,10 @@ private inline fn ext2_mount_with(slot: borrow Ext2Slot[0],
 // outer device lock spans parsing, the second read, or publication.
 fn ext2_mount_driver(device: KernelBlockDevice,
                      phase: borrow TestDriverPhase[driver]) -> Ext2MountDriverResult {
-    let started: usize = read_cntpct() as usize;
-    atomic_word_fetch_add(&ext2_driver_mounts, 1);
     let slot: Ext2Slot[0] = ext2_slot_acquire();
     let result = ext2_mount_driver_with(slot, device, phase);
     ext2_slot_release(slot);
-    let finished: usize = read_cntpct() as usize;
-    atomic_word_fetch_add(&ext2_driver_mount_total_ticks, finished - started);
-    match result {
-        Ext2MountDriverResult::Busy => {
-            atomic_word_fetch_add(&ext2_driver_mount_busy, 1);
-            return Ext2MountDriverResult::Busy;
-        }
-        Ext2MountDriverResult::Invalid => {
-            atomic_word_fetch_add(&ext2_driver_mount_invalid, 1);
-            return Ext2MountDriverResult::Invalid;
-        }
-        Ext2MountDriverResult::Mounted(mount) => {
-            atomic_word_fetch_add(&ext2_driver_mount_ready, 1);
-            return Ext2MountDriverResult::Mounted(mount);
-        }
-    }
+    return result;
 }
 
 private fn ext2_mount_driver_with(slot: borrow Ext2Slot[0],
@@ -567,26 +508,18 @@ private fn ext2_mount_driver_with(slot: borrow Ext2Slot[0],
         BlockDriverIoResult::Invalid => { return Ext2MountDriverResult::Invalid; }
         BlockDriverIoResult::Ok => { }
     }
-    let header_start: usize = read_cntpct() as usize;
     let mut header: Ext2MountHeader = match ext2_mount_header(slot, device) {
         Ext2MountHeaderResult::Invalid => {
-            let header_end: usize = read_cntpct() as usize;
-            atomic_word_fetch_add(&ext2_driver_mount_header_ticks, header_end - header_start);
             return Ext2MountDriverResult::Invalid;
         }
         Ext2MountHeaderResult::Header(parsed) => { parsed }
     };
-    let header_end: usize = read_cntpct() as usize;
-    atomic_word_fetch_add(&ext2_driver_mount_header_ticks, header_end - header_start);
     match block_read_driver(device, 2, ext2_scratch[slot.index].metadata as []u8, phase) {
         BlockDriverIoResult::Busy => { return Ext2MountDriverResult::Busy; }
         BlockDriverIoResult::Invalid => { return Ext2MountDriverResult::Invalid; }
         BlockDriverIoResult::Ok => { }
     }
-    let descriptor_start: usize = read_cntpct() as usize;
     let result = ext2_mount_finish(slot, device, header);
-    let descriptor_end: usize = read_cntpct() as usize;
-    atomic_word_fetch_add(&ext2_driver_mount_descriptor_ticks, descriptor_end - descriptor_start);
     match result {
         Ext2MountResult::Invalid => { return Ext2MountDriverResult::Invalid; }
         Ext2MountResult::Mounted(mount) => { return Ext2MountDriverResult::Mounted(mount); }

@@ -261,26 +261,6 @@ private let mut msc_write10_command_count: AtomicWord;
 private let mut msc_command_count: AtomicWord;
 private let mut msc_command_timeouts: AtomicWord;
 
-private let mut msc_read10_request_commands: AtomicWord;
-private let mut msc_read10_request_bytes: AtomicWord;
-
-// CBW submission to the USB bulk transport, including retries and failed
-// attempts; not confirmed device execution or transferred bytes. The caller
-// still owns the CPU bytes, immediately before dma_begin_tx/usb_bulk_out.
-fn disk_note_read10_request(cbw: borrow [u8; 31..]) {
-    if (cbw[15] != 0x28) { return; }
-    let bytes: usize = (cbw[8] as usize) | ((cbw[9] as usize) << 8) |
-        ((cbw[10] as usize) << 16) | ((cbw[11] as usize) << 24);
-    atomic_word_fetch_add(&msc_read10_request_commands, 1);
-    atomic_word_fetch_add(&msc_read10_request_bytes, bytes);
-}
-fn disk_read10_request_commands() -> usize {
-    return atomic_word_load(&msc_read10_request_commands);
-}
-fn disk_read10_request_bytes() -> usize {
-    return atomic_word_load(&msc_read10_request_bytes);
-}
-
 let mut xhci_ready: AtomicWord;
 private let mut xhci_controller_unusable: AtomicWord;
 

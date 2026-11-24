@@ -604,8 +604,6 @@ private fn host_driver_read(device: KernelBlockDevice,
 private fn host_driver_mount_controls(device: KernelBlockDevice) -> bool !{unsafe} {
     let phase = test_driver_phase_begin(true);
     block_forget_all();
-    let mut busy_before: BlockDriverReadStats = block_driver_read_stats();
-    let mut mount_busy_before: Ext2DriverMountStats = ext2_driver_mount_stats();
     let guard = match block_device_try_take() {
         BlockDeviceTry::Busy => { test_driver_phase_end(phase); return false; }
         BlockDeviceTry::Taken(held) => { held }
@@ -616,25 +614,13 @@ private fn host_driver_mount_controls(device: KernelBlockDevice) -> bool !{unsaf
         Ext2MountDriverResult::Mounted(found) => { false }
     };
     block_device_give(guard);
-    let mut busy_after: BlockDriverReadStats = block_driver_read_stats();
-    let mut mount_busy_after: Ext2DriverMountStats = ext2_driver_mount_stats();
-    if (busy_after.attempts != busy_before.attempts + 1 ||
-        busy_after.busy != busy_before.busy + 1 ||
-        busy_after.acquired != busy_before.acquired ||
-        mount_busy_after.busy != mount_busy_before.busy + 1) {
-        test_driver_phase_end(phase); return false;
-    }
     if (cold_busy == false) { test_driver_phase_end(phase); return false; }
     let mut cold: Ext2Mount = match ext2_mount_driver(device, phase) {
         Ext2MountDriverResult::Busy => { test_driver_phase_end(phase); return false; }
         Ext2MountDriverResult::Invalid => { test_driver_phase_end(phase); return false; }
         Ext2MountDriverResult::Mounted(found) => { found }
     };
-    let mut before: BlockDriverReadStats = block_driver_read_stats();
-    if (before.attempts <= busy_after.attempts ||
-        before.attempts > busy_after.attempts + 4 ||
-        before.acquired - busy_after.acquired != before.attempts - busy_after.attempts ||
-        before.busy != busy_after.busy) {
+    if (ext2_fixture_geometry_is_expected(cold) == false) {
         test_driver_phase_end(phase); return false;
     }
     let guard = match block_device_try_take() {
@@ -644,11 +630,12 @@ private fn host_driver_mount_controls(device: KernelBlockDevice) -> bool !{unsaf
     let warm: bool = match ext2_mount_driver(device, phase) {
         Ext2MountDriverResult::Busy => { false }
         Ext2MountDriverResult::Invalid => { false }
-        Ext2MountDriverResult::Mounted(found) => { ext2_mount_same_geometry(cold, found) }
+        Ext2MountDriverResult::Mounted(found) => { ext2_fixture_geometry_is_expected(found) &&
+            ext2_block_capacity(cold) == ext2_block_capacity(found) &&
+            block_device_same(ext2_mount_device(cold), ext2_mount_device(found)) }
     };
     block_device_give(guard);
-    let mut after: BlockDriverReadStats = block_driver_read_stats();
-    if (warm == false || after.attempts != before.attempts) {
+    if (warm == false) {
         test_driver_phase_end(phase); return false;
     }
     block_forget_all();
@@ -668,24 +655,16 @@ private fn host_driver_mount_controls(device: KernelBlockDevice) -> bool !{unsaf
     block_device_give(guard);
     if (second_busy == false) { test_driver_phase_end(phase); return false; }
     block_forget_all();
-    let mut ordinary_before: BlockDriverReadStats = block_driver_read_stats();
-    let mut ordinary_mount_before: Ext2DriverMountStats = ext2_driver_mount_stats();
     let ordinary: bool = match ext2_mount(device) {
         Ext2MountResult::Invalid => { false }
-        Ext2MountResult::Mounted(found) => { ext2_mount_same_geometry(cold, found) }
+        Ext2MountResult::Mounted(found) => { ext2_fixture_geometry_is_expected(found) &&
+            ext2_block_capacity(cold) == ext2_block_capacity(found) &&
+            block_device_same(ext2_mount_device(cold), ext2_mount_device(found)) }
     };
     block_forget_all();
-    let mut ordinary_after: BlockDriverReadStats = block_driver_read_stats();
-    let mut ordinary_mount_after: Ext2DriverMountStats = ext2_driver_mount_stats();
-    if (ordinary_after.attempts != ordinary_before.attempts ||
-        ordinary_mount_after.attempts != ordinary_mount_before.attempts) {
-        test_driver_phase_end(phase); return false;
-    }
     let primed: bool = host_driver_read(device, phase, 100);
     block_fault_arm(false, 0, false);
-    let mut fallback_before: BlockDriverReadStats = block_driver_read_stats();
     let fallback: bool = host_driver_read(device, phase, 101);
-    let mut fallback_after: BlockDriverReadStats = block_driver_read_stats();
     let faults: usize = block_fault_disarm();
     let saved: u8 = ram_disk_image[1080];
     ram_disk_image[1080] = 0;
@@ -697,17 +676,8 @@ private fn host_driver_mount_controls(device: KernelBlockDevice) -> bool !{unsaf
     };
     ram_disk_image[1080] = saved;
     block_forget_all();
-    let mut mount_final: Ext2DriverMountStats = ext2_driver_mount_stats();
     test_driver_phase_end(phase);
-    return mount_final.attempts == mount_busy_before.attempts + 5 &&
-        mount_final.ready == mount_busy_before.ready + 2 &&
-        mount_final.busy == mount_busy_before.busy + 2 &&
-        mount_final.invalid == mount_busy_before.invalid + 1 && ordinary && primed && fallback && faults == 1 && invalid &&
-        fallback_after.run_attempts == fallback_before.run_attempts + 1 &&
-        fallback_after.run_fallbacks == fallback_before.run_fallbacks + 1 &&
-        fallback_after.attempts == fallback_before.attempts + 2 &&
-        fallback_after.acquired == fallback_before.acquired + 2 &&
-        fallback_after.busy == fallback_before.busy;
+    return ordinary && primed && fallback && faults == 1 && invalid;
 }
 
 fn app_main() !{unsafe} {

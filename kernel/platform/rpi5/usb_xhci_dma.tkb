@@ -411,7 +411,6 @@ fn msc_data_out_put(value: sink MscDataTransmitAuthority) {
 fn msc_cbw_send_once(guard: borrow BlockDeviceGuard[&block_device_lock]) -> MscDataReceiveResult !{unsafe} {
     match msc_cbw_take() {
         MscCbwTransmitAuthority::Cpu(cpu) => {
-            disk_note_read10_request(dma_cpu_slice(cpu, MscCbwTransmit));
             let device = dma_begin_tx(cpu, MscCbwTransmit);
             let mut span = dma_device_span(device, MscCbwTransmit, 0, 31);
             let completion: u32 = usb_bulk_out(guard, span);

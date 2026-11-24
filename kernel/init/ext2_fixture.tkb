@@ -1623,94 +1623,17 @@ fn kernel_ext2_fixture_run(mount: Ext2Mount, phase: borrow TestDriverPhase[drive
 // same way once the body above stopped being written twice. Extracting the
 // body made this identical, and scripts/check_platform_file_parity.py said so
 // on the next run -- the check finding the next layer down is what it is for.
-// Two observations in the existing fixture, not a new benchmark lane.
-// Software-cold retires kernel cache/run epochs; it does not flush the
-// USB device's media cache. Neither observed span is exclusive CPU time.
-private fn kernel_ext2_mount_observe(device: KernelBlockDevice,
-                                    phase: borrow TestDriverPhase[driver],
-                                    warm: bool) -> Ext2MountDriverResult !{unsafe} {
-    let clock_before: usize = read_cntpct() as usize;
-    let clock_after: usize = read_cntpct() as usize;
-    let snapshot_start: usize = read_cntpct() as usize;
-    let mut before: BlockDriverReadStats = block_driver_read_stats();
-    let mut parse_before: Ext2DriverMountStats = ext2_driver_mount_stats();
-    let commands: usize = disk_read10_request_commands();
-    let bytes: usize = disk_read10_request_bytes();
-    let reads: usize = block_read_call_total();
-    let singles: usize = block_single_read_total();
-    let runs: usize = block_run_read_total();
-    let hits: usize = block_run_hit_total();
-    let cache_hits: usize = block_cache_hit_total();
-    let ext2_waits: usize = slot_pool_wait_count(SlotPoolWaitPool::Ext2);
-    let block_waits: usize = slot_pool_wait_count(SlotPoolWaitPool::Block);
-    let snapshot_end: usize = read_cntpct() as usize;
-    let result = ext2_mount_driver(device, phase);
-    let mut after: BlockDriverReadStats = block_driver_read_stats();
-    let mut parse_after: Ext2DriverMountStats = ext2_driver_mount_stats();
-    let commands_after: usize = disk_read10_request_commands();
-    let bytes_after: usize = disk_read10_request_bytes();
-    let reads_after: usize = block_read_call_total();
-    let singles_after: usize = block_single_read_total();
-    let runs_after: usize = block_run_read_total();
-    let hits_after: usize = block_run_hit_total();
-    let cache_hits_after: usize = block_cache_hit_total();
-    let ext2_waits_after: usize = slot_pool_wait_count(SlotPoolWaitPool::Ext2);
-    let block_waits_after: usize = slot_pool_wait_count(SlotPoolWaitPool::Block);
-    // No guard remains live across snapshot/formatting. Deltas can include
-    // other USB users in the window; the fields are not an atomic tuple.
-    uart_puts("ext2 mount cost: ");
-    if (warm) { uart_puts("warm"); } else { uart_puts("software-cold"); }
-    uart_puts(" frequency="); uart_put_udec(read_cntfrq() as usize);
-    uart_puts(" attempts="); uart_put_udec(after.attempts - before.attempts);
-    uart_puts(" acquired="); uart_put_udec(after.acquired - before.acquired);
-    uart_puts(" busy="); uart_put_udec(after.busy - before.busy);
-    uart_puts(" acquire_ticks="); uart_put_udec(after.acquire_ticks - before.acquire_ticks);
-    uart_puts(" hold_ticks="); uart_put_udec(after.hold_ticks - before.hold_ticks);
-    uart_puts(" run_attempts="); uart_put_udec(after.run_attempts - before.run_attempts);
-    uart_puts(" fallbacks="); uart_put_udec(after.run_fallbacks - before.run_fallbacks);
-    uart_puts(" header_ticks="); uart_put_udec(parse_after.header_ticks - parse_before.header_ticks);
-    uart_puts(" descriptor_ticks="); uart_put_udec(parse_after.descriptor_ticks - parse_before.descriptor_ticks);
-    uart_puts(" total_ticks="); uart_put_udec(parse_after.total_ticks - parse_before.total_ticks);
-    uart_puts(" usb_read10_requests="); uart_put_udec(commands_after - commands);
-    uart_puts(" usb_requested_bytes="); uart_put_udec(bytes_after - bytes);
-    uart_puts(" device_blocks="); uart_put_udec(reads_after - reads);
-    uart_puts(" singles="); uart_put_udec(singles_after - singles);
-    uart_puts(" runs="); uart_put_udec(runs_after - runs);
-    uart_puts(" run_hits="); uart_put_udec(hits_after - hits);
-    uart_puts(" cache_hits="); uart_put_udec(cache_hits_after - cache_hits);
-    uart_puts(" ext2_slot_waits="); uart_put_udec(ext2_waits_after - ext2_waits);
-    uart_puts(" block_slot_waits="); uart_put_udec(block_waits_after - block_waits);
-    uart_puts(" clock_pair_ticks="); uart_put_udec(clock_after - clock_before);
-    uart_puts(" snapshot_ticks="); uart_put_udec(snapshot_end - snapshot_start);
-    uart_puts("\n");
-    return result;
-}
-
 fn kernel_ext2_mount_and_run(device: KernelBlockDevice,
                              phase: borrow TestDriverPhase[driver]) !{logs, unsafe} {
-    block_forget_all();
-    let mut cold: Ext2Mount = match kernel_ext2_mount_observe(device, phase, false) {
+    match ext2_mount_driver(device, phase) {
         Ext2MountDriverResult::Busy => {
-            kernel_boot_log("ext2 mount: busy; fixture failed\n"); return;
+            kernel_boot_log("ext2 mount: busy; fixture failed\n");
         }
         Ext2MountDriverResult::Invalid => {
-            kernel_boot_log("ext2 mount: invalid\n"); return;
+            kernel_boot_log("ext2 mount: invalid\n");
         }
-        Ext2MountDriverResult::Mounted(mount) => { mount }
-    };
-    let mut warm: Ext2Mount = match kernel_ext2_mount_observe(device, phase, true) {
-        Ext2MountDriverResult::Busy => {
-            kernel_boot_log("ext2 mount: busy; fixture failed\n"); return;
+        Ext2MountDriverResult::Mounted(mount) => {
+            kernel_ext2_fixture_run(mount, phase);
         }
-        Ext2MountDriverResult::Invalid => {
-            kernel_boot_log("ext2 mount: invalid\n"); return;
-        }
-        Ext2MountDriverResult::Mounted(mount) => { mount }
-    };
-    if (ext2_mount_same_geometry(cold, warm) == false) {
-        kernel_boot_log("ext2 mount: measurement geometry mismatch; fixture failed\n");
-        return;
     }
-    kernel_boot_log("ext2 mount measurement: verified\n");
-    kernel_ext2_fixture_run(cold, phase);
 }
