@@ -153,7 +153,7 @@ This is a source-backed entry inventory, not complete export certification.
 | --- | --- | --- |
 | copy_to_user | borrow init []const u8; length check, COW resolution, UserAccessWindow | Source construction/provenance and actual source lifetime; destination mapping/assembly are trusted |
 | copy_to_user_span | borrow uninit source with requires init(source[offset..<offset + length]); checked tail forwards to copy_to_user | Every producer's range fact and alias/lease identity |
-| Pipe reads (two wrap segments) | copy_to_user_span from pipe_of(owner).buffer | Stored-owner lifetime and written ring ranges across wrap/reuse |
+| Pipe reads (two wrap segments) | Projected lock identity, bounded cursor stores, and copy_to_user_span from pipe_of(owner).buffer | Written ring ranges across wrap/reuse and exact consumption of the successful prefix from the same locked cursor across VM and COW |
 | TCP reads (buffered and freshly received) | copy_to_user_span from tcp_frame_bytes | Frame ownership, received extent, publication and DMA completion |
 | procfs file reads | `procfs_render_file` initializes `[0, total)`. With `offset < total`, the read copies `min(total - offset, requested)` bytes from the selected scratch slot and then updates the offset | Renderer input provenance, destination faults and file-offset semantics |
 | ext2 file reads | `Ext2ReadResult::Read(n)` establishes the scratch prefix `[0, n)`. Each iteration copies that prefix before updating the file offset and delivered count | Block/device completion and actual byte fulfillment, destination faults and partial-result semantics |
@@ -178,6 +178,19 @@ the call.
 builds. Physical slot exclusion depends on the acquire compare-exchange
 and release store. Destination mapping, COW and the PAN access window
 retain the premises of the common copy-out boundary.
+
+Both normal kernel links validate the complete resolved PAN open and close
+leaves before using the compiler's narrow write-frame assumption in a
+kernel artifact. Each leaf must be a strong defined function containing
+exactly its expected PAN write and return. The check establishes the
+absence of a memory-writing instruction in those two leaves. Destination
+mapping and COW retain their own premises.
+
+The full Pipe read/consume proof is deferred. A first-span fault must
+consume nothing, and a second-span fault after wraparound must consume
+only the successful first span. The projected-lock and cursor-store checks
+cover parts of this path. The prototypes left cursor continuity across
+user mapping and COW unproved and were left out of the maintained kernel.
 
 On RPi5, a fixed-size USB READ(10) finishes with a checked destination
 only after the current receive reports the full byte extent and the
