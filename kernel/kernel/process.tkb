@@ -368,6 +368,10 @@ struct ProcessRecord {
     // by the block that follows. Separate from `wait` so a decision that is
     // abandoned leaves nothing behind for a scheduler to trust (#603).
     pending_block_reason: ProcessWaitReason;
+    // The run lock protects admission and the first committed exit signal.
+    // A signal selected here survives retries of the ordinary exit tail.
+    ext2_reader_waiting: bool;
+    ext2_reader_fatal: u8;
     // Absolute generic-counter deadline for nanosleep/clock_nanosleep and
     // finite ppoll. Meaningful only while the published wait is Deadline.
     deadline_ticks: usize;
@@ -3682,6 +3686,8 @@ private fn scheduled_process_record_reset(guard: borrow ProcessRunGuard[lock],
     record.stack_owner_cpu = PROCESS_STACK_UNOWNED;
     process_state_free(&record.state);
     record.pending_block_reason = ProcessWaitReason::None;
+    record.ext2_reader_waiting = false;
+    record.ext2_reader_fatal = 0;
     record.deadline_ticks = 0;
     record.tick_wake_core = 0;
     record.tick_wake_next = 0;
@@ -9541,8 +9547,7 @@ private fn kernel_process_block_would_miss(
         ProcessWaitReason::Ext2ReaderDrain => { return ext2_readers_drained(); }
         ProcessWaitReason::Ext2ReaderAdmission => {
             return ext2_mutation_in_flight() == false ||
-                (scheduled_process_record_live_locked(guard, from).pending_signals &
-                    PROCESS_SIGKILL_BIT) != 0;
+                scheduled_process_record_live_locked(guard, from).ext2_reader_fatal != 0;
         }
         // Delivered again: the same list's next tick
         // (kernel_process_tick_wake_scan) wakes a Blocked waiter whose
@@ -10190,6 +10195,17 @@ fn kernel_process_current_termination_signal_take()
     let guard = process_run_lock();
     let mut handle: ProcessHandle = current_task;
     let record: &mut ProcessRecord = scheduled_process_record_live_locked(guard, handle);
+    let fatal: usize = record.ext2_reader_fatal as usize;
+    if (fatal >= 1 && fatal <= PROCESS_SIGNAL_ACTIONS) {
+        let bit: usize = 1 << (fatal - 1);
+        if ((record.pending_signals & bit) != 0) {
+            let taken = taken_signal_take(guard, record, handle, fatal);
+            process_run_unlock(guard);
+            return ProcessSignalPendingResult::Pending(taken);
+        }
+        process_run_unlock(guard);
+        return ProcessSignalPendingResult::Missing;
+    }
     for index: usize in 0..<PROCESS_SIGNAL_ACTIONS {
         let bit: usize = 1 << index;
         if ((record.pending_signals & bit) != 0 &&
@@ -10694,6 +10710,16 @@ private fn process_signal_terminates(record: borrow &mut ProcessRecord,
     }
 }
 
+// Match the default-fatal, non-core-dump group-exit trigger for the
+// supported AArch64 signals. A Takibi process has one task.
+private inline fn process_signal_reader_fatal(record: borrow &mut ProcessRecord,
+        index: {0..<PROCESS_SIGNAL_ACTIONS as usize}) -> bool {
+    match index + 1 {
+        3 | 4 | 5 | 6 | 7 | 8 | 11 | 24 | 25 | 31 => { return false; }
+        _ => { return process_signal_terminates(record, index); }
+    }
+}
+
 // GitHub issue #726: the signal that interrupts a sleeping syscall -- the
 // lowest pending one the process catches and does not mask, which is the
 // one a syscall return delivers first -- or 0 for none. rt_sigsuspend and
@@ -10842,12 +10868,19 @@ private fn kernel_process_signal_deliver_traced(
         record.signal_sender[index] = sender_pid as u32;
     }
     process_signal_pending_raise(guard, record, bit);
+    if (record.ext2_reader_waiting && record.ext2_reader_fatal == 0 &&
+        signum >= 1 && signum <= PROCESS_SIGNAL_ACTIONS) {
+        let index: {0..<PROCESS_SIGNAL_ACTIONS as usize} = signum - 1;
+        if (process_signal_reader_fatal(record, index)) {
+            record.ext2_reader_fatal = signum as u8;
+        }
+    }
     // Both ext2 writer waits defer fatal and caught signals to syscall return.
     if (scheduled_process_state_of_locked(guard, target) == ProcessSlotState::Blocked) {
         let reason: ProcessWaitReason = scheduled_process_wait_reason_of_locked(guard, target);
         if (reason == ProcessWaitReason::Ext2Mutation ||
             reason == ProcessWaitReason::Ext2ReaderDrain ||
-            (reason == ProcessWaitReason::Ext2ReaderAdmission && bit != PROCESS_SIGKILL_BIT)) {
+            (reason == ProcessWaitReason::Ext2ReaderAdmission && record.ext2_reader_fatal == 0)) {
             return ProcessSignalSendResult::Delivered;
         }
     }
@@ -15362,8 +15395,8 @@ private inline fn kernel_process_ext2_reader_cancelled() -> bool {
         ProcessCurrentRead::Idle => { return false; }
     };
     let guard = process_run_lock();
-    let fatal: bool = (scheduled_process_record_live_locked(guard, task).pending_signals &
-                        PROCESS_SIGKILL_BIT) != 0;
+    let fatal: bool =
+        scheduled_process_record_live_locked(guard, task).ext2_reader_fatal != 0;
     process_run_unlock(guard);
     return fatal;
 }
@@ -15450,6 +15483,42 @@ fn kernel_process_ext2_wait_begin(
     process_current_end(current);
     let mut identity: ProcessWaitIdentity = { process_slot_of(handle.pool_index), handle.generation };
     return identity;
+}
+
+private fn process_reader_pending_fatal(record: borrow &mut ProcessRecord) -> u8 {
+    for index: usize in 0..<PROCESS_SIGNAL_ACTIONS {
+        if ((record.pending_signals & (1 << index)) != 0 &&
+            process_signal_reader_fatal(record, index)) {
+            return (index + 1) as u8;
+        }
+    }
+    return 0;
+}
+
+fn kernel_process_ext2_reader_wait_begin(
+        current: sink ProcessCurrent[process, ProcessState::Running]) -> ProcessWaitIdentity {
+    let mut handle: ProcessHandle = process_current_handle(current);
+    let guard = process_run_lock();
+    let record: &mut ProcessRecord = scheduled_process_record_live_locked(guard, handle);
+    record.ext2_reader_waiting = true;
+    // If a qualifying signal was pending before admission, commit the
+    // same first signal that the existing pending order would select.
+    if (record.ext2_reader_fatal == 0) {
+        record.ext2_reader_fatal = process_reader_pending_fatal(record);
+    }
+    process_run_unlock(guard);
+    return kernel_process_ext2_wait_begin(current);
+}
+
+fn kernel_process_ext2_reader_wait_finish(original: ProcessWaitIdentity) {
+    let ProcessCurrentRead::Running(task) = kernel_process_current_read() else {
+        ProcessCurrentRead::Idle => { return; }
+    };
+    let guard = process_run_lock();
+    if (process_wait_identity_matches(original, task)) {
+        scheduled_process_record_live_locked(guard, task).ext2_reader_waiting = false;
+    }
+    process_run_unlock(guard);
 }
 
 fn kernel_process_ext2_wait_complete(original: ProcessWaitIdentity) -> ProcessRunningHere !{unsafe} {

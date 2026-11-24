@@ -7849,13 +7849,6 @@ private fn syscall_ext2_wait_for_reader(
     return SyscallExt2ReaderWait::Refused;
 }
 
-private inline fn syscall_take_termination(reader_cancelled: bool) -> ProcessSignalPendingResult {
-    if (reader_cancelled) {
-        return kernel_process_current_signal_take(PROCESS_SIGKILL_BIT);
-    }
-    return kernel_process_current_termination_signal_take();
-}
-
 fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usize,
                            x2: usize, x3: usize, x4: usize, frame: MaybeFrame,
                            ext2_reader: &mut SyscallExt2Reader)
@@ -7889,8 +7882,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 }
                 MaybeFrame::Frame(entry) => {
                     let mut original: ProcessWaitIdentity =
-                        kernel_process_ext2_wait_begin(before);
-                    match syscall_ext2_wait_for_reader(entry, original, number, x0, x2) {
+                        kernel_process_ext2_reader_wait_begin(before);
+                    let waited = syscall_ext2_wait_for_reader(entry, original, number, x0, x2);
+                    kernel_process_ext2_reader_wait_finish(original);
+                    match waited {
                         SyscallExt2ReaderWait::Counted => { syscall_ext2_reader_mark(ext2_reader); }
                         SyscallExt2ReaderWait::Bypass => {}
                         SyscallExt2ReaderWait::Cancelled => { reader_cancelled = true; }
@@ -7908,7 +7903,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     let frame = reader_frame;
     kernel_init_boot_fixture_poll(current_authority);
     kernel_syscall_persistent_shell_checkpoint_selected();
-    match syscall_take_termination(reader_cancelled) {
+    match kernel_process_current_termination_signal_take() {
         ProcessSignalPendingResult::Missing => {}
         ProcessSignalPendingResult::Pending(taken) => {
             // A core-0 exit with nowhere to hand the CPU waits and reruns
