@@ -63,7 +63,7 @@
 //   counted since mutation runs on a peer too, and an execve's registration
 //   is held until its child exec prepare has streamed the image.
 // - A READER OUTSIDE A SYSCALL IS NOT COUNTED. The count is taken by the
-//   syscall gate (syscall_reaches_filesystem) and by nothing else, so an
+//   syscall gate (syscall_ext2_read_mode) and by nothing else, so an
 //   ext2 read added on another path -- a fault handler, a kernel thread --
 //   would not be. Today the only one is the boot fixture's, before any
 //   peer runs a process.

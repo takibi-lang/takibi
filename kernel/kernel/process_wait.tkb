@@ -43,7 +43,7 @@
 // on the pipe its record's pipe_wait names. Added at the end so the codes
 // the DDB and crash reports print for the others are unchanged.
 enum ProcessWaitReason: u8 {
-    None; UartRx; ChildExit; NetRx; Deadline; Signal; UartTx; Pipe; Ext2Mutation; Ext2ReaderDrain; Ext2Directory;
+    None; UartRx; ChildExit; NetRx; Deadline; Signal; UartTx; Pipe; Ext2Mutation; Ext2ReaderDrain; Ext2ReaderAdmission;
 }
 
 // The kind of state, as readers compare it.

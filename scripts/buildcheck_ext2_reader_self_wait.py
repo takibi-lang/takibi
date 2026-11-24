@@ -20,7 +20,7 @@ syscall from repeating it, so this check reads the --facts callgraph.tsv table
    registration is held), every callee of the releasers other than
    REGISTRAR itself, and the call chains below them. A callee named in
    MUTATING_ARMS is allowed, with the syscall numbers it serves: those are
-   numbers syscall_reaches_filesystem does not register;
+   numbers syscall_ext2_read_mode does not register;
 3. a MUTATING_ARMS entry that no longer reaches the guard (a claim about
    nothing).
 
@@ -29,7 +29,7 @@ REGISTRAR. The rule is function-level: a new mutation written as a helper
 the dispatch calls is refused until it is named in MUTATING_ARMS with the
 numbers it serves, which is the review point; an arm that takes the guard
 inline in REGISTRAR is covered by the ext2_mutation_take entry and by the
-comment on syscall_reaches_filesystem, not by this check.
+comment on syscall_ext2_read_mode, not by this check.
 
 Exit code only (0 = pass, 1 = fail).
 """
@@ -50,7 +50,7 @@ REGISTRAR = "kernel_syscall_dispatch_action"
 RELEASERS = ("kernel_syscall_dispatch", "kernel_syscall_child_exec_return")
 
 # Callees of the registered window that do reach the guard, and the syscall
-# numbers they serve. Each number must be one syscall_reaches_filesystem
+# numbers they serve. Each number must be one syscall_ext2_read_mode
 # answers false for; that function's comment says why.
 MUTATING_ARMS = {
     TAKE: "taken inline by REGISTRAR for no-frame mkdirat (34), unlinkat (35), "
@@ -149,7 +149,7 @@ def self_wait_problems(table: list[dict]) -> tuple[list[str], int]:
             f"{callee} runs while the syscall is counted as an ext2 reader "
             f"({MARK}) and reaches {chain[-1]}, which waits for every counted "
             "reader, itself included (GitHub issue #1015). Do not register "
-            "the syscall in syscall_reaches_filesystem, or, if it is already "
+            "the syscall in syscall_ext2_read_mode, or, if it is already "
             "unregistered, name it in MUTATING_ARMS with the numbers it serves")
     for arm in MUTATING_ARMS:
         if (REGISTRAR, arm) not in window or chain_to_take(rows, arm) is None:

@@ -5847,37 +5847,33 @@ private fn syscall_accept_claimed(current_authority: borrow ProcessCurrent[curre
 // which the table refused and the per-pid rule admitted anyway. The table
 // admits the read path itself now, so "the table does not admit it" has
 // stopped being the same question and the two are asked separately.
-fn syscall_reaches_filesystem(number: usize, fd: usize, flags: usize) -> bool {
-    // GitHub issue #967: O_CREAT is a mutation, which takes the guard
-    // instead; a counted reader that then took it would wait for itself.
-    // scripts/buildcheck_ext2_reader_self_wait.py refuses a registered
-    // handler that reaches the guard (GitHub issue #1015); a number added
-    // here whose dispatch arm takes the guard inline is not visible to it.
-    // So is O_TRUNC (GitHub issue #1016).
+enum SyscallExt2ReadMode { None; Poll; Park; }
+
+private fn syscall_ext2_read_mode(number: usize, fd: usize, flags: usize)
+        -> SyscallExt2ReadMode {
+    // The mutating openat arm takes the guard itself (#967, #1016).
+    // Registering it here would make it wait for its own reader count.
     if (number == AARCH64_NR_OPENAT && (flags & LINUX_O_MUTATING) != 0) {
-        return false;
+        return SyscallExt2ReadMode::None;
     }
+    if (number == 61 && syscall_getdents_needs_reader(fd, flags)) {
+        return SyscallExt2ReadMode::Park;
+    }
+    if (number == 71 ||
+        ((number == 63 || number == AARCH64_NR_READV) &&
+         kernel_syscall_file_readable(fd))) {
+        return SyscallExt2ReadMode::Park;
+    }
+    // A successful exec retains its count until image preparation ends
+    // (#597). lseek's SEEK_END reads ext2's inode size.
     if (number == AARCH64_NR_OPENAT || number == AARCH64_NR_CLOSE ||
-        number == AARCH64_NR_NEWFSTATAT) {
-        return true;
+        number == AARCH64_NR_NEWFSTATAT || number == AARCH64_NR_EXECVE ||
+        number == AARCH64_NR_EXECVEAT || number == 21 || number == 48 ||
+        number == 439 ||
+        (number == AARCH64_NR_LSEEK && kernel_syscall_file_is_open(fd))) {
+        return SyscallExt2ReadMode::Poll;
     }
-    // GitHub issue #597: execve looks the image up in dispatch, and a
-    // child's exec prepare streams it from ext2 after dispatch has
-    // returned; the registration made here is held across both.
-    if (number == AARCH64_NR_EXECVE || number == AARCH64_NR_EXECVEAT) {
-        return true;
-    }
-    // sendfile reads its input file from ext2 (GitHub issue #598).
-    if (number == 71) { return true; }
-    // lseek's SEEK_END reads an ext2 inode's size.
-    if (number == AARCH64_NR_LSEEK) { return kernel_syscall_file_is_open(fd); }
-    if (number == 63 || number == AARCH64_NR_READV) {
-        return kernel_syscall_file_readable(fd);
-    }
-    if (number == 21 || number == 48 || number == 439) {
-        return true;
-    }
-    return false;
+    return SyscallExt2ReadMode::None;
 }
 
 // A terminal, ext2 file, directory or pipe descriptor: the kinds whose
@@ -7833,28 +7829,28 @@ private inline fn syscall_note_ext2_path_mutation(number: usize, flags: usize, a
     }
 }
 
-must_use variant Ext2DirectoryAdmission { Counted; Bypass; Cancelled; Refused; }
+must_use variant SyscallExt2ReaderWait { Counted; Bypass; Cancelled; Refused; }
 
-private fn syscall_getdents_wait_for_reader(
+private fn syscall_ext2_wait_for_reader(
         frame: borrow FrameRef[process, ExceptionLevel::El0],
-        original: ProcessWaitIdentity, fd: usize, count: usize)
-        -> Ext2DirectoryAdmission !{may_block, requires_irq_unmasked, unsafe} {
+        original: ProcessWaitIdentity, number: usize, fd: usize, count: usize)
+        -> SyscallExt2ReaderWait !{may_block, requires_irq_unmasked, unsafe} {
     while (true) {
-        match kernel_process_ext2_directory_park(frame, original) {
-            ProcessExt2DirectoryPark::Cancelled => { return Ext2DirectoryAdmission::Cancelled; }
-            ProcessExt2DirectoryPark::NoOrdinaryStack => { return Ext2DirectoryAdmission::Refused; }
-            ProcessExt2DirectoryPark::Retry => {}
+        match kernel_process_ext2_reader_park(frame, original) {
+            ProcessExt2ReaderAdmissionPark::Cancelled => { return SyscallExt2ReaderWait::Cancelled; }
+            ProcessExt2ReaderAdmissionPark::NoOrdinaryStack => { return SyscallExt2ReaderWait::Refused; }
+            ProcessExt2ReaderAdmissionPark::Retry => {}
         }
-        if (syscall_getdents_needs_reader(fd, count) == false) {
-            return Ext2DirectoryAdmission::Bypass;
+        if (syscall_ext2_read_mode(number, fd, count) == SyscallExt2ReadMode::None) {
+            return SyscallExt2ReaderWait::Bypass;
         }
-        if (kernel_ext2_read_enter()) { return Ext2DirectoryAdmission::Counted; }
+        if (kernel_ext2_read_enter()) { return SyscallExt2ReaderWait::Counted; }
     }
-    return Ext2DirectoryAdmission::Refused;
+    return SyscallExt2ReaderWait::Refused;
 }
 
-private inline fn syscall_take_termination(directory_cancelled: bool) -> ProcessSignalPendingResult {
-    if (directory_cancelled) {
+private inline fn syscall_take_termination(reader_cancelled: bool) -> ProcessSignalPendingResult {
+    if (reader_cancelled) {
         return kernel_process_current_signal_take(PROCESS_SIGKILL_BIT);
     }
     return kernel_process_current_termination_signal_take();
@@ -7869,69 +7865,50 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     };
     let exception_class: usize = (esr >> 26) & 0x3F;
     if (exception_class != 0x15) { return syscall_finish_current(frame, SyscallAction::Unreachable, current_authority); }
-    // GitHub issue #533: a reader must not read a tree that is being
-    // rewritten. The mutators hold kernel/fs/ext2/mutation_lock.tkb; this
-    // asks, with one acquire-load and no wait, whether one is inside right
-    // now. If so, the calling core -- any core -- waits for an interrupt
-    // and reruns the syscall (GitHub issues #597, #775).
-    //
-    // GitHub issue #533: asked of anything that reaches ext2, independently
-    // of whether the peer-safe table admits it. A normal process can now run
-    // on any online core without being named by a fixture; this mutation
-    // check must therefore remain attached to the operation, not to how the
-    // process was placed.
-    //
-    // GitHub issue #559: and the answer is now also a registration. A peer
-    // reader that finds no mutation in flight is counted until this syscall
-    // is done (kernel_syscall_dispatch releases it), and a mutation that
-    // starts meanwhile waits for it -- the entry question alone let a
-    // mutation start during an admitted read.
-    if (syscall_reaches_filesystem(number, x0, x2)) {
-        if (kernel_ext2_read_enter() == false) {
-            // GitHub issue #775: every core waits in place. A peer used to
-            // hand the call to core 0 to wait there, which changed the
-            // process's placement for a condition no core owns.
-            return syscall_finish_current(frame, SyscallAction::WaitInterrupt, current_authority);
-        }
-        syscall_ext2_reader_mark(ext2_reader);
-    }
-    let mut directory_cancelled: bool = false;
-    let mut directory_frame: MaybeFrame = frame;
-    let mut directory_current: ProcessRunningHere =
+    // Count an admitted ext2 reader for the whole syscall (#559). Wait
+    // before touching its buffers or position. The ordinary data reads and
+    // getdents64 park on their own stack and leave caught signals pending.
+    let read_mode: SyscallExt2ReadMode = syscall_ext2_read_mode(number, x0, x2);
+    let mut reader_cancelled: bool = false;
+    let mut reader_frame: MaybeFrame = frame;
+    let mut reader_current: ProcessRunningHere =
         ProcessRunningHere::Running(current_authority);
-    if (number == 61 && syscall_getdents_needs_reader(x0, x2)) {
+    if (read_mode != SyscallExt2ReadMode::None) {
         if (kernel_ext2_read_enter()) {
             syscall_ext2_reader_mark(ext2_reader);
         } else {
-            let ProcessRunningHere::Running(before) = directory_current else {
+            let ProcessRunningHere::Running(before) = reader_current else {
                 ProcessRunningHere::Idle => { return SyscallAction::Unreachable; }
             };
-            match directory_frame {
+            if (read_mode == SyscallExt2ReadMode::Poll) {
+                return syscall_finish_current(reader_frame, SyscallAction::WaitInterrupt, before);
+            }
+            match reader_frame {
                 MaybeFrame::NoFrame => {
                     return syscall_finish_current(MaybeFrame::NoFrame, SyscallAction::WaitInterrupt, before);
                 }
                 MaybeFrame::Frame(entry) => {
                     let mut original: ProcessWaitIdentity =
                         kernel_process_ext2_wait_begin(before);
-                    match syscall_getdents_wait_for_reader(entry, original, x0, x2) {
-                        Ext2DirectoryAdmission::Counted => { syscall_ext2_reader_mark(ext2_reader); }
-                        Ext2DirectoryAdmission::Bypass => {}
-                        Ext2DirectoryAdmission::Cancelled => { directory_cancelled = true; }
-                        Ext2DirectoryAdmission::Refused => { return SyscallAction::Unreachable; }
+                    match syscall_ext2_wait_for_reader(entry, original, number, x0, x2) {
+                        SyscallExt2ReaderWait::Counted => { syscall_ext2_reader_mark(ext2_reader); }
+                        SyscallExt2ReaderWait::Bypass => {}
+                        SyscallExt2ReaderWait::Cancelled => { reader_cancelled = true; }
+                        SyscallExt2ReaderWait::Refused => { return SyscallAction::Unreachable; }
                     }
-                    directory_current = kernel_process_ext2_wait_complete(original);
-                    directory_frame = MaybeFrame::Frame(entry);
+                    reader_current = kernel_process_ext2_wait_complete(original);
+                    reader_frame = MaybeFrame::Frame(entry);
                 }
             }
         }
     }
-    let ProcessRunningHere::Running(current_authority) = directory_current else {
+    let ProcessRunningHere::Running(current_authority) = reader_current else {
         ProcessRunningHere::Idle => { return SyscallAction::Unreachable; }
     };
-    let frame = directory_frame;
+    let frame = reader_frame;
     kernel_init_boot_fixture_poll(current_authority);
     kernel_syscall_persistent_shell_checkpoint_selected();
-    match syscall_take_termination(directory_cancelled) {
+    match syscall_take_termination(reader_cancelled) {
         ProcessSignalPendingResult::Missing => {}
         ProcessSignalPendingResult::Pending(taken) => {
             // A core-0 exit with nowhere to hand the CPU waits and reruns
@@ -7975,7 +7952,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
         }
     }
-    if (directory_cancelled) {
+    if (reader_cancelled) {
         return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINTR),
                                       current_authority);
     }

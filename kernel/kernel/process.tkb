@@ -1774,7 +1774,7 @@ private fn scheduled_process_ddb_record(
         ProcessWaitReason::Pipe => { result.wait_reason = 7; }
         ProcessWaitReason::Ext2Mutation => { result.wait_reason = 8; }
         ProcessWaitReason::Ext2ReaderDrain => { result.wait_reason = 9; }
-        ProcessWaitReason::Ext2Directory => { result.wait_reason = 10; }
+        ProcessWaitReason::Ext2ReaderAdmission => { result.wait_reason = 10; }
     }
     result.saved_sp = record.saved_sp;
     result.stack_bottom = 0;
@@ -1940,7 +1940,7 @@ private fn kernel_process_protocol_reason(reason: ProcessWaitReason)
         ProcessWaitReason::Pipe => { return 7; }
         ProcessWaitReason::Ext2Mutation => { return 8; }
         ProcessWaitReason::Ext2ReaderDrain => { return 9; }
-        ProcessWaitReason::Ext2Directory => { return 10; }
+        ProcessWaitReason::Ext2ReaderAdmission => { return 10; }
     }
 }
 
@@ -2980,7 +2980,7 @@ fn kernel_process_monitor_proc(stopped: borrow MachineStopped[&kernel_world_stop
         ProcessWaitReason::Pipe => { ddb_put_udec(7); }
         ProcessWaitReason::Ext2Mutation => { ddb_put_udec(8); }
         ProcessWaitReason::Ext2ReaderDrain => { ddb_put_udec(9); }
-        ProcessWaitReason::Ext2Directory => { ddb_put_udec(10); }
+        ProcessWaitReason::Ext2ReaderAdmission => { ddb_put_udec(10); }
     }
     ddb_puts(" saved_sp=");
     ddb_put_hex(saved_sp);
@@ -9481,7 +9481,7 @@ private fn kernel_process_block_would_miss(
     if (reason != ProcessWaitReason::None &&
         reason != ProcessWaitReason::Ext2Mutation &&
         reason != ProcessWaitReason::Ext2ReaderDrain &&
-        reason != ProcessWaitReason::Ext2Directory &&
+        reason != ProcessWaitReason::Ext2ReaderAdmission &&
         process_signal_interrupt_of(scheduled_process_record_live_locked(guard, from)) != 0) {
         return true;
     }
@@ -9539,7 +9539,7 @@ private fn kernel_process_block_would_miss(
         }
         ProcessWaitReason::Ext2Mutation => { return ext2_mutation_in_flight() == false; }
         ProcessWaitReason::Ext2ReaderDrain => { return ext2_readers_drained(); }
-        ProcessWaitReason::Ext2Directory => {
+        ProcessWaitReason::Ext2ReaderAdmission => {
             return ext2_mutation_in_flight() == false ||
                 (scheduled_process_record_live_locked(guard, from).pending_signals &
                     PROCESS_SIGKILL_BIT) != 0;
@@ -10847,7 +10847,7 @@ private fn kernel_process_signal_deliver_traced(
         let reason: ProcessWaitReason = scheduled_process_wait_reason_of_locked(guard, target);
         if (reason == ProcessWaitReason::Ext2Mutation ||
             reason == ProcessWaitReason::Ext2ReaderDrain ||
-            (reason == ProcessWaitReason::Ext2Directory && bit != PROCESS_SIGKILL_BIT)) {
+            (reason == ProcessWaitReason::Ext2ReaderAdmission && bit != PROCESS_SIGKILL_BIT)) {
             return ProcessSignalSendResult::Delivered;
         }
     }
@@ -11615,7 +11615,7 @@ private fn kernel_process_ext2_wake(reason: ProcessWaitReason) !{unsafe} {
                         ProcessSlotState::Blocked &&
                     (waiting == reason ||
                      (reason == ProcessWaitReason::Ext2Mutation &&
-                      waiting == ProcessWaitReason::Ext2Directory))) {
+                      waiting == ProcessWaitReason::Ext2ReaderAdmission))) {
                     match scheduled_process_blocked_take_slot(guard, slot) {
                         ScheduledProcessBlockedTakeResult::Missing => {}
                         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
@@ -13566,7 +13566,7 @@ fn kernel_process_crash_wait_reason() -> usize !{unsafe} {
         ProcessWaitReason::Pipe => { return 7; }
         ProcessWaitReason::Ext2Mutation => { return 8; }
         ProcessWaitReason::Ext2ReaderDrain => { return 9; }
-        ProcessWaitReason::Ext2Directory => { return 10; }
+        ProcessWaitReason::Ext2ReaderAdmission => { return 10; }
     }
 }
 
@@ -15355,9 +15355,9 @@ fn kernel_process_ext2_mutex_park(frame: borrow FrameRef[process, ExceptionLevel
         frame, original, ProcessWaitReason::Ext2Mutation, 8);
 }
 
-must_use variant ProcessExt2DirectoryPark { Retry; Cancelled; NoOrdinaryStack; }
+must_use variant ProcessExt2ReaderAdmissionPark { Retry; Cancelled; NoOrdinaryStack; }
 
-private inline fn kernel_process_ext2_directory_cancelled() -> bool {
+private inline fn kernel_process_ext2_reader_cancelled() -> bool {
     let ProcessCurrentRead::Running(task) = kernel_process_current_read() else {
         ProcessCurrentRead::Idle => { return false; }
     };
@@ -15368,18 +15368,18 @@ private inline fn kernel_process_ext2_directory_cancelled() -> bool {
     return fatal;
 }
 
-inline fn kernel_process_ext2_directory_park(
+inline fn kernel_process_ext2_reader_park(
         frame: borrow FrameRef[process, ExceptionLevel::El0],
-        original: ProcessWaitIdentity) -> ProcessExt2DirectoryPark
+        original: ProcessWaitIdentity) -> ProcessExt2ReaderAdmissionPark
         !{may_block, requires_irq_unmasked} {
     match kernel_process_ext2_ordinary_park(
-            frame, original, ProcessWaitReason::Ext2Directory, 10) {
-        ProcessExt2Park::NoOrdinaryStack => { return ProcessExt2DirectoryPark::NoOrdinaryStack; }
+            frame, original, ProcessWaitReason::Ext2ReaderAdmission, 10) {
+        ProcessExt2Park::NoOrdinaryStack => { return ProcessExt2ReaderAdmissionPark::NoOrdinaryStack; }
         ProcessExt2Park::RetryAcquire => {
-            if (kernel_process_ext2_directory_cancelled()) {
-                return ProcessExt2DirectoryPark::Cancelled;
+            if (kernel_process_ext2_reader_cancelled()) {
+                return ProcessExt2ReaderAdmissionPark::Cancelled;
             }
-            return ProcessExt2DirectoryPark::Retry;
+            return ProcessExt2ReaderAdmissionPark::Retry;
         }
     }
 }
