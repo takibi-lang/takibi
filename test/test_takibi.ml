@@ -142,14 +142,14 @@ let infer_files files =
    cases are free to reuse the same function/global names -- each gen_codegen
    call starts from a genuinely empty module, matching bin/main.exe's own
    single-compilation-per-process behavior. *)
-let gen_codegen src =
+let gen_codegen ?diagnostic_event_file src =
   if Option.is_none !Llvm_gen.target_data then
     ignore (Llvm_gen.setup_target ~triple:"aarch64-none-elf" ());
   let prog =
     Declared_type_resolver.run
       (Monomorphize.run (Dma_fixed_record.run (Publish_record.run (parse src)))) in
   let prog_types = Type_inf.infer_program prog in
-  Llvm_gen.gen_program ~prog_types prog
+  Llvm_gen.gen_program ~prog_types ?diagnostic_event_file prog
 
 (* Expect the full pipeline (parse -> infer -> codegen) to succeed,
    including LLVM's own IR verifier (gen_func calls
@@ -16601,6 +16601,31 @@ fn release_byte(guard: sink NestedGuard[0]) -> u8 {
 |}
 
 let codegen_tests = [
+  Alcotest.test_case "fixed diagnostic event IDs use evaluated constants" `Quick
+    (fun () ->
+      let compile = gen_codegen ~diagnostic_event_file:"" in
+      let reject expected src =
+        match compile src with
+        | () -> Alcotest.failf "accepted diagnostic event IDs: %s" src
+        | exception Types.TypeError (_, msg) ->
+            Alcotest.(check bool) msg true (contains_substring msg expected) in
+      compile "const DiagnosticEventLow: usize = 2 - 1;
+               const DiagnosticEventHigh: usize = 0xfffe + 1;
+               // const DiagnosticEventComment: usize = 1;";
+      reject "both use 0x101"
+        "const DiagnosticEventA: usize = 0x101;
+         const DiagnosticEventB: usize = (0x102 - 1);";
+      reject "outside 1..0xffff"
+        "const DiagnosticEventWide: usize = 0xffff + 1;";
+      reject "outside 1..0xffff"
+        "const DiagnosticEventZero: usize = 1 - 1;";
+      reject "no fixed diagnostic event IDs found" "const Other: usize = 1;";
+      match gen_codegen ~diagnostic_event_file:"registry.tkb"
+              "const DiagnosticEventMoved: usize = 1;" with
+      | () -> Alcotest.fail "accepted an event ID outside the registry"
+      | exception Types.TypeError (_, msg) ->
+          Alcotest.(check bool) msg true
+            (contains_substring msg "must be declared in registry.tkb"));
   (* Replay #722's checker/backend disagreement without changing production
      checking. The scoped initializer context deliberately restores the old
      acceptance, so reverting expect_ok to inference-only makes this fail. *)

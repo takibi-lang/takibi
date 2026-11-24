@@ -305,7 +305,7 @@ CHECK_CPU_BUDGET_REFS    := 18
 # CHECK_TIMEOUT_SECONDS, which is what makes "the fast gate is for checks
 # that read tracked files" a mechanism instead of a sentence: a member that
 # waits is killed and this lane goes red.
-langcheck: asid-boot-config-control unused-function-control forbid-unsafe-control effect-matrix-control language-words-control cli-flags-control pool-liveness-control wont-compile-control regions-flag-control range-obligation-compile-control
+langcheck: diagnostic-event-ids-check asid-boot-config-control unused-function-control forbid-unsafe-control effect-matrix-control language-words-control cli-flags-control pool-liveness-control wont-compile-control regions-flag-control range-obligation-compile-control
 	@bash scripts/lane_timing.sh begin langcheck
 	@bash scripts/run_check_lane.sh check $(CHECK_TIMEOUT_SECONDS) $(CHECK_CPU_BUDGET_MS) $(CHECK_CPU_BUDGET_REFS)
 # -I skips binary files. Without it a build directory left in the worktree
@@ -436,6 +436,7 @@ KERNEL_UNUSED_EXEMPT := \
 	kernel/lib/task_mutex.tkb \
 	kernel/platform/rpi5/usb_xhci.tkb
 KERNEL_UNUSED_NO_FUNCTIONS := \
+	kernel/lib/diagnostic_event_ids.tkb \
 	kernel/lib/atomic_word.tkb \
 	kernel/arch/arm64/kernel/exception_frame.tkb \
 	kernel/arch/arm64/kernel/vector_table.tkb \
@@ -1959,7 +1960,7 @@ $(KERNEL_HANG_CORE_ELF): $(KERNEL_HANG_CORE_O)
 
 $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_EXT2_MUTATION_LOCK_TKB) $(KERNEL_EXT2_MUTATION_PROBE_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_PMU_EXTERN) $(KERNEL_CACHE_GEOMETRY_EXTERN) $(KERNEL_EXT2_TKZ) $(KERNEL_LZ4_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_RPI5_MEMORY_TKB) $(KERNEL_FDT_TKB) \
     $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_INTC_TKB) $(KERNEL_RPI5_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile scripts/buildcheck_frame_size.py scripts/allowed_callers.tsv scripts/call_graph_table.py | $(KERNEL_BUILD_DIR)
-	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $< $(KERNEL_RPI5_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_EXECUTION_MODEL) $(KERNEL_UNUSED_CHECK_RPI5) --kernel-allowed-callers scripts/allowed_callers.tsv --facts $@.facts -o $@
+	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $< $(KERNEL_RPI5_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_EXECUTION_MODEL) $(KERNEL_UNUSED_CHECK_RPI5) $(DIAGNOSTIC_EVENT_IDS_POLICY) --kernel-allowed-callers scripts/allowed_callers.tsv --facts $@.facts -o $@
 	python3 scripts/buildcheck_kernel_unused_coverage.py rpi5 $@.facts/deps.d
 	python3 scripts/buildcheck_ext2_mutation_guard.py $@.facts/callgraph.tsv
 	python3 scripts/buildcheck_ext2_reader_self_wait.py $@.facts/callgraph.tsv
@@ -2006,7 +2007,7 @@ $(KERNEL_RPI5_SHELL_ELF): $(KERNEL_RPI5_ELF) $(KERNEL_EXT2_TKZ) \
 # ordinary image, with DWARF added only to the host ELF. Depending on main.o
 # gives this second compile its complete depfile-backed source boundary.
 $(KERNEL_RPI5_MAIN_DEBUG_O): $(KERNEL_RPI5_MAIN_O) scripts/buildcheck_frame_size.py
-	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_RPI5_COMPILE_FLAGS) $(KERNEL_UNUSED_CHECK_RPI5) -g --facts $@.facts -o $@
+	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_RPI5_COMPILE_FLAGS) $(KERNEL_UNUSED_CHECK_RPI5) $(DIAGNOSTIC_EVENT_IDS_POLICY) -g --facts $@.facts -o $@
 	python3 scripts/buildcheck_kernel_unused_coverage.py rpi5 $@.facts/deps.d
 	python3 scripts/buildcheck_frame_size.py $@
 
@@ -2117,7 +2118,7 @@ $(KERNEL_QEMU_CACHE_GEOMETRY_O): $(KERNEL_CACHE_GEOMETRY_S) | $(KERNEL_QEMU_BUIL
 # duplicate top-level definition is a compile error by design.
 $(KERNEL_QEMU_MAIN_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_EXT2_MUTATION_LOCK_TKB) $(KERNEL_EXT2_MUTATION_PROBE_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_PMU_EXTERN) $(KERNEL_CACHE_GEOMETRY_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_FDT_TKB) \
     $(KERNEL_QEMU_UART_TKB) $(KERNEL_QEMU_INTC_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile scripts/buildcheck_frame_size.py scripts/allowed_callers.tsv scripts/call_graph_table.py | $(KERNEL_QEMU_BUILD_DIR)
-	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< $(KERNEL_QEMU_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_EXECUTION_MODEL) $(KERNEL_UNUSED_CHECK_QEMU) --kernel-allowed-callers scripts/allowed_callers.tsv --facts $@.facts -o $@
+	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< $(KERNEL_QEMU_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_EXECUTION_MODEL) $(KERNEL_UNUSED_CHECK_QEMU) $(DIAGNOSTIC_EVENT_IDS_POLICY) --kernel-allowed-callers scripts/allowed_callers.tsv --facts $@.facts -o $@
 	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.facts/deps.d
 	python3 scripts/buildcheck_ext2_mutation_guard.py $@.facts/callgraph.tsv
 	python3 scripts/buildcheck_ext2_reader_self_wait.py $@.facts/callgraph.tsv
@@ -2219,7 +2220,7 @@ KERNEL_QEMU_DEBUG_ELF    := $(KERNEL_QEMU_BUILD_DIR)/kernel-debug.elf
 
 $(KERNEL_QEMU_MAIN_DEBUG_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_EXT2_MUTATION_LOCK_TKB) $(KERNEL_EXT2_MUTATION_PROBE_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_PMU_EXTERN) $(KERNEL_CACHE_GEOMETRY_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_FDT_TKB) \
     $(KERNEL_QEMU_UART_TKB) $(KERNEL_QEMU_INTC_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile scripts/buildcheck_frame_size.py | $(KERNEL_QEMU_BUILD_DIR)
-	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< $(KERNEL_QEMU_COMPILE_FLAGS) $(KERNEL_UNUSED_CHECK_QEMU) -g --facts $@.facts -o $@
+	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< $(KERNEL_QEMU_COMPILE_FLAGS) $(KERNEL_UNUSED_CHECK_QEMU) $(DIAGNOSTIC_EVENT_IDS_POLICY) -g --facts $@.facts -o $@
 	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.facts/deps.d
 	python3 scripts/buildcheck_frame_size.py $@
 
@@ -2252,13 +2253,23 @@ kernelbuild-qemu-debug: build
 # Pure source-text check (issues #207/#242, see HISTORY.md's 2026-08-07
 # entry) -- no build product needed, so it runs independent of and before
 # the actual compile below rather than being tied to a .o/.elf rule.
+DIAGNOSTIC_EVENT_IDS_TKB := kernel/lib/diagnostic_event_ids.tkb
+DIAGNOSTIC_EVENT_IDS_POLICY := --check-diagnostic-event-ids $(DIAGNOSTIC_EVENT_IDS_TKB)
+
+.PHONY: diagnostic-event-ids-check
+diagnostic-event-ids-check: _build/diagnostic-event-ids.o
+
+# A constants-only host compile keeps the source gate independent of either
+# platform build. The kernel recipes repeat the check at their target width.
+_build/diagnostic-event-ids.o: $(DIAGNOSTIC_EVENT_IDS_TKB) $(TAKIBI) Makefile
+	$(NICE_HEAVY) $(TAKIBI) $(DIAGNOSTIC_EVENT_IDS_TKB) $(DIAGNOSTIC_EVENT_IDS_POLICY) -o $@
+
 .PHONY: kernel-lib-check
-kernel-lib-check:
+kernel-lib-check: diagnostic-event-ids-check
 	python3 scripts/check_pinned_downloads.py
 	python3 scripts/check_workflow_shell.py
 	python3 scripts/check_el0_fault_evidence_registers.py
 	python3 scripts/check_kernel_lib_limitations_header.py $(KERNEL_DIR)/lib $(KERNEL_DIR)/kernel $(KERNEL_DIR)/net
-	python3 scripts/check_diagnostic_event_ids.py
 	python3 scripts/check_flag_guarded_fields.py $(KERNEL_DIR)
 	python3 scripts/check_lock_rank_wrappers.py
 	python3 scripts/check_guest_syscalls_dispatched.py

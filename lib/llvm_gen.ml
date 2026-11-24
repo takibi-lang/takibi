@@ -8547,7 +8547,32 @@ let gen_exception_restore name frame after_switch =
     a "\tmov\tx0, sp\n\tbl\t%s\n" hook) after_switch;
   emit_exception_restore off total
 
-let gen_program ?prog_types prog =
+(* Check the target-width values already produced by global initialization. *)
+let check_diagnostic_event_ids file prog =
+  let _, count = List.fold_left (fun (values, count) -> function
+    | ConstDef (name, TypeUsize, _, loc)
+      when String.starts_with ~prefix:"DiagnosticEvent" name ->
+        let fail message = raise (Types.TypeError (loc, message)) in
+        if source_file_of_loc loc <> file then
+          fail (Printf.sprintf "diagnostic event ID %s must be declared in %s" name file);
+        let _, global = Hashtbl.find global_vars name in
+        let value = match Option.bind (global_initializer global) int64_of_const with
+          | Some value -> value
+          | None -> fail (Printf.sprintf "diagnostic event ID %s must resolve to an integer" name) in
+        if Int64.compare value 1L < 0 || Int64.compare value 0xffffL > 0 then
+          fail (Printf.sprintf "diagnostic event ID %s=0x%Lx is outside 1..0xffff" name value);
+        (match List.assoc_opt value values with
+         | Some previous ->
+             fail (Printf.sprintf "diagnostic event IDs %s and %s both use 0x%Lx"
+               previous name value)
+         | None -> ((value, name) :: values, count + 1))
+    | _ -> (values, count)) ([], 0) prog in
+  if count = 0 then
+    raise (Types.TypeError ({ Lexing.dummy_pos with pos_fname = file },
+      "no fixed diagnostic event IDs found"));
+  Printf.printf "PASS diagnostic-event-ids: %d fixed IDs are unique and 16-bit\n%!" count
+
+let gen_program ?prog_types ?diagnostic_event_file prog =
   current_runtime_bounds_key := "";
   (* The declared-type phase is a required boundary: silently repairing an
      unresolved AST here would hide a caller that bypassed it. *)
@@ -8933,6 +8958,7 @@ let gen_program ?prog_types prog =
        entirely before this pass runs; until then, this is just a no-op so
        a program containing one still compiles. *)
   ) prog;
+  Option.iter (fun file -> check_diagnostic_event_ids file prog) diagnostic_event_file;
   (* GitHub issue #344: static_assert runs here, between the two codegen
      passes -- late enough that monomorphize.ml has substituted every
      generic type parameter and the target data layout that sizeof reads is

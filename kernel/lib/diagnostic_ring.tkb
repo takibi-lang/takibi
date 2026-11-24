@@ -27,22 +27,11 @@
 //   not a zero left by publish_begin's scrub.
 
 use "kernel/lib/atomic_word.tkb";
+use "kernel/lib/diagnostic_event_ids.tkb";
 use "kernel/lib/occupancy.tkb";
 const DIAGNOSTIC_TRACE_CPUS: usize = 4;
 const DIAGNOSTIC_TRACE_EVENTS: usize = 8;
 const DIAGNOSTIC_TRACE_SLOTS: usize = 32;
-
-// 0x0100..0x01ff is the platform/interrupt range. The first concrete event
-// records a UART BREAK before control enters DDB.
-const DiagnosticEventUartBreak: usize = 0x0101;
-// Busy payload: claimed, owner, requested, unused.
-// Partial payload: stopped mask, claimed, owner, requested.
-const DiagnosticEventDdbStopBusy: usize = 0x0102;
-const DiagnosticEventDdbStopPartial: usize = 0x0103;
-// 0x0200..0x02ff is the process/scheduler range. UART wake outcome codes are
-// 0=no current process, 1=no blocked waiter, 2=waiter ownership vanished,
-// 3=byte consumed, 4=read must retry. Payload is byte/current pid/waiter pid.
-const DiagnosticEventProcessUartWake: usize = 0x0201;
 
 // The published record. `seq` is the publication field -- first, `usize`,
 // and written only by publish_begin and publish_commit. A decoder outside

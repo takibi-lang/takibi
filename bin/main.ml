@@ -92,6 +92,7 @@ let () =
   let confine_raw_authority = ref false in
   let raw_mint_files = ref [] in
   let execution_model_file = ref "" in
+  let diagnostic_event_file = ref "" in
   let device_semantics_files = ref [] in
   let regions = ref false in
   let reject_unused_functions = ref true in
@@ -138,6 +139,8 @@ let () =
       "a file allowed to mint raw authority (repeatable)";
     flag "--require-execution-model" Policy ~arg:path (set execution_model_file)
       "check the execution-model declarations in this file";
+    flag "--check-diagnostic-event-ids" Policy ~arg:path (set diagnostic_event_file)
+      "check resolved diagnostic event IDs declared in this file";
     flag "--kernel-allowed-callers" Policy ~arg:path (set kernel_caller_rules)
       "enforce the kernel caller policy compiled from this TSV in the repository root";
     flag "--device-semantics-file" Policy ~arg:path (add device_semantics_files)
@@ -641,7 +644,9 @@ let () =
       | _ -> ()) (Generic_variant.instance_defs prog
                     (Type_inf.generic_variant_site_instances ()));
     Llvm_gen.set_external_entries !external_entries;
-    Llvm_gen.gen_program ~prog_types prog;
+    let diagnostic_event_file =
+      if !diagnostic_event_file = "" then None else Some !diagnostic_event_file in
+    Llvm_gen.gen_program ~prog_types ?diagnostic_event_file prog;
 
     (* GitHub issue #362: the three layout implementations must still
        agree. llvm_gen already checks its own OCaml formula against the

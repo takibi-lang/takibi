@@ -1,12 +1,12 @@
 {
   "date": "2026-11-24",
-  "event": "milestone",
-  "decision": "measured",
-  "source_sha256": "f43860317be2226b1b488fde9afe200b435845fc40f6f08abdd56927013dc1dd",
-  "workload": "Matched normal QEMU and RPi5 linked production images for killable ext2 reader admission with compile-time caller policy, against 4dcbfb3b3.",
+  "event": "incremental",
+  "decision": "reuse",
+  "source_sha256": "e4ce022d38b59e83d415f1e35e6c7736098f5149cc96286f8098c1152ecd8965",
+  "workload": "Normal linked QEMU and RPi5 production images against 598ff7a94. Compile-time diagnostic event ID policy and declaration file split.",
   "evidence": [
     "docs/EXT2_READER_DRAIN_SPACE_REVIEW.md"
   ],
-  "assessment": "QEMU and RPi5 retain their usable RAM starts. The QEMU image remains within the previously approved 32 KiB reservation step.",
+  "assessment": "Both normal ELFs are byte-identical to 598ff7a94, including usable RAM starts at 0x40218000 for QEMU and 0x7e0000 for RPi5. Diagnostic event names and values in debugger metadata agree.",
   "next_trigger": "Remeasure changes to ext2 reader-writer admission or shared file-position lifetime."
 }
