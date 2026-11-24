@@ -2,11 +2,11 @@
   "date": "2026-11-24",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "9c26c60d23471240c9d61cc86c4c09c41c819b63072a6b6ab1d2ead0ac5929a7",
-  "workload": "Compare the normal linked QEMU and RPi5 kernels and ordinary signal-boundary fixture against 7f4dddcd4, with the wait4 fixture included in the rebuilt ext2 image.",
+  "source_sha256": "98f5667df5e196f384502ed2950f946737d2ffbb0db9ee456da6abb9c0a2f402",
+  "workload": "Normal linked QEMU and RPi5 images versus e275083b8 with the existing boot USB storage workload. Compare linked sections, symbol sizes and the Address Device static call frames.",
   "evidence": [
-    "docs/MEMORY_SAFETY_CONTRACT.md"
+    "docs/XHCI_DCBAA_SPACE.md"
   ],
-  "assessment": "The signal fixture adds 44 executable bytes within the same mapped extent and stack reservation. The wait4 payload and QEMU kernel ELF are byte-identical. The packed ext2 fixture makes RPi5 read-only data 1456 bytes smaller. The RPi5 executable section size, data and BSS sizes, and usable RAM boundary are unchanged.",
-  "next_trigger": "Measure again when a signal frame or EL0 fixture changes its extent, or the kernel changes storage or allocation behavior."
+  "assessment": "QEMU ELF is byte-identical. RPi5 text adds 364 bytes, with unchanged data, BSS symbols, DCBAA layout and usable RAM. The static Address Device submission path adds 112 stack bytes before the common ring submit. No physical timing claim.",
+  "next_trigger": "Measure again when slot reuse, completion ordering, or the output-context storage contract changes."
 }
