@@ -14,6 +14,9 @@ must_use variant DiskIoResult {
 // GitHub issue #1440: no USB disk, so no commands and no timeouts.
 fn disk_command_count() -> usize { return 0; }
 fn disk_timeout_count() -> usize { return 0; }
+// No USB transport exists on this target; never report virtio requests as USB.
+fn disk_read10_request_commands() -> usize { return 0; }
+fn disk_read10_request_bytes() -> usize { return 0; }
 
 fn disk_status() -> DiskIoResult {
     return DiskIoResult::Err(-1);

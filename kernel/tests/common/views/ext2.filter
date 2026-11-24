@@ -1,1 +1,1 @@
-^ext2 (mount:|symlink:)
+^ext2 (mount:|mount measurement:|symlink:)

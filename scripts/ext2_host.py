@@ -423,6 +423,25 @@ def eq_lines(rows):
     return lines, spans, skipped
 
 
+def run_mount_driver_controls(image):
+    """Existing native tier only: actual API outcomes, no physical timing."""
+    fd = os.open(image, os.O_RDWR)
+    try:
+        done = subprocess.run([EXE], input=b"mount-driver\n", capture_output=True,
+                              pass_fds=(fd,), timeout=TIMEOUT,
+                              preexec_fn=lambda: os.dup2(fd, 3))
+    finally:
+        os.close(fd)
+    # This is the native program's protocol, as in run_program, not a UART
+    # wait. Latin-1 is a byte-preserving decode; equality remains exact.
+    expected = "mount-driver: verified cold/warm/busy/fallback/invalid\n"
+    if done.returncode != 0 or done.stdout.decode("latin-1") != expected or done.stderr:
+        raise HostError(f"mount driver controls: status={done.returncode} "
+                        f"stdout={done.stdout!r} stderr={done.stderr!r}")
+    report_pass("ext2-host mount driver", "cold/warm, first/second Busy, "
+                "ordinary geometry, read-ahead fallback and Invalid", programs=1)
+
+
 def run_eq(ops_path):
     rows = ext2_eq.parse(open(ops_path).read())
     lines, spans, skipped = eq_lines(rows)
@@ -430,6 +449,7 @@ def run_eq(ops_path):
         pristine = os.path.join(work, "pristine.img")
         # the fixture's size: the rows were written against its free space
         make_image(pristine, blocks=6144, inodes=1024)
+        run_mount_driver_controls(pristine)
         if ext2_eq.adopted(rows):
             plant_fixture(pristine, work)
         problems, results = compare_run_rows(pristine, lines, spans, rows, work)

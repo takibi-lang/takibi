@@ -4,6 +4,7 @@ use "kernel/drivers/block/device_lock.tkb";
 use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/slot_pool_wait.tkb";
 use "kernel/kernel/cpu_authority.tkb";
+use "kernel/kernel/test_driver_phase.tkb";
 
 const KERNEL_BLOCK_SIZE: usize = 1024;
 // 64 1 KiB filesystem blocks = 128 USB sectors = 64 KiB. This is the
@@ -35,6 +36,49 @@ must_use variant KernelBlockDeviceResult {
 }
 
 must_use variant BlockIoResult { Invalid; Ok; }
+// Driver reads never park for the device lock. Busy is not an I/O failure.
+must_use variant BlockDriverIoResult { Busy; Invalid; Ok; }
+must_use variant BlockReadStart { Hit; Read(BlockCacheEpoch); }
+must_use variant BlockRunReadStart { Invalid; Read((usize, usize)); }
+
+// Driver-read observations only. Snapshot fields are separate atomic loads,
+// not a coherent transaction. Time includes interrupts, preemption and the
+// timer itself; the observed hold spans try return through give return.
+private let mut block_driver_read_attempts: AtomicWord;
+private let mut block_driver_read_acquired: AtomicWord;
+private let mut block_driver_read_busy: AtomicWord;
+private let mut block_driver_read_acquire_ticks: AtomicWord;
+private let mut block_driver_read_hold_ticks: AtomicWord;
+private let mut block_driver_read_run_attempts: AtomicWord;
+private let mut block_driver_read_run_fallbacks: AtomicWord;
+struct BlockDriverReadStats {
+    attempts: usize;
+    acquired: usize;
+    busy: usize;
+    acquire_ticks: usize;
+    hold_ticks: usize;
+    run_attempts: usize;
+    run_fallbacks: usize;
+}
+fn block_driver_read_stats() -> BlockDriverReadStats {
+    let mut stats: BlockDriverReadStats = {
+        atomic_word_load(&block_driver_read_attempts),
+        atomic_word_load(&block_driver_read_acquired),
+        atomic_word_load(&block_driver_read_busy),
+        atomic_word_load(&block_driver_read_acquire_ticks),
+        atomic_word_load(&block_driver_read_hold_ticks),
+        atomic_word_load(&block_driver_read_run_attempts),
+        atomic_word_load(&block_driver_read_run_fallbacks)
+    };
+    return stats;
+}
+private fn block_driver_read_observe(acquired: bool, acquire_ticks: usize,
+                                     hold_ticks: usize) {
+    if (acquired) { atomic_word_fetch_add(&block_driver_read_acquired, 1); }
+    else { atomic_word_fetch_add(&block_driver_read_busy, 1); }
+    atomic_word_fetch_add(&block_driver_read_acquire_ticks, acquire_ticks);
+    atomic_word_fetch_add(&block_driver_read_hold_ticks, hold_ticks);
+}
 
 fn usb_mass_storage_block_device() -> KernelBlockDeviceResult {
     match disk_status() {
@@ -326,24 +370,14 @@ private inline fn block_read_with(slot: borrow BlockSlot[0],
                                   device: KernelBlockDevice, block: usize,
                                   destination: borrow [u8; KERNEL_BLOCK_SIZE..])
         -> BlockIoResult !{unsafe} {
-    match block_cache_read(slot, device.backend, block, destination) {
-        BlockCacheReadResult::Hit => { return BlockIoResult::Ok; }
-        BlockCacheReadResult::Miss => { }
-    }
-    // Taken before any copy is produced, so a write that lands meanwhile
-    // leaves the filled copy stale (GitHub issue #553).
-    let mut epoch: BlockCacheEpoch = block_cache_epoch_of(device.backend, block);
-    if (block_run_take(slot, device, block, destination)) {
-        block_cache_fill(slot, device.backend, block, destination, epoch);
-        return BlockIoResult::Ok;
-    }
-    // A run that was read and then cannot answer -- another core wrote in
-    // between and moved the epoch -- falls through to the single read.
+    let mut epoch: BlockCacheEpoch = match block_read_start(slot, device, block, destination) {
+        BlockReadStart::Hit => { return BlockIoResult::Ok; }
+        BlockReadStart::Read(saved) => { saved }
+    };
     if (block_run_wanted(slot, device, block)) {
         if (block_run_read(slot, device, block)) {
             if (block_run_take(slot, device, block, destination)) {
-                block_cache_fill(slot, device.backend, block,
-                                 destination, epoch);
+                block_cache_fill(slot, device.backend, block, destination, epoch);
                 return BlockIoResult::Ok;
             }
         }
@@ -355,6 +389,76 @@ private inline fn block_read_with(slot: borrow BlockSlot[0],
     block_run_note_single(slot, device, block);
     block_cache_fill(slot, device.backend, block, destination, epoch);
     return BlockIoResult::Ok;
+}
+
+// Shared cache/run lookup and epoch sampling; this stage acquires no device.
+private fn block_read_start(slot: borrow BlockSlot[0],
+                           device: KernelBlockDevice, block: usize,
+                           destination: borrow [u8; KERNEL_BLOCK_SIZE..])
+        -> BlockReadStart !{unsafe} {
+    match block_cache_read(slot, device.backend, block, destination) {
+        BlockCacheReadResult::Hit => { return BlockReadStart::Hit; }
+        BlockCacheReadResult::Miss => { }
+    }
+    // Taken before any copy is produced, so a write that lands meanwhile
+    // leaves the filled copy stale (GitHub issue #553).
+    let mut epoch: BlockCacheEpoch = block_cache_epoch_of(device.backend, block);
+    if (block_run_take(slot, device, block, destination)) {
+        block_cache_fill(slot, device.backend, block, destination, epoch);
+        return BlockReadStart::Hit;
+    }
+    return BlockReadStart::Read(epoch);
+}
+
+// The real driver phase remains borrowed through each synchronous command.
+// Cache/run hits acquire nothing; read-ahead failure can still fall back to
+// a separate single command. No guard escapes either fallible command entry.
+fn block_read_driver(device: KernelBlockDevice, block: usize,
+                     destination: borrow [u8; KERNEL_BLOCK_SIZE..],
+                     phase: borrow TestDriverPhase[driver])
+        -> BlockDriverIoResult !{unsafe} {
+    if (block >= device.length / KERNEL_BLOCK_SIZE) {
+        return BlockDriverIoResult::Invalid;
+    }
+    let slot: BlockSlot[0] = block_slot_acquire();
+    let result = block_read_driver_with(slot, device, block, destination, phase);
+    block_slot_release(slot);
+    return result;
+}
+
+private fn block_read_driver_with(slot: borrow BlockSlot[0],
+                                  device: KernelBlockDevice, block: usize,
+                                  destination: borrow [u8; KERNEL_BLOCK_SIZE..],
+                                  phase: borrow TestDriverPhase[driver])
+        -> BlockDriverIoResult !{unsafe} {
+    let mut epoch: BlockCacheEpoch = match block_read_start(slot, device, block, destination) {
+        BlockReadStart::Hit => { return BlockDriverIoResult::Ok; }
+        BlockReadStart::Read(saved) => { saved }
+    };
+    // A run that was read and then cannot answer -- another core wrote in
+    // between and moved the epoch -- falls through to the single read.
+    if (block_run_wanted(slot, device, block)) {
+        atomic_word_fetch_add(&block_driver_read_run_attempts, 1);
+        match block_run_read_driver(slot, device, block, phase) {
+            BlockDriverIoResult::Busy => { return BlockDriverIoResult::Busy; }
+            BlockDriverIoResult::Invalid => { }
+            BlockDriverIoResult::Ok => {
+                if (block_run_take(slot, device, block, destination)) {
+                    block_cache_fill(slot, device.backend, block, destination, epoch);
+                    return BlockDriverIoResult::Ok;
+                }
+            }
+        }
+        atomic_word_fetch_add(&block_driver_read_run_fallbacks, 1);
+    }
+    match block_read_device_driver(slot, device, block, destination, phase) {
+        BlockDriverIoResult::Busy => { return BlockDriverIoResult::Busy; }
+        BlockDriverIoResult::Invalid => { return BlockDriverIoResult::Invalid; }
+        BlockDriverIoResult::Ok => { }
+    }
+    block_run_note_single(slot, device, block);
+    block_cache_fill(slot, device.backend, block, destination, epoch);
+    return BlockDriverIoResult::Ok;
 }
 
 // GitHub issue #545: read-ahead for sequential device reads.
@@ -446,20 +550,67 @@ private fn block_run_note_single(slot: borrow BlockSlot[0],
 // no run behind, and the caller reads the one block it wanted instead.
 private fn block_run_read(slot: borrow BlockSlot[0], device: KernelBlockDevice,
                           first: usize) -> bool !{unsafe} {
-    let here: {0..<KERNEL_MAX_CORES as usize} = block_slot_number(slot);
+    let plan: (usize, usize) = match block_run_read_start(slot, device, first) {
+        BlockRunReadStart::Invalid => { return false; }
+        BlockRunReadStart::Read(saved) => { saved }
+    };
+    let (count, epoch) = plan;
+    let guard = block_device_take(slot);
+    let transferred: bool = block_run_transfer_locked(guard, slot, device, first, count);
+    block_device_give(guard);
+    if (transferred == false) { return false; }
+    block_run_publish(slot, device, first, count, epoch);
+    return true;
+}
+
+private fn block_run_read_start(slot: borrow BlockSlot[0], device: KernelBlockDevice,
+                                first: usize) -> BlockRunReadStart {
     let available: usize = block_count(device);
-    if (first >= available) { return false; }
+    if (first >= available) { return BlockRunReadStart::Invalid; }
     let mut count: usize = available - first;
     if (count > BLOCK_RUN_BLOCKS) { count = BLOCK_RUN_BLOCKS; }
     // The epoch is taken before the device is, so a write that lands while
     // the run is being read retires it.
     block_run_count[slot.index] = 0;
     let epoch: usize = block_cache_epoch_now();
-    let guard = block_device_take(slot);
-    let transferred: bool =
-        block_run_transfer_locked(guard, slot, device, first, count);
+    return BlockRunReadStart::Read((count, epoch));
+}
+
+private fn block_run_read_driver(slot: borrow BlockSlot[0],
+                                 device: KernelBlockDevice, first: usize,
+                                 phase: borrow TestDriverPhase[driver])
+        -> BlockDriverIoResult !{unsafe} {
+    let plan: (usize, usize) = match block_run_read_start(slot, device, first) {
+        BlockRunReadStart::Invalid => { return BlockDriverIoResult::Invalid; }
+        BlockRunReadStart::Read(saved) => { saved }
+    };
+    let (count, epoch) = plan;
+    // This closed entrance borrows the real phase until after give. A Busy
+    // attempt transfers no guard or bytes and never enters the queued take.
+    atomic_word_fetch_add(&block_driver_read_attempts, 1);
+    let try_start: usize = read_cntpct() as usize;
+    let guard = match block_device_try_take() {
+        BlockDeviceTry::Busy => {
+            let try_end: usize = read_cntpct() as usize;
+            block_driver_read_observe(false, try_end - try_start, 0);
+            return BlockDriverIoResult::Busy;
+        }
+        BlockDeviceTry::Taken(held) => { held }
+    };
+    let hold_start: usize = read_cntpct() as usize;
+    let transferred: bool = block_run_transfer_locked(guard, slot, device, first, count);
     block_device_give(guard);
-    if (transferred == false) { return false; }
+    let hold_end: usize = read_cntpct() as usize;
+    block_driver_read_observe(true, hold_start - try_start, hold_end - hold_start);
+    if (transferred == false) { return BlockDriverIoResult::Invalid; }
+    block_run_publish(slot, device, first, count, epoch);
+    return BlockDriverIoResult::Ok;
+}
+
+// Publication and successful-run accounting happen only after device release.
+private fn block_run_publish(slot: borrow BlockSlot[0], device: KernelBlockDevice,
+                             first: usize, count: usize, epoch: usize) {
+    let here: {0..<KERNEL_MAX_CORES as usize} = block_slot_number(slot);
     for offset: usize in 0..<BLOCK_RUN_BLOCKS {
         if (offset < count) {
             block_note_call(slot, block_read_calls as []AtomicWord);
@@ -473,7 +624,6 @@ private fn block_run_read(slot: borrow BlockSlot[0], device: KernelBlockDevice,
     block_run_next[slot.index] = first + count;
     block_run_next_backend[slot.index] = device.backend;
     atomic_word_fetch_add(&block_run_reads[here], 1);
-    return true;
 }
 
 private fn block_run_transfer_locked(
@@ -559,6 +709,32 @@ private fn block_read_device(slot: borrow BlockSlot[0],
     return result;
 }
 
+private fn block_read_device_driver(slot: borrow BlockSlot[0],
+                                    device: KernelBlockDevice, block: usize,
+                                    destination: borrow [u8; KERNEL_BLOCK_SIZE..],
+                                    phase: borrow TestDriverPhase[driver])
+        -> BlockDriverIoResult !{unsafe} {
+    atomic_word_fetch_add(&block_driver_read_attempts, 1);
+    let try_start: usize = read_cntpct() as usize;
+    let guard = match block_device_try_take() {
+        BlockDeviceTry::Busy => {
+            let try_end: usize = read_cntpct() as usize;
+            block_driver_read_observe(false, try_end - try_start, 0);
+            return BlockDriverIoResult::Busy;
+        }
+        BlockDeviceTry::Taken(held) => { held }
+    };
+    let hold_start: usize = read_cntpct() as usize;
+    let result = block_read_device_locked(slot, guard, device, block, destination);
+    block_device_give(guard);
+    let hold_end: usize = read_cntpct() as usize;
+    block_driver_read_observe(true, hold_start - try_start, hold_end - hold_start);
+    match result {
+        BlockIoResult::Invalid => { return BlockDriverIoResult::Invalid; }
+        BlockIoResult::Ok => { return BlockDriverIoResult::Ok; }
+    }
+}
+
 private fn block_write_device(slot: borrow BlockSlot[0],
                               device: KernelBlockDevice, block: usize,
                               source: borrow [u8; KERNEL_BLOCK_SIZE..])
@@ -629,6 +805,11 @@ private fn block_write_device_locked(
         }
         return BlockIoResult::Ok;
     }
+}
+
+// Exact identity comparison for the mount fixture's repeated observation.
+fn block_device_same(left: KernelBlockDevice, right: KernelBlockDevice) -> bool {
+    return left.backend == right.backend && left.length == right.length;
 }
 
 fn block_count(device: KernelBlockDevice) -> usize {

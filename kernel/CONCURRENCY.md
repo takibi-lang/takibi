@@ -89,7 +89,13 @@ lock and the USB completion wait, so the run, the block cache's entries and
 write counts, and the block counters are a pool reached through a linear
 `BlockSlot`, acquired by `block_read`, `block_write` and the two other entry
 points. ext2 calls the block layer while it holds an `Ext2Slot`, never the
-reverse, so the two pools cannot wait on each other. The rest of the first
+reverse, so the two pools cannot wait on each other. The two-read boot mount
+uses `ext2_mount_driver` and `block_read_driver` with the same pool order and
+a borrowed `TestDriverPhase`. Cache and read-ahead hits take no device lock.
+Each device command tries once, returns Busy on contention, and releases
+before run publication or ext2 parsing. A failed read-ahead command can
+still fall back to a separate single-block command. The ordinary block
+entries retain their existing acquisition path. The rest of the first
 kind moves the same way, or into regions where it
 does not span a blocking call, before the flip.
 
