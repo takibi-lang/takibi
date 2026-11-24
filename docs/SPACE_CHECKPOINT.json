@@ -1,12 +1,12 @@
 {
-  "date": "2026-11-23",
-  "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "f7a27077b3d05eb73021aadeeeeabe9132b9fbad42d4088b8d2e7737c743c5b0",
-  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 04724fea: this branch's review, rebound to the merged sources (upstream's record was 2026-11-23 milestone/measured). Normal linked QEMU and RPi5 kernels built with the same source and toolchain, with the internal validated PAN frame mode enabled and disabled.",
+  "date": "2026-11-24",
+  "event": "milestone",
+  "decision": "measured",
+  "source_sha256": "6cfd94a86768dab275500e21295a514c00f4eb3ee0b92b8e2837789e0da40db1",
+  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto c2fb197f: this branch's review, rebound to the merged sources (upstream's record was 2026-11-23 incremental/reuse). Normal linked kernels against 04724feab and two focused QEMU workloads with real truncate or ftruncate draining a counted ext2 reader.",
   "evidence": [
-    "docs/PROJECTED_LOCK_SPACE_REVIEW.md"
+    "docs/EXT2_READER_DRAIN_SPACE_REVIEW.md"
   ],
-  "assessment": "Both platforms produced byte-identical main.o and linked kernel.elf artifacts. The linked PAN check adds no runtime storage or code; prior kernel space measurements still apply.",
-  "next_trigger": "Remeasure when Pipe write evidence or ring copy paths change the linked workload."
+  "assessment": "Linked text accounting falls by 32 bytes on each target. Data and BSS symbol sizes, usable RAM starts and dispatch frames match the published baseline. Both syscalls use the existing retained wait state.",
+  "next_trigger": "Remeasure when another ext2 syscall parks, the waiting representation changes, or physical contention is measured."
 }
