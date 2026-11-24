@@ -328,6 +328,16 @@ while eight sentinel bytes on each side of the 144-byte result are preserved.
 These checks cover the observed tails and extents. They do not add any claim
 about uptime, CPU accounting, other fields, or faulting destinations.
 
+The existing successful `wait4` fixture checks all 144 bytes of Takibi's
+zero-filled rusage output and eight adjacent canary bytes on each side.
+The shared Linux fixture checks the canaries and its existing timeval
+bounds. The zero-fill check describes the current Takibi result and makes
+no claim about child accounting or fault and reap ordering.
+The fixture frame grows from 352 to 368 bytes and its executable text
+by 128 bytes, with the same mapped end. The normal QEMU kernel ELF is
+byte-identical. The RPi5 linked text accounting grows by 16 bytes from
+the embedded fixture, with the same kernel RAM reservation.
+
 ## Refreshed trust measurement
 
 `make trustedbasecheck` passed on 2026-11-17. The depfile-derived inventory

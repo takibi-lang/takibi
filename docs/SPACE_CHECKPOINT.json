@@ -2,11 +2,11 @@
   "date": "2026-11-24",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "6149bd4a5dfc50fee951b248059092c0d8c769a6599c5bd83f146402f8ea119c",
-  "workload": "Normal linked QEMU and RPi5 kernels compared with 1ba90fed8; include the signal-probe frames and the static retained memory boundary. The admitted-drain overlay and native gate fixture are excluded from normal kernel storage.",
+  "source_sha256": "b319d8d344474d4d224288251c3539636ddf866a5359f679f3b93deed6073adf",
+  "workload": "Compare the normal linked QEMU and RPi5 images and the existing EL0 shared-mapping fixture against 148f795d7, covering the wait4 output with adjacent canaries.",
   "evidence": [
-    "docs/LANE_INVENTORY.md"
+    "docs/MEMORY_SAFETY_CONTRACT.md"
   ],
-  "assessment": "Sharing the departure and reuse predicates does not change normal linked text, data or BSS sizes, the usable-RAM start, or the signal-probe frames. The linked text bytes differ. The tests introduce no retained kernel storage or allocator policy change.",
-  "next_trigger": "Measure again when the signal probe changes its record placement, retained storage or admission and drain protocol."
+  "assessment": "The fixture adds 16 bytes of local stack and 128 bytes of executable text, with the same mapped end. The QEMU kernel ELF is byte-identical. RPi5 linked text accounting grows 16 bytes for the embedded fixture without moving usable RAM or changing data and BSS sizes.",
+  "next_trigger": "Measure again when an EL0 fixture changes its mapped extent or the kernel changes storage or allocation behavior."
 }

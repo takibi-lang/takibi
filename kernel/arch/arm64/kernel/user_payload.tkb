@@ -1057,7 +1057,7 @@ fn initial_user_payload() !{unsafe} {
         sigchld_siginfo_probe();
         sigaltstack_probe();
         sigaltstack_autodisarm_probe();
-        shared_mapping_probe();
+        shared_mapping_probe(true);
         sysinfo_kernel_probe();
         rusage_kernel_probe();
         pipe_wrap_kernel_probe();
@@ -1455,11 +1455,11 @@ fn rusage_burn_until_charged() !{unsafe} {
 }
 
 fn shared_mapping_probe_alone() !{unsafe} {
-    shared_mapping_probe();
+    shared_mapping_probe(false);
     svc5(93, 0, 0, 0, 0, 0);
 }
 
-fn shared_mapping_probe() !{unsafe} {
+fn shared_mapping_probe(check_wait4_zero_fill: bool) !{unsafe} {
     // Neither shared nor private is EINVAL.
     fail_if(src_loc(), shared_probe_mmap(SHARED_PROBE_LENGTH, PROT_READ_WRITE, 0x20) != EINVAL_RC);
     let shared: usize = shared_probe_mmap(SHARED_PROBE_LENGTH, PROT_READ_WRITE,
@@ -1518,16 +1518,22 @@ fn shared_mapping_probe() !{unsafe} {
     }
     fail_if(src_loc(), umask_child >= 0x8000000000000000);
     payload_write_u64(status_base, 0, 0xFF);
-    let mut usage: [u8; 144];
-    // GitHub issue #1314: wait4 writes its rusage argument; the bytes
-    // poisoned here would read as tv_usec past a second if it did not.
-    for index: usize in 0..<144 { usage[index] = 0xFF; }
-    let usage_base: *u8 = usage as *u8;
+    let mut usage: [u8; 160];
+    // Place the 144-byte rusage between two eight-byte canaries.
+    for index: usize in 0..<160 { usage[index] = 0xFF; }
+    let usage_base: *u8 = usage[8..<152] as *u8;
     fail_if(src_loc(), svc5(260, umask_child, ptr_of(status_base, 0), 0,
                             (usage_base as usize), 0) != umask_child);
     fail_if(src_loc(), (payload_read_u64(status_base, 0) & 0xFFFFFFFF) != 0);
     fail_if(src_loc(), payload_read_u64(usage_base, 8) >= 1000000);
     fail_if(src_loc(), payload_read_u64(usage_base, 24) >= 1000000);
+    // Takibi currently zero-fills this output; Linux reports child usage.
+    if (check_wait4_zero_fill) {
+        for index: usize in 8..<152 { fail_if(src_loc(), usage[index] != 0); }
+    }
+    for index: usize in 0..<8 {
+        fail_if(src_loc(), usage[index] != 0xFF || usage[152 + index] != 0xFF);
+    }
 
     fail_if(src_loc(), svc5(GETRUSAGE_SYSCALL, 0, (usage_base as usize), 0, 0, 0) != 0);
     fail_if(src_loc(), svc5(GETRUSAGE_SYSCALL, 0xFFFFFFFFFFFFFFFF, (usage_base as usize), 0, 0, 0) != 0);
@@ -1537,7 +1543,7 @@ fn shared_mapping_probe() !{unsafe} {
     // RUSAGE_CHILDREN once it has been waited for. Each burns until the kernel
     // reports it, so the check does not depend on how a tick lands; a kernel
     // that reports no time runs into the bound.
-    let before: usize = rusage_total(usage as []u8, 0xFFFFFFFFFFFFFFFF);
+    let before: usize = rusage_total(usage[8..<152], 0xFFFFFFFFFFFFFFFF);
     rusage_burn_until_charged();
     let burner: usize = svc5(220, SIGCHLD, 0, 0, 0, 0);
     if (burner == 0) {
@@ -1546,7 +1552,7 @@ fn shared_mapping_probe() !{unsafe} {
     }
     fail_if(src_loc(), burner >= 0x8000000000000000);
     fail_if(src_loc(), svc5(260, burner, 0, 0, 0, 0) != burner);
-    fail_if(src_loc(), rusage_total(usage as []u8, 0xFFFFFFFFFFFFFFFF) <= before);
+    fail_if(src_loc(), rusage_total(usage[8..<152], 0xFFFFFFFFFFFFFFFF) <= before);
 
     let mut fs: [u8; 120];
     for index: usize in 0..<120 { fs[index] = 0; }
