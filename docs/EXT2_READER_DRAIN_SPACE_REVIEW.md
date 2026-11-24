@@ -189,3 +189,8 @@ The combined QEMU image remains within the already approved reservation
 step. Neither allocator start moves from this baseline. These figures
 measure linked images. Remeasure when the reader-writer admission policy
 or the shared file-position lifetime changes.
+
+Rebuilding the same reader candidate with the in-compiler caller policy
+produced byte-identical normal objects, ELFs, call graphs and source
+signatures on both targets. The linked-image comparison above applies
+to the combined candidate.
