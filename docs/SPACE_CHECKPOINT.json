@@ -1,13 +1,13 @@
 {
-  "date": "2026-11-24",
+  "date": "2026-11-21",
   "event": "incremental",
   "decision": "reuse",
-  "source_sha256": "cf42c8817fb614bb351a7401d8113565207b8c6e8c190e3146ffc2d909912018",
-  "workload": "Reuse the refreshed DDB review for the normal linked kernel and the existing allocator workload. This slice strengthens successful ABI output checks in the existing EL0 boot and affinity fixtures. The changed openat retry record leaves the production fingerprint of the previous ABI candidate unchanged.",
+  "source_sha256": "e54129499fb51533fb1ac03255d027e6a6e588d2a4ae7b4e2be3d627bf4951ef",
+  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 1ba90fed: this branch's review, rebound to the merged sources (upstream's record was 2026-11-24 incremental/reuse). Normal QEMU and RPi5 kernels linked against ab79a8441. The existing FDT boot log reads the first bank through the region result.",
   "evidence": [
-    "docs/GLOBAL_PROTECTION.md",
-    "docs/MEMORY_SAFETY_CONTRACT.md"
+    "docs/FRAME_API_SPACE_REVIEW.md",
+    "docs/LANE_INVENTORY.md"
   ],
-  "assessment": "The fixture assertions use existing output buffers and syscall cases. Kernel handlers, production storage declarations, and allocation policy are unchanged. The embedded fixture image and helper frames can change; the reuse assessment does not assert linked-image byte identity or a fresh measurement on this revision.",
-  "next_trigger": "Measure again when a completed milestone, a retained diagnostic representation, or an allocation workload changes."
+  "assessment": "Parent linked measurements still apply. The build adds a distinct QEMU test overlay and invokes it from the existing probe-ticks lane. Normal compiler inputs, link inputs, allocator workload, and retained state are unchanged.",
+  "next_trigger": "Remeasure when FDT region logging or memory-bank allocation changes."
 }
