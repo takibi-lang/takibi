@@ -32,7 +32,7 @@ Exit code only (0 = pass, 1 = fail).
 import sys
 
 import call_graph_table
-import buildcheck_allowed_callers as allowed_callers
+import kernel_caller_facts as allowed_callers
 from pass_line import report_pass
 
 AUTHORITY = "CpuHere"

@@ -9,7 +9,7 @@ from what the compiler resolved, because it is that resolution.
 
 The kernel recipes in the root `Makefile` (the QEMU and RPi5 `main.o`) and
 the EL0 payload macro `KERNEL_EL0_COMPILE` write it beside the object as
-`<object>.callgraph.tsv`, and the checks that need it run from the same
+`<object>.facts/callgraph.tsv`, and the checks that need it run from the same
 recipe on that file. `scripts/call_graph_table.py` is the Python reader; it
 refuses another format version, a changed column set and an empty table.
 
@@ -44,6 +44,12 @@ empty cell or empty list is `-`.
 
 Rows come in the order the definitions reach the type checker. Calls in a
 global or constant initializer belong to no row.
+The normal kernel builds pass `--kernel-allowed-callers` to enforce the
+reviewed caller rules before object emission. The policy and TSV writer
+share one collection of compiled function rows. The policy uses the same
+repository-relative `file:function` identity and target names as the table.
+Run it from the repository root. Global initializer references and
+uninstantiated definitions remain outside this policy.
 
 What the table does not say: the targets of an indirect call (the effect
 contracts in `effect_rules.ml` constrain those), anything about `extern`
@@ -74,7 +80,7 @@ the table change in the same commit.
   `callees` and `callers`.
 - `scripts/buildcheck_ext2_release_log.py`: `name`, `file`, `line` and
   `callees`.
-- `scripts/buildcheck_allowed_callers.py`: `name`, `file`, `callees` and
+- `scripts/kernel_caller_facts.py`: `name`, `file`, `callees` and
   `values`.
 - `scripts/buildcheck_world_stop_rank.py`: `name`, `file`, `line`,
   `declared` (the `acquires_lock_<rank>_<class>` ranks) and `callers`.

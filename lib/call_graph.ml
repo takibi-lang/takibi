@@ -241,7 +241,21 @@ let relative file =
 
 let cell = function [] -> "-" | items -> String.concat "," items
 
-let write_table ?source_signatures (out : out_channel) (prog : toplevel list) (types : program_types) =
+type graph = {
+  definitions : func list list;
+  callees : func -> StringSet.t;
+  values : func -> StringSet.t;
+  callers : func -> StringSet.t;
+}
+
+let function_name (f : func) =
+  match String.index_opt f.name '$' with
+  | Some i -> String.sub f.name 0 i
+  | None -> f.name
+
+let function_file (f : func) = relative (source_file_of_loc f.def_loc)
+
+let collect (prog : toplevel list) (types : program_types) =
   let definitions = List.filter_map (function FuncDef f -> Some f | _ -> None) prog in
   (* A row is a source definition; the instances of one generic function
      are one row, identified by their shared def_loc. *)
@@ -255,12 +269,10 @@ let write_table ?source_signatures (out : out_channel) (prog : toplevel list) (t
     match Hashtbl.find_opt rows id with
     | Some instances -> Hashtbl.replace rows id (f :: instances)
     | None -> Hashtbl.replace rows id [f]; order := id :: !order) definitions;
-  let base_name name = match String.index_opt name '$' with
-    | Some i -> String.sub name 0 i | None -> name in
   let label id = match Hashtbl.find_opt rows id with
     | Some (f :: _) ->
-        Printf.sprintf "%s@%s:%d" (base_name f.name)
-          (relative (source_file_of_loc f.def_loc)) f.def_loc.Lexing.pos_lnum
+        Printf.sprintf "%s@%s:%d" (function_name f)
+          (function_file f) f.def_loc.Lexing.pos_lnum
     | _ -> assert false in
   let empty = StringSet.empty in
   let add table id item =
@@ -282,6 +294,20 @@ let write_table ?source_signatures (out : out_channel) (prog : toplevel list) (t
           add callees id text;
           Option.iter (fun target -> add callers target (label id)) target
       | Value -> add values id (snd (target_label key))) prog types;
+  let get table f =
+    Option.value (Hashtbl.find_opt table (row_id f)) ~default:empty in
+  { definitions = List.rev_map (Hashtbl.find rows) !order;
+    callees = get callees;
+    values = get values;
+    callers = get callers }
+
+let reference_name label =
+  match String.index_opt label '@' with
+  | Some at -> String.sub label 0 at
+  | None -> label
+
+let write_table ?source_signatures (out : out_channel) graph (types : program_types) =
+  let empty = StringSet.empty in
   let lexed = Hashtbl.create 64 in
   let tokens_of file = match Hashtbl.find_opt lexed file with
     | Some tokens -> tokens
@@ -304,8 +330,7 @@ let write_table ?source_signatures (out : out_channel) (prog : toplevel list) (t
   Printf.fprintf out "# takibi call graph, format %d; see docs/CALL_GRAPH.md\n"
     format_version;
   output_string out (String.concat "\t" columns ^ "\n");
-  List.iter (fun id ->
-    let instances = Hashtbl.find rows id in
+  List.iter (fun instances ->
     let f = List.hd instances in
     let file = source_file_of_loc f.def_loc in
     let extent = Def_extent.find f.def_loc in
@@ -322,13 +347,12 @@ let write_table ?source_signatures (out : out_channel) (prog : toplevel list) (t
       match StringMap.find_opt (definition_key types g) types.functions with
       | Some info -> List.fold_left (fun acc e -> StringSet.add e acc) acc info.effects
       | None -> acc) empty instances in
-    let set table = match Hashtbl.find_opt table id with
-      | Some s -> cell (StringSet.elements s) | None -> "-" in
+    let set s = cell (StringSet.elements s) in
     let fields = [
       relative file;
       string_of_int f.def_loc.Lexing.pos_lnum;
       (match extent with Some stop -> string_of_int stop.Lexing.pos_lnum | None -> "-");
-      base_name f.name;
+      function_name f;
       cell qualifiers;
       declared;
       cell (StringSet.elements inferred);
@@ -337,13 +361,13 @@ let write_table ?source_signatures (out : out_channel) (prog : toplevel list) (t
            | [] -> "-" | ps -> String.concat ", " ps)
        | None -> "-");
       (match span with Some tokens -> returns_of tokens | None -> "-");
-      set callees;
-      set callers;
-      set values;
+      set (graph.callees f);
+      set (graph.callers f);
+      set (graph.values f);
       (match span with
        | Some tokens ->
            Digest.to_hex (Digest.string
              (String.concat " " (List.map (fun t -> t.text) tokens)))
        | None -> "-");
     ] in
-    output_string out (String.concat "\t" fields ^ "\n")) (List.rev !order)
+    output_string out (String.concat "\t" fields ^ "\n")) graph.definitions

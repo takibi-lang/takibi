@@ -4,7 +4,7 @@
 from pathlib import Path
 from check_exception_cpu_snapshots import PATH, MIRROR, CALLERS, problems
 from buildcheck_global_protection import exception_publication_admitted, parse_table, TableError, COLUMNS
-from buildcheck_allowed_callers import read_list
+from kernel_caller_facts import read_list
 from control_patch import replace_once, replace_in_function
 from pass_line import report_pass
 

@@ -568,7 +568,7 @@ rules globally.
   fail-stop context, not a consequence of a successful compile. The private
   index must be constructed in the authority's definition module; all uses
   are confined to exact exception_evidence callers. The compiled caller and
-  function-value checks in `scripts/buildcheck_allowed_callers.py` and
+  function-value checks in the compiler caller policy and
   `scripts/buildcheck_cpu_authority_mints.py` enforce that boundary; they do
   not grant general ordinary-code mint permission.
   The PMU sample mint is separate. Its only caller passes the one MPIDR
@@ -645,7 +645,7 @@ rules globally.
   `kernel_ddb_dcache_clean_invalidate` in `user_entry.S` (`dc civac`,
   `dsb ish`, `ret`; the compiler has no builtin for it), and that
   clean+invalidate is safe whichever side owns the line. Its one caller is
-  fixed by `scripts/buildcheck_allowed_callers.py`; the `debug_stopped`
+  fixed by the compiler caller policy; the `debug_stopped`
   effect check still keeps the look lock-free. Statically excluded (#1164):
   calling it outside the stop, since both drivers' look borrows
   `MachineStopped[&kernel_world_stop]`. Still trusted: the raw reads
@@ -1123,7 +1123,7 @@ container to its guarded payload and the two reviewed setup address
 initializers. Setup borrows the block-device guard; its closed body uses
 each immutable address only in the corresponding low/high MMIO stores.
 The compiler's ordinary guarded_ref address prohibition is unchanged.
-`buildcheck_allowed_callers.py` also restricts setup to the guarded
+The compiler caller policy also restricts setup to the guarded
 initialization/reset caller. The source policy rejects other container
 copies, pointers, integer aliases, stores, returns and captures. This is
 bounded repository enforcement, not general integer noninterference.
@@ -1160,8 +1160,8 @@ and ASID generation. Image mapping retains its explicit target independently.
 
 `scripts/check_root_held_entries.py` closes the three constructor and eight
 small adapter source shapes, explicit image-target propagation and private
-Running reservation factory. Compiled rows in
-`scripts/buildcheck_allowed_callers.py` confine those mints and the hardware
+Running reservation factory. The compiler caller policy confines those mints
+and the hardware
 installation leaves, including the checked Running-state factory callers.
 These are bounded source/callgraph policies; physical owner/root association,
 typestate transition implementations and the permanent boot root remain trusted.
@@ -1196,3 +1196,8 @@ effect and the physical lock primitives remain reviewed implementation
 boundaries. Source tests check the wrapper's begin/acquire and release/end
 ordering. Per-entry retry association remains module-private.
 See docs/TCP_RETX_GUARD_SPACE.md for the linked-image and static-frame cost.
+
+The compiled kernel caller policy uses `scripts/allowed_callers.tsv`.
+Independent CPU-authority and global-admission audits still use
+`scripts/kernel_caller_facts.py` to read their selected rows and
+compare them with the emitted graph.

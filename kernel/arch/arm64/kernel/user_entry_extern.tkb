@@ -42,7 +42,7 @@ extern fn kernel_idle_yield_enter() !{noreturn};
 extern fn kernel_idle_block_enter() !{noreturn};
 // GitHub issue #1095: dc civac; dsb ish on the line holding `address`
 // (user_entry.S). DDB-only: its one caller is fixed by
-// scripts/buildcheck_allowed_callers.py.
+// the compiler caller policy.
 extern fn kernel_ddb_dcache_clean_invalidate(address: usize);
 extern fn kernel_idle_tick_enter() !{noreturn};
 extern fn kernel_idle_boot_enter() !{noreturn};
@@ -51,7 +51,7 @@ extern fn kernel_idle_boot_enter() !{noreturn};
 // Assembly captures the incoming LR before making any call.
 // GitHub issue #638 stage 2: TPIDR_EL1, this core's index times the
 // per-core stack group stride. Called only by cpu_authority.tkb's
-// preempt_slot() (scripts/buildcheck_allowed_callers.py).
+// preempt_slot() (the compiler caller policy).
 extern fn kernel_invariant_stop_with_frame(frame: borrow FrameRef[process, level]) !{noreturn};
 
 extern fn kernel_ddb_breakpoint();

@@ -1958,13 +1958,12 @@ $(KERNEL_HANG_CORE_ELF): $(KERNEL_HANG_CORE_O)
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
 $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_EXT2_MUTATION_LOCK_TKB) $(KERNEL_EXT2_MUTATION_PROBE_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_PMU_EXTERN) $(KERNEL_CACHE_GEOMETRY_EXTERN) $(KERNEL_EXT2_TKZ) $(KERNEL_LZ4_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_RPI5_MEMORY_TKB) $(KERNEL_FDT_TKB) \
-    $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_INTC_TKB) $(KERNEL_RPI5_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile scripts/buildcheck_frame_size.py scripts/allowed_callers.tsv scripts/buildcheck_allowed_callers.py scripts/call_graph_table.py | $(KERNEL_BUILD_DIR)
-	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $< $(KERNEL_RPI5_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_EXECUTION_MODEL) $(KERNEL_UNUSED_CHECK_RPI5) --facts $@.facts -o $@
+    $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_INTC_TKB) $(KERNEL_RPI5_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile scripts/buildcheck_frame_size.py scripts/allowed_callers.tsv scripts/call_graph_table.py | $(KERNEL_BUILD_DIR)
+	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $< $(KERNEL_RPI5_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_EXECUTION_MODEL) $(KERNEL_UNUSED_CHECK_RPI5) --kernel-allowed-callers scripts/allowed_callers.tsv --facts $@.facts -o $@
 	python3 scripts/buildcheck_kernel_unused_coverage.py rpi5 $@.facts/deps.d
 	python3 scripts/buildcheck_ext2_mutation_guard.py $@.facts/callgraph.tsv
 	python3 scripts/buildcheck_ext2_reader_self_wait.py $@.facts/callgraph.tsv
 	python3 scripts/buildcheck_ext2_release_log.py $@.facts/callgraph.tsv
-	python3 scripts/buildcheck_allowed_callers.py $@.facts/callgraph.tsv
 	python3 scripts/buildcheck_cpu_authority_mints.py $@.facts/callgraph.tsv
 	python3 scripts/buildcheck_world_stop_rank.py $@.facts/callgraph.tsv
 	python3 scripts/buildcheck_frame_size.py $@
@@ -2117,13 +2116,12 @@ $(KERNEL_QEMU_CACHE_GEOMETRY_O): $(KERNEL_CACHE_GEOMETRY_S) | $(KERNEL_QEMU_BUIL
 # platform_* name kernel/platform/qemu/'s own files already define, and a
 # duplicate top-level definition is a compile error by design.
 $(KERNEL_QEMU_MAIN_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_EXT2_MUTATION_LOCK_TKB) $(KERNEL_EXT2_MUTATION_PROBE_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_PMU_EXTERN) $(KERNEL_CACHE_GEOMETRY_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_FDT_TKB) \
-    $(KERNEL_QEMU_UART_TKB) $(KERNEL_QEMU_INTC_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile scripts/buildcheck_frame_size.py scripts/allowed_callers.tsv scripts/buildcheck_allowed_callers.py scripts/call_graph_table.py | $(KERNEL_QEMU_BUILD_DIR)
-	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< $(KERNEL_QEMU_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_EXECUTION_MODEL) $(KERNEL_UNUSED_CHECK_QEMU) --facts $@.facts -o $@
+    $(KERNEL_QEMU_UART_TKB) $(KERNEL_QEMU_INTC_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile scripts/buildcheck_frame_size.py scripts/allowed_callers.tsv scripts/call_graph_table.py | $(KERNEL_QEMU_BUILD_DIR)
+	$(NICE_HEAVY) $(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_QEMU_USB_ABSENT_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< $(KERNEL_QEMU_COMPILE_FLAGS) $(KERNEL_RAW_CONFINE) $(KERNEL_EXECUTION_MODEL) $(KERNEL_UNUSED_CHECK_QEMU) --kernel-allowed-callers scripts/allowed_callers.tsv --facts $@.facts -o $@
 	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.facts/deps.d
 	python3 scripts/buildcheck_ext2_mutation_guard.py $@.facts/callgraph.tsv
 	python3 scripts/buildcheck_ext2_reader_self_wait.py $@.facts/callgraph.tsv
 	python3 scripts/buildcheck_ext2_release_log.py $@.facts/callgraph.tsv
-	python3 scripts/buildcheck_allowed_callers.py $@.facts/callgraph.tsv
 	python3 scripts/buildcheck_cpu_authority_mints.py $@.facts/callgraph.tsv
 	python3 scripts/buildcheck_world_stop_rank.py $@.facts/callgraph.tsv
 	python3 scripts/buildcheck_frame_size.py $@
@@ -2375,7 +2373,7 @@ $(MODEL_MAP_STAMP): $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_DIR)/mo
 ## a stale row there, fails the build.
 GLOBAL_PROTECTION_TABLES = $(KERNEL_QEMU_MAIN_O).facts/globals.tsv $(KERNEL_RPI5_MAIN_O).facts/globals.tsv
 GLOBAL_PROTECTION_STAMP  = $(KERNEL_DIR)/build/global_protection.ok
-$(GLOBAL_PROTECTION_STAMP): $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_QEMU_ELF) $(KERNEL_RPI5_ELF) scripts/check_asid_boot_config.py scripts/struct_layout_gdb.py scripts/buildcheck_global_protection.py scripts/buildcheck_unread_globals.py scripts/global_protection_allowlist.tsv scripts/debugger_set_globals.tsv scripts/buildcheck_dma_mint_files.py scripts/check_exception_cpu_snapshots.py scripts/allowed_callers.tsv scripts/buildcheck_allowed_callers.py
+$(GLOBAL_PROTECTION_STAMP): $(KERNEL_QEMU_MAIN_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_QEMU_ELF) $(KERNEL_RPI5_ELF) scripts/check_asid_boot_config.py scripts/struct_layout_gdb.py scripts/buildcheck_global_protection.py scripts/buildcheck_unread_globals.py scripts/global_protection_allowlist.tsv scripts/debugger_set_globals.tsv scripts/buildcheck_dma_mint_files.py scripts/check_exception_cpu_snapshots.py scripts/allowed_callers.tsv scripts/kernel_caller_facts.py
 	python3 scripts/buildcheck_global_protection.py $(GLOBAL_PROTECTION_TABLES)
 	python3 scripts/buildcheck_unread_globals.py $(GLOBAL_PROTECTION_TABLES)
 	python3 scripts/buildcheck_dma_mint_files.py $(KERNEL_QEMU_MAIN_O).facts/fields.tsv $(KERNEL_RPI5_MAIN_O).facts/fields.tsv

@@ -5,7 +5,7 @@ from copy import deepcopy
 from unittest.mock import patch
 
 import buildcheck_global_protection as protection
-from buildcheck_allowed_callers import read_list
+from kernel_caller_facts import read_list
 from buildcheck_asid_boot_config import image_problems, section_records, symbol_records
 from check_asid_boot_config import ASID, BOOT, CALLERS, ENTRIES, PATH, evidence_counts, read_sources, source_problems
 from control_patch import replace_in_function, replace_once

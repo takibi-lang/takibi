@@ -3,7 +3,6 @@
 # scripts/check_trust_ledger.py refuses a named script with no row and a row
 # whose script is no longer named; the row count is the ledger's
 # trust_build_checks. Columns: script, what the kernel trusts it for, successor.
-buildcheck_allowed_callers.py	which functions may call a mint	#1008 module visibility: private constructors
 buildcheck_kernel_asm_invariants.py	properties of handwritten assembly no type sees	permanent (assembly is outside the checker)
 check_assume_init_sites.py	the empty list of assume_init sites	#945 local array tracking, or stays as a zero-ratchet
 buildcheck_cpu_authority_mints.py	approved unscoped exception constructor plus exact compiled callers	#641 ties exception authority to entry exclusion; #1159 audits the mint uses

@@ -572,7 +572,7 @@ el1_resume_probe_landing_address:
  * core's entry path). One register move and no logic: the compiler has no
  * builtin for TPIDR_EL1 (DECISIONS 2026-10-25, after the 2026-10-19 rule),
  * and everything decided from the value is in cpu_authority.tkb's
- * preempt_slot(), its one caller (scripts/buildcheck_allowed_callers.py). */
+ * preempt_slot(), its one caller (the compiler caller policy). */
 /* GitHub issue #638: the preempt count of the stack SP stands on, the 16-byte
  * word at the top of its 0x8000-aligned run (KERNEL_STACK_TOP_RESERVE,
  * scripts/check_kernel_stack_top_reserve.py): sp | 0x7fff is the run's last
@@ -623,7 +623,7 @@ kernel_cpu_offset:
  * dc civac (DECISIONS 2026-10-25). Clean+invalidate is safe whichever side
  * owns the line: a dirty CPU line is written back rather than discarded.
  * Its one caller is rp1_gem.tkb's kernel_net_rx_frame_pending(), DDB's
- * lock-free RX look (scripts/buildcheck_allowed_callers.py). */
+ * lock-free RX look (the compiler caller policy). */
     .global kernel_ddb_dcache_clean_invalidate
     .type kernel_ddb_dcache_clean_invalidate, %function
 kernel_ddb_dcache_clean_invalidate:

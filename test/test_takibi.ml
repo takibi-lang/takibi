@@ -102,7 +102,7 @@ let call_graph_rows ?(regions = false) src =
   let prog = Declared_type_resolver.run
       (if regions then Region_builtin.lower prog else prog) in
   let types = Type_inf.infer_program prog in
-  Out_channel.with_open_bin table (fun oc -> Call_graph.write_table oc prog types);
+  Out_channel.with_open_bin table (fun oc -> Call_graph.write_table oc (Call_graph.collect prog types) types);
   let lines = In_channel.with_open_bin table In_channel.input_all
     |> String.split_on_char '\n' |> List.filter (( <> ) "") in
   Sys.remove file; Sys.remove table;

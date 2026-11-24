@@ -101,6 +101,7 @@ let () =
   let function_sections = ref true in
   let show_version = ref false in
   let facts_dir = ref "" in
+  let kernel_caller_rules = ref "" in
   let generate = ref None in
   let tla_omit = ref None in
   let set r = Cli_flags.Arg (fun v -> r := v) in
@@ -137,6 +138,8 @@ let () =
       "a file allowed to mint raw authority (repeatable)";
     flag "--require-execution-model" Policy ~arg:path (set execution_model_file)
       "check the execution-model declarations in this file";
+    flag "--kernel-allowed-callers" Policy ~arg:path (set kernel_caller_rules)
+      "enforce the kernel caller policy compiled from this TSV in the repository root";
     flag "--device-semantics-file" Policy ~arg:path (add device_semantics_files)
       "a file allowed to declare device semantics (repeatable)";
     flag "--regions" Policy (on regions) "enable the region built-ins";
@@ -470,13 +473,22 @@ let () =
       close_out out
     end;
 
-    if facts_on then begin
-      let out = open_out (fact "callgraph.tsv") in
-      let signatures = open_out (fact "source-signatures.tsv") in
-      Fun.protect ~finally:(fun () -> close_out signatures)
-        (fun () -> Call_graph.write_table
-          ~source_signatures:(signatures, source_prog) out prog prog_types);
-      close_out out
+    if facts_on || !kernel_caller_rules <> "" then begin
+      let graph = Call_graph.collect prog prog_types in
+      if !kernel_caller_rules <> "" then begin
+        match Kernel_caller_policy.check !kernel_caller_rules graph with
+        | Ok (rules, callers) ->
+            Printf.printf "PASS allowed-callers: %d guarded functions and %d reviewed callers; per rule, planted calls, function values and missing callers are checked\n%!"
+              rules callers
+        | Error problems ->
+            List.iter (Printf.eprintf "Error: %s\n") problems;
+            exit 1
+      end;
+      if facts_on then
+        Out_channel.with_open_bin (fact "callgraph.tsv") (fun out ->
+          Out_channel.with_open_bin (fact "source-signatures.tsv") (fun signatures ->
+            Call_graph.write_table ~source_signatures:(signatures, source_prog)
+              out graph prog_types))
     end;
 
     (match Unused_functions.flag_error ~reject:!reject_unused_functions

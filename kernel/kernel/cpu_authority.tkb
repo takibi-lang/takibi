@@ -59,7 +59,7 @@
 //   linker scripts assert the stride is 1 << PERCPU_STACK_GROUP_SHIFT). It is
 //   read by the assembly helper kernel_cpu_offset (user_entry.S; no compiler
 //   builtin, DECISIONS 2026-10-25), and preempt_slot_index() is its one
-//   caller (scripts/buildcheck_allowed_callers.py). With
+//   caller (the compiler caller policy). With
 //   KERNEL_PREEMPT_ASSERTS, every region entry checks it agrees with MPIDR.
 //   The only public mint is the confined exception constructor below
 //   (scripts/buildcheck_cpu_authority_mints.py); the boot probe's any-CPU

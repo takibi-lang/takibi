@@ -1,40 +1,12 @@
-#!/usr/bin/env python3
-"""Guarded kernel functions are called only by their reviewed callers.
+"""Read caller rules and compare them against emitted call graph facts.
 
-Usage: buildcheck_allowed_callers.py <kernel>.facts/callgraph.tsv
-
-GitHub issue #1107. Each row of scripts/allowed_callers.tsv names a guarded
-function, the (file, function) pairs allowed to call it, and the reason. This
-check reads the --facts callgraph.tsv table (scripts/call_graph_table.py), after
-name resolution, and for every row refuses:
-
-1. a function outside the allowed set that calls the guarded function or
-   takes it as a value (a function-pointer reference);
-2. a table in which an allowed caller no longer calls it (a claim about
-   nothing).
-
-Every row also runs three negative controls on the real table: a planted
-call, a planted function-pointer reference, and the allowed calls removed;
-each must be refused, or the check fails.
-
-A caller file that a kernel does not compile (rp1_gem.tkb is RPi5-only)
-is not built there: on that table the row allows no caller at all, and the
-removed-call control is skipped. Every caller file must exist in the tree,
-so a rename cannot make a row vacuous on every kernel.
-
-scripts/allowed_callers.tsv is the list of rows, each with its issue and reason.
-A row holds a named function only: an equivalent loop written inline under
-another name passes (for #771's rebuild, the RECORDED page run allocator line
-and its visit count show that). Lexically, scripts/check_mpidr_reads.py is the sibling for MPIDR_EL1.
-
-Exit code only (0 = pass, 1 = fail).
+The normal kernel recipes enforce the policy inside Takibi. These helpers
+remain for the independent CPU authority and global admission audits.
 """
 
 import pathlib
-import sys
 
 import call_graph_table
-from pass_line import report_pass
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 LIST = ROOT / "scripts" / "allowed_callers.tsv"
@@ -123,44 +95,3 @@ def controls_fail(rule: dict, table: list[dict]) -> list[str]:
     if not problems_in(rule, gone):
         failed.append(f"an allowed caller no longer calling {helper}")
     return failed
-
-
-def main() -> int:
-    if len(sys.argv) != 2:
-        print(__doc__.splitlines()[2], file=sys.stderr)
-        return 2
-    try:
-        rules = read_list()
-        table = call_graph_table.read(sys.argv[1])
-    except (OSError, ListError, call_graph_table.TableError) as error:
-        print(f"FAIL allowed-callers: {error}")
-        return 1
-    failed = False
-    for rule in rules:
-        problems = problems_in(rule, table)
-        for problem in problems:
-            print(f"ERROR {rule['name']}: {problem}")
-        if problems:
-            print(f"FAIL {rule['name']}: {rule['helper']} has an unreviewed "
-                  "caller")
-            failed = True
-            continue
-        if not_refused := controls_fail(rule, table):
-            print(f"FAIL {rule['name']}: negative control(s) "
-                  f"{'; '.join(not_refused)} were accepted, so this check "
-                  "proves nothing")
-            failed = True
-    if failed:
-        return 1
-    callers = sum(len(built_allowed(rule, table)) for rule in rules)
-    report_pass("allowed-callers",
-                f"{len(rules)} guarded functions "
-                f"({', '.join(r['helper'] for r in rules)}) are called only "
-                f"by their {callers} reviewed callers in {sys.argv[1]}; per "
-                "row, a planted call, a pointer and a removed call are refused",
-                functions=len(table))
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

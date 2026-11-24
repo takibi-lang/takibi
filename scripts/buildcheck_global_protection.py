@@ -141,7 +141,7 @@ def exception_publication_admitted(row, origin, source=None, table=None, rules=N
                                                 '[CrashSnapshot;4]', 'none'):
         return False
     import call_graph_table
-    from buildcheck_allowed_callers import read_list, problems_in, controls_fail
+    from kernel_caller_facts import read_list, problems_in, controls_fail
     try:
         if source is None:
             source = (ROOT / PATH).read_text(encoding='ascii')
@@ -182,7 +182,7 @@ def asid_initializer_admitted(row, origin, sources=None, table=None, rules=None,
             ('private', '-', 'AsidBootWord', 'none')):
         return False
     import call_graph_table
-    from buildcheck_allowed_callers import read_list, problems_in, controls_fail, ListError
+    from kernel_caller_facts import read_list, problems_in, controls_fail, ListError
     from struct_layout_gdb import read_structs
     try:
         if sources is None:
