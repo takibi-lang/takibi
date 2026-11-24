@@ -4339,7 +4339,6 @@ must_use variant SyscallAction {
     // kernel_syscall_child_exec_return and found the argv page in a per-CPU
     // slot. Execve's success never leaves Takibi now (#1080, the first
     // instance of "assembly is a leaf", #1133): see SyscallExecveResult.
-    Migrate;                      // 9: rerun this syscall on core 0
     OrdinaryExit(exists process: usize. (ProcessOrdinaryTarget[process], PreemptOff[0]));
 }
 
@@ -4358,7 +4357,6 @@ private fn syscall_action_encode(action: sink SyscallAction, completion: Syscall
         SyscallAction::CloneParent(value) => { return (4, value); }
         SyscallAction::Block => { return (5, 0); }
         SyscallAction::WaitInterrupt => { return (6, 0); }
-        SyscallAction::Migrate => { return (9, 0); }
         SyscallAction::OrdinaryExit(switched) => {
             let (next, span) = switched;
             match completion {
@@ -5901,21 +5899,6 @@ fn syscall_fd_is_socket(fd: usize) -> bool {
     }
 }
 
-// Step 9/9: action 9 (.Lsyscall_migrate). Affinity excluded this CPU.
-// Rewind the call and leave; the process becomes Ready only once this core
-// is off its stack (kernel_process_stack_idle_yield).
-fn kernel_syscall_migrate_return(frame_sp: usize) {
-    let frame =
-        frame_ref_from_el0_entry(frame_sp, kernel_process_entry_generation());
-    el0_context_retry_syscall(frame);
-    let span = preempt_span_begin();
-    if (kernel_process_migrate_current(frame) == false) {
-        kernel_invariant_stop_with_frame(frame);
-    }
-    preempt_span_resume(span);
-    kernel_idle_yield_enter();
-}
-
 // GitHub issue #627: asynchronous SIGCHLD handlers, rt_sigsuspend and
 // rt_sigreturn -- what BusyBox ash's `wait` builtin needs. It masks SIGCHLD,
 // then loops on sigsuspend until its handler has set a flag; with neither
@@ -6322,7 +6305,6 @@ fn syscall_signal_deliver(current_authority: ProcessCurrent[current_process, Pro
         }
         SyscallAction::Block => { return syscall_block_interrupt(current_authority, frame); }
         SyscallAction::WaitInterrupt => { process_current_end(current_authority); return SyscallAction::WaitInterrupt; }
-        SyscallAction::Migrate => { process_current_end(current_authority); return SyscallAction::Migrate; }
     };
     match frame {
         MaybeFrame::NoFrame => {
@@ -6751,7 +6733,6 @@ private fn signal_return_exit(current_authority: ProcessCurrent[current_process,
         SyscallAction::CloneChild(_) => {}
         SyscallAction::Block => {}
         SyscallAction::WaitInterrupt => {}
-        SyscallAction::Migrate => {}
     }
     // kernel_syscall_exit_current_process answers nothing else; the
     // syscall tail fail-stops on Unreachable (its file reap failed) too.
@@ -6910,17 +6891,58 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                            x2: usize, x3: usize, x4: usize, frame_sp: usize)
         -> (usize, usize) !{unsafe} {
     kernel_activity_set(KernelActivity::Syscall);
-    workload_profile_note_syscall(number);
-    // GitHub issue #580: sample the real BusyBox sleep applet at syscall
-    // entry, before affinity exclusion can yield its current CPU.
     workload_ordinary_placement_note_syscall(number);
     let mut ext2_reader: SyscallExt2Reader = { false };
-    let action: SyscallAction = kernel_syscall_dispatch_action(esr, number, x0, x1, x2, x3, x4,
-        maybe_frame_from_entry(frame_sp, kernel_process_entry_generation()), &ext2_reader);
+    let exception_class: usize = (esr >> 26) & 0x3F;
+    let frame: MaybeFrame = match frame_sp {
+        0 => {
+            if (exception_class == 0x15) {
+                preempt_off (cpu) {
+                    if (cpu_here_index(cpu) == 0) { kernel_process_reschedule_if_excluded_here(); }
+                }
+            }
+            maybe_frame_from_entry(0, kernel_process_entry_generation())
+        }
+        _ => {
+            let generation: usize = kernel_process_entry_generation();
+            let original = frame_ref_from_el0_entry(frame_sp, generation);
+            let admitted: MaybeFrame = match exception_class {
+                0x15 => {
+                    let checked: MaybeFrame = match kernel_process_syscall_migration_prepare(generation) {
+                        SyscallMigrationAdmission::Admitted => { MaybeFrame::Frame(original) }
+                        SyscallMigrationAdmission::Requested(pending) => {
+                            // No ext2 reader has been admitted at this boundary.
+                            let after: MaybeFrame = match kernel_process_migrate_current(pending, original) {
+                                SyscallMigrationCommit::Readmitted(same) => { MaybeFrame::Frame(same) }
+                                SyscallMigrationCommit::Refused(refused) => {
+                                    kernel_boot_log_syscall_unreachable(number);
+                                    return (0, 0);
+                                }
+                                SyscallMigrationCommit::Departed(span) => {
+                                    workload_profile_syscall_depart();
+                                    preempt_span_resume(span);
+                                    kernel_idle_yield_enter();
+                                    return (0, 0);
+                                }
+                            };
+                            after
+                        }
+                    };
+                    checked
+                }
+                _ => { MaybeFrame::Frame(original) }
+            };
+            admitted
+        }
+    };
+    workload_profile_note_syscall(number);
+    let action: SyscallAction =
+        kernel_syscall_dispatch_action(esr, number, x0, x1, x2, x3, x4,
+            frame, &ext2_reader);
     // GitHub issue #559: the ext2 reader registered at entry is done with
     // ext2 by the time the handler has chosen what happens next, whatever
-    // that is -- Block and Migrate included. An execve that succeeded is the
-    // exception (#597) and never returns here: its prepare reads the image,
+    // that is, including Block. A successful execve never returns here
+    // (#597): its prepare reads the image,
     // and kernel_syscall_child_exec_return releases the registration then.
     if (syscall_ext2_reader_take(&ext2_reader)) { kernel_ext2_read_leave(); }
     let (action_code, action_value) = syscall_action_encode(action, SyscallCompletion::Dispatch(number));
@@ -7847,45 +7869,6 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     };
     let exception_class: usize = (esr >> 26) & 0x3F;
     if (exception_class != 0x15) { return syscall_finish_current(frame, SyscallAction::Unreachable, current_authority); }
-    // Affinity exclusion is independent of syscall admission (#1330).
-    // GitHub issue #579: this CPU may no longer run this process AT ALL --
-    // its affinity mask has stopped naming this CPU, which is what happens
-    // the moment a process re-pins itself with sched_setaffinity. Hand it
-    // back before asking anything else about the syscall.
-    //
-    // Nothing else could do this. `kernel_process_affinity_set` asks for a
-    // reschedule, and `kernel_process_schedule` returns the current frame
-    // unchanged when no OTHER process is Ready on this CPU -- so a peer with
-    // nothing else to run kept a process its mask had already excluded. That
-    // was invisible while the only transition anybody exercised was core 0
-    // to CPU 1, where the fixture keeps a spinner Ready on core 0 for
-    // exactly this reason, and it is what stopped a process reaching cores 2
-    // and 3.
-    //
-    // A peer that hands a process back has somewhere to go: the architectural
-    // idle loop it booted into. Core 0 does not rewind the call; it lets it
-    // finish and hands the process away at the return (below).
-    // core-role: a peer rewinds a call its mask excludes and idles; core 0
-    // lets the call finish and hands the process away at the return
-    if (cpu_id() != 0) {
-        // Affinity may have been changed by another CPU. Take the process
-        // run lock for this scheduling-boundary snapshot, then release it
-        // before the migration path acquires the same lock.
-        let guard = process_run_lock();
-        let current_cpu_allows: bool =
-            kernel_process_current_cpu_allows(guard);
-        process_run_unlock(guard);
-        if (current_cpu_allows == false) { return syscall_finish_current(frame, SyscallAction::Migrate, current_authority); }
-    } else {
-        // GitHub issue #581: the same question on core 0. A process whose
-        // mask excludes core 0 can be here after an affinity change.
-        // Without this it stayed until the next timer
-        // tick, which a short-lived process such as an HTTPd connection
-        // handler never reaches. The reschedule lets the syscall return
-        // switch to another process core 0 may run; with none Ready, that
-        // return parks this one Ready and idles core 0 (#592).
-        kernel_process_reschedule_if_excluded_here();
-    }
     // GitHub issue #533: a reader must not read a tree that is being
     // rewritten. The mutators hold kernel/fs/ext2/mutation_lock.tkb; this
     // asks, with one acquire-load and no wait, whether one is inside right
@@ -7960,10 +7943,6 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 SyscallAction::WaitInterrupt => {
                     taken_signal_restore(taken);
                     return SyscallAction::WaitInterrupt;
-                }
-                SyscallAction::Migrate => {
-                    taken_signal_restore(taken);
-                    return SyscallAction::Migrate;
                 }
                 SyscallAction::Block => {
                     taken_signal_restore(taken);
@@ -9804,7 +9783,6 @@ private fn syscall_finish_write(
         }
         SyscallAction::Block => { return syscall_finish_current(frame, SyscallAction::Block, current_authority); }
         SyscallAction::WaitInterrupt => { return syscall_finish_current(frame, SyscallAction::WaitInterrupt, current_authority); }
-        SyscallAction::Migrate => { return syscall_finish_current(frame, SyscallAction::Migrate, current_authority); }
     }
 }
 

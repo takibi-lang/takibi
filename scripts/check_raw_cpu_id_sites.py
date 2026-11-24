@@ -47,7 +47,7 @@ LISTED = {
     "kernel/fs/ext2/mutation_lock.tkb": (2, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/cpu_authority.tkb": (3, MINT, "normal region entry and availability, plus the approved exception-only unscoped constructor (#1159, #638)"),
     "kernel/kernel/process.tkb": (21, FLIP, "remaining raw callers after typed ExecutionState selection removed execution_cpu_index (#638)"),
-    "kernel/kernel/syscall.tkb": (2, FLIP, "kernel_syscall_dispatch_action: affinity response can outlive its selecting CPU before Migrate consumption; getcpu is a scalar sample in the same function and remains counted pending that path review"),
+    "kernel/kernel/syscall.tkb": (1, FLIP, "kernel_syscall_dispatch_action: getcpu is a scalar sample and remains counted pending that path review"),
     "kernel/mm/page.tkb": (1, FLIP, "#638 page_reserve_cpu: samples the issuing slot once under the page pool lock; allocation and release select the issuer carried by the reservation"),
 }
 
@@ -118,7 +118,6 @@ REVIEWED_SITES = {
     "kernel/kernel/process.tkb::kernel_process_block_current": (1, "#638 stage 9: read while the process-run lock is held (an IRQ-masking Mutex guard), so no tick switches the task before the answer is used under that lock, inside the block tail's PreemptOff span (#1323)"),
     "kernel/kernel/process.tkb::kernel_process_child_exit": (3, "#638 stage 9: read while the process-run lock is held (an IRQ-masking Mutex guard), so no tick switches the task before the answer is used under that lock (exit_guard), inside the exit tail's span (#1323)"),
     "kernel/kernel/process.tkb::kernel_process_clone_unselectable_locked": (1, "#638 stage 9: read while the process-run lock is held (an IRQ-masking Mutex guard), so no tick switches the task before the answer is used under that lock"),
-    "kernel/kernel/process.tkb::kernel_process_migrate_current": (1, "#638 stage 9: called only from kernel_syscall_migrate_return inside a PreemptOff span; the former run-lock read used to infer forced-core placement is removed"),
     "kernel/kernel/process.tkb::kernel_process_schedule": (1, "#638 stage 9: read while the process-run lock is held (an IRQ-masking Mutex guard), so no tick switches the task before the answer is used under that lock, inside the switch tail's PreemptOff span (#1323)"),
     "kernel/kernel/process.tkb::kernel_process_tick_leave_excluded": (1, "#638 stage 9: an !{interrupt} root, read under the run lock in the tick"),
     "kernel/kernel/process.tkb::kernel_process_tick_wake_if_due": (1, "#638 stage 9: an !{interrupt} root (the timer tick), entered with IRQs masked"),

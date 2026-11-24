@@ -7187,30 +7187,103 @@ fn kernel_process_reschedule_if_excluded_here() {
     if (allowed == false) { kernel_process_request_reschedule(); }
 }
 
-// The gate handed this peer's current syscall away, and its frame has
-// already been rewound. Publish this peer as having no current EL0 context,
-// as an exit to idle does; the process stays Running, and so unselectable,
-// until kernel_process_stack_idle_yield has moved this CPU off its stack.
-//
-// Affinity excluded this CPU at dispatch (#1330). A remote affinity update
-// may admit it again before this lock is acquired; publish the saved frame
-// and yield without inferring a core-0-only call from that changed answer.
-fn kernel_process_migrate_current(frame: borrow FrameRef[process, level]) -> bool !{changes_witness_ProcessCurrent} {
-    preempt_off (execution_cpu) {
-        // core-role: affinity exclusion on a peer returns to architectural idle;
-        // core 0 uses its syscall-return scheduling path
-        if (cpu_id() == 0) { return false; }
+// Carries untouched syscall admission to the dispatcher boundary. The second
+// run-lock hold checks the same generation, slot and physical stack again.
+private linear struct SyscallMigrationPermit[process: usize] {
+    private generation: usize;
+    private slot: ProcessSlot;
+}
+
+must_use variant SyscallMigrationAdmission[process: usize] {
+    Admitted;
+    Requested(SyscallMigrationPermit[process]);
+}
+
+inline fn kernel_process_syscall_migration_prepare(generation: usize @ process) -> SyscallMigrationAdmission[process] {
+    preempt_off (cpu) {
         let guard = process_run_lock();
-        if (execution_state[execution_cpu].current_live == false) {
+        let here: usize = cpu_here_index(cpu);
+        let ProcessCurrentRead::Running(current) = kernel_process_current_read() else {
+            ProcessCurrentRead::Idle => {
+                process_run_unlock(guard);
+                return SyscallMigrationAdmission::Admitted;
+            }
+        };
+        let mut slot: ProcessSlot = process_slot_of(current.pool_index);
+        if (kernel_process_cpu_allows_slot(guard, here, slot)) {
             process_run_unlock(guard);
-            return false;
+            return SyscallMigrationAdmission::Admitted;
         }
-        scheduled_process_record_live_locked(guard, execution_state[execution_cpu].current_handle).saved_sp = frame_ref_address(frame);
-        execution_current_set_live(guard, execution_cpu, false);
-        execution_state[execution_cpu].scheduler_enabled = false;
-        execution_state[execution_cpu].reschedule_pending = false;
+        if (here == 0) {
+            if (execution_state[cpu].scheduler_enabled) {
+                execution_state[cpu].reschedule_pending = true;
+                process_test_evidence_record_deferred_request();
+            }
+            process_run_unlock(guard);
+            return SyscallMigrationAdmission::Admitted;
+        }
         process_run_unlock(guard);
-        return true;
+        let mut pending: SyscallMigrationPermit[process] = { generation, slot };
+        return SyscallMigrationAdmission::Requested(pending);
+    }
+}
+
+must_use variant SyscallMigrationCommit[process: usize] {
+    Readmitted(FrameRef[process, ExceptionLevel::El0]);
+    Refused(FrameRef[process, ExceptionLevel::El0]);
+    Departed(PreemptOff[0]);
+}
+
+private fn syscall_migration_permit_identity(pending: sink SyscallMigrationPermit[process])
+        -> (usize, usize) {
+    return (pending.generation, pending.slot.word);
+}
+
+fn kernel_process_migrate_current(pending: sink SyscallMigrationPermit[process],
+        frame: sink FrameRef[process, ExceptionLevel::El0])
+        -> SyscallMigrationCommit[process] !{changes_witness_ProcessCurrent} {
+    let (expected, expected_slot) = syscall_migration_permit_identity(pending);
+    let span = preempt_span_begin();
+    preempt_off (cpu) {
+        let guard = process_run_lock();
+        let here: usize = cpu_here_index(cpu);
+        if (execution_state[cpu].current_live == false || execution_state[cpu].stack_live == false) {
+            process_run_unlock(guard);
+            preempt_span_end(span);
+            return SyscallMigrationCommit::Refused(frame);
+        }
+        let mut current: ProcessHandle = execution_state[cpu].current_handle;
+        let mut stack: ProcessHandle = execution_state[cpu].stack_handle;
+        let mut slot: ProcessSlot = process_slot_of(current.pool_index);
+        if (current.generation != expected || slot.word != expected_slot ||
+                current.generation != stack.generation ||
+                process_slot_same(slot, process_slot_of(stack.pool_index)) == false ||
+                scheduled_process_handle_matches(current) == false ||
+                scheduled_process_state_of_locked(guard, current) != ProcessSlotState::Running ||
+                kernel_process_frame_belongs_to(current, frame) == false ||
+                scheduled_process_record_live_locked(guard, current).stack_owner_cpu != here) {
+            process_run_unlock(guard);
+            preempt_span_end(span);
+            return SyscallMigrationCommit::Refused(frame);
+        }
+        let allowed: bool = kernel_process_cpu_allows_slot(guard, here, slot);
+        if (here == 0 || allowed) {
+            if (allowed == false && execution_state[cpu].scheduler_enabled) {
+                execution_state[cpu].reschedule_pending = true;
+                process_test_evidence_record_deferred_request();
+            }
+            process_run_unlock(guard);
+            preempt_span_end(span);
+            return SyscallMigrationCommit::Readmitted(frame);
+        }
+        // The syscall has not run. Rewind only after the last admission check.
+        el0_context_retry_syscall(frame);
+        scheduled_process_record_live_locked(guard, current).saved_sp = frame_ref_address(frame);
+        execution_current_set_live(guard, cpu, false);
+        execution_state[cpu].scheduler_enabled = false;
+        execution_state[cpu].reschedule_pending = false;
+        process_run_unlock(guard);
+        return SyscallMigrationCommit::Departed(span);
     }
 }
 

@@ -833,6 +833,17 @@ fn workload_profile_syscall_wait(number: usize) {
     mutex_irq_restore(irq_was_masked);
 }
 
+// A committed departure abandons this CPU's retry accounting. The next
+// admission on its destination is a new diagnostic attempt.
+fn workload_profile_syscall_depart() {
+    let irq_was_masked: usize = irq_save();
+    let cpu: usize = workload_profile_current_cpu();
+    if (cpu < KERNEL_MAX_CORES) {
+        atomic_word_store(&workload_profile_cores[cpu].syscall_retrying, 0);
+    }
+    mutex_irq_restore(irq_was_masked);
+}
+
 fn workload_profile_syscall_complete(number: usize) {
     let irq_was_masked: usize = irq_save();
     let cpu: usize = workload_profile_current_cpu();

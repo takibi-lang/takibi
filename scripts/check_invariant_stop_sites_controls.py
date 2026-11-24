@@ -30,14 +30,13 @@ def main():
     files = check.source_files()
     tsv = check.LIST.read_text(encoding="utf-8")
     planted = "\nfn planted_stop() {\n    kernel_invariant_stop();\n}\n"
-    grown = ("\nfn kernel_syscall_migrate_return_extra() {}\n")
+    grown = ("\nfn signal_return_exit_extra() {}\n")
     comment = ("\n// fn planted_comment() { kernel_invariant_stop(); }\n"
                "/* kernel_invariant_stop_with_frame(f); */\n"
                "fn kernel_invariant_stop() {}\n")
-    # One more stop inside a listed function (kernel_syscall_migrate_return
-    # has one row of 1).
-    anchor = ('let span = preempt_span_begin();\n'
-              '    if (kernel_process_migrate_current(frame) == false) {')
+    # One more stop inside the one-stop signal-return exit.
+    anchor = ('    // syscall tail fail-stops on Unreachable (its file reap failed) too.\n'
+              '    kernel_invariant_stop_with_frame(frame);')
     exec_grown = replace_once(files[FILE], anchor,
                               anchor + " kernel_invariant_stop();", FILE)
     cases = {

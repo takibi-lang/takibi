@@ -18,21 +18,24 @@ FIRST_COMMANDS = (
 
 
 def peer_affinity_gate_is_guarded(syscall: str, process: str) -> bool:
-    dispatch = syscall.find("fn kernel_syscall_dispatch_action(")
-    gate_start = syscall.find("if (cpu_id() != 0) {", dispatch)
-    reader = syscall.find(
-        "if (syscall_reaches_filesystem(number, x0, x2))", gate_start)
-    gate = (syscall[gate_start:reader]
-            if dispatch >= 0 and gate_start >= dispatch and
-            reader > gate_start else "")
-    return (
-        re.search(
-            r"fn kernel_process_current_cpu_allows\(\s*"
-            r"guard: borrow ProcessRunGuard\[process_run\]\)"
-            r" -> bool", process) is not None
-        and "let guard = process_run_lock();" in gate
-        and "kernel_process_current_cpu_allows(guard)" in gate
-        and "process_run_unlock(guard);" in gate
+    dispatch = syscall.find("fn kernel_syscall_dispatch(")
+    prepare = syscall.find("kernel_process_syscall_migration_prepare(generation)",
+                           dispatch)
+    commit = syscall.find("kernel_process_migrate_current(pending, original)",
+                          prepare)
+    body = syscall.find("kernel_syscall_dispatch_action(", commit)
+    start = process.find("fn kernel_process_syscall_migration_prepare(")
+    middle = process.find("fn kernel_process_migrate_current(", start)
+    end = process.find("must_use variant ProcessAffinityResult", middle)
+    if not (0 <= dispatch < prepare < commit < body and
+            0 <= start < middle < end):
+        return False
+    affinity_check = "kernel_process_cpu_allows_slot(guard, here, slot)"
+    return all(
+        0 <= gate.find("let guard = process_run_lock();") <
+        gate.find(affinity_check) <
+        gate.find("process_run_unlock(guard);", gate.find(affinity_check))
+        for gate in (process[start:middle], process[middle:end])
     )
 
 
@@ -64,7 +67,8 @@ def busybox_sleep_probe_is_real(makefile: str, stdin: str,
                      if line and not line.startswith("#"))
     observer = syscall.find(
         "workload_ordinary_placement_note_syscall(number);")
-    dispatcher = syscall.find("kernel_syscall_dispatch_action(", observer)
+    dispatcher = syscall.find(
+        "kernel_process_syscall_migration_prepare(generation)", observer)
     sample_start = workload.find(
         "fn workload_ordinary_placement_note_syscall(number: usize) {")
     sample_end = workload.find(

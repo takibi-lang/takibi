@@ -108,8 +108,6 @@ el0_sync_body:
     b.eq    .Lsyscall_block
     cmp     x6, #6
     b.eq    .Lsyscall_wait_interrupt
-    cmp     x6, #9
-    b.eq    .Lsyscall_migrate
     mov     x0, #8
     mov     x1, sp
     b       el1_exception_evidence_from_frame
@@ -186,12 +184,6 @@ el0_sync_body:
     // primitives above instead of hand-rolling the restore-and-eret sequence.
     mov     x0, sp
     b       kernel_syscall_block_return
-
-.Lsyscall_migrate:
-    // GitHub issue #9: a syscall this peer may not run. The .tkb tail
-    // rewinds it and hands the process to core 0; it does not return.
-    mov     x0, sp
-    b       kernel_syscall_migrate_return
 
 .Lsyscall_wait_interrupt:
     /* Wait for an interrupt, then run this same syscall again --

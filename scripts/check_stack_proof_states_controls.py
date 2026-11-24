@@ -109,7 +109,7 @@ def main() -> int:
 
     CASES.note()
     clean, _ = check.check_frames({
-        "control.tkb": "fn kernel_syscall_migrate_return(frame_sp: usize) {\n"
+        "control.tkb": "fn kernel_syscall_dispatch(frame_sp: usize) {\n"
                        "    let mut f: FrameRef = frame_ref_from_el0_entry(frame_sp);\n"
                        "}\n"})
     if clean:

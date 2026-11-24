@@ -77,7 +77,7 @@ FRAME_USIZE_SEAMS = {
     "kernel_syscall_block_return", "kernel_syscall_block_choose",
     "kernel_syscall_resume_return",
     "kernel_syscall_clone_child_return",
-    "kernel_syscall_clone_parent_return", "kernel_syscall_migrate_return",
+    "kernel_syscall_clone_parent_return",
     "kernel_process_stack_switch_complete", "platform_irq_dispatch",
     "platform_el0_irq_dispatch", "kernel_syscall_dispatch",
     # el0_irq_entry's after_switch, which hands frame_sp straight to

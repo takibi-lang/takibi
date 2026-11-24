@@ -93,13 +93,21 @@ def main() -> int:
         "-> usize {", "fn kernel_process_current_parent_pid() -> usize {")
     assert not check.busybox_sleep_probe_is_real(
         makefile, stdin, workload, syscall, no_run_guard)
-    no_affinity_gate_lock = replace_once(syscall, "let guard = process_run_lock();\n"
-        "        let current_cpu_allows: bool =\n"
-        "            kernel_process_current_cpu_allows(guard);\n"
-        "        process_run_unlock(guard);", "let current_cpu_allows: bool =\n"
-        "            kernel_process_current_cpu_allows();")
+    prepare = process.index("fn kernel_process_syscall_migration_prepare(")
+    commit = process.index("fn kernel_process_migrate_current(", prepare)
+    for start in (prepare, commit):
+        rest = process[start:]
+        no_affinity_gate_lock = replace_once(
+            rest[:rest.index("kernel_process_cpu_allows_slot(guard, here, slot)")],
+            "let guard = process_run_lock();", "let guard = unavailable_lock();")
+        changed = process[:start] + no_affinity_gate_lock + rest[
+            rest.index("kernel_process_cpu_allows_slot(guard, here, slot)"):]
+        assert not check.busybox_sleep_probe_is_real(
+            makefile, stdin, workload, syscall, changed)
+    check_call = "kernel_process_migrate_current(pending, original)"
+    no_commit = replace_once(syscall, check_call, "unreviewed_affinity_commit()")
     assert not check.busybox_sleep_probe_is_real(
-        makefile, stdin, workload, no_affinity_gate_lock, process)
+        makefile, stdin, workload, no_commit, process)
     controls.append("actual CPU-source and run-lock-token controls")
     report_pass("ash-bin-inventory controls",
                 "current inventory passes; additions, omissions, and "
