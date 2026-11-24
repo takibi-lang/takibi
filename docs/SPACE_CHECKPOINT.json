@@ -1,12 +1,13 @@
 {
   "date": "2026-11-24",
   "event": "incremental",
-  "decision": "measured",
-  "source_sha256": "3a8e51fbf1c9fe4cbca013a4416dac0fa1516e7bdccb3fb1598941b32d2e00eb",
-  "workload": "Static normal linked QEMU and RPi5 kernels, with paired DDB event copy, renderer, and stopped-dispatch frame sizes from the main objects. This review keeps the production fingerprint of the previous DDB candidate on the refreshed openat base, which changes only the known-intermittent record.",
+  "decision": "reuse",
+  "source_sha256": "cf42c8817fb614bb351a7401d8113565207b8c6e8c190e3146ffc2d909912018",
+  "workload": "Reuse the refreshed DDB review for the normal linked kernel and the existing allocator workload. This slice strengthens successful ABI output checks in the existing EL0 boot and affinity fixtures. The changed openat retry record leaves the production fingerprint of the previous ABI candidate unchanged.",
   "evidence": [
-    "docs/GLOBAL_PROTECTION.md"
+    "docs/GLOBAL_PROTECTION.md",
+    "docs/MEMORY_SAFETY_CONTRACT.md"
   ],
-  "assessment": "Borrowing the existing complete-stop token adds 16 B of QEMU text and 32 B of RPi5 text. The DDB renderer frame increases 32 B to 608 B on both targets. The copy and dispatcher frames, data and BSS sizes, usable-RAM boundary, and retained ring storage are unchanged.",
-  "next_trigger": "Remeasure if a DDB reader changes the ring representation, debugger frame shape, or the retained diagnostic workload."
+  "assessment": "The fixture assertions use existing output buffers and syscall cases. Kernel handlers, production storage declarations, and allocation policy are unchanged. The embedded fixture image and helper frames can change; the reuse assessment does not assert linked-image byte identity or a fresh measurement on this revision.",
+  "next_trigger": "Measure again when a completed milestone, a retained diagnostic representation, or an allocation workload changes."
 }
