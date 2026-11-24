@@ -1711,11 +1711,11 @@ private fn ddb_render_trace(stopped: borrow MachineStopped[&kernel_world_stop]) 
 // + 3] was `a`, and the only thing tying that 3 to the writer's own
 // `base + 3` was that both were typed by the same person on the same day.
 // The records are DiagnosticEvent now and the fields have their names.
-private fn ddb_render_events() !{interrupt, unsafe} {
+private fn ddb_render_events(stopped: borrow MachineStopped[&kernel_world_stop]) !{interrupt, unsafe} {
     let mut records: [DiagnosticEvent; DIAGNOSTIC_TRACE_EVENTS];
     for cpu: usize in 0..<DIAGNOSTIC_TRACE_CPUS {
         let mut copied: DiagnosticTraceCopyResult =
-            diagnostic_trace_copy_cpu(cpu, records as []DiagnosticEvent);
+            diagnostic_trace_copy_cpu(stopped, cpu, records as []DiagnosticEvent);
         ddb_puts("ddb: events cpu="); ddb_put_udec(cpu);
         ddb_puts(" count="); ddb_put_udec(copied.count);
         ddb_puts(" damaged="); ddb_put_udec(copied.damaged);
@@ -2978,7 +2978,7 @@ private fn kernel_ddb_enter_stopped(
         } else if (ddb_command_is(line as []u8, length, bs"wait")) {
             ddb_render_wait(stopped_world);
         } else if (ddb_command_is(line as []u8, length, bs"events")) {
-            ddb_render_events();
+            ddb_render_events(stopped_world);
         } else if (ddb_command_is(line as []u8, length, bs"unimpl")) {
             ddb_render_unimpl();
         } else if (ddb_command_is(line as []u8, length, bs"log")) {

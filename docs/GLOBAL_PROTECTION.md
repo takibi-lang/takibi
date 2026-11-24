@@ -193,6 +193,18 @@ A row whose 2026-10-06 label stopped describing the global stays `unreviewed`
 with a dated note saying so, even when it has a reader, until a review gives it
 a why that does describe the global.
 
+The diagnostic event reader is a narrower case: the Takibi entry
+`diagnostic_trace_copy_cpu` requires a borrowed complete `MachineStopped`
+for `kernel_world_stop`. A partial stop cannot read through that entry.
+Live writers still use the publication sequence protocol, and GDB reads
+the ring externally, so `diagnostic_trace_records` remains an allowance.
+
+The normal linked QEMU and RPi5 kernels add 16 and 32 bytes of text,
+respectively. Data and BSS sizes and the usable-RAM start are unchanged.
+On both targets the DDB event renderer frame increases from 576 to 608
+bytes, the copy frame stays at 112 bytes, and the stopped dispatcher frame
+stays at 320 bytes. No ring storage or allocation changed.
+
 ## Classification of the remaining rows, 2026-10-31
 
 Each of the 164 rows then unreviewed was read in the code and the uses table. 148

@@ -18,6 +18,8 @@
 // - Eight records per CPU retain only a short diagnostic tail.
 // - DDB stop refusals that cannot use the console are always recorded.
 //   Other events are enabled only by debugger test configuration.
+// - The kernel reader requires a complete world stop. The external GDB
+//   reader follows the debugger stop protocol.
 // - Readers preserve per-CPU order only. They do not invent a global order
 //   between CPUs and do not yet carry timestamps for causal correlation.
 // - A writer must set all six payload fields before publish_commit. Since
@@ -25,6 +27,7 @@
 //   not a zero left by publish_begin's scrub.
 
 use "kernel/lib/atomic_word.tkb";
+use "kernel/lib/occupancy.tkb";
 const DIAGNOSTIC_TRACE_CPUS: usize = 4;
 const DIAGNOSTIC_TRACE_EVENTS: usize = 8;
 const DIAGNOSTIC_TRACE_SLOTS: usize = 32;
@@ -119,7 +122,8 @@ fn diagnostic_trace_record_uart_break(data: usize) !{interrupt, unsafe} {
 // and after each record, so a wrap during the copy becomes `damaged` rather
 // than plausible stale data -- that re-check is the compiler's now, and it
 // is the step this loop used to have to remember.
-fn diagnostic_trace_copy_cpu(cpu: usize,
+fn diagnostic_trace_copy_cpu(
+        _stopped: borrow MachineStopped[&kernel_world_stop], cpu: usize,
         output: borrow uninit [DiagnosticEvent; DIAGNOSTIC_TRACE_EVENTS..])
         -> DiagnosticTraceCopyResult !{interrupt, unsafe}
         ensures init_fields(output[0..<result.count]) {
