@@ -1,12 +1,12 @@
 {
   "date": "2026-11-24",
-  "event": "milestone",
+  "event": "incremental",
   "decision": "measured",
-  "source_sha256": "a08c87ca67e4e2471a8bb3a4461f9e09042de74b4b0653023467cb84db5c8233",
-  "workload": "Normal linked kernels against 18fa7046c and focused QEMU O_CREAT and O_TRUNC openat paths through ordinary reader drain.",
+  "source_sha256": "3a8e51fbf1c9fe4cbca013a4416dac0fa1516e7bdccb3fb1598941b32d2e00eb",
+  "workload": "Static normal linked QEMU and RPi5 kernels, with paired DDB event copy, renderer, and stopped-dispatch frame sizes from the main objects. This review keeps the production fingerprint of the previous DDB candidate on the refreshed openat base, which changes only the known-intermittent record.",
   "evidence": [
-    "docs/EXT2_READER_DRAIN_SPACE_REVIEW.md"
+    "docs/GLOBAL_PROTECTION.md"
   ],
-  "assessment": "Linked text accounting grows by 32 bytes on each target. Shared guard release and completion preserve usable RAM starts. Data and BSS symbol sizes and dispatch frames match the baseline.",
-  "next_trigger": "Remeasure when another ext2 syscall parks, the waiting representation changes, or physical contention is measured."
+  "assessment": "Borrowing the existing complete-stop token adds 16 B of QEMU text and 32 B of RPi5 text. The DDB renderer frame increases 32 B to 608 B on both targets. The copy and dispatcher frames, data and BSS sizes, usable-RAM boundary, and retained ring storage are unchanged.",
+  "next_trigger": "Remeasure if a DDB reader changes the ring representation, debugger frame shape, or the retained diagnostic workload."
 }
