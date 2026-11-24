@@ -281,6 +281,7 @@ must_use variant DiskIoResult {
 // matched result cannot be forwarded, so the mapping is where the outcome
 // is read.
 must_use variant XhciAddressOutcome {
+    EnableSlot;
     Ok;
     SlotIdOutOfRange(u32);
     PortReset;
@@ -1036,7 +1037,18 @@ fn xhci_setup_rings_and_start(guard: borrow BlockDeviceGuard[&block_device_lock]
     return run_confirmed;
 }
 
-fn xhci_enable_slot(guard: borrow BlockDeviceGuard[&block_device_lock]) -> bool !{unsafe} {
+private linear view XhciDcbaaEnabled[slot: usize, generation: usize];
+private linear view XhciDcbaaPublished[slot: usize, generation: usize];
+
+// The only caller checks the matching completion and borrows the same
+// device guard from submission through the lifetime of this witness.
+private inline fn xhci_dcbaa_enabled(slot: {1..<65 as usize} @ s,
+        generation: usize @ g) -> XhciDcbaaEnabled[s, g] {
+    return view XhciDcbaaEnabled[s, g];
+}
+
+private fn xhci_enable_slot(guard: borrow BlockDeviceGuard[&block_device_lock])
+        -> XhciAddressOutcome !{unsafe} {
     // Enable Slot, Cycle=1, at the Command Ring's first TRB. Written here
     // with its doorbell (GitHub issue #783), not at controller start: the
     // controller reads a command TRB only after the doorbell.
@@ -1047,45 +1059,58 @@ fn xhci_enable_slot(guard: borrow BlockDeviceGuard[&block_device_lock]) -> bool 
     td[2] = enable_slot;
     let enable_cc: u32 = xhci_ring_submit(guard, XHCI_RING_CMD, 0, 0, 0, 0, 1000, 1,
                                           td as [Trb; 3..]);
-    if (enable_cc == 0) {
-        return false;
-    }
-    guarded_ref(guard, xhci_msc_device.slot_id) = ((guarded_ref(guard, xhci_event_seen.last_dw3) >> 24) & 0xFF) as usize;
-    return true;
+    // Under the same guard, the matching event supplies the slot and the
+    // command completion counter supplies the operation's generation.
+    let slot: {1..<65 as usize} =
+        match xhci_enabled_slot(enable_cc, guarded_ref(guard, xhci_event_seen.last_dw3)) {
+            XhciEnabledSlot::Failed => { return XhciAddressOutcome::EnableSlot; }
+            XhciEnabledSlot::OutOfRange(reported) => {
+                return XhciAddressOutcome::SlotIdOutOfRange(reported);
+            }
+            XhciEnabledSlot::Slot(valid) => { valid }
+        };
+    let generation: usize = xhci_command_generation(guard);
+    guarded_ref(guard, xhci_msc_device.slot_id) = slot;
+    let enabled = xhci_dcbaa_enabled(slot, generation);
+    return xhci_address_device(guard, slot, generation, enabled);
 }
 
-// Address Device: build the Input Context (Slot + EP0 Context), point
-// DCBAA[slot_id] at a fresh Device Context, and issue the Address Device
-// command -- but first, a real USB Port Reset. USBCMD.HCRST resets the
-// controller, not the device, and firmware already enumerated this drive
-// before handoff, so Address Device's implicit SET_ADDRESS needs the
-// device back in the Default state a port reset produces.
-fn xhci_address_device(guard: borrow BlockDeviceGuard[&block_device_lock]) -> XhciAddressOutcome !{unsafe} {
-    let dcbaa_base: usize = (xhci_dcbaa as *u8) as usize;
-    let slot_id: usize = guarded_ref(guard, xhci_msc_device.slot_id);
-    if (slot_id >= 65) {
-        return XhciAddressOutcome::SlotIdOutOfRange(slot_id as u32);
-    }
-    let slot: {0..<65 as usize} = slot_id;
-    // The output device context: the controller's for the session
-    // (XhciOutput in usb_xhci_rings.tkb).
-    let device_ctx_dma: usize = xhci_output_start(guard);
-    if (device_ctx_dma == 0) {
-        return XhciAddressOutcome::Completion(0);
-    }
-    xhci_dcbaa[slot * 2] = (device_ctx_dma & 0xFFFFFFFF) as u32;
-    xhci_dcbaa[slot * 2 + 1] =
-        ((device_ctx_dma >> 32) & 0xFFFFFFFF) as u32;
+private fn xhci_dcbaa_publish(guard: borrow BlockDeviceGuard[&block_device_lock],
+        slot: {1..<65 as usize} @ s,
+        generation: usize @ g, enabled: sink XhciDcbaaEnabled[s, g],
+        address: usize) -> XhciDcbaaPublished[s, g] !{unsafe} {
+    // Keep the slot identity at the API and use its plain range for indexing.
+    let index: {1..<65 as usize} = slot;
+    let low: {0..<130 as usize} = index * 2;
+    let high: {0..<130 as usize} = index * 2 + 1;
+    xhci_dcbaa[low] = (address & 0xFFFFFFFF) as u32;
+    xhci_dcbaa[high] = ((address >> 32) & 0xFFFFFFFF) as u32;
     xhci_dcbaa_clean();
+    return view XhciDcbaaPublished[s, g];
+}
 
-    let mut ep0_ring_dma: usize = 0;
-    match xhci_ring_dma(XHCI_RING_EP0) {
-        XhciRingAddress::Known(dma) => { ep0_ring_dma = dma; }
-        XhciRingAddress::Busy => { return XhciAddressOutcome::Completion(0); }
-    }
-    xhci_ring_set_cursor(XHCI_RING_EP0, 0, 1);
+// Leaving before submission does not retire the controller's output context.
+private fn xhci_dcbaa_abandon_enabled(enabled: sink XhciDcbaaEnabled[s, g]) {}
+private fn xhci_dcbaa_abandon_published(published: sink XhciDcbaaPublished[s, g]) {}
 
+private fn xhci_submit_address(guard: borrow BlockDeviceGuard[&block_device_lock],
+        slot: {1..<65 as usize} @ s, generation: usize @ g,
+        published: sink XhciDcbaaPublished[s, g], input_ctx_dma: usize) -> u32 !{unsafe} {
+    let mut address_device: Trb = {
+        (input_ctx_dma & 0xFFFFFFFF) as u32, ((input_ctx_dma >> 32) & 0xFFFFFFFF) as u32,
+        0, (1 | (11 << 10) | (slot << 24)) as u32
+    };
+    let mut td: [Trb; 3];
+    td[0] = address_device;
+    td[1] = address_device;
+    td[2] = address_device;
+    return xhci_ring_submit(guard, XHCI_RING_CMD, 0, 0, 1, 1, 1000, 1,
+                           td as [Trb; 3..]);
+}
 
+must_use variant XhciPortReset { Failed; Ready(u32); }
+
+private inline fn xhci_address_port_reset() -> XhciPortReset !{unsafe} {
     // Slot Context: Route String=0 (root-port-attached), Speed = the
     // value PORTSC3 itself reports (bits 13:10), Context Entries=1,
     // Root Hub Port Number=3 (usbhost0 port 3, this project's only ever
@@ -1131,7 +1156,7 @@ fn xhci_address_device(guard: borrow BlockDeviceGuard[&block_device_lock]) -> Xh
         delay_us(1000);
     }
     if (reset_confirmed == false) {
-        return XhciAddressOutcome::PortReset;
+        return XhciPortReset::Failed;
     }
 
     // Clear the change bits the reset raised (RW1C), same neutral mask.
@@ -1144,10 +1169,53 @@ fn xhci_address_device(guard: borrow BlockDeviceGuard[&block_device_lock]) -> Xh
     // Linux's hub_port_reset() waits 10ms + 40ms margin.
     delay_us(50000);
 
+    return XhciPortReset::Ready(slot_speed);
+}
+
+// Address Device: build the Input Context (Slot + EP0 Context), point
+// DCBAA[slot_id] at a fresh Device Context, and issue the Address Device
+// command -- but first, a real USB Port Reset. USBCMD.HCRST resets the
+// controller, not the device, and firmware already enumerated this drive
+// before handoff, so Address Device's implicit SET_ADDRESS needs the
+// device back in the Default state a port reset produces.
+private fn xhci_address_device(guard: borrow BlockDeviceGuard[&block_device_lock],
+        slot: {1..<65 as usize} @ s, generation: usize @ g,
+        enabled: sink XhciDcbaaEnabled[s, g]) -> XhciAddressOutcome !{unsafe} {
+    // The output context remains owned by the controller's session, even
+    // if this Address command is never submitted or does not complete.
+    let device_ctx_dma: usize = xhci_output_start(guard);
+    if (device_ctx_dma == 0) {
+        xhci_dcbaa_abandon_enabled(enabled);
+        return XhciAddressOutcome::Completion(0);
+    }
+    let published = xhci_dcbaa_publish(guard, slot, generation, enabled, device_ctx_dma);
+
+    let mut ep0_ring_dma: usize = 0;
+    match xhci_ring_dma(XHCI_RING_EP0) {
+        XhciRingAddress::Known(dma) => { ep0_ring_dma = dma; }
+        XhciRingAddress::Busy => {
+            xhci_dcbaa_abandon_published(published);
+            return XhciAddressOutcome::Completion(0);
+        }
+    }
+    xhci_ring_set_cursor(XHCI_RING_EP0, 0, 1);
+
+
+    let slot_speed: u32 = match xhci_address_port_reset() {
+        XhciPortReset::Failed => {
+            xhci_dcbaa_abandon_published(published);
+            return XhciAddressOutcome::PortReset;
+        }
+        XhciPortReset::Ready(speed) => { speed }
+    };
+
     // The input context is built here, right before the command that reads
     // it, so it is never held across a loop or an early return.
     let XhciInputTake::Ready(input) = xhci_input_take(guard) else {
-        XhciInputTake::Unavailable => { return XhciAddressOutcome::Completion(0); }
+        XhciInputTake::Unavailable => {
+            xhci_dcbaa_abandon_published(published);
+            return XhciAddressOutcome::Completion(0);
+        }
     };
     xhci_input_set(input, 0, 0);
     xhci_input_set(input, 1, 3); // A0 (Slot) | A1 (EP0)
@@ -1161,20 +1229,9 @@ fn xhci_address_device(guard: borrow BlockDeviceGuard[&block_device_lock]) -> Xh
     xhci_input_set(input, 2 * ctx + 3, ((ep0_ring_dma >> 32) & 0xFFFFFFFF) as u32);
     xhci_input_set(input, 2 * ctx + 4, 8);
     let input_ctx_dma: usize = xhci_input_submit(guard, input);
-    let mut address_device: Trb = {
-        (input_ctx_dma & 0xFFFFFFFF) as u32, ((input_ctx_dma >> 32) & 0xFFFFFFFF) as u32,
-        0, (1 | (11 << 10) | (guarded_ref(guard, xhci_msc_device.slot_id) << 24)) as u32
-    };
-
-    // The port reset above queues its own async Port Status Change
-    // Event (Type 34), which lands before Address Device's real Command
-    // Completion Event (Type 33) -- usb_await_event() scans past it.
-    let mut td: [Trb; 3];
-    td[0] = address_device;
-    td[1] = address_device;
-    td[2] = address_device;
-    let addr_cc: u32 = xhci_ring_submit(guard, XHCI_RING_CMD, 0, 0, 1, 1, 1000, 1,
-                                        td as [Trb; 3..]);
+    // Port reset can enqueue an asynchronous status event before the real
+    // command completion. The existing ring matcher skips that event.
+    let addr_cc: u32 = xhci_submit_address(guard, slot, generation, published, input_ctx_dma);
     if (addr_cc != 1) {
         // usb_await_event() answers 0 when nothing arrived at all, and 0 is
         // not an xHCI completion code, so the caller can tell a command
@@ -1370,10 +1427,10 @@ fn usb_disk_initialize_stages(guard: borrow BlockDeviceGuard[&block_device_lock]
     if (xhci_setup_rings_and_start(guard) == false) {
         return UsbInitOutcome::RingSetup;
     }
-    if (xhci_enable_slot(guard) == false) {
-        return UsbInitOutcome::EnableSlot;
-    }
-    match xhci_address_device(guard) {
+    match xhci_enable_slot(guard) {
+        XhciAddressOutcome::EnableSlot => {
+            return UsbInitOutcome::EnableSlot;
+        }
         XhciAddressOutcome::SlotIdOutOfRange(slot) => {
             return UsbInitOutcome::SlotIdOutOfRange(slot);
         }

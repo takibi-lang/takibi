@@ -75,6 +75,9 @@ struct XhciRingWords {
     private input_published_at: usize guarded_by(block_device_lock);
 }
 private let mut xhci_ring_words: XhciRingWords;
+fn xhci_command_generation(device: borrow BlockDeviceGuard[&block_device_lock]) -> usize {
+    return guarded_ref(device, xhci_ring_words.cmd_completions);
+}
 // GitHub issue #1159: each region is claimed once per boot; the first
 // caller wins the SetOnce claim and the rest take the reclaim path.
 private let mut xhci_rings_claimed: SetOnce(bool);

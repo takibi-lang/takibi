@@ -75,3 +75,20 @@ fn xhci_bulk_receive_length(status: u32, requested: u32) -> XhciBulkReceiveLengt
     }
     return XhciBulkReceiveLength::Received(requested - remaining);
 }
+
+
+// Decode the slot from a matching Enable Slot event. A silent or failed
+// command grants no authority, regardless of the previous event's slot.
+must_use variant XhciEnabledSlot {
+    Failed;
+    OutOfRange(u32);
+    Slot({1..<65 as usize});
+}
+
+inline fn xhci_enabled_slot(completion: u32, dw3: u32) -> XhciEnabledSlot {
+    if (completion != 1) { return XhciEnabledSlot::Failed; }
+    let slot: usize = (dw3 >> 24) as usize;
+    if (slot >= 65) { return XhciEnabledSlot::OutOfRange(slot as u32); }
+    if (slot < 1) { return XhciEnabledSlot::OutOfRange(slot as u32); }
+    return XhciEnabledSlot::Slot(slot);
+}

@@ -27,6 +27,16 @@ fn check_bulk_length(status: u32, requested: u32, expected: u32) -> bool {
     }
 }
 
+fn check_enabled_slot(completion: u32, slot: u32, expected: u32) -> bool {
+    match xhci_enabled_slot(completion, ev_dw3(33, 0, slot)) {
+        XhciEnabledSlot::Failed => { return expected == 0xFFFFFFFF; }
+        XhciEnabledSlot::OutOfRange(reported) => {
+            return expected == 0xFFFFFFFE && reported == slot;
+        }
+        XhciEnabledSlot::Slot(actual) => { return actual as u32 == expected; }
+    }
+}
+
 fn app_main() {
     // A ring above 4 GiB, so DWORD1 matters.
     let ring: usize = 0x100002000;
@@ -57,5 +67,11 @@ fn app_main() {
     say("bulk-empty    ", check_bulk_length((13 << 24) | 1024, 1024, 0));
     say("bulk-residual ", check_bulk_length((13 << 24) | 1025, 1024, 0xFFFFFFFF));
     say("bulk-no-event ", check_bulk_length(0, 1024, 0xFFFFFFFF));
+    say("enable-first  ", check_enabled_slot(1, 1, 1));
+    say("enable-last   ", check_enabled_slot(1, 64, 64));
+    say("enable-zero   ", check_enabled_slot(1, 0, 0xFFFFFFFE));
+    say("enable-oob    ", check_enabled_slot(1, 65, 0xFFFFFFFE));
+    say("enable-silent ", check_enabled_slot(0, 5, 0xFFFFFFFF));
+    say("enable-failed ", check_enabled_slot(9, 5, 0xFFFFFFFF));
 
 }

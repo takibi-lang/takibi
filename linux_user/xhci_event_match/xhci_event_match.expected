@@ -16,3 +16,9 @@ bulk-partial   match
 bulk-empty     match
 bulk-residual  match
 bulk-no-event  match
+enable-first   match
+enable-last    match
+enable-zero    match
+enable-oob     match
+enable-silent  match
+enable-failed  match
