@@ -31,9 +31,10 @@ state in this kernel is safe *because of* them:
   core since #597: each takes the guard before its path lookup, and a
   mutation waits for every CPU's counted readers, including a child
   execve's until its exec prepare has read the image.
-  With an ordinary syscall frame, `mkdirat`, `unlinkat` and `renameat`
-  park on a busy mutation lock or active readers, then recheck on the same
-  continuation. They acquire syscall scratch only after the readers drain.
+  With an ordinary syscall frame, `mkdirat`, `unlinkat`, `renameat`,
+  `truncate` and `ftruncate` park on a busy mutation lock or active readers,
+  then recheck on the same continuation. They acquire syscall scratch
+  after the readers drain.
   A `write` to an ext2 file runs on any core since #602: it reads the file
   position, checks its bound, writes, and advances the position all under
   the guard, so two writers sharing one open file serialize. A reader's

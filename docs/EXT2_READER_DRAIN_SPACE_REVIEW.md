@@ -125,3 +125,27 @@ All data and BSS symbols retain their sizes. The wait uses the existing
 task and guard state. Scratch acquisition follows reader drain, and
 fixture progress is reported after guard release. Peak depth and physical
 contention timing remain unmeasured.
+
+## Sleeping truncate and ftruncate
+
+The normal linked kernel baseline is `04724feab`. Two focused QEMU
+workloads issue actual truncate and ftruncate calls after positioning an
+open file at byte 3. In each, the observer holds a counted reader until
+the writer reaches the ordinary drain park, releases the count and checks
+resumption on the same frame, slot and generation. Each guest checks
+`EINVAL` for nonzero length, a zero final file size and an unchanged open
+offset after successful truncation.
+
+| Accounting boundary | QEMU baseline | QEMU candidate | RPi5 baseline | RPi5 candidate |
+| --- | ---: | ---: | ---: | ---: |
+| Linked text accounting (bytes) | 843704 | 843672 | 4239348 | 4239316 |
+| Linked data (bytes) | 4624 | 4624 | 5600 | 5600 |
+| Linked BSS (bytes) | 1310720 | 1310720 | 1896448 | 1896448 |
+| Usable RAM start | 0x40210000 | 0x40210000 | 0x7e0000 | 0x7e0000 |
+| Dispatch frame (bytes) | 320 | 320 | 288 | 288 |
+
+The two syscalls share the existing post-acquisition dispatch path. Their
+scratch allocation, validation and filesystem mutation follow reader
+drain. All data and BSS symbol sizes agree with the baseline. The QEMU
+observers force an event ordering. Physical contention timing and peak
+stack depth remain unmeasured.

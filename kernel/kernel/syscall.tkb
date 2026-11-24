@@ -7783,7 +7783,7 @@ private inline fn syscall_getdents_needs_reader(fd: usize, count: usize) -> bool
     return inode != 0 && inode != PROCFS_ROOT_INODE && inode != PROCFS_TAKIBI_INODE;
 }
 
-private inline fn syscall_ext2_path_mutate(
+private inline fn syscall_ext2_mutate_under(
         current: borrow ProcessCurrent[process, ProcessState::Running],
         guard: borrow Ext2MutationGuard[&ext2_mutation_lock],
         number: usize, x0: usize, x1: usize, x2: usize, x3: usize) -> usize !{unsafe} {
@@ -7794,7 +7794,10 @@ private inline fn syscall_ext2_path_mutate(
     if (number == 35) {
         return syscall_unlinkat_under(current, guard, x0, x1, x2);
     }
-    return syscall_renameat_under(current, guard, x0, x1, x2, x3);
+    if (number == 38) {
+        return syscall_renameat_under(current, guard, x0, x1, x2, x3);
+    }
+    return syscall_truncate_under(current, guard, number, x0, x1);
 }
 
 private inline fn syscall_note_ext2_path_mutation(number: usize, flags: usize, answer: usize) {
@@ -7803,7 +7806,7 @@ private inline fn syscall_note_ext2_path_mutation(number: usize, flags: usize, a
         workload_peer_mutation_note(1);
     } else if (number == 38) {
         workload_peer_mutation_note(2);
-    } else if (flags != 0) {
+    } else if (number == 35 && flags != 0) {
         workload_peer_mutation_note(4);
     }
 }
@@ -8202,7 +8205,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         return syscall_finish_current(frame, syscall_openat(current_authority, x0, x1, x2), current_authority);
     }
 
-    if (number == 34 || number == 35 || number == 38) {
+    if (number == 34 || number == 35 || number == 38 ||
+        number == AARCH64_NR_TRUNCATE || number == AARCH64_NR_FTRUNCATE) {
         let selected_mutation = match frame {
             MaybeFrame::Frame(entry) => {
                 let mut original: ProcessWaitIdentity = kernel_process_ext2_wait_begin(current_authority);
@@ -8223,18 +8227,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 return SyscallAction::Unreachable;
             }
         };
-        let answer: usize = syscall_ext2_path_mutate(resumed, guard, number, x0, x1, x2, x3);
+        let answer: usize = syscall_ext2_mutate_under(resumed, guard, number, x0, x1, x2, x3);
         kernel_ext2_mutation_give(guard);
         syscall_note_ext2_path_mutation(number, x2, answer);
         return syscall_finish_current(mutation_frame, SyscallAction::Resume(answer), resumed);
-    }
-
-    if (number == AARCH64_NR_TRUNCATE || number == AARCH64_NR_FTRUNCATE) {
-        let guard = ext2_mutation_take();
-        let answer: usize = syscall_truncate_under(current_authority, guard,
-                number, x0, x1);
-        kernel_ext2_mutation_give(guard);
-        return syscall_finish_current(frame, SyscallAction::Resume(answer), current_authority);
     }
 
     if (number == 61) {
