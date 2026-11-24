@@ -29129,7 +29129,7 @@ let raw_authority_policy_tests = [
             contains_substring message "an address becomes a region")
           (Raw_authority_policy.check ~source_program ~mint_files:[file] ()))));
 
-  (* GitHub issue #989: the cases of check_lock_discipline's retired RULE 2.
+  (* GitHub issue #989: count raw atomic intrinsic calls directly.
      A raw atomic intrinsic call is a counted site wherever it is called,
      even with no `unsafe` block of real authority around it. *)
   (* GitHub issue #996: the parse helper (Compilation_state.reset) clears

@@ -130,9 +130,8 @@ fn block_slot_acquire() -> BlockSlot[0] !{may_block} {
 // too, so one shared counter would lose increments to a race and understate
 // the very diff #208 is to be judged by.
 //
-// Per-slot AtomicWords (GitHub issue #1012). The raw atomic intrinsic that
-// scripts/check_lock_discipline.py once refused here is not involved:
-// AtomicWord's operations need no unsafe and no address, and a slot shared
+// Per-slot AtomicWords (GitHub issue #1012). AtomicWord operations need no unsafe
+// and no raw address, and a slot shared
 // by two holders (the flip) still counts every increment.
 private let mut block_read_calls: [AtomicWord; KERNEL_MAX_CORES];
 private let mut block_write_calls: [AtomicWord; KERNEL_MAX_CORES];

@@ -731,10 +731,11 @@ gone (#1080). Still masked:
   sites to carry the run out and still leave the fail-stop taker, so it stays
   a masking `Mutex` (#1096, 2026-10-26).
 
-A global `Mutex` needs no `mutex_init`: `.bss` is zeroed by both entry paths
-and a zeroed word is free. Calling `mutex_init` on one is worse than
-redundant, because it FORCE-FREES -- on two cores it releases a lock somebody
-else holds. `scripts/check_lock_discipline.py` makes that a build failure. A
+Both entry paths zero `.bss`, so a global mutex starts free.
+`task_mutex_init` force-frees a lock and is for private storage before
+publication. The QEMU and RPi5 build gates restrict its compiled callers
+to the two reviewed TCP record initialization functions. Source review
+binds their arguments to those records. A
 raw atomic intrinsic call is a raw site under `--confine-raw-authority`
 (GitHub issue #989), so `kernel/RAW_MINT_FILES` is the one list of files
 permitted to make one.

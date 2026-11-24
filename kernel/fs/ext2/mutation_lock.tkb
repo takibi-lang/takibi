@@ -91,7 +91,8 @@ use "kernel/lib/execution_model.tkb";
 
 // No initialisation: a global's .bss zero is already SPIN_LOCK_FREE, and
 // task_mutex_init FORCE-FREES, which on two cores releases a lock the other
-// core holds. scripts/check_lock_discipline.py's RULE 1 is that defect.
+// core holds. The resolved caller gate restricts task_mutex_init to TCP
+// record initialization.
 //
 // Not private (GitHub issue #1159, 2026-11-08): Ext2MutationGuard is indexed
 // by this lock's address, as ProcessRunGuard is by

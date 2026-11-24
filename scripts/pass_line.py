@@ -20,8 +20,8 @@ plus the counts its verdict rests on, and refuses to print PASS when one of
 them is zero:
 
     pass_line.report_pass(
-        "lock-discipline",
-        f"{len(files)} files checked; no global Mutex is initialised",
+        "file-inventory",
+        f"{len(files)} files checked against the inventory",
         files=len(files),
     )
 
@@ -73,7 +73,7 @@ def report_pass(check: str, message: str, *, stream=None,
                 **examined: int) -> None:
     """Print one PASS line, or exit 1 rather than pass about nothing.
 
-    `check` is the verdict tag ("lock-discipline"), `message` the check's own
+    `check` is the verdict tag ("file-inventory"), `message` the check's own
     sentence, and `examined` the counts that are zero when nothing was
     looked at. At least one is required.
 

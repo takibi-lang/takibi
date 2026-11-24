@@ -115,9 +115,8 @@ private linear struct LockedCellGuard[cell: addr] {
 
 // Acquires this cell. No mutex_init is needed or wanted for a cell in a
 // global: .bss is zeroed and a zeroed word is SPIN_LOCK_FREE, and
-// mutex_init FORCE-FREES, which on two cores releases a lock somebody
-// else is holding. kernel/lib/mutex.tkb has the whole argument, and
-// scripts/check_lock_discipline.py makes forgetting it a build failure.
+// explicitly resetting a live lock can release it while another core
+// holds it. See kernel/lib/mutex.tkb for the zero-initialization contract.
 fn locked_cell_take(T: type, cell: &mut LockedCell(T) @ id)
         -> LockedCellGuard[id]
         !{acquires_lock_40_locked_cell, lock_guard_40_locked_cell} {

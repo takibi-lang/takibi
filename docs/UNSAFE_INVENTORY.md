@@ -102,7 +102,8 @@ Notes on individual groups:
   a refined core number. The terminal, secondary-core, diagnostic-ring,
   block-cache, ext2 reader count, unimplemented-syscall, crash-trace, log and
   world-stop/occupancy words are cells; the files that still call an
-  intrinsic directly are the allowlist in `scripts/check_lock_discipline.py`.
+  intrinsic directly are confined to the compiler mint list in
+  `kernel/RAW_MINT_FILES`.
   A cell does not check the ordering argument between accesses, which is the
   part #613 asks the type system to carry. The counts in the table are the
   2026-09-29 baseline.

@@ -2262,7 +2262,6 @@ kernel-lib-check:
 	python3 scripts/check_kernel_lib_limitations_header.py $(KERNEL_DIR)/lib $(KERNEL_DIR)/kernel $(KERNEL_DIR)/net
 	python3 scripts/check_diagnostic_event_ids.py
 	python3 scripts/check_flag_guarded_fields.py $(KERNEL_DIR)
-	python3 scripts/check_lock_discipline.py
 	python3 scripts/check_lock_rank_wrappers.py
 	python3 scripts/check_guest_syscalls_dispatched.py
 	python3 scripts/check_liveness_proof_escapes.py
