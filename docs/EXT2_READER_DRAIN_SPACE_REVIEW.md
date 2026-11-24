@@ -149,3 +149,27 @@ scratch allocation, validation and filesystem mutation follow reader
 drain. All data and BSS symbol sizes agree with the baseline. The QEMU
 observers force an event ordering. Physical contention timing and peak
 stack depth remain unmeasured.
+
+## Sleeping mutating openat
+
+The normal linked kernel baseline is `18fa7046c`. The focused QEMU
+workloads exercise the ordinary writer wait through openat with
+`O_CREAT | O_EXCL` on a missing path and `O_TRUNC` on a populated file.
+Each observer holds an admitted reader until the writer reaches its
+drain park and checks the frame, slot and generation on resume. The
+guest checks file size, the exclusive-open error, and plain and
+exclusive procfs results.
+
+| Accounting boundary | QEMU baseline | QEMU candidate | RPi5 baseline | RPi5 candidate |
+| --- | ---: | ---: | ---: | ---: |
+| Linked text accounting (bytes) | 843672 | 843704 | 4239316 | 4239348 |
+| Linked data (bytes) | 4624 | 4624 | 5600 | 5600 |
+| Linked BSS (bytes) | 1310720 | 1310720 | 1896448 | 1896448 |
+| Usable RAM start | 0x40210000 | 0x40210000 | 0x7e0000 | 0x7e0000 |
+| Dispatch frame (bytes) | 320 | 320 | 288 | 288 |
+
+Sharing guard release and syscall completion recovers the 32 KiB QEMU
+alignment reservation observed with separate completion paths. Data and
+BSS symbols retain their sizes. The existing guard is acquired before
+path lookup, scratch use and descriptor allocation. The observers force
+the ordering. Physical contention timing and peak depth remain unmeasured.

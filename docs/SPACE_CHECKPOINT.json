@@ -2,11 +2,11 @@
   "date": "2026-11-24",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "6cfd94a86768dab275500e21295a514c00f4eb3ee0b92b8e2837789e0da40db1",
-  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto c2fb197f: this branch's review, rebound to the merged sources (upstream's record was 2026-11-23 incremental/reuse). Normal linked kernels against 04724feab and two focused QEMU workloads with real truncate or ftruncate draining a counted ext2 reader.",
+  "source_sha256": "a08c87ca67e4e2471a8bb3a4461f9e09042de74b4b0653023467cb84db5c8233",
+  "workload": "Normal linked kernels against 18fa7046c and focused QEMU O_CREAT and O_TRUNC openat paths through ordinary reader drain.",
   "evidence": [
     "docs/EXT2_READER_DRAIN_SPACE_REVIEW.md"
   ],
-  "assessment": "Linked text accounting falls by 32 bytes on each target. Data and BSS symbol sizes, usable RAM starts and dispatch frames match the published baseline. Both syscalls use the existing retained wait state.",
+  "assessment": "Linked text accounting grows by 32 bytes on each target. Shared guard release and completion preserve usable RAM starts. Data and BSS symbol sizes and dispatch frames match the baseline.",
   "next_trigger": "Remeasure when another ext2 syscall parks, the waiting representation changes, or physical contention is measured."
 }

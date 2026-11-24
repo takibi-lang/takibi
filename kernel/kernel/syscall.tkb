@@ -8192,20 +8192,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         return syscall_finish_write(frame, syscall_io_action(current_authority, sent), current_authority);
     }
 
-    if (number == 56 && (x2 & LINUX_O_MUTATING) != 0) {
-        let guard = ext2_mutation_take();
-        let action: SyscallAction =
-            syscall_openat_create_under(current_authority, guard, x0, x1, x2,
-                syscall_umasked(current_authority, x3, 0xFFF));
-        kernel_ext2_mutation_give(guard);
-        return syscall_finish_current(frame, action, current_authority);
-    }
-
-    if (number == 56) {
+    let mutating_open: bool = number == 56 && (x2 & LINUX_O_MUTATING) != 0;
+    if (number == 56 && mutating_open == false) {
         return syscall_finish_current(frame, syscall_openat(current_authority, x0, x1, x2), current_authority);
     }
 
-    if (number == 34 || number == 35 || number == 38 ||
+    if (mutating_open || number == 34 || number == 35 || number == 38 ||
         number == AARCH64_NR_TRUNCATE || number == AARCH64_NR_FTRUNCATE) {
         let selected_mutation = match frame {
             MaybeFrame::Frame(entry) => {
@@ -8227,10 +8219,20 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 return SyscallAction::Unreachable;
             }
         };
-        let answer: usize = syscall_ext2_mutate_under(resumed, guard, number, x0, x1, x2, x3);
+        let reply = match number {
+            56 => {
+                (syscall_openat_create_under(resumed, guard, x0, x1, x2,
+                    syscall_umasked(resumed, x3, 0xFFF)), 0 as usize)
+            }
+            _ => {
+                let answer: usize = syscall_ext2_mutate_under(resumed, guard, number, x0, x1, x2, x3);
+                (SyscallAction::Resume(answer), answer)
+            }
+        };
+        let (action, answer) = reply;
         kernel_ext2_mutation_give(guard);
         syscall_note_ext2_path_mutation(number, x2, answer);
-        return syscall_finish_current(mutation_frame, SyscallAction::Resume(answer), resumed);
+        return syscall_finish_current(mutation_frame, action, resumed);
     }
 
     if (number == 61) {
