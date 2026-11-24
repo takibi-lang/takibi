@@ -1,12 +1,14 @@
 {
   "date": "2026-11-24",
-  "event": "incremental",
+  "event": "milestone",
   "decision": "measured",
-  "source_sha256": "98f5667df5e196f384502ed2950f946737d2ffbb0db9ee456da6abb9c0a2f402",
-  "workload": "Normal linked QEMU and RPi5 images versus e275083b8 with the existing boot USB storage workload. Compare linked sections, symbol sizes and the Address Device static call frames.",
+  "source_sha256": "c591418361486bbec16646d7421cfd00730f0b949b7edd21cdafc8b2368ec03f",
+  "workload": "Matched normal QEMU and RPi5 linked production images for syscall affinity, ext2 boot mount and resolved TaskMutex callers against da5c749e1.",
   "evidence": [
-    "docs/XHCI_DCBAA_SPACE.md"
+    "docs/XHCI_DCBAA_SPACE.md",
+    "docs/SYSCALL_AFFINITY_HANDOFF_SPACE.md",
+    "docs/EXT2_MOUNT_SPACE.md"
   ],
-  "assessment": "QEMU ELF is byte-identical. RPi5 text adds 364 bytes, with unchanged data, BSS symbols, DCBAA layout and usable RAM. The static Address Device submission path adds 112 stack bytes before the common ring submit. No physical timing claim.",
-  "next_trigger": "Measure again when slot reuse, completion ordering, or the output-context storage contract changes."
+  "assessment": "The integrated candidate crosses one approved 32 KiB QEMU reservation step. RPi5 retains its usable RAM start.",
+  "next_trigger": "Remeasure after ext2 reader admission, idle handoff or syscall continuation changes and before general preemption."
 }

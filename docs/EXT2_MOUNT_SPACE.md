@@ -20,3 +20,16 @@ Against the same baseline, the combined normal QEMU image has 846612 B
 of text and RPi5 has 4240752 B. Data, BSS and usable RAM starts equal
 the standalone mount candidate on both targets. The two changes share one
 32 KiB reservation step on QEMU.
+
+## Combined candidate with DCBAA and resolved TaskMutex caller policy
+
+The integrated image was rebuilt on the DCBAA candidate da5c749e1.
+The table compares that baseline and the integrated normal images.
+
+| Image | Text before -> after | Data | BSS before -> after | Usable RAM start before -> after |
+| --- | ---: | ---: | ---: | --- |
+| QEMU | 843704 -> 846612 B | 4624 B | 1310720 -> 1310720 B | 0x40210000 -> 0x40218000 |
+| RPi5 | 4238240 -> 4241124 B | 5600 B | 1896448 -> 1892352 B | 0x7e0000 -> 0x7e0000 |
+
+The integrated changes cross the approved single 32 KiB QEMU reservation
+step. RPi5 retains its usable RAM start. These are linked-image measurements.
