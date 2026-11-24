@@ -1,13 +1,12 @@
 {
-  "date": "2026-11-21",
+  "date": "2026-11-24",
   "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "e54129499fb51533fb1ac03255d027e6a6e588d2a4ae7b4e2be3d627bf4951ef",
-  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 1ba90fed: this branch's review, rebound to the merged sources (upstream's record was 2026-11-24 incremental/reuse). Normal QEMU and RPi5 kernels linked against ab79a8441. The existing FDT boot log reads the first bank through the region result.",
+  "decision": "measured",
+  "source_sha256": "6149bd4a5dfc50fee951b248059092c0d8c769a6599c5bd83f146402f8ea119c",
+  "workload": "Normal linked QEMU and RPi5 kernels compared with 1ba90fed8; include the signal-probe frames and the static retained memory boundary. The admitted-drain overlay and native gate fixture are excluded from normal kernel storage.",
   "evidence": [
-    "docs/FRAME_API_SPACE_REVIEW.md",
     "docs/LANE_INVENTORY.md"
   ],
-  "assessment": "Parent linked measurements still apply. The build adds a distinct QEMU test overlay and invokes it from the existing probe-ticks lane. Normal compiler inputs, link inputs, allocator workload, and retained state are unchanged.",
-  "next_trigger": "Remeasure when FDT region logging or memory-bank allocation changes."
+  "assessment": "Sharing the departure and reuse predicates does not change normal linked text, data or BSS sizes, the usable-RAM start, or the signal-probe frames. The linked text bytes differ. The tests introduce no retained kernel storage or allocator policy change.",
+  "next_trigger": "Measure again when the signal probe changes its record placement, retained storage or admission and drain protocol."
 }
