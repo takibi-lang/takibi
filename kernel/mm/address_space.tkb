@@ -1337,18 +1337,30 @@ fn address_space_replace_with_zero(root: AddressSpaceRoot, index: usize) -> bool
     }
 }
 
+// Bound the temporary stack storage and the number of table pages waiting
+// for a walk-cache invalidate. Each populated branch contributes one page.
+const USER_L3_RETIRE_BATCH: usize = 16;
+
 // Each mapped user page transferred its PageOwner when it was installed.
 // Walk the L2 branches rather than retaining a parallel page-index list:
 // the actual table is the ownership record and each populated branch also
 // owns one dynamic L3 page. This handles clone rollback, image cleanup, and
 // root destruction without a USER_SPACE_PAGE_COUNT-sized shadow array.
+// The caller must exclude concurrent software walks of this user root.
+// Reaping gets this from the process lifetime handoff; a constructing
+// clone is unpublished, and current-image teardown owns the current root.
 fn address_space_release_user_mappings(root: AddressSpaceRoot) {
     let slot: usize = root.slot;
     if (address_space_root_key_valid(slot) == false) { return; }
     let checked: usize = slot;
     if (address_space_backing_read(root).live == false) { return; }
     let l2_physical: usize = address_space_backing_read(root).l2_physical;
+    let mut retired: [usize; USER_L3_RETIRE_BATCH];
+    for index: usize in 0..<USER_L3_RETIRE_BATCH { retired[index] = 0; }
+    let mut retire_next: {0..<USER_L3_RETIRE_BATCH as usize} = 0;
+    let mut had_tables: bool = false;
     for branch: usize in 0..<USER_L2_BRANCH_COUNT {
+        let mut full: bool = false;
         let l3_physical: usize = mmu_user_l3_physical(l2_physical, branch);
         if (l3_physical != 0) {
             for entry: usize in 0..<USER_L3_PAGE_COUNT {
@@ -1364,11 +1376,34 @@ fn address_space_release_user_mappings(root: AddressSpaceRoot) {
             }
             mmu_clear_user_table(l3_physical);
             mmu_user_l3_remove(l2_physical, branch);
-            page_transferred_release_physical(l3_physical);
+            retired[retire_next] = l3_physical;
+            let next: usize = retire_next + 1;
+            if (next < USER_L3_RETIRE_BATCH) {
+                retire_next = next;
+            } else {
+                full = true;
+            }
+            had_tables = true;
+        }
+        if (full || (retire_next != 0 && branch == USER_L2_BRANCH_COUNT - 1)) {
+            // Each unlink completed its store barrier. ASIDE1IS covers
+            // walk-cache entries as well as non-global leaf translations.
+            // An unactivated root has no cached translations to invalidate.
+            let asid: usize = address_space_backing_read(root).asid;
+            if (asid != 0) { mmu_tlb_invalidate_asid(asid); }
+            for index: usize in 0..<USER_L3_RETIRE_BATCH {
+                if (full || index < retire_next) {
+                    page_transferred_release_physical(retired[index]);
+                }
+            }
+            retire_next = 0;
         }
     }
-    let asid: usize = address_space_backing_read(root).asid;
-    if (asid != 0) { mmu_tlb_invalidate_asid(asid); }
+    // Preserve the existing whole-ASID maintenance for empty roots.
+    if (had_tables == false) {
+        let asid: usize = address_space_backing_read(root).asid;
+        if (asid != 0) { mmu_tlb_invalidate_asid(asid); }
+    }
 }
 
 fn address_space_clear_root(root: AddressSpaceRoot) {
@@ -1514,12 +1549,29 @@ fn process_address_space_probe_fill_first_branch(root: AddressSpaceRoot) -> bool
     return true;
 }
 
+// Two branches are already populated. Add one leaf to each remaining
+// branch in a full retirement batch and to the first branch of its tail.
+private fn process_address_space_probe_fill_retirement_batches(
+        root: AddressSpaceRoot) -> bool {
+    for branch: usize in 2..<USER_L3_RETIRE_BATCH + 1 {
+        match page_alloc(PageOwnerTag::PageTable) {
+            PageAllocResult::OutOfMemory => { return false; }
+            PageAllocResult::Allocated(page) => {
+                if (process_address_space_probe_map(root, branch * USER_L3_PAGE_COUNT, page) == false) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 // Exercises production ownership with two temporary roots. Root 1 maps
 // pages 511 and 512, on opposite sides of the former one-L3/2-MiB boundary;
-// it also maps pages 0 through 510, producing 513 mapped user pages. Root 2
-// maps the same low VA to a different page. The final root releases prove
-// that the L3 pages and transferred user pages are all reclaimed by a table
-// walk rather than by a fixed 512-entry shadow list.
+// it also maps pages 0 through 510 and sparse leaves through one full L3
+// retirement batch and a partial batch. Root 2 maps the same low VA to a
+// different page. The final root releases check that the allocator reclaims
+// the table pages and all the transferred user pages.
 fn process_address_space_probe() -> bool !{unsafe} {
     // GitHub issue #392: two roots of this probe's own. They used to be
     // the bare numbers 1 and 2, which named real roots only while any
@@ -1641,6 +1693,9 @@ fn process_address_space_probe() -> bool !{unsafe} {
                             let filled_first_branch: bool =
                                 first_ok && second_ok && third_ok &&
                                 process_address_space_probe_fill_first_branch(root_a_root);
+                            let filled_retire_batches: bool =
+                                filled_first_branch &&
+                                process_address_space_probe_fill_retirement_batches(root_a_root);
                             // The two EL0 VAs on either side of the old
                             // one-L3 boundary. They are reached only through
                             // user_memory's probe accessors, which validate
@@ -1648,13 +1703,15 @@ fn process_address_space_probe() -> bool !{unsafe} {
                             let low_address: usize = USER_TEXT_VA + 511 * PAGE_SIZE;
                             let high_address: usize = USER_TEXT_VA + 512 * PAGE_SIZE;
                             let mut mapped_ok: bool =
-                                filled_first_branch &&
+                                filled_retire_batches &&
                                 address_space_l3_physical_for_branch(root_a_root, 0) != 0 &&
                                 address_space_l3_physical_for_branch(root_a_root, 1) != 0 &&
                                 address_space_l3_physical_for_branch(root_a_root, 0) !=
                                 address_space_l3_physical_for_branch(root_a_root, 1) &&
                                 address_space_l3_physical_for_branch(root_b_root, 0) != 0 &&
-                                page_allocator_live_count() == before + 521;
+                                // Each extra branch owns one L3 and one leaf.
+                                page_allocator_live_count() ==
+                                    before + 521 + 2 * (USER_L3_RETIRE_BATCH - 1);
                             if (mapped_ok == false) {
                                if (filled_first_branch) { kernel_boot_log("1"); }
                                 else { kernel_boot_log("0"); }

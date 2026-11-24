@@ -1270,6 +1270,17 @@ owner-derived record loans; its owner remains alive until record removal.
 The existing typestate transition mints and current/root association remain
 trusted. PTE mutation and root release are separate ownership boundaries.
 
+User L3 retirement keeps detached table pages in a bounded local batch.
+The parent descriptor stores complete before the batch's walk-cache-inclusive
+ASID invalidation, whose completion precedes allocator reuse. The reaper's
+lifecycle handoff excludes ordinary execution and current-root walks. The
+departing CPU installs the boot root before releasing stack ownership, and
+the reaper exclusively takes that generation from Exited to Reaping.
+A stopped crash walk runs under complete machine-stop authority. Image
+cleanup and allocating clone rollback retain their own execution or
+construction authority. The invalidation does not drain software readers,
+and the common release helper still relies on its caller to exclude them.
+
 Synthetic root probes retain real owners with Running reservations while
 using their roots; they do not mint a current witness from a slot word.
 These probes allocate before ordinary dispatch opens. The image probe keeps
