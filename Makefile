@@ -509,6 +509,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/kernel/el1_preempt_scenario.tkb \
 	kernel/kernel/schedule_contention_evidence.tkb \
 	kernel/kernel/signal_contention_evidence.tkb \
+	kernel/lib/signal_probe_gate.tkb \
 	kernel/kernel/syscall.tkb \
 	kernel/kernel/security_floor.tkb \
 	kernel/kernel/syscall_test_evidence.tkb \
@@ -633,7 +634,7 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              affine_escape_via_index align_ptr_proof linear_obligation tuple_pair region_proto region_inspection pool_space_replay \
                              field_lease match_int_lit record_loans io_span \
                              callstack ringbuf crc8 djb2 siphash slice slice_from_field logical_eval foreach for loop fizzbuzz fibonacci \
-                             bubblesort lz4 inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring boot_once set_once guarded_ref publish fdt number usb_config usb_init_report xhci_event_match xhci_regs uart_rx_ring pl011_rx block_cache gem_tx_wait virtio_net_tx virtio_net_reply generic_variant runtime_bounds pin_placement place_array protocol_ring protocol_tx protocol_txrx protocol_snapshot region_held region_table_retire header_overlay cache_geometry wait_status plain_variant variant_abi struct_array_arg struct_array_result preempt_region src_loc
+                             bubblesort lz4 inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring boot_once set_once guarded_ref publish fdt number usb_config usb_init_report xhci_event_match xhci_regs uart_rx_ring pl011_rx block_cache gem_tx_wait virtio_net_tx virtio_net_reply generic_variant runtime_bounds pin_placement place_array protocol_ring protocol_tx protocol_txrx protocol_snapshot region_held region_table_retire header_overlay cache_geometry wait_status signal_probe_gate plain_variant variant_abi struct_array_arg struct_array_result preempt_region src_loc
 # GitHub issue #1035: linux_user/ext2_host is a driver program, not a
 # stdout-against-.expected test: scripts/ext2_host.py runs it (image on fd 3,
 # operations on stdin). It is built with the others, outside the loop below.
@@ -676,6 +677,8 @@ $(LINUX_USER_LZ4_FIXTURE): scripts/lz4_image.py
 $(LINUX_USER_DIR)/lz4/lz4_exe.o: kernel/lib/lz4.tkb kernel/lib/lz4_image.tkb $(LINUX_USER_LZ4_FIXTURE)
 $(LINUX_USER_DIR)/wait_status/wait_status_exe.o: kernel/kernel/wait_status.tkb
 $(LINUX_USER_DIR)/wait_status/wait_status_exe.o: LINUX_USER_EXTRA_SRCS := kernel/kernel/wait_status.tkb
+$(LINUX_USER_DIR)/signal_probe_gate/signal_probe_gate_exe.o: kernel/lib/signal_probe_gate.tkb
+$(LINUX_USER_DIR)/signal_probe_gate/signal_probe_gate_exe.o: LINUX_USER_EXTRA_SRCS := kernel/lib/signal_probe_gate.tkb
 # GitHub issue #470: the kernel's device-tree reader, run against a blob
 # shaped like the board's own. The blob is generated because it stands in
 # for another project's GPL binary; scripts/make_fdt_fixture.py carries the

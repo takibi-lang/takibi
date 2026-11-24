@@ -1,0 +1,18 @@
+// Pure transitions shared by the boot signal probe and its native control.
+//
+// Current limitations:
+// - Callers own atomic admission, closure and departure. These functions
+//   only interpret a gate word or compute the next CAS value.
+
+const SIGNAL_PROBE_GATE_STATE: usize = 3;
+const SIGNAL_PROBE_OPEN: usize = 1;
+const SIGNAL_PROBE_CLOSED: usize = 2;
+const SIGNAL_PROBE_ABANDONED: usize = 3;
+
+inline fn signal_probe_gate_after_leave(gate: usize, bit: usize) -> usize {
+    return gate & ~bit;
+}
+
+inline fn signal_probe_gate_can_open(gate: usize) -> bool {
+    return gate == 0 || gate == SIGNAL_PROBE_CLOSED;
+}

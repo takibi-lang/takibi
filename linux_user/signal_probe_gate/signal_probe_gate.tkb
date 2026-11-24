@@ -1,0 +1,18 @@
+// The live boot probe and this control use the same departure and reuse rules.
+fn app_main() {
+    let peer: usize = 1 << 2;
+    let closed_with_peer: usize = SIGNAL_PROBE_CLOSED | peer;
+    let abandoned_with_peer: usize = SIGNAL_PROBE_ABANDONED | peer;
+
+    if (signal_probe_gate_can_open(0) == false ||
+            signal_probe_gate_can_open(closed_with_peer) ||
+            signal_probe_gate_can_open(abandoned_with_peer)) { linux_exit(1); }
+    let drained = signal_probe_gate_after_leave(closed_with_peer, peer);
+    let late = signal_probe_gate_after_leave(abandoned_with_peer, peer);
+    if (drained != SIGNAL_PROBE_CLOSED ||
+            signal_probe_gate_can_open(drained) == false) { linux_exit(2); }
+    if (late != SIGNAL_PROBE_ABANDONED || signal_probe_gate_can_open(late)) {
+        linux_exit(3);
+    }
+    uart_puts("signal probe gate: drained can reopen, abandoned stays closed\n");
+}

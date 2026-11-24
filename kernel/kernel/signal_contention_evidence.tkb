@@ -40,6 +40,7 @@
 
 use "kernel/lib/peer_tick_window.tkb";
 use "kernel/lib/peer_round.tkb";
+use "kernel/lib/signal_probe_gate.tkb";
 use "kernel/kernel/process.tkb";
 use "kernel/lib/execution_model.tkb";
 
@@ -53,9 +54,6 @@ private let mut signal_probe_phase: AtomicWord;
 // The low two bits are initial (0), open (1), closed (2), or abandoned
 // (3). Bit cpu + 1 records each admitted peer. A single atomic word orders
 // closing admission against a peer entering after its idle-loop check.
-const SIGNAL_PROBE_GATE_STATE: usize = 3;
-const SIGNAL_PROBE_OPEN: usize = 1;
-const SIGNAL_PROBE_CLOSED: usize = 2;
 private let mut signal_probe_gate: AtomicWord;
 
 private linear struct SignalProbeVisit[gate: addr] { private bit: usize; }
@@ -124,7 +122,8 @@ private fn signal_probe_leave(visit: sink SignalProbeVisit[&signal_probe_gate]) 
     let bit: usize = visit.bit;
     let mut gate: usize = atomic_word_load(&signal_probe_gate);
     while (true) {
-        match atomic_word_compare_swap_acq_rel(&signal_probe_gate, gate, gate & ~bit) {
+        match atomic_word_compare_swap_acq_rel(&signal_probe_gate, gate,
+                signal_probe_gate_after_leave(gate, bit)) {
             CasResult::Swapped => { return; }
             CasResult::Observed(seen) => { gate = seen; }
         }
@@ -245,7 +244,7 @@ private fn signal_probe_round(round: usize, locked: bool) -> usize
 // A phase can reuse the record only after a complete close and drain.
 private fn signal_contention_run_phase(locked: usize) -> SignalProbePhase !{unsafe} {
     let gate: usize = atomic_word_load(&signal_probe_gate);
-    if (gate != 0 && gate != SIGNAL_PROBE_CLOSED) { return SignalProbePhase::Failed; }
+    if (signal_probe_gate_can_open(gate) == false) { return SignalProbePhase::Failed; }
     atomic_word_store(&signal_probe_phase, locked);
     atomic_word_store(&signal_probe_go, 0);
     peer_tally_reset(&signal_probe_done, kernel_online_core_count());

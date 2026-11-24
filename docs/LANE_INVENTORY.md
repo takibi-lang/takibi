@@ -68,3 +68,18 @@ TCG does not model the weak memory ordering of the Cortex-A76, so none of
 these lanes is memory-ordering evidence; that belongs to `make litmuscheck`
 and the RPi5 lanes. Keep this table in step when a lane is added, removed or
 merged.
+
+## Signal probe drain evidence
+
+The admitted-drain case in the existing probe-ticks lane observes actual
+admission, timeout, late departure and continued boot with the record left
+abandoned. Its host log oracle also refuses synthetic reopen and reset
+observations. The native `signal_probe_gate` fixture exercises the same
+departure and reuse predicates used by the kernel. It checks that the
+last departure permits a drained phase to reopen and leaves an abandoned
+phase closed. It does not model atomic ordering or schedule a peer.
+
+Sharing the two pure predicates leaves the normal linked text, data and
+BSS sizes and the usable-RAM start unchanged on QEMU and RPi5. The linked
+text bytes differ. Frames for the signal probe functions are unchanged on
+both targets; the phase takes 64 bytes and departure takes 16 bytes.
