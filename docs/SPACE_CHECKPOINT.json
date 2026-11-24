@@ -2,13 +2,11 @@
   "date": "2026-11-24",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "c591418361486bbec16646d7421cfd00730f0b949b7edd21cdafc8b2368ec03f",
-  "workload": "Matched normal QEMU and RPi5 linked production images for syscall affinity, ext2 boot mount and resolved TaskMutex callers against da5c749e1.",
+  "source_sha256": "6fb6e706fc9ca003a42fd3ff2724d6b11b14fbfddb5c138206a78de6d51e301a",
+  "workload": "Matched normal QEMU and RPi5 linked production images for killable ext2 reader admission after SVC affinity migration, against 4dcbfb3b3.",
   "evidence": [
-    "docs/XHCI_DCBAA_SPACE.md",
-    "docs/SYSCALL_AFFINITY_HANDOFF_SPACE.md",
-    "docs/EXT2_MOUNT_SPACE.md"
+    "docs/EXT2_READER_DRAIN_SPACE_REVIEW.md"
   ],
-  "assessment": "The integrated candidate crosses one approved 32 KiB QEMU reservation step. RPi5 retains its usable RAM start.",
-  "next_trigger": "Remeasure after ext2 reader admission, idle handoff or syscall continuation changes and before general preemption."
+  "assessment": "QEMU and RPi5 retain their usable RAM starts. The QEMU image remains within the previously approved 32 KiB reservation step.",
+  "next_trigger": "Remeasure changes to ext2 reader-writer admission or shared file-position lifetime."
 }

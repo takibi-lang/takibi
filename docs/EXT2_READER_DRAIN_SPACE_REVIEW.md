@@ -173,3 +173,19 @@ alignment reservation observed with separate completion paths. Data and
 BSS symbols retain their sizes. The existing guard is acquired before
 path lookup, scratch use and descriptor allocation. The observers force
 the ordering. Physical contention timing and peak depth remain unmeasured.
+
+## Ordinary reader admission after SVC affinity migration
+
+Matched normal images on 2026-11-24 against 4dcbfb3b3. The candidate
+adds ordinary reader admission and records the first fatal signal that
+commits termination during the wait.
+
+| Image | Text before -> after | Data | BSS | Usable RAM start |
+| --- | ---: | ---: | ---: | --- |
+| QEMU | 846612 -> 847676 B | 4624 B | 1310720 B | 0x40218000 |
+| RPi5 | 4241124 -> 4242116 B | 5600 B | 1892352 B | 0x7e0000 |
+
+The combined QEMU image remains within the already approved reservation
+step. Neither allocator start moves from this baseline. These figures
+measure linked images. Remeasure when the reader-writer admission policy
+or the shared file-position lifetime changes.
