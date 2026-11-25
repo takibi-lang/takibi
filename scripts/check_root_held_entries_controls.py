@@ -21,11 +21,20 @@ def main():
                 if line.startswith('root-held-fixture-scheduled_process_probe_root_slot\t'))
     release = next(line for line in caller_text.splitlines(True)
                    if line.startswith('root-held-fixture-scheduled_process_probe_slot_release\t'))
-    caller_mutations = [
+    fd_probe = 'kernel/kernel/fd_table.tkb:fd_refcount_contention_probe'
+    caller_mutations = []
+    for suffix in ('acquire', 'release', 'slot'):
+        prefix = f'root-held-fixture-scheduled_process_probe_root_{suffix}\t'
+        row = next(line for line in caller_text.splitlines(True)
+                   if line.startswith(prefix))
+        caller_mutations.append(replace_once(
+            caller_text, row, replace_once(row, fd_probe + ',', '')))
+    caller_mutations.extend([
         replace_once(caller_text, owned, ''),
         replace_once(caller_text, slot, replace_once(slot, '\t#1472\t', ',kernel/kernel/process.tkb:unreviewed\t#1472\t')),
         replace_once(caller_text, release, replace_once(release, '\t#1472\t', ',kernel/mm/address_space.tkb:process_address_space_probe\t#1472\t')),
-    ]
+        replace_once(caller_text, release, replace_once(release, '\t#1472\t', f',{fd_probe}\t#1472\t')),
+    ])
     for changed in caller_mutations:
         assert problems(sources, changed)
     fields = slot.split('\t')
