@@ -1152,3 +1152,32 @@ descriptor as path syscalls. The boot image plan itself is local to the
 test driver, which consumes it when it maps PID 1. Its slice still refers
 to the permanent rootfs metadata window. There is no second writable mount
 descriptor or globally stored image plan.
+
+### FD refcount probe publication (2026-11-25)
+
+The boot probe publishes one slot and generation in a SetOnce cell. Each
+peer reads the key at admission. Each attempt still calls the checked object
+retain and, on success, transfers a linear receipt containing that exact
+handle to release. A stale result is counted and the next scheduled attempt
+looks up the same key. The probe's process reservation is returned to Ready
+before descriptor installation. Failure before publication consumes the
+fixture owner and its Running state to return the process slot. The cell is
+classified as set_once in both production facts tables, removing one allowance
+(12 to 11).
+
+Against e49057f10, the SetOnce cell is 24 bytes, equal to the previous
+16-byte handle and 8-byte flag. Both normal images keep the same BSS and
+usable RAM start (QEMU 0x40218000, RPi5 0x7e0000).
+
+| Linked section | QEMU change | RPi5 change |
+| --- | ---: | ---: |
+| Executable .text | +496 B | +480 B |
+| .rodata | +32 B | +32 B |
+| .eh_frame | +120 B | +128 B |
+| .got | -8 B | -8 B |
+
+For both normal targets, the primary and secondary probe frames rise from
+64 to 96 and from 32 to 48 bytes. The cycle frame stays 32 bytes.
+Disassembly confirms the cycle takes its argument locally, with no
+publication read or extra constructor call. Remeasure if the key grows,
+admission moves, or process rollback changes.

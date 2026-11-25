@@ -1,12 +1,12 @@
 {
   "date": "2026-11-25",
-  "event": "milestone",
+  "event": "incremental",
   "decision": "measured",
-  "source_sha256": "4b553c18766a51b05fafe44cf5b95cd2fa493da0afdc0a859d89d06818dd53be",
-  "workload": "Matched normal QEMU and RPi5 linked images and the maintained address-space teardown with full and partial L3 batches, against published 1a44dbced.",
+  "source_sha256": "ee40b2aec24a07f91efbc646bf1f1f276bb090a219e9cf736c57733e4037fb95",
+  "workload": "Matched normal QEMU and RPi5 linked images for FD-refcount probe publication and typed setup rollback, against published e49057f10.",
   "evidence": [
-    "docs/USER_L3_RETIREMENT_SPACE.md"
+    "docs/GLOBAL_PROTECTION.md"
   ],
-  "assessment": "The release frame gains 144 bytes and holds up to sixteen detached L3 pages until invalidation completes. The RPi5 BSS alignment gap shrinks by one page. Both usable RAM starts remain unchanged.",
-  "next_trigger": "Remeasure when batch capacity, table coverage, release-path concurrency or the image reservation changes."
+  "assessment": "The publication cell remains 24 bytes, BSS and usable RAM are unchanged, and executable text grows by 496/480 bytes. Primary and secondary probe frames add 32 and 16 transient bytes; the hot cycle frame is unchanged.",
+  "next_trigger": "Remeasure when the key size, admission boundary, or process rollback changes."
 }
