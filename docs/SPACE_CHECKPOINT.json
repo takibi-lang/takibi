@@ -1,12 +1,12 @@
 {
-  "date": "2026-11-24",
+  "date": "2026-11-25",
   "event": "milestone",
   "decision": "measured",
   "source_sha256": "4b553c18766a51b05fafe44cf5b95cd2fa493da0afdc0a859d89d06818dd53be",
-  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 1a44dbce: this branch's review, rebound to the merged sources (upstream's record was 2026-11-25 incremental/measured). Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 22fa7c2f: this branch's review, rebound to the merged sources (upstream's record was 2026-11-24 incremental/reuse). Matched linked production kernels and the maintained address-space teardown with full and partial L3 batches, against 598ff7a94.",
+  "workload": "Matched normal QEMU and RPi5 linked images and the maintained address-space teardown with full and partial L3 batches, against published 1a44dbced.",
   "evidence": [
     "docs/USER_L3_RETIREMENT_SPACE.md"
   ],
-  "assessment": "The release frame gains 144 bytes and holds up to sixteen detached L3 pages until the batch invalidation completes. Both usable RAM starts remain unchanged.",
+  "assessment": "The release frame gains 144 bytes and holds up to sixteen detached L3 pages until invalidation completes. The RPi5 BSS alignment gap shrinks by one page. Both usable RAM starts remain unchanged.",
   "next_trigger": "Remeasure when batch capacity, table coverage, release-path concurrency or the image reservation changes."
 }

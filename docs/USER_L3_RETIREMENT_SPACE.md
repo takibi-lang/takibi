@@ -1,16 +1,21 @@
 # Bounded user L3 retirement space
 
 The matched normal QEMU and Raspberry Pi 5 production ELFs use
-`598ff7a94` as the baseline. Measurements use LLVM 19 linked section
+`1a44dbced` as the baseline. Measurements use LLVM 19 linked section
 accounting and the linked retirement function's stack prologue.
 
 | Boundary | QEMU baseline | QEMU batch | RPi5 baseline | RPi5 batch |
 |---|---:|---:|---:|---:|
-| Text, read-only and unwind data (bytes) | 847676 | 848108 | 4242116 | 4242604 |
+| Text, read-only and unwind data (bytes) | 848612 | 849052 | 4243156 | 4243636 |
 | Initialized writable data and GOT (bytes) | 4624 | 4624 | 5600 | 5600 |
-| BSS and stack sections (bytes) | 1310720 | 1310720 | 1892352 | 1892352 |
+| BSS and stack sections (bytes) | 1310720 | 1310720 | 1892352 | 1888256 |
 | Usable RAM start | 0x40218000 | 0x40218000 | 0x7e0000 | 0x7e0000 |
 | User mappings release frame (bytes) | 96 | 240 | 96 | 240 |
+
+On RPi5, the larger executable advances the read-only section and BSS
+start by one page. The existing padding before the RP1 DMA arena absorbs
+that page. The DMA arena, BSS end, stack reservations, usable RAM start,
+and writable symbol sizes stay fixed.
 
 The release frame contains the sixteen-word (128-byte) retirement array.
 One full batch can temporarily retain sixteen detached 4 KiB tables
