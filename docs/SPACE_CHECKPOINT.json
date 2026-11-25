@@ -1,13 +1,12 @@
 {
-  "date": "2026-11-25",
-  "event": "incremental",
+  "date": "2026-11-24",
+  "event": "milestone",
   "decision": "measured",
-  "source_sha256": "514cc29f0ceaef315b5921d6069dfac287a8d1d7088a0604c9a45be625445be8",
-  "workload": "Primary/secondary MMU bootstrap and protocol report on both normal kernels; reproduce the measured paired images on 22fa7c2f5.",
+  "source_sha256": "4b553c18766a51b05fafe44cf5b95cd2fa493da0afdc0a859d89d06818dd53be",
+  "workload": "Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 1a44dbce: this branch's review, rebound to the merged sources (upstream's record was 2026-11-25 incremental/measured). Re-recorded by scripts/checkpoint_rebase.py after a rebase onto 22fa7c2f: this branch's review, rebound to the merged sources (upstream's record was 2026-11-24 incremental/reuse). Matched linked production kernels and the maintained address-space teardown with full and partial L3 batches, against 598ff7a94.",
   "evidence": [
-    "docs/SECONDARY_BOOT_HANDOFF_SPACE.md",
-    "docs/PROTOCOL_TRACE_REPORT_SPACE.md"
+    "docs/USER_L3_RETIREMENT_SPACE.md"
   ],
-  "assessment": "Both ELF outputs match the measured paired images byte for byte. The handoff adds 16 bytes to boot root storage and the RPi5 text class grows 32 bytes over report-only. Both usable RAM starts are unchanged.",
-  "next_trigger": "Remeasure when the handoff layout, cache publication, trace event storage, or reservation changes."
+  "assessment": "The release frame gains 144 bytes and holds up to sixteen detached L3 pages until the batch invalidation completes. Both usable RAM starts remain unchanged.",
+  "next_trigger": "Remeasure when batch capacity, table coverage, release-path concurrency or the image reservation changes."
 }
