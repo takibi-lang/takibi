@@ -2016,6 +2016,10 @@ private fn kernel_process_protocol_observe(guard: borrow ProcessRunGuard[&schedu
 // outside the lock.
 fn kernel_process_protocol_trace_open() -> ProtocolTraceOpenResult {
     let guard = process_run_lock();
+    if (protocol_trace_reporting(guard)) {
+        process_run_unlock(guard);
+        return ProtocolTraceOpenResult::Busy;
+    }
     if (protocol_trace_open_probe(guard) == false) {
         process_run_unlock(guard);
         return ProtocolTraceOpenResult::Invalid;
@@ -2029,11 +2033,16 @@ fn kernel_process_protocol_trace_open() -> ProtocolTraceOpenResult {
     return result;
 }
 
-fn kernel_process_protocol_trace_close() -> usize {
+must_use variant ProtocolTraceCloseResult { Reported; Busy; }
+
+fn kernel_process_protocol_trace_close() -> ProtocolTraceCloseResult {
     let guard = process_run_lock();
-    protocol_trace_close();
+    let start = protocol_trace_begin_report(guard);
     process_run_unlock(guard);
-    protocol_trace_report();
+    let ProtocolTraceReportStart::Started(header) = start else {
+        ProtocolTraceReportStart::Busy => { return ProtocolTraceCloseResult::Busy; }
+    };
+    protocol_trace_report(header);
     // #638 stage 8: the switches themselves, which the trace's labels cannot
     // tell from a syscall return's (the replay accepts either as PreemptEL1).
     if (el1_preempt_switches_read() == 2 && el1_preempt_irq_return_resumes_read() >= 1) {
@@ -2041,7 +2050,10 @@ fn kernel_process_protocol_trace_close() -> usize {
     } else {
         kernel_boot_log("scheduler: el1 preempt: failed\n");
     }
-    return 1;
+    let done_guard = process_run_lock();
+    protocol_trace_end_report(done_guard);
+    process_run_unlock(done_guard);
+    return ProtocolTraceCloseResult::Reported;
 }
 
 // Lock-free record access tied to the complete machine stop. The private

@@ -79,12 +79,15 @@ BOOT_CONSTRUCTION = '''private fn address_space_initialize_boot_root()
                     let (numeric_asid, generation) = asid_assign_boot();
                     mmu_init_kernel_identity_tables();
                     mmu_init_root(l1_physical, l2_physical);
+                    address_space_backing_root0.secondary.l1_physical = l1_physical;
+                    address_space_backing_root0.secondary.asid = numeric_asid;
+                    kernel_boot_publish_secondary_root(&address_space_backing_root0.secondary);
                     kernel_mmu_activate(l1_physical, numeric_asid);
-                    address_space_backing_root0.l1_physical = l1_physical;
-                    address_space_backing_root0.l2_physical = l2_physical;
-                    address_space_backing_root0.asid = numeric_asid;
-                    address_space_backing_root0.asid_generation = generation;
-                    address_space_backing_root0.live = true;
+                    address_space_backing_root0.backing.l1_physical = l1_physical;
+                    address_space_backing_root0.backing.l2_physical = l2_physical;
+                    address_space_backing_root0.backing.asid = numeric_asid;
+                    address_space_backing_root0.backing.asid_generation = generation;
+                    address_space_backing_root0.backing.live = true;
                     page_owner_transfer_index(l1);
                     page_owner_transfer_index(l2);
                     return AddressSpaceAllocateResult::Ok;
@@ -93,6 +96,12 @@ BOOT_CONSTRUCTION = '''private fn address_space_initialize_boot_root()
         }
     }
 }'''
+
+SECONDARY_BOOT = '''fn kernel_mmu_init_secondary() !{mmu_off} {
+    kernel_mmu_activate(address_space_backing_root0.secondary.l1_physical,
+                        address_space_backing_root0.secondary.asid);
+}'''
+
 
 def compact(source):
     return re.sub(r'\s+', '', code_skeleton(source))
@@ -124,7 +133,13 @@ def problems(path, source):
                         if n == 'address_space_initialize_boot_root']
         if (len(constructors) != 1 or
                 compact(''.join(constructors[0])) != compact(BOOT_CONSTRUCTION)):
-            return ('root 0 must roll back a partial allocation and publish backing only after activation',)
+            return ('root 0 must roll back partial allocation, publish the handoff before activation and keep runtime backing publication after activation',)
+        handoff_users = [(n, h, b) for n, h, b in functions(source)
+                         if 'address_space_backing_root0.secondary' in compact(b)]
+        secondary = [compact(h + b) for n, h, b in handoff_users
+                     if n == 'kernel_mmu_init_secondary']
+        if (len(handoff_users) != 2 or secondary != [compact(SECONDARY_BOOT)]):
+            return ('secondary boot must read only the dedicated L1 and ASID handoff, with one primary writer',)
     return ()
 
 

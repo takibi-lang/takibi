@@ -186,3 +186,11 @@ el1_fpsimd_enable:
     msr     cpacr_el1, x0
     isb
     ret
+
+/* QEMU only enters through the MMU-off boot path. */
+    .global kernel_boot_publish_secondary_root
+    .type kernel_boot_publish_secondary_root, %function
+kernel_boot_publish_secondary_root:
+    dsb     sy
+    ret
+    .size kernel_boot_publish_secondary_root, .-kernel_boot_publish_secondary_root

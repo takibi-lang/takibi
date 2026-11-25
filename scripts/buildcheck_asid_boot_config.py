@@ -18,13 +18,14 @@ from pass_line import report_pass
 from struct_layout_gdb import read_structs
 
 ROOT = Path(__file__).resolve().parent.parent
+BOOT_STORAGE = 'address_space_backing_root0'
 
 
 def symbol_records(text):
     records = []
     for line in text.splitlines():
         fields = line.split()
-        if len(fields) == 8 and fields[0].endswith(':') and fields[-1] in WORDS:
+        if len(fields) == 8 and fields[0].endswith(':') and fields[-1] in (*WORDS, BOOT_STORAGE):
             records.append(dict(name=fields[7], address=int(fields[1], 16),
                                 size=int(fields[2]), kind=fields[3],
                                 binding=fields[4], visibility=fields[5], section=fields[6]))
@@ -72,17 +73,37 @@ def image_problems(data, symbols, sections, structs):
     return tuple(found)
 
 
+def handoff_layout_problems(symbols, sections, structs):
+    expected = [('l1_physical', '0'), ('asid', '8'), ('.size', '16'), ('.members', '2')]
+    if structs.get('SecondaryBootstrapHandoff') != expected:
+        return ('secondary handoff must contain two consecutive eight-byte words',)
+    outer = dict(structs.get('BootRootStorage', ()))
+    if outer.get('secondary') != '0' or int(outer.get('backing', '0')) < 16:
+        return ('secondary handoff must start the boot storage, disjoint from runtime backing',)
+    matches = [symbol for symbol in symbols if symbol['name'] == BOOT_STORAGE]
+    if len(matches) != 1:
+        return ('expected one linked boot root storage symbol',)
+    symbol = matches[0]
+    section = sections.get(symbol['section'])
+    if (symbol['kind'] != 'OBJECT' or symbol['address'] % 16 or
+            str(symbol['size']) != outer.get('.size') or
+            section is None or section[0] != 'NOBITS'):
+        return ('boot root storage must be a 16-byte-aligned BSS object of the checked layout',)
+    return ()
+
+
 def image(elf, facts):
     structs = read_structs(facts)
     symbols = symbol_records(subprocess.check_output(
         ['llvm-readelf-19', '--symbols', '--wide', str(elf)], text=True))
     sections = section_records(subprocess.check_output(
         ['llvm-readelf-19', '--sections', '--wide', str(elf)], text=True))
-    found = image_problems(elf.read_bytes(), symbols, sections, structs)
+    found = (image_problems(elf.read_bytes(), symbols, sections, structs) +
+             handoff_layout_problems(symbols, sections, structs))
     if found:
         raise ValueError('; '.join(found))
     report_pass('asid-boot-config image',
-                'linked asid_bits/asid_last retain offset-zero eight-byte 8/255 data for debugger seeds',
+                'ASID defaults and the distinct aligned secondary boot handoff match the linked layout',
                 words=len(symbols))
 
 

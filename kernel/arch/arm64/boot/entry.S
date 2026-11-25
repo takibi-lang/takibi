@@ -285,3 +285,22 @@ el1_fpsimd_enable:
  * (kernel/arch/arm64/kernel/user_entry.S) still use exception_context.inc's
  * EXC_CONTEXT_RESTORE directly -- restore-only, without a preceding save,
  * is out of this first slice's scope. */
+
+/* Cold stores run with translation and the cache off. An EL1 reload
+ * may retain the primary's cache state. Make both handoff words visible
+ * at PoC before the warm loader can resume a secondary. Complete the
+ * cold memory stores as well before the primary changes translation. */
+    .global kernel_boot_publish_secondary_root
+    .type kernel_boot_publish_secondary_root, %function
+kernel_boot_publish_secondary_root:
+    adrp    x1, boot_warm_flag
+    add     x1, x1, :lo12:boot_warm_flag
+    ldr     x1, [x1]
+    cbz     x1, 1f
+    dc      cvac, x0
+    add     x0, x0, #8
+    dc      cvac, x0
+1:
+    dsb     sy
+    ret
+    .size kernel_boot_publish_secondary_root, .-kernel_boot_publish_secondary_root

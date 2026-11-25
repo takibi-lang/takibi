@@ -8054,11 +8054,15 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             match kernel_process_protocol_trace_open() {
                 ProtocolTraceOpenResult::Opened => { return syscall_finish_current(frame, SyscallAction::Resume(1), current_authority); }
                 ProtocolTraceOpenResult::ReservationPending => { return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority); }
+                ProtocolTraceOpenResult::Busy => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EBUSY), current_authority); }
                 ProtocolTraceOpenResult::Invalid => { return syscall_finish_current(frame, SyscallAction::Resume(0xFFFFFFFFFFFFFFFF), current_authority); }
             }
         }
         if (x0 == 17) {
-            return syscall_finish_current(frame, SyscallAction::Resume(kernel_process_protocol_trace_close()), current_authority);
+            match kernel_process_protocol_trace_close() {
+                ProtocolTraceCloseResult::Reported => { return syscall_finish_current(frame, SyscallAction::Resume(1), current_authority); }
+                ProtocolTraceCloseResult::Busy => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EBUSY), current_authority); }
+            }
         }
         // /bin/protocol-trace's real EL1 preemption (#638 stage 8): x1 is the
         // CPU the last phase must be taken on.

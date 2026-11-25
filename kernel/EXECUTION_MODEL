@@ -41,7 +41,7 @@ exempt kernel/kernel/ext2_mutation_contention_evidence.tkb  the two-core probes;
 exempt kernel/kernel/log_storm_evidence.tkb  the all-core log ring probe (#613); every shared word is an atomic and log_storm_last_round is indexed by the writing core
 exempt kernel/lib/diagnostic_ring.tkb  per-CPU rings published through GitHub issue #299's protocol; the commit word is an atomic and the reader re-checks it
 exempt kernel/printk/log_ring_trace.tkb  the log-ring trace window (#656): each CPU writes only its own buffer, indexed by cpu_id(); the window flag is an atomic; the reader fields are written by core 0 around its own read
-exempt kernel/kernel/protocol_trace.tkb  every write is made holding the process-run lock, and the report reads the buffer only after a hold has closed the window
+exempt kernel/kernel/protocol_trace.tkb  the process-run lock guards trace state, event writes, and report row copies; only copies are printed outside the lock
 exempt kernel/arch/arm64/kernel/secondary.tkb  the secondary cores' entry point: the boot-state and tick words are per-core atomics, and the online count is written only by core 0 around each CPU_ON (one writer) and read as an io word; the entry once carried an assertion, but it no longer does, and the earlier reason claiming one was stale (GitHub issue #814)
 # --- Device state, single-core by interrupt routing rather than by a
 # number. Device SPIs are targeted at CPU0 (gicd_itargetsr8 =

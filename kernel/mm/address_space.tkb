@@ -439,10 +439,22 @@ private fn address_space_backing_grow(
     }
 }
 
-// Root 0 is permanent and has a plain static backing. The primary builds
-// its tables with translation off, enables translation from the local L1
-// address and ASID, and publishes this record before any secondary starts.
-private let mut address_space_backing_root0: AddressSpaceBacking;
+// The secondary only needs the primary's physical L1 and reserved boot
+// ASID. Publish these two words separately from runtime backing metadata.
+struct no_copy SecondaryBootstrapHandoff {
+    private l1_physical: usize;
+    private asid: usize;
+}
+
+struct no_copy BootRootStorage {
+    private secondary: SecondaryBootstrapHandoff;
+    private backing: AddressSpaceBacking;
+}
+
+// Both projections retain the permanent root's existing static storage
+// boundary. Only primary boot writes the secondary handoff.
+private let mut address_space_backing_root0: BootRootStorage align(16);
+extern fn kernel_boot_publish_secondary_root(handoff: borrow *SecondaryBootstrapHandoff);
 
 // A root's backing. It no longer allocates on a miss: the root carries the
 // handle it was made with, so a backing allocated here would be published
@@ -485,11 +497,11 @@ private fn address_space_backing_read_checked(root: AddressSpaceRoot)
     let slot: usize = root.slot;
     let mut value: AddressSpaceBacking = { false, 0, 0, 0, 0 };
     if (slot == 0) {
-        value.live = address_space_backing_root0.live;
-        value.l1_physical = address_space_backing_root0.l1_physical;
-        value.l2_physical = address_space_backing_root0.l2_physical;
-        value.asid = address_space_backing_root0.asid;
-        value.asid_generation = address_space_backing_root0.asid_generation;
+        value.live = address_space_backing_root0.backing.live;
+        value.l1_physical = address_space_backing_root0.backing.l1_physical;
+        value.l2_physical = address_space_backing_root0.backing.l2_physical;
+        value.asid = address_space_backing_root0.backing.asid;
+        value.asid_generation = address_space_backing_root0.backing.asid_generation;
         return address_space_backing_exists(slot, root, value);
     }
     match address_space_backing_pin(&address_space_backing_pool, root) {
@@ -515,11 +527,11 @@ private fn address_space_backing_write(
     let mut root: AddressSpaceRoot = evidence.target;
     let slot: usize = evidence.slot;
     if (slot == 0) {
-        address_space_backing_root0.live = value.live;
-        address_space_backing_root0.l1_physical = value.l1_physical;
-        address_space_backing_root0.l2_physical = value.l2_physical;
-        address_space_backing_root0.asid = value.asid;
-        address_space_backing_root0.asid_generation = value.asid_generation;
+        address_space_backing_root0.backing.live = value.live;
+        address_space_backing_root0.backing.l1_physical = value.l1_physical;
+        address_space_backing_root0.backing.l2_physical = value.l2_physical;
+        address_space_backing_root0.backing.asid = value.asid;
+        address_space_backing_root0.backing.asid_generation = value.asid_generation;
         return;
     }
     match address_space_backing_pin(&address_space_backing_pool, root) {
@@ -656,10 +668,10 @@ fn address_space_diagnostic_snapshot(
         -> AddressSpaceDiagnosticResult !{unsafe} {
     let mut snapshot: AddressSpaceDiagnosticSnapshot = { false, 0, 0, 0 };
     if (root.slot == 0) {
-        snapshot.live = address_space_backing_root0.live;
-        snapshot.l1_physical = address_space_backing_root0.l1_physical;
-        snapshot.l2_physical = address_space_backing_root0.l2_physical;
-        snapshot.asid = address_space_backing_root0.asid;
+        snapshot.live = address_space_backing_root0.backing.live;
+        snapshot.l1_physical = address_space_backing_root0.backing.l1_physical;
+        snapshot.l2_physical = address_space_backing_root0.backing.l2_physical;
+        snapshot.asid = address_space_backing_root0.backing.asid;
         return AddressSpaceDiagnosticResult::Ready(snapshot);
     }
     match address_space_inspect_stopped(stopped, &address_space_backing_pool, root) {
@@ -798,12 +810,15 @@ private fn address_space_initialize_boot_root()
                     let (numeric_asid, generation) = asid_assign_boot();
                     mmu_init_kernel_identity_tables();
                     mmu_init_root(l1_physical, l2_physical);
+                    address_space_backing_root0.secondary.l1_physical = l1_physical;
+                    address_space_backing_root0.secondary.asid = numeric_asid;
+                    kernel_boot_publish_secondary_root(&address_space_backing_root0.secondary);
                     kernel_mmu_activate(l1_physical, numeric_asid);
-                    address_space_backing_root0.l1_physical = l1_physical;
-                    address_space_backing_root0.l2_physical = l2_physical;
-                    address_space_backing_root0.asid = numeric_asid;
-                    address_space_backing_root0.asid_generation = generation;
-                    address_space_backing_root0.live = true;
+                    address_space_backing_root0.backing.l1_physical = l1_physical;
+                    address_space_backing_root0.backing.l2_physical = l2_physical;
+                    address_space_backing_root0.backing.asid = numeric_asid;
+                    address_space_backing_root0.backing.asid_generation = generation;
+                    address_space_backing_root0.backing.live = true;
                     page_owner_transfer_index(l1);
                     page_owner_transfer_index(l2);
                     return AddressSpaceAllocateResult::Ok;
@@ -1444,8 +1459,8 @@ fn kernel_mmu_init() !{mmu_off} {
 }
 
 fn kernel_mmu_init_secondary() !{mmu_off} {
-    kernel_mmu_activate(address_space_backing_root0.l1_physical,
-                        address_space_backing_root0.asid);
+    kernel_mmu_activate(address_space_backing_root0.secondary.l1_physical,
+                        address_space_backing_root0.secondary.asid);
 }
 
 // Root-0 compatibility helper used by boot-only probes. The production

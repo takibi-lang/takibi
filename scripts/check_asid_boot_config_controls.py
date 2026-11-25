@@ -86,9 +86,16 @@ def main():
                                   'page_free_boot(l1);\n                    return AddressSpaceAllocateResult::Ok;')),
         (BOOT, replace_in_function(sources[BOOT], 'fn address_space_initialize_boot_root(',
                                   'kernel_mmu_activate(l1_physical, numeric_asid);\n                    '
-                                  'address_space_backing_root0.l1_physical = l1_physical;',
-                                  'address_space_backing_root0.l1_physical = l1_physical;\n                    '
+                                  'address_space_backing_root0.backing.l1_physical = l1_physical;',
+                                  'address_space_backing_root0.backing.l1_physical = l1_physical;\n                    '
                                   'kernel_mmu_activate(l1_physical, numeric_asid);')),
+        (BOOT, replace_in_function(sources[BOOT], 'fn address_space_initialize_boot_root(',
+                                  'address_space_backing_root0.secondary.asid = numeric_asid;',
+                                  'address_space_backing_root0.backing.asid = numeric_asid;')),
+        (BOOT, replace_in_function(sources[BOOT], 'fn kernel_mmu_init_secondary(',
+                                  'address_space_backing_root0.secondary.l1_physical,',
+                                  'address_space_backing_root0.backing.l1_physical,')),
+        (BOOT, sources[BOOT] + '\nfn overwrite_handoff() { address_space_backing_root0.secondary.asid = 0; }\n'),
     ]
     for path in ENTRIES:
         changes.extend([
