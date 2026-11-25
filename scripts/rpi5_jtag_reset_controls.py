@@ -33,20 +33,48 @@ if [ "$count" -eq 2 ]; then
     exit 0
 fi
 if [ "$count" -eq 3 ]; then
-    if [ "$RPI5_FAKE_CASE" != no_smc ]; then
-        printf '%s\n' 'takibi-reset: smc #0 at 0x295b44'
-    fi
+    case "$RPI5_FAKE_CASE" in
+        no_smc|peer_eligible|peer_unreadable)
+            printf '%s\n' 'takibi-reset: primary scan failed before arm: no smc #0'
+            exit 0 ;;
+        missing_arm)
+            printf '%s\n' 'takibi-reset: smc #0 at 0x295b44'
+            exit 0 ;;
+        timeout_before_arm)
+            exit 124 ;;
+        *)
+            printf '%s\n' 'takibi-reset: smc #0 at 0x295b44' 'takibi-reset: armed' ;;
+    esac
+    if [ "$RPI5_FAKE_CASE" = timeout_after_arm ]; then exit 124; fi
     exit 0
 fi
-if [ "$RPI5_FAKE_CASE" = transient_then_safe ] && [ "$count" -ge 5 ]; then
-    printf '%s\n' 'bcm2712.cpu0 halted in AArch64 state, current mode: EL2H'
-    printf '%s\n' 'pc (/64): 0x0000000000080000'
-    printf '%s\n' 'MMU: disabled'
-else
-    printf '%s\n' 'bcm2712.cpu0 halted in AArch64 state, current mode: EL0T'
-    printf '%s\n' 'pc (/64): 0x0000000000000200'
-    printf '%s\n' 'MMU: enabled'
+if [ "$count" -eq 4 ]; then
+    case "$RPI5_FAKE_CASE" in
+        peer_eligible)
+            printf '%s\n' 'takibi-reset: CPU1 carries the exact linked Takibi reset code' 'takibi-reset: armed'
+            exit 1 ;;
+        peer_unreadable)
+            exit 1 ;;
+    esac
 fi
+case "$RPI5_FAKE_CASE" in
+    transient_then_safe|timeout_after_arm|wrong_stub_signature|peer_eligible)
+        if [ "$count" -ge 5 ]; then
+            printf '%s\n' 'bcm2712.cpu0 halted in AArch64 state, current mode: EL2H'
+            printf '%s\n' 'pc (/64): 0x00000000000800e4' 'MMU: disabled'
+            if [ "$RPI5_FAKE_CASE" != wrong_stub_signature ]; then
+                printf '%s\n' 'takibi-reset: installed SD stub signature'
+            fi
+            exit 0
+        fi ;;
+    low_el1)
+        printf '%s\n' 'bcm2712.cpu0 halted in AArch64 state, current mode: EL1H'
+        printf '%s\n' 'pc (/64): 0x0000000000201000' 'MMU: enabled'
+        exit 0 ;;
+esac
+printf '%s\n' 'bcm2712.cpu0 halted in AArch64 state, current mode: EL0T'
+printf '%s\n' 'pc (/64): 0x0000000000000200' 'MMU: enabled'
+
 '''
 
 
@@ -78,9 +106,20 @@ def run_case(case: str) -> tuple[subprocess.CompletedProcess[str], int, list[lis
         fake.chmod(0o755)
         fake_nm = temp / "llvm-nm-19"
         fake_nm.write_text(
-            "#!/bin/sh\nprintf '%s\\n' '0000000000200800 T el1_vectors'\n",
+            "#!/bin/sh\nprintf '%s\\n' '0000000000200800 T el1_vectors'"
+            " '0000000000300000 T kernel_text_end'\n",
             encoding="ascii")
         fake_nm.chmod(0o755)
+        if case in ("peer_eligible", "peer_unreadable"):
+            fake_objdump = temp / "llvm-objdump-19"
+            start = [f"{0x200000 + 4 * i:x}: d503201f nop" for i in range(7)]
+            psci = [f"{0x201000 + 4 * i:x}: d503201f nop" for i in range(7)]
+            output = ["0000000000200000 <_start>:", *start,
+                      "0000000000201000 <rpi5_psci_cpu_on>:", *psci,
+                      "20101c: d4000003 smc #0"]
+            fake_objdump.write_text("#!/bin/sh\ncat <<'EOF'\n" + "\n".join(output) +
+                                    "\nEOF\n", encoding="ascii")
+            fake_objdump.chmod(0o755)
         count_file = temp / "count"
         env = os.environ.copy()
         env.update({
@@ -114,19 +153,50 @@ def verify() -> None:
             or "bp 0x200c80 4 hw" not in commands[1]
             or "wait_halt 30000" not in commands[1]):
         raise SystemExit("EL0 preflight was not caught at the next EL1 IRQ")
-    if not any("reg cpsr 0x3c5" in command for command in commands[2]):
+    if not any("takibi_arm_reset $takibi_smc 0x3c5" in command for command in commands[2]):
         raise SystemExit("EL1 preflight did not preserve its exception level")
     if "resume" not in commands[3]:
         raise SystemExit("transient observation left the CPU halted")
     # GitHub issue #1197: an EL1 kernel with WXN cannot fetch the trampoline
     # written to RESET_ADDR, so the reset must jump to an smc #0 in its text.
     if not any("read_memory" in command for command in commands[2]) or not any(
-            "reg pc $takibi_smc" in command for command in commands[2]):
+            "takibi_arm_reset $takibi_smc" in command for command in commands[2]):
         raise SystemExit("EL1 reset does not jump to the resident kernel's smc")
 
     result, count, _ = run_case("no_smc")
     if result.returncode == 0 or count != 3 or "smc #0" not in result.stderr:
         raise SystemExit("EL1 reset without an smc #0 was not refused")
+
+    for case in ("missing_arm", "timeout_before_arm"):
+        result, count, _ = run_case(case)
+        if result.returncode == 0 or count != 3 or "was not armed" not in result.stderr:
+            raise SystemExit(f"{case}: verification ran without an armed reset")
+
+    result, count, _ = run_case("timeout_after_arm")
+    if result.returncode != 0 or count != 5 or "installed Takibi SD stub" not in result.stdout:
+        raise SystemExit("a verified stub did not override a reset-session timeout")
+
+    for case in ("low_el1", "wrong_stub_signature"):
+        result, count, _ = run_case(case)
+        if result.returncode == 0 or count != 6 or "no verified MMU-off SD stub" not in result.stderr:
+            raise SystemExit(f"{case}: wrong endpoint certified reset")
+
+    if not all(any(f"[takibi_register {name}]" in command for command in commands[2])
+               for name in ("pc", "cpsr", "x0")):
+        raise SystemExit("arm does not require readback of PC, CPSR and x0")
+    if any(command.startswith("mww ") for command in commands[2]):
+        raise SystemExit("EL1 reset still depends on writing a scratch mapping")
+
+    result, count, peer_calls = run_case("peer_eligible")
+    if result.returncode != 0 or count != 5 or "CPU1 carries the exact linked" not in result.stdout:
+        raise SystemExit("explicit pre-arm scan failure did not allow an identified peer")
+    if not any("read_memory $address 32" in command and "($cpsr & 15) == 5" in command
+               for command in peer_calls[3]):
+        raise SystemExit("peer selection did not require EL1H and exact live image reads")
+
+    result, count, _ = run_case("peer_unreadable")
+    if result.returncode == 0 or count != 4 or "power-cycle the RPi5" not in result.stderr:
+        raise SystemExit("unreadable peers did not stop with a physical recovery instruction")
 
     result, count, commands = run_case("never_safe")
     if result.returncode == 0:

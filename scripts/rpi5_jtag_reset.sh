@@ -108,6 +108,26 @@ if [ -z "${EL1_VECTORS#0x}" ]; then
 fi
 EL1_LOWER_IRQ=$(printf '0x%x' $((EL1_VECTORS + 0x480)))
 
+# These are the two stop PCs of the installed SD stub's final WFE loop.
+# Check its live instruction words and captured FDT before certifying reset.
+RESET_REGISTERS='
+proc takibi_register {name} {
+    if {![regexp {(0x[0-9a-fA-F]+)} [reg $name] token]} {
+        error "cannot read reset register $name"
+    }
+    return [expr {$token + 0}]
+}
+proc takibi_arm_reset {site cpsr} {
+    reg cpsr $cpsr
+    reg x0 0x84000009
+    reg pc $site
+    if {[takibi_register pc] != $site || [takibi_register cpsr] != $cpsr ||
+        [takibi_register x0] != 0x84000009} {
+        error "reset register readback mismatch; refused before resume"
+    }
+    echo "takibi-reset: armed"
+}'
+
 PREFLIGHT_LOG=$(mktemp)
 preflight_ok=false
 preflight_pc=""
@@ -186,62 +206,137 @@ RESET_FIND_SMC=(-c "set takibi_smc $RESET_ADDR")
 if [ "$preflight_mode" = "EL1H" ]; then
     RESET_FIND_SMC=(
         -c 'set takibi_smc 0
-            for {set base 0x200000} {$base < 0x400000 && $takibi_smc == 0} {incr base 0x10000} {
-                set i 0
-                foreach w [read_memory $base 32 0x4000] {
-                    if {$w == 0xd4000003} { set takibi_smc [expr {$base + 4 * $i}]; break }
-                    incr i
+            if {[catch {
+                for {set base 0x200000} {$base < 0x400000 && $takibi_smc == 0} {incr base 0x10000} {
+                    set i 0
+                    foreach w [read_memory $base 32 0x4000] {
+                        if {$w == 0xd4000003} { set takibi_smc [expr {$base + 4 * $i}]; break }
+                        incr i
+                    }
                 }
-            }
-            if {$takibi_smc == 0} {
-                echo "takibi-reset: no smc #0 in resident kernel text"
+            } detail]} {
+                echo "takibi-reset: primary scan failed before arm: $detail"
+            } elseif {$takibi_smc == 0} {
+                echo "takibi-reset: primary scan failed before arm: no smc #0 in resident kernel text"
             } else {
                 echo [format "takibi-reset: smc #0 at 0x%x" $takibi_smc]
             }'
     )
 fi
 
-# Reading up to 2 MiB of text over SWD outlasts the 10 s session default.
+# A peer must have a readable virtual mapping of the exact linked startup
+# and PSCI code. The primary retains its resident-text scan for older images.
+# An unrecognized, unreadable or non-EL1H peer stays untouched.
+reset_from_verified_peer() {
+    local elf="$REPO_ROOT/kernel/build/rpi5/kernel.elf" anchors entry_limit
+    entry_limit=$(llvm-nm-19 "$elf" | awk '$3=="kernel_text_end"{print "0x"$1}')
+    if [ -z "$entry_limit" ]; then return 1; fi
+    if ! anchors=$(llvm-objdump-19 -d --disassemble-symbols=_start,rpi5_psci_cpu_on "$elf" | awk '
+        /<_start>:$/ { part = 1; next }
+        /<rpi5_psci_cpu_on>:$/ { part = 2; next }
+        /^[[:xdigit:]]+ </ { part = 0 }
+        $1 ~ /^[[:xdigit:]]+:$/ && $2 ~ /^[[:xdigit:]]+$/ && length($2) == 8 {
+            if (part == 1 && first_count < 7) {
+                if (first_count == 0) first_addr = substr($1, 1, length($1) - 1)
+                first_count++
+                first = first " 0x" $2
+            }
+            if (part == 2) {
+                if (second_count == 0) second_addr = substr($1, 1, length($1) - 1)
+                second_count++
+                second = second " 0x" $2
+                if ($2 == "d4000003") {
+                    site = substr($1, 1, length($1) - 1)
+                    sites++
+                }
+            }
+        }
+        END {
+            if (first_count != 7 || second_count < 8 || sites != 1) exit 1
+            printf "set anchors {0x%s {%s} 0x%s {%s}}; set reset_site 0x%s", first_addr, first, second_addr, second, site
+        }'); then return 1; fi
+    timeout --foreground "${RPI5_RESET_SESSION_TIMEOUT:-90}" openocd "${OPENOCD_ARGS[@]}" "${OPENOCD_SPEED_ARGS[@]}"         -c "$RESET_REGISTERS" -c "$anchors" -c "set text_end $entry_limit" -c init         -c 'foreach core {1 2 3} {
+                targets bcm2712.cpu$core
+                if {[catch {halt 2500}]} { continue }
+                set matched 0
+                if {![catch {
+                    set pc [takibi_register pc]
+                    set cpsr [takibi_register cpsr]
+                    set matched [expr {($cpsr & 15) == 5 && $pc >= 0x200000 && $pc < $text_end}]
+                    foreach {address expected} $anchors {
+                        if {!$matched} { break }
+                        set actual [read_memory $address 32 [llength $expected]]
+                        if {[llength $actual] != [llength $expected]} { set matched 0; break }
+                        foreach a $actual b $expected {
+                            if {$a != $b} { set matched 0; break }
+                        }
+                    }
+                }] && $matched} {
+                    echo "takibi-reset: CPU$core carries the exact linked Takibi reset code"
+                    takibi_arm_reset $reset_site [expr {$cpsr | 0x3c0}]
+                    resume
+                    break
+                }
+                resume
+            }' -c shutdown
+}
+
+# EL1 resolves a resident executable instruction. Keep scratch writes in
+# the MMU-off stub path so a broken EL1 map cannot abort before its scan.
+RESET_TRAMPOLINES=()
+if [ "$preflight_mode" = EL2H ]; then
+    RESET_TRAMPOLINES=(
+        -c "mww $RESET_ADDR 0xd4000003"
+        -c "mww $((RESET_ADDR + 4)) 0x14000000"
+        -c "mww $CACHE_PUBLISH_ADDR 0xd50b7e20"
+        -c "mww $((CACHE_PUBLISH_ADDR + 4)) 0x91010000"
+        -c "mww $((CACHE_PUBLISH_ADDR + 8)) 0xeb01001f"
+        -c "mww $((CACHE_PUBLISH_ADDR + 12)) 0x54ffffa3"
+        -c "mww $((CACHE_PUBLISH_ADDR + 16)) 0xd5033f9f"
+        -c "mww $((CACHE_PUBLISH_ADDR + 20)) 0xd508751f"
+        -c "mww $((CACHE_PUBLISH_ADDR + 24)) 0xd5033f9f"
+        -c "mww $((CACHE_PUBLISH_ADDR + 28)) 0xd5033fdf"
+        -c "mww $((CACHE_PUBLISH_ADDR + 32)) 0x14000000"
+        -c 'set reset_words [read_memory 0x180000 32 2]
+            if {[llength $reset_words] != 2 || [lindex $reset_words 0] != 0xd4000003 ||
+                [lindex $reset_words 1] != 0x14000000} {
+                error "reset trampoline readback mismatch"
+            }'
+    )
+fi
+
+# A disconnect after arming can be the reset itself. A failed scan can try a
+# peer, but an unknown failure or timeout before arming grants no retry.
 RESET_LOG=$(mktemp)
+reset_status=0
 timeout --foreground "${RPI5_RESET_SESSION_TIMEOUT:-90}" openocd "${OPENOCD_ARGS[@]}" "${OPENOCD_SPEED_ARGS[@]}" \
+    -c "$RESET_REGISTERS" \
     -c 'init' \
     -c 'targets bcm2712.cpu0' \
     -c 'halt' \
-    -c "mww $RESET_ADDR 0xd4000003" \
-    -c "mww $((RESET_ADDR + 4)) 0x14000000" \
-    -c "mww $CACHE_PUBLISH_ADDR 0xd50b7e20" \
-    -c "mww $((CACHE_PUBLISH_ADDR + 4)) 0x91010000" \
-    -c "mww $((CACHE_PUBLISH_ADDR + 8)) 0xeb01001f" \
-    -c "mww $((CACHE_PUBLISH_ADDR + 12)) 0x54ffffa3" \
-    -c "mww $((CACHE_PUBLISH_ADDR + 16)) 0xd5033f9f" \
-    -c "mww $((CACHE_PUBLISH_ADDR + 20)) 0xd508751f" \
-    -c "mww $((CACHE_PUBLISH_ADDR + 24)) 0xd5033f9f" \
-    -c "mww $((CACHE_PUBLISH_ADDR + 28)) 0xd5033fdf" \
-    -c "mww $((CACHE_PUBLISH_ADDR + 32)) 0x14000000" \
+    "${RESET_TRAMPOLINES[@]}" \
     "${RESET_FIND_SMC[@]}" \
-    -c "if {\$takibi_smc != 0} {
-            reg cpsr $RESET_CPSR
-            reg x0 $PSCI_SYSTEM_RESET
-            reg pc \$takibi_smc
-        }" \
-    -c 'resume' \
-    -c 'shutdown' > "$RESET_LOG" 2>&1 || true
-if [ "$preflight_mode" = "EL1H" ] && ! grep -q 'takibi-reset: smc #0 at' "$RESET_LOG"; then
-    echo "error: could not find the resident kernel's smc #0 for PSCI SYSTEM_RESET -- log follows" >&2
+    -c "if {\$takibi_smc != 0} { takibi_arm_reset \$takibi_smc $RESET_CPSR }" \
+    -c 'resume' -c 'shutdown' > "$RESET_LOG" 2>&1 || reset_status=$?
+if ! grep -qx 'takibi-reset: armed' "$RESET_LOG" &&
+        [ "$preflight_mode" = EL1H ] &&
+        grep -q '^takibi-reset: primary scan failed before arm:' "$RESET_LOG"; then
+    reset_from_verified_peer >>"$RESET_LOG" 2>&1 || reset_status=$?
+fi
+if ! grep -qx 'takibi-reset: armed' "$RESET_LOG"; then
+    echo "error: SWD PSCI reset was not armed (OpenOCD status $reset_status); power-cycle the RPi5 if no resident Takibi core is readable" >&2
     cat "$RESET_LOG" >&2
     rm -f "$RESET_LOG"
     exit 1
 fi
-grep 'takibi-reset:' "$RESET_LOG" || true
+grep '^takibi-reset:' "$RESET_LOG"
 rm -f "$RESET_LOG"
 
 # Full SD-card boot (EEPROM -> TF-A -> config.txt -> kernel_2712.img)
 # takes noticeably longer than the reset itself. A successful SWD reconnect
-# only says the core is visible; it can still be at a transient low-PC EL1
-# firmware state. Read, resume, and poll until the resident image reaches the
-# safe low-PC EL1 or EL2 state. The firmware may replay the resident Takibi
-# payload rather than the SD stub. Leaving a transient halt in place made
-# every second allcheck require a physical power cycle.
+# only says the core is visible. Poll for the installed MMU-off SD stub,
+# resuming CPU0 after every observation. A resident EL1 image can be the
+# unchanged pre-reset kernel and never certifies this reset workflow.
 VERIFY_LOG=$(mktemp)
 attempt=0
 verified=false
@@ -251,10 +346,21 @@ mmu_state=""
 while [ "$attempt" -lt "$RESET_MAX_ATTEMPTS" ]; do
     attempt=$((attempt + 1))
     if timeout --foreground "$OPENOCD_TIMEOUT" openocd "${OPENOCD_ARGS[@]}" "${OPENOCD_SPEED_ARGS[@]}" \
+        -c "$RESET_REGISTERS" \
         -c 'init' \
         -c 'targets bcm2712.cpu0' \
         -c 'halt' \
         -c 'reg pc' \
+        -c 'set pc [takibi_register pc]
+            if {([takibi_register cpsr] & 15) == 9 && ($pc == 0x800e0 || $pc == 0x800e4)} {
+                if {![catch {read_memory 0x800e0 32 2} spin] &&
+                    [llength $spin] == 2 && [lindex $spin 0] == 0xd503205f &&
+                    [lindex $spin 1] == 0x17ffffff &&
+                    ![catch {read_memory 0x100000 32 1} dtb] &&
+                    [llength $dtb] == 1 && [lindex $dtb 0] == 0xedfe0dd0} {
+                    echo "takibi-reset: installed SD stub signature"
+                }
+            }' \
         -c 'resume' \
         -c 'shutdown' > "$VERIFY_LOG" 2>&1
     then
@@ -263,10 +369,10 @@ while [ "$attempt" -lt "$RESET_MAX_ATTEMPTS" ]; do
         mmu_state=$(grep -oE 'MMU: (enabled|disabled)' "$VERIFY_LOG" | tail -1 | awk '{print $2}')
         halted_pc_hex="${halted_pc#0x}"
         halted_pc_hex="$(printf '%s' "$halted_pc_hex" | tr 'A-F' 'a-f')"
-        if { [ "$current_mode" = "EL1H" ] ||
-                [ "$current_mode" = "EL2H" ]; } &&
-                [ "${#halted_pc_hex}" -eq 16 ] &&
-                [[ "$halted_pc_hex" < "$RPI5_SAFE_PC_MAX_HEX" ]]; then
+        if [ "$current_mode" = EL2H ] && [ "$mmu_state" = disabled ] &&
+                { [ "$halted_pc_hex" = 00000000000800e0 ] ||
+                  [ "$halted_pc_hex" = 00000000000800e4 ]; } &&
+                grep -qx 'takibi-reset: installed SD stub signature' "$VERIFY_LOG"; then
             verified=true
             break
         fi
@@ -275,16 +381,10 @@ while [ "$attempt" -lt "$RESET_MAX_ATTEMPTS" ]; do
 done
 rm -f "$VERIFY_LOG"
 
-# Accept the resident spin stub and any previously injected Takibi payload.
-# Both execute from the low physical window below 32 MiB; a normal VHE Linux
-# kernel is at a canonical high virtual address. MMU state is diagnostic only:
-# a prior Takibi payload may have enabled its MMU before entering its park.
 if [ "$verified" = true ]; then
-    echo "reset confirmed: resident Takibi image is safe to replace (PC=$halted_pc mode=$current_mode MMU=$mmu_state)"
+    echo "reset confirmed: installed Takibi SD stub (PC=$halted_pc mode=$current_mode MMU=$mmu_state)"
 else
-    echo "warning: reset did not settle at a safe resident Takibi image after" \
-         "$RESET_MAX_ATTEMPTS attempts (last PC=${halted_pc:-unknown} mode=${current_mode:-unknown}" \
-         "MMU=${mmu_state:-unknown}) -- refusing to inject into a possible live" \
-         "Raspberry Pi OS (see scripts/rpi5_jtag_load.sh's VHE safety check)" >&2
+    echo "warning: no verified MMU-off SD stub after $RESET_MAX_ATTEMPTS attempts (last PC=${halted_pc:-unknown} mode=${current_mode:-unknown} MMU=${mmu_state:-unknown})" >&2
+    echo "A resident EL1 image does not certify reset. Power-cycle the RPi5 if the SD stub does not return." >&2
     exit 1
 fi

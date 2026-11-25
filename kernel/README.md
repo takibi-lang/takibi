@@ -550,7 +550,12 @@ kernel address is `192.168.20.2`.
 `kernelsh-rpi5` first performs the existing resident-image reset. The SD card
 must have booted this project's `jtag_stub.img` at least once; subsequent
 shell/check runs may reset and replace an already resident Takibi payload
-without another power cycle. Power-cycle after changing the SD-card payload.
+without another power cycle. The reset command requires an armed PSCI call
+and observes the installed MMU-off EL2 stub before loading another image.
+If CPU0 cannot read its resident PSCI instruction, an EL1 peer can issue the
+reset after matching the built Takibi image's reset code. Power-cycle if
+no known peer can reset the board, if the stub does not return, or after
+changing the SD-card payload.
 The shell kernel overwrites the first 6 MiB of the attached USB Mass Storage
 device with its interactive root filesystem, just as `kernelcheck-rpi5`
 provisions the ordinary integration image. Attach only the dedicated
