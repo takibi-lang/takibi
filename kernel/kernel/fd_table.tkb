@@ -1,4 +1,5 @@
 use "kernel/lib/atomic_word.tkb";
+use "kernel/lib/set_once.tkb";
 use "kernel/lib/peer_tick_window.tkb";
 use "kernel/kernel/pool_lock_wait.tkb";
 use "kernel/lib/peer_round.tkb";
@@ -3460,8 +3461,8 @@ fn unified_fd_probe_install(fd: usize, result: UnifiedObjectResult) -> bool {
 // Current limitations:
 // - ONE object, deliberately. The race is on a single counter, so a second
 //   object would only make collisions rarer.
-// - The object is allocated here and released here; it is never installed
-//   in any descriptor table, so nothing else in the kernel can reach it.
+// - The object is installed only in the probe's private descriptor table.
+//   The probe keeps a second reference to prevent a test cycle freeing it.
 // - Measures exclusion, not ordering.
 
 const FD_REFCOUNT_CONTENTION_ROUNDS: usize = 2048;
@@ -3469,8 +3470,14 @@ const FD_REFCOUNT_CONTENTION_ROUNDS: usize = 2048;
 const FD_REFCOUNT_PROBE_FD: usize = 9;
 const FD_REFCOUNT_CONTENTION_OUTSIDE_WORK: usize = 64;
 
-private let mut fd_refcount_probe_handle: UnifiedObjectHandle;
-private let mut fd_refcount_probe_ready: AtomicWord;
+// A lookup key remains meaningful after retirement: each operation checks
+// the pool's current slot and generation before accessing an object.
+struct FdRefcountProbeKey {
+    slot: usize;
+    generation: usize;
+}
+
+private let mut fd_refcount_probe_key: SetOnce(FdRefcountProbeKey);
 private let mut fd_refcount_probe_armed: AtomicWord;
 // Completed cycles and the inside-the-run level, one word per core
 // (GitHub issue #756: every online peer, index 0 is core 0's).
@@ -3500,19 +3507,23 @@ private fn fd_refcount_probe_overlap_address() -> *AtomicWord {
     return &fd_refcount_probe_overlap;
 }
 
-// The probe publishes its handle once before arming any participant.
+// The probe publishes its lookup key once before arming any participant.
 // A successful retain grants one release against that same handle.
-private linear view FdRefcountProbeReceipt[published: addr];
-
-private inline fn fd_refcount_probe_release(
-        receipt: sink FdRefcountProbeReceipt[&fd_refcount_probe_handle])
-        -> UnifiedObjectReleaseResult !{unsafe} {
-    return unified_object_release(fd_refcount_probe_handle);
+private linear struct FdRefcountProbeReceipt[published: addr] {
+    private handle: UnifiedObjectHandle;
 }
 
-// One retain/release pair. Both cores run this, on the same object.
-private fn fd_refcount_probe_cycle() !{unsafe} {
-    match unified_object_retain(fd_refcount_probe_handle) {
+private inline fn fd_refcount_probe_release(
+        receipt: sink FdRefcountProbeReceipt[&fd_refcount_probe_key])
+        -> UnifiedObjectReleaseResult !{unsafe} {
+    return unified_object_release(receipt.handle);
+}
+
+// Each attempt uses the admitted key, including after a failed lookup or
+// retirement. The constructor copies the key; retain checks the live pool.
+private fn fd_refcount_probe_cycle(key: FdRefcountProbeKey) !{unsafe} {
+    let mut handle: UnifiedObjectHandle = { key.slot, key.generation };
+    match unified_object_retain(handle) {
         UnifiedObjectRetainResult::Invalid => {
             atomic_word_fetch_add(
                 fd_refcount_probe_refused_address(), 1);
@@ -3522,7 +3533,8 @@ private fn fd_refcount_probe_cycle() !{unsafe} {
                 fd_refcount_probe_refused_address(), 1);
         }
         UnifiedObjectRetainResult::Ok => {
-            match fd_refcount_probe_release(view FdRefcountProbeReceipt[&fd_refcount_probe_handle]) {
+            let mut receipt: FdRefcountProbeReceipt[&fd_refcount_probe_key] = { handle };
+            match fd_refcount_probe_release(receipt) {
                 UnifiedObjectReleaseResult::Invalid => {
                     atomic_word_fetch_add(
                         fd_refcount_probe_refused_address(), 1);
@@ -3555,16 +3567,21 @@ fn fd_refcount_contention_secondary_run(cpu: usize) !{unsafe} {
     // core can finish all of its work before the other has begun. Merely
     // publishing active was insufficient because this core could be
     // interrupted between that store and its first cycle.
-    if (atomic_word_load(fd_refcount_probe_armed_address()) == 1) {
-        fd_refcount_probe_cycle();
-        peer_tally_add(&fd_refcount_probe_tally, cpu);
+    if (atomic_word_load(fd_refcount_probe_armed_address()) == 0) {
+        peer_tally_leave(&fd_refcount_probe_tally, cpu);
+        return;
     }
+    // The primary arms only after publishing. Acquire the key once for
+    // this participant.
+    let mut key: FdRefcountProbeKey = set_once_get(&fd_refcount_probe_key);
+    fd_refcount_probe_cycle(key);
+    peer_tally_add(&fd_refcount_probe_tally, cpu);
     while (peer_tally_count(&fd_refcount_probe_tally, 0) == 0 &&
            atomic_word_load(fd_refcount_probe_armed_address()) == 1) { }
     while (peer_tally_count(&fd_refcount_probe_tally, cpu) <
                FD_REFCOUNT_CONTENTION_ROUNDS &&
            atomic_word_load(fd_refcount_probe_armed_address()) == 1) {
-        fd_refcount_probe_cycle();
+        fd_refcount_probe_cycle(key);
         peer_tally_add(&fd_refcount_probe_tally, cpu);
     }
     peer_tally_leave(&fd_refcount_probe_tally, cpu);
@@ -3590,18 +3607,23 @@ private fn fd_refcount_contention_report(stage: *u8, refs: usize,
 
 fn fd_refcount_contention_probe() -> bool !{unsafe} {
     unified_fd_table_init();
-    if (atomic_word_load(&fd_refcount_probe_ready) == 0) {
+    let mut key: FdRefcountProbeKey;
+    if (set_once_is_set(&fd_refcount_probe_key) == false) {
         // GitHub issue #831: the descriptor goes into a private probe
         // process's table. It went into slot 0's, which every boot had
         // whether or not any process did; this probe runs before the boot
         // fixtures, with no process yet, and the next table reset gives the
         // probe process back.
-        let mut process_slot: ProcessSlot = scheduled_process_probe_slot_acquire();
+        let ScheduledProcessRunningTakeResult::Running(resources) =
+            scheduled_process_probe_root_acquire() else {
+            ScheduledProcessRunningTakeResult::Missing => {
+                fd_refcount_contention_report("no-process" as *u8, 0, 0);
+                return false;
+            }
+        };
+        let (owner, running) = resources;
+        let mut process_slot: ProcessSlot = scheduled_process_probe_root_slot(owner);
         let process: usize = process_slot_address(process_slot);
-        if (process == 0) {
-            fd_refcount_contention_report("no-process" as *u8, 0, 0);
-            return false;
-        }
         // Every exit path reports, including these. The first version of
         // this function returned here without printing anything, so a run
         // that could not even allocate its object looked identical to one
@@ -3609,18 +3631,39 @@ fn fd_refcount_contention_probe() -> bool !{unsafe} {
         // had already fixed, reintroduced one file over.
         match unified_object_alloc_first(UnifiedFdKind::OpenFile) {
             UnifiedObjectResult::Invalid => {
+                scheduled_process_probe_root_release(owner, running);
                 fd_refcount_contention_report("no-object" as *u8, 0, 0);
                 return false;
             }
             UnifiedObjectResult::Full => {
+                scheduled_process_probe_root_release(owner, running);
                 fd_refcount_contention_report("pool-full" as *u8, 0, 0);
                 return false;
             }
-            UnifiedObjectResult::Allocated(handle) => {
-                fd_refcount_probe_handle = handle;
-                atomic_word_store(&fd_refcount_probe_ready, 1);
+            UnifiedObjectResult::Allocated(allocated) => {
+                // SetOnce has no cancellation. Take its claim only after
+                // allocation so a failed allocation can still be retried.
+                match set_once_claim(&fd_refcount_probe_key) {
+                    SetOnceBegin::Taken => {
+                        unified_object_free(allocated.slot, allocated.generation);
+                        scheduled_process_probe_root_release(owner, running);
+                        fd_refcount_contention_report("already-published" as *u8, 0, 0);
+                        return false;
+                    }
+                    SetOnceBegin::Claimed(claim) => {
+                        let mut allocated_key: FdRefcountProbeKey = { allocated.slot, allocated.generation };
+                        key = allocated_key;
+                        set_once_publish(&fd_refcount_probe_key, claim, key);
+                    }
+                }
             }
         }
+        // Keep the successfully published fixture for the same subsequent
+        // table reset as before, returning its reservation to Ready.
+        let run_guard = process_run_lock();
+        let ready = scheduled_process_yield(owner, running);
+        scheduled_process_release(owner, ready);
+        process_run_unlock(run_guard);
         // The object needs a real descriptor holding it before any
         // reference can be taken. unified_object_ref_bound() is
         // fd_slot_total -- "a reference no descriptor slot could be
@@ -3637,8 +3680,8 @@ fn fd_refcount_contention_probe() -> bool !{unsafe} {
             }
         }
         match unified_fd_install(process, FD_REFCOUNT_PROBE_FD,
-                                 fd_refcount_probe_handle.slot,
-                                 fd_refcount_probe_handle.generation) {
+                                 key.slot,
+                                 key.generation) {
             UnifiedFdInstallResult::Ok => {}
             UnifiedFdInstallResult::Invalid => {
                 fd_refcount_contention_report("install-invalid" as *u8, 0, 0);
@@ -3657,7 +3700,7 @@ fn fd_refcount_contention_probe() -> bool !{unsafe} {
         // retain cannot take the count to zero and free the object out
         // from under the other core -- which would be a different failure
         // reported as this one.
-        match unified_object_retain(fd_refcount_probe_handle) {
+        match unified_object_retain(unified_object_handle_new(key.slot, key.generation)) {
             UnifiedObjectRetainResult::Ok => {}
             UnifiedObjectRetainResult::Invalid => {
                 fd_refcount_contention_report("baseline-invalid" as *u8, 0, 0);
@@ -3668,8 +3711,10 @@ fn fd_refcount_contention_probe() -> bool !{unsafe} {
                 return false;
             }
         }
+    } else {
+        key = set_once_get(&fd_refcount_probe_key);
     }
-    let baseline: usize = unified_object_refs_of(fd_refcount_probe_handle);
+    let baseline: usize = unified_object_refs_of(unified_object_handle_new(key.slot, key.generation));
     let doubles_before: usize = unified_object_double_release_count();
     peer_tally_reset(&fd_refcount_probe_tally, kernel_online_core_count());
     atomic_word_store(fd_refcount_probe_overlap_address(), 0);
@@ -3698,7 +3743,7 @@ fn fd_refcount_contention_probe() -> bool !{unsafe} {
         return false;
     }
     for round: usize in 0..<FD_REFCOUNT_CONTENTION_ROUNDS {
-        fd_refcount_probe_cycle();
+        fd_refcount_probe_cycle(key);
         peer_tally_add(&fd_refcount_probe_tally, 0);
     }
 
@@ -3717,7 +3762,7 @@ fn fd_refcount_contention_probe() -> bool !{unsafe} {
     let settled: bool = peer_tally_peers_left(&fd_refcount_probe_tally,
                                               PeerTickPolicy::Entry);
 
-    let refs: usize = unified_object_refs_of(fd_refcount_probe_handle);
+    let refs: usize = unified_object_refs_of(unified_object_handle_new(key.slot, key.generation));
     if (finished == false) {
         fd_refcount_contention_report("secondary-never-finished" as *u8,
                                       refs, baseline);

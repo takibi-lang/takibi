@@ -107,7 +107,7 @@ exempt kernel/fs/ext2/mutation_lock.tkb  GitHub issue #533: the file's only muta
 # comment, and each comment says the file does NOT depend on it. The
 # reasons below restate those comments.
 exempt kernel/arch/arm64/kernel/platform_uart_common.tkb  the UART RX registration is a LockedCell; boot discard writes borrow BootPhase before secondary startup, and later exchanges and snapshots hold its IRQ-safe guard, released before invoking the copied callback
-exempt kernel/kernel/fd_table.tkb  pools are guard-required by typing, refcounts and the slot total share the refcount Mutex, descriptor chains are owned by their process lifecycle, and the probe words are atomics
+exempt kernel/kernel/fd_table.tkb  pools are guard-required by typing, refcounts and the slot total share the refcount Mutex, descriptor chains are owned by their process lifecycle, and the probe lookup key is SetOnce and its coordination words are atomic
 exempt kernel/lib/occupancy.tkb  the world-stop controller's words are atomics, its generation is written only by the holder of the atomic claim, and KERNEL_ACTIVE_CORES is only its storage bound
 exempt kernel/mm/address_space.tkb  the backing pool is guard-required by typing, its ready flag settles on core 0 before PSCI starts core 1, fallback storage is per-core, and root 0's backing is immutable after MMU-off boot
 exempt kernel/net/socket_capability.tkb  every public operation takes network_capability_store.mutex
