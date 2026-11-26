@@ -1,5 +1,20 @@
 # takibi Engineering History
 
+## 2026-11-26: DDB reports switch and block reservations (#898)
+
+Both scheduler paths hold a linear claim until the existing activation
+helper returns. The same CpuHere in one preemption-off region authorizes
+the publication and clear. DDB reads that CPU's claim through its existing
+stopped-root snapshot and shows it alongside the stack root.
+
+Against fbdf9faea, linked text grew from 849700 to 850236 bytes on QEMU and
+from 4244276 to 4244780 on RPi5. Data and BSS stayed at 4616 and 1310720
+bytes on QEMU and 5592 and 1888256 bytes on RPi5. The existing claim array
+stays 32 bytes and usable RAM starts stay at 0x40218000 and 0x7e0000.
+The normal boot and process-switch workload allocates no additional claim
+storage. The QEMU DDB lane observed both incoming reservations while the
+outgoing tasks were still current and resumed both debugger entry modes.
+
 ## 2026-11-16: initialization contracts preserve the field/byte distinction
 
 The annotation pilot found a whole-record contract checking field leaves but

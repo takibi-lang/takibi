@@ -7724,9 +7724,15 @@ fn kernel_process_schedule(current: borrow FrameRef[process, level]) -> FrameSwi
                 ScheduledProcessReadyTakeResult::Ready(resources) => {
                     let (owner, ready) = resources;
                     let running = scheduled_process_start(owner, ready);
-                    process_run_unlock(guard);
-                    return kernel_process_schedule_reserved(
-                        from, owner, running, current, span);
+                    preempt_off (cpu) {
+                        let claim = kernel_process_claim_begin(
+                            cpu, scheduled_process_record_owned(owner).pid);
+                        process_run_unlock(guard);
+                        let decision: FrameSwitch = kernel_process_schedule_reserved(
+                            from, owner, running, current, span);
+                        kernel_process_claim_end(cpu, claim);
+                        return decision;
+                    }
                 }
             }
         }
@@ -7947,6 +7953,19 @@ struct per_cpu ProcessClaim {
 }
 
 private let mut kernel_process_claim: [ProcessClaim; KERNEL_MAX_CORES];
+
+// The switch and block callers keep their CPU authority across activation.
+// The linear claim makes the matching clear mandatory before either returns.
+private linear view ProcessClaimHeld[claim: usize];
+
+private fn kernel_process_claim_begin(cpu: CpuHere, pid: usize) -> ProcessClaimHeld[0] {
+    kernel_process_claim[cpu].pid = pid;
+    return view ProcessClaimHeld[0];
+}
+
+private fn kernel_process_claim_end(cpu: CpuHere, claim: sink ProcessClaimHeld[0]) {
+    kernel_process_claim[cpu].pid = 0;
+}
 
 fn kernel_process_claimed_pid_or_zero() -> usize {
     preempt_off (cpu) { return kernel_process_claim[cpu].pid; }
@@ -9680,9 +9699,15 @@ private fn kernel_process_block_current(current: borrow FrameRef[process, level]
                 ScheduledProcessReadyTakeResult::Ready(resources) => {
                     let (owner, ready) = resources;
                     let running = scheduled_process_start(owner, ready);
-                    process_run_unlock(guard);
-                    return kernel_process_block_reserved(
-                        from, owner, running, current, reason, trace_aux, span);
+                    preempt_off (cpu) {
+                        let claim = kernel_process_claim_begin(
+                            cpu, scheduled_process_record_owned(owner).pid);
+                        process_run_unlock(guard);
+                        let decision: BlockSwitch = kernel_process_block_reserved(
+                            from, owner, running, current, reason, trace_aux, span);
+                        kernel_process_claim_end(cpu, claim);
+                        return decision;
+                    }
                 }
             }
         }

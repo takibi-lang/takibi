@@ -30,6 +30,7 @@ from pass_line import CaseCount, report_pass
 ROOT = Path(__file__).resolve().parent.parent
 CASES = CaseCount()
 INCONCLUSIVE = "inconclusive"
+HARDWARE_BREAKPOINT = 2
 
 
 class Guest:
@@ -43,22 +44,28 @@ class Guest:
         self.ticks = 0
         self.physical = physical
         self.created = []
+        self.reservations = []
         guest = self
 
         class Breakpoint:
-            def __init__(self, spec, kind=None, access=None, internal=False):
+            def __init__(self, spec, type=None, wp_class=None, internal=False,
+                         temporary=False):
                 self.hit_count = 0
                 self.reached = False
                 self.condition = None
                 self.thread = None
                 self.stage = len(guest.created)
-                guest.created.append(self)
+                if type == HARDWARE_BREAKPOINT and temporary:
+                    guest.reservations.append(self)
+                else:
+                    guest.created.append(self)
 
             def delete(self):
                 pass
 
         self.module = SimpleNamespace(
             Breakpoint=Breakpoint, BP_WATCHPOINT=1, WP_WRITE=1,
+            BP_HARDWARE_BREAKPOINT=HARDWARE_BREAKPOINT,
             GdbError=RuntimeError, error=RuntimeError,
             execute=self.execute, parse_and_eval=self.parse_and_eval,
             selected_inferior=lambda: SimpleNamespace(
@@ -76,6 +83,10 @@ class Guest:
             if stage.stage < self.reachable:
                 stage.hit_count += 1
                 stage.reached = True
+                # The reservation observations precede the armed watchpoint.
+                # Real claim values are checked in the DDB integration lane.
+                for reservation in self.reservations:
+                    reservation.observed = (0, 1, 2, 2)
                 self.ticks += 1
             else:
                 self.ticks += self.after

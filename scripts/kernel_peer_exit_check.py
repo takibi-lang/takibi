@@ -21,10 +21,16 @@ STEP_TICKS = 64 * 60
 
 def current_record(cpu):
     execution = gdb.parse_and_eval("execution_state")[cpu]
+    if not bool(execution["current_live"]):
+        return None
+    return record_for_handle(execution["current_handle"])
+
+
+def record_for_handle(handle):
     # GitHub issue #745: a process handle's slot reference is a RegionHeld,
     # and a RegionPool slot is the record itself.
-    slot = int(execution["current_handle"]["pool_index"]["address"])
-    if not bool(execution["current_live"]) or slot == 0:
+    slot = int(handle["pool_index"]["address"])
+    if slot == 0:
         return None
     record_type = gdb.lookup_type("struct ProcessRecord")
     return gdb.Value(slot).cast(record_type.pointer()).dereference()
@@ -88,9 +94,52 @@ class PeerExitArmed(gdb.Breakpoint):
         return True
 
 
+class ProcessReservation(gdb.Breakpoint):
+    # At the ASID preparation entry the run lock is released, but current
+    # still names the outgoing process. Read the already-spilled owner in
+    # the caller so the probe needs no instruction offset.
+    def __init__(self, path):
+        super().__init__("process_image_prepare_activation",
+                         type=gdb.BP_HARDWARE_BREAKPOINT, temporary=True)
+        self.path = path
+        self.observed = None
+
+    def stop(self):
+        caller = gdb.newest_frame().older()
+        if caller is None or caller.name() != f"kernel_process_{self.path}_reserved":
+            return False
+        cpu = gdb.selected_thread().num - 1
+        current = current_record(cpu)
+        if current is None:
+            return False
+        successor = record_for_handle(caller.read_var("owner"))
+        if successor is None:
+            return False
+        incoming = int(successor["pid"])
+        outgoing = int(current["pid"])
+        if not incoming or not outgoing or outgoing == incoming:
+            return False
+        claim = int(gdb.parse_and_eval("kernel_process_claim")[cpu]["pid"])
+        self.observed = (cpu, outgoing, incoming, claim)
+        return True
+
+    def verify(self):
+        if self.observed is None:
+            raise gdb.GdbError(f"no {self.path} reservation observed before peer exit")
+        cpu, outgoing, incoming, claim = self.observed
+        if incoming != claim:
+            raise gdb.GdbError(f"cpu {cpu} switching from {outgoing} to {incoming} "
+                               f"published claim {claim}")
+        print(f"PASS kernel/qemu {self.path} claim: cpu={cpu} current={outgoing} "
+              f"incoming={incoming} claim={claim}")
+
+
+reservations = (ProcessReservation("schedule"), ProcessReservation("block"))
 armed = PeerExitArmed()
 reach(armed)
 armed.delete()
+for reservation in reservations:
+    reservation.verify()
 reply = PeerExitBoundary("kernel_syscall_resume_return", True)
 reach(reply)
 record = current_record(reply.cpu)

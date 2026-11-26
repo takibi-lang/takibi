@@ -63,6 +63,9 @@ REQUIREMENTS = (
     # GitHub issue #874: a pid an idle CPU has taken but not made current
     # is named as that CPU's claim and walked from its root.
     ('claimed pid backtrace', '^ddb: bt pid=999998 claimed by cpu=1, not yet current$', 1, None, 'both'),
+    # GitHub issue #898: and `stacks` names the claim beside CPU 1's root,
+    # idle or the outgoing process of a switch.
+    ('claimed pid stacks line', '^ddb: stack cpu=1 claimed pid=999998 not-yet-current$', 1, None, 'both'),
     ('missing PID refusal', '^ddb: bt pid not captured$', 1, None, 'both'),
     ('unsupported PC refusal', '^ddb: bt stop=unsupported-pc fp=0x', 1, None, 'both'),
     ('misaligned PC refusal', '^ddb: bt stop=misaligned-pc fp=0x', 1, None, 'both'),

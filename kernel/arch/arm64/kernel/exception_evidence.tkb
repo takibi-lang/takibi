@@ -1573,6 +1573,7 @@ private fn ddb_render_backtrace_test(stopped: borrow MachineStopped[&kernel_worl
                 1, DDB_BT_TEST_CLAIMED_PID) == false) {
             ddb_puts("ddb: bt test claimed pid not found\n");
         }
+        ddb_render_stack_claim(1, DDB_BT_TEST_CLAIMED_PID);
     }
 }
 
@@ -2334,6 +2335,15 @@ private fn ddb_stack_root(stopped: borrow MachineStopped[&kernel_world_stop], co
     return ddb_stopped_unwind_root(stopped, core);
 }
 
+// The reservation belongs to the CPU and does not contribute a stack root.
+private fn ddb_render_stack_claim(core: usize, claimed: usize) {
+    if (claimed != 0) {
+        ddb_puts("ddb: stack cpu="); ddb_put_udec(core);
+        ddb_puts(" claimed pid="); ddb_put_udec(claimed);
+        ddb_puts(" not-yet-current\n");
+    }
+}
+
 private fn ddb_render_stack_root(stopped: borrow MachineStopped[&kernel_world_stop], 
         core: usize, audit: DdbStackAudit)
         -> DdbStackRenderResult !{unsafe} {
@@ -2351,18 +2361,12 @@ private fn ddb_render_stack_root(stopped: borrow MachineStopped[&kernel_world_st
             if (root.pid == 0) {
                 ddb_puts("ddb: stack cpu="); ddb_put_udec(core);
                 ddb_puts(" status=idle\n");
-                // GitHub issue #874: an idle CPU may hold a claim. It is not
-                // a root (the stack is the CPU's own), so it is not counted.
-                let claimed: usize = ddb_claimed_pid(stopped, core);
-                if (claimed != 0) {
-                    ddb_puts("ddb: stack cpu="); ddb_put_udec(core);
-                    ddb_puts(" claimed pid="); ddb_put_udec(claimed);
-                    ddb_puts(" not-yet-current\n");
-                }
+                ddb_render_stack_claim(core, ddb_claimed_pid(stopped, core));
                 let mut absent: DdbStackRootSummary = { false, 0, 0, 0 };
                 let mut idle: DdbStackRenderResult = { absent, next };
                 return idle;
             }
+            ddb_render_stack_claim(core, ddb_claimed_pid(stopped, core));
             next.roots = next.roots + 1;
             ddb_puts("ddb: stack cpu="); ddb_put_udec(core);
             ddb_puts(" pid="); ddb_put_udec(root.pid);

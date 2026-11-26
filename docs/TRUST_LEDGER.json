@@ -6117,6 +6117,37 @@
       "changes": {
         "unprotected_globals": "SetOnce: #1159 FD probe publishes its neutral lookup key once; inherited #1159 protocol trace report releases retire the other allowance under the existing run guard."
       }
+    },
+    {
+      "date": "2026-11-26",
+      "head": "fbdf9faea",
+      "counts": {
+        "raw_mint_files": 15,
+        "frame_lines": 12967,
+        "device_semantics_files": 4,
+        "raw_deref_plain": 80,
+        "raw_deref_io": 8,
+        "raw_deref_builtin_region": 113,
+        "raw_deref_generated": 0,
+        "unsafe_blocks": 178,
+        "extern_fns": 80,
+        "invariant_stop_sites": 138,
+        "static_assert_premises": 11,
+        "assembly_lines": 3018,
+        "per_cpu_ordinary_arrays": 47,
+        "per_cpu_stores": 16,
+        "raw_cpu_id_calls": 133,
+        "trust_build_checks": 24,
+        "tla_review_stamps": 187,
+        "judge_defects_range": 1,
+        "judge_defects_init": 0,
+        "judge_defects_region_overlay": 0,
+        "unprotected_globals": 11,
+        "frame_api_ratchet": 6
+      },
+      "changes": {
+        "frame_lines": "#898 separates the existing DDB claim renderer and observes the reserved PID in both stopped-root cases; no new raw frame operation."
+      }
     }
   ]
 }
