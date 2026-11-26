@@ -325,7 +325,13 @@ condition below applies, and reports the land afterwards.
 
 - 2026-10-13 Device protocols: tx/rx/txrx regions, `addressed` writable
   states, E1 snapshots for device-written rings. [active] #720 #740
-- 2026-10-13 xHCI DCBAA stays legacy until sub-region authority. [active] #720
+- 2026-10-13 xHCI DCBAA stayed legacy pending sub-region authority. The
+  2026-11-22 option 1 gives boot slot publication transient linear authority
+  indexed by the slot and guarded command generation, minted after a
+  matching successful Enable Slot completion with a valid slot ID. The
+  allocation and output context remain live for the controller session;
+  whole-table sub-region authority and concurrent commands remain open.
+  [active] #720
 - 2026-10-14 Packet buffers are pool elements owned linearly: Free ->
   RxPosted -> Filled -> TxPosted -> Free, Unconfirmed terminal. [active] #740
 - 2026-10-14 Sharing for TCP retransmit: keep the owner in TxPosted, read

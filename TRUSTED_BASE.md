@@ -374,9 +374,9 @@ rules globally.
   (a) Raw-pointer cache maintenance, `dma_prepare_tx` (clean) and
   `dma_prepare_rx`/`dma_finish_rx` (invalidate): direct calls only in
   `exception_evidence.tkb` (crash-snapshot writeback, no DMA transition)
-  and `usb_xhci_bus.tkb`'s `xhci_dcbaa_clean` (the DCBAA, outside every
-  ownership model by the #720 "DCBAA stays legacy" decision), both
-  mint-listed; protocol and dma_fixed cache work reaches the same
+  and `usb_xhci_bus.tkb`'s `xhci_dcbaa_clean` (the session-long DCBAA
+  uses an audited raw clean), both mint-listed. Protocol and dma_fixed
+  cache work reaches the same
   lowerings only through generated wrappers (`__protocol_dma_*`) on their
   checked publish/finish edges. Under `--confine-raw-authority` each direct
   call is a counted raw site, an error outside `kernel/RAW_MINT_FILES`. (b) Zero-argument ordering (`dma_publish`,
@@ -473,12 +473,19 @@ rules globally.
   rewrites for the whole session, are rx owners read through snapshot
   observations: trusted, the event TRB's Cycle bit as the mark of a whole
   entry, and that the output context's slot and EP0 words are written when
-  Address Device completes. Still outside the owners: the DCBAA (its slot
-  entry is written while the controller holds the table, which needs
-  sub-region authority); it is an ordinary checked array whose bus address
-  is taken by a pointer cast. With that, `usb_xhci.tkb` holds no raw site
-  and is off `kernel/RAW_MINT_FILES`; its one raw step left is
-  `kernel/platform/rpi5/usb_xhci_bus.tkb`'s DCBAA clean.
+  Address Device completes. The DCBAA remains a session-long checked array
+  whose bus address is taken by a pointer cast. For the configured single
+  slot, a successful matching Enable Slot completion with an ID in 1..64
+  permits a private linear update view indexed by slot and guarded command
+  generation. The two checked table stores and the clean produce the
+  publication view consumed by Address Device submission. The same device
+  guard serializes the sequence. Event truth, cache-line sharing and
+  device visibility remain audited premises. The output context remains
+  live through confirmed controller reset, including if Address Device
+  is abandoned or fails. Whole-table ownership, concurrent commands
+  and sub-region authority remain separate from these transient views.
+  `usb_xhci.tkb` remains off `kernel/RAW_MINT_FILES`; the audited clean
+  is in `kernel/platform/rpi5/usb_xhci_bus.tkb`.
   Every device-visible address of a span is minted in one file,
   `kernel/drivers/dma_address.tkb` (2026-10-29, #1162), under one rule: a
   span's CPU physical address is `dma_span_address`, and a device sees it
