@@ -47,7 +47,6 @@ LISTED = {
     "kernel/fs/ext2/mutation_lock.tkb": (2, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/cpu_authority.tkb": (3, MINT, "normal region entry and availability, plus the approved exception-only unscoped constructor (#1159, #638)"),
     "kernel/kernel/process.tkb": (21, FLIP, "remaining raw callers after typed ExecutionState selection removed execution_cpu_index (#638)"),
-    "kernel/kernel/syscall.tkb": (1, FLIP, "kernel_syscall_dispatch_action: getcpu is a scalar sample and remains counted pending that path review"),
     "kernel/mm/page.tkb": (1, FLIP, "#638 page_reserve_cpu: samples the issuing slot once under the page pool lock; allocation and release select the issuer carried by the reservation"),
 }
 
@@ -70,6 +69,7 @@ REVIEWED_SITES = {
     "kernel/kernel/profile_session.tkb::profile_session_irq": (1, "#638 stage 9: an interrupt function called by profile_sample_irq in the PMU handler; ordinary IRQs exclude migration throughout the CPU-indexed state/buffer accesses, and the nested buffer lock restores the already-masked state"),
     "kernel/kernel/profile_session.tkb::irqsoff_open": (1, "#638 stage 9: mutex_irq_save calls it after irq_save, and irq_mask_cost_daif calls it after msr_daifset_irq; the CPU-indexed walk and stores finish while the caller's IRQ mask is still held"),
     "kernel/kernel/profile_session.tkb::irqsoff_close": (1, "#638 stage 9: mutex_irq_restore calls it before enable_irq, and irq_mask_cost_daif before msr_daifclr_irq; the CPU-indexed close, walks and stores finish before either caller unmasks"),
+    "kernel/kernel/syscall.tkb::kernel_syscall_dispatch_action": (1, "#638: only getcpu's non-null CPU output arm takes an instantaneous CPU sample after validating its user range; the sampled scalar is copied as the ABI result, with no per-CPU storage lookup or execution authority. A later move during copyout preserves the sampled observation"),
     "kernel/kernel/syscall.tkb::syscall_syslog_copy": (1, "#638: sampled CPU only gates the once-only AtomicWord peer-completion evidence line after a successful copy; it neither indexes CPU storage nor authorizes a user write, whose range is tied to ProcessCurrent and whose staging is owned by SyscallSlot; no whole-copy CPU-stability claim"),
     "kernel/kernel/syscall.tkb::syscall_system_stop_stopped": (1, "#638: initiator CPU is direct DDB output only on Complete machine stop; world_stop_debug_begin retains IRQ masking, disable_irq is explicit, keep_forever never restores flags or resumes peers; Busy/Partial return before the read"),
     "kernel/lib/occupancy.tkb::world_stop_hold": (1, "#638: interrupt function reached only from world_stop_interrupt_hold in the NMI stop service; ordinary IRQs exclude migration through owner comparison, acknowledgement, hold and retirement"),
