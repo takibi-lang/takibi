@@ -44,7 +44,6 @@ CALL = re.compile(r"\bcpu_id\s*\(\s*\)")
 
 # file -> (count, kind, reason): the calls of a file outside REVIEWED_SITES.
 LISTED = {
-    "kernel/fs/ext2/mutation_lock.tkb": (2, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/cpu_authority.tkb": (3, MINT, "normal region entry and availability, plus the approved exception-only unscoped constructor (#1159, #638)"),
     "kernel/kernel/process.tkb": (13, FLIP, "remaining raw callers after typed ExecutionState selection removed execution_cpu_index (#638)"),
 }
@@ -54,6 +53,8 @@ LISTED = {
 # function, so a new call in an already reviewed file is refused rather
 # than absorbed by the file's label.
 REVIEWED_SITES = {
+    "kernel/fs/ext2/mutation_lock.tkb::ext2_mutation_guard_mint_cpu": (1, "#638: the blocking and try-acquire paths sample the CPU when minting the private guard after taking the mutex. The drain transition copies it; no indexing, admission decision, or unlock reads it. A resumed waiter may run on another CPU; both release paths name the same mutex"),
+    "kernel/fs/ext2/mutation_lock.tkb::ext2_mutation_take_without_readers_unchecked": (1, "#638: only the two contention control paths call this after taking the mutex. The sample initializes the same unused guard field; neither control nor release uses it to select a CPU or authority"),
     "kernel/mm/page.tkb::page_reserve_cpu": (1, "#638: the sole caller samples and publishes the issuer under the IRQ-masking page-pool Mutex. The selected slot travels in the linear PageReservation for later debit and release across migration"),
     "kernel/kernel/process.tkb::scheduled_process_alloc_boot_thread": (1, "#638: its sole caller is execution reset, reached only from the primary test driver before boot handoff; reset closes scheduling before the sample and peers cannot dispatch yet. The bounded CPU value sets only the new boot record affinity mask; this is reviewed caller context, not a typed CPU lifetime"),
     "kernel/kernel/process.tkb::kernel_process_rollover_backoff": (1, "#638: the CPU sample only chooses an immutable counter-delay threshold; the IRQ-unmasked helper does not index CPU storage or return execution authority, so later migration does not invalidate that already chosen scalar value; no activation, ASID or liveness guarantee"),
