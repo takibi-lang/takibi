@@ -47,7 +47,6 @@ LISTED = {
     "kernel/fs/ext2/mutation_lock.tkb": (2, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/cpu_authority.tkb": (3, MINT, "normal region entry and availability, plus the approved exception-only unscoped constructor (#1159, #638)"),
     "kernel/kernel/process.tkb": (13, FLIP, "remaining raw callers after typed ExecutionState selection removed execution_cpu_index (#638)"),
-    "kernel/mm/page.tkb": (1, FLIP, "#638 page_reserve_cpu: samples the issuing slot once under the page pool lock; allocation and release select the issuer carried by the reservation"),
 }
 
 # "file::function" -> (count, reason): calls read before the flip that hold
@@ -55,6 +54,7 @@ LISTED = {
 # function, so a new call in an already reviewed file is refused rather
 # than absorbed by the file's label.
 REVIEWED_SITES = {
+    "kernel/mm/page.tkb::page_reserve_cpu": (1, "#638: the sole caller samples and publishes the issuer under the IRQ-masking page-pool Mutex. The selected slot travels in the linear PageReservation for later debit and release across migration"),
     "kernel/kernel/process.tkb::scheduled_process_alloc_boot_thread": (1, "#638: its sole caller is execution reset, reached only from the primary test driver before boot handoff; reset closes scheduling before the sample and peers cannot dispatch yet. The bounded CPU value sets only the new boot record affinity mask; this is reviewed caller context, not a typed CPU lifetime"),
     "kernel/kernel/process.tkb::kernel_process_rollover_backoff": (1, "#638: the CPU sample only chooses an immutable counter-delay threshold; the IRQ-unmasked helper does not index CPU storage or return execution authority, so later migration does not invalidate that already chosen scalar value; no activation, ASID or liveness guarantee"),
     "kernel/kernel/process.tkb::kernel_process_spread_timer_progress": (1, "#638: acquires the IRQ-masking ProcessRunGuard before its CPU1 fixture-role read; all uses of that predicate and guarded fixture updates finish before unlock; no post-unlock scheduling claim"),
