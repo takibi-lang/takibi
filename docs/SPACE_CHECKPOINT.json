@@ -1,12 +1,12 @@
 {
-  "date": "2026-11-25",
+  "date": "2026-11-26",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "ee40b2aec24a07f91efbc646bf1f1f276bb090a219e9cf736c57733e4037fb95",
-  "workload": "Matched normal QEMU and RPi5 linked images for FD-refcount probe publication and typed setup rollback, against published e49057f10.",
+  "source_sha256": "6a7b937bda71e3abd5cf6dc5c969124266c51a797ef353629580d7d0e86c02c5",
+  "workload": "Existing process switch and block reservations, normal QEMU and RPi5 linked kernel images, and the QEMU DDB ASID-preparation observer.",
   "evidence": [
-    "docs/GLOBAL_PROTECTION.md"
+    "HISTORY.md"
   ],
-  "assessment": "The publication cell remains 24 bytes, BSS and usable RAM are unchanged, and executable text grows by 496/480 bytes. Primary and secondary probe frames add 32 and 16 transient bytes; the hot cycle frame is unchanged.",
-  "next_trigger": "Remeasure when the key size, admission boundary, or process rollback changes."
+  "assessment": "Text grows by 536 bytes on QEMU and 504 bytes on RPi5. Data, BSS, usable RAM starts and the existing 32-byte claim array are unchanged. The operation introduces no new reservation storage or allocation.",
+  "next_trigger": "Measure again when the stopped-root claim storage or scheduler reservation lifetime changes."
 }
