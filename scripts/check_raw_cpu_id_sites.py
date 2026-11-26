@@ -45,7 +45,7 @@ CALL = re.compile(r"\bcpu_id\s*\(\s*\)")
 # file -> (count, kind, reason): the calls of a file outside REVIEWED_SITES.
 LISTED = {
     "kernel/kernel/cpu_authority.tkb": (3, MINT, "normal region entry and availability, plus the approved exception-only unscoped constructor (#1159, #638)"),
-    "kernel/kernel/process.tkb": (9, FLIP, "remaining raw callers after typed ExecutionState selection removed execution_cpu_index (#638)"),
+    "kernel/kernel/process.tkb": (6, FLIP, "remaining raw callers after typed ExecutionState selection removed execution_cpu_index (#638)"),
 }
 
 # "file::function" -> (count, reason): calls read before the flip that hold
@@ -72,6 +72,7 @@ REVIEWED_SITES = {
     "kernel/kernel/process.tkb::kernel_process_stack_owner_probe": (1, "#638: its local IRQ-masking run guard covers the CPU-role sample, the temporary synthetic stack owner and its restoration; only the probe verdict leaves the hold"),
     "kernel/kernel/process.tkb::scheduled_process_restart_check": (1, "#638: its sole caller is the reserved-block rollback, inside preempt_off and the IRQ-masking run guard through the stack check and immediate restart on this CPU"),
     "kernel/kernel/process.tkb::kernel_process_start_handle": (1, "#638: both direct callers retain the real IRQ-masking run guard through stack-owner and local execution-slot publication; the reserved-schedule rollback also retains its outer preempt_off region"),
+    "kernel/kernel/process.tkb::kernel_process_el1_preempt_scenario": (3, "#638: the three reads observe the starting CPU, the first resume before the affinity change, and the second resume on the requested target. The saved observation is used for comparison, and the affinity update uses the separately validated target argument"),
     "kernel/kernel/process.tkb::kernel_crash_trace_cpu": (1, "#638: the sole trace writer masks ordinary IRQs before sampling; the bounded sample selects its per-CPU cursor and record segment, and all cursor and record stores finish before the matching restore. This review covers CPU placement during that writer interval"),
     "kernel/kernel/process.tkb::kernel_process_idle_starvation_note": (1, "#638: borrows the IRQ-masking ProcessRunGuard through raw CPU eligibility walk, existing typed per-CPU count region and starvation diagnostic; its caller unlocks only after return; no new idle or scheduler guarantee"),
     "kernel/kernel/process.tkb::kernel_process_tick_wake_enqueue": (1, "#638: borrows the IRQ-masking ProcessRunGuard across current-CPU sampling and the immediate queue marker, list-head and due-word updates; the retained core names this enqueue list, not future task execution authority"),
