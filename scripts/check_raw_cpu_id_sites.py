@@ -46,7 +46,7 @@ CALL = re.compile(r"\bcpu_id\s*\(\s*\)")
 LISTED = {
     "kernel/fs/ext2/mutation_lock.tkb": (2, FLIP, "not yet reviewed for migration"),
     "kernel/kernel/cpu_authority.tkb": (3, MINT, "normal region entry and availability, plus the approved exception-only unscoped constructor (#1159, #638)"),
-    "kernel/kernel/process.tkb": (20, FLIP, "remaining raw callers after typed ExecutionState selection removed execution_cpu_index (#638)"),
+    "kernel/kernel/process.tkb": (13, FLIP, "remaining raw callers after typed ExecutionState selection removed execution_cpu_index (#638)"),
     "kernel/mm/page.tkb": (1, FLIP, "#638 page_reserve_cpu: samples the issuing slot once under the page pool lock; allocation and release select the issuer carried by the reservation"),
 }
 
@@ -60,6 +60,13 @@ REVIEWED_SITES = {
     "kernel/kernel/process.tkb::kernel_process_spread_timer_progress": (1, "#638: acquires the IRQ-masking ProcessRunGuard before its CPU1 fixture-role read; all uses of that predicate and guarded fixture updates finish before unlock; no post-unlock scheduling claim"),
     "kernel/kernel/process.tkb::kernel_process_spread_timer_enter": (1, "#638: acquires the IRQ-masking ProcessRunGuard before the CPU0 sample; the changing predicate and its immediate guarded update stay under that hold; timer-schedule caller is interrupt context, not a substitute for this local hold"),
     "kernel/kernel/process.tkb::kernel_process_spread_timer_left": (1, "#638: borrows ProcessRunGuard across the CPU0 check and immediate Left-phase bookkeeping; the caller passes the guard and unlocks only after return; no sampled CPU value or deferred action escapes"),
+    "kernel/kernel/process.tkb::kernel_process_stack_interrupt_depart": (1, "#638: preempt_off holds this CPU while comparing and clearing the departing stack owner under the process-run guard"),
+    "kernel/kernel/process.tkb::kernel_process_stack_switch_claim": (1, "#638: preempt_off holds this CPU from the stack-owner comparison through the incoming stack-owner publication and local execution-slot updates; deferred reaping carries process handles"),
+    "kernel/kernel/process.tkb::kernel_process_stack_idle_complete": (1, "#638: preempt_off holds this CPU while checking the outgoing stack owner, clearing it and recording the exit-stack release; the later reap uses process handles"),
+    "kernel/kernel/process.tkb::kernel_process_stack_idle_yield": (1, "#638: preempt_off holds this CPU while checking the outgoing stack owner and publishing the unowned Ready stack under the process-run guard"),
+    "kernel/kernel/process.tkb::kernel_process_stack_idle_blocked": (1, "#638: preempt_off holds this CPU while checking and clearing the outgoing stack owner; a later wake can select the now unowned stack"),
+    "kernel/kernel/process.tkb::kernel_process_core0_leave_excluded": (1, "#638: the CPU0 predicate and its immediate current-slot and scheduler updates all run inside the same preempt_off region under the process-run guard"),
+    "kernel/kernel/process.tkb::kernel_process_scheduler_probe_stack_depart": (1, "#638: the probe compares and clears the parked stack owner inside preempt_off and under the process-run guard; its return reports the completed check"),
     "kernel/kernel/process.tkb::kernel_crash_trace_cpu": (1, "#638: the sole trace writer masks ordinary IRQs before sampling; the bounded sample selects its per-CPU cursor and record segment, and all cursor and record stores finish before the matching restore. This review covers CPU placement during that writer interval"),
     "kernel/kernel/process.tkb::kernel_process_idle_starvation_note": (1, "#638: borrows the IRQ-masking ProcessRunGuard through raw CPU eligibility walk, existing typed per-CPU count region and starvation diagnostic; its caller unlocks only after return; no new idle or scheduler guarantee"),
     "kernel/kernel/process.tkb::kernel_process_tick_wake_enqueue": (1, "#638: borrows the IRQ-masking ProcessRunGuard across current-CPU sampling and the immediate queue marker, list-head and due-word updates; the retained core names this enqueue list, not future task execution authority"),
