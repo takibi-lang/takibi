@@ -47,17 +47,10 @@ independently, so both lanes run, and the issues slightly off the pillars.
 An urgent issue that comes up mid-work is scheduled by the coordinator,
 which rewrites the priorities below and says so on the issue.
 
-**The pillars need their support lanes (maintainer, 2026-10-25).** The
-two pillars remain the most important near-term goal: without them the
-kernel's skeleton is not fixed. What the 2026-10-24/25 review showed is
-that they do not grow soundly on their own. The z3 second judge (#952,
-#954) found several existing defects within days; moving the `.tkb`-reading
-build checks into the compiler (#567) stops a tax that takes more of the
-commits than the compiler they guard; equivalence oracles against host
-Linux and libext2fs (#999, #1034) turn review chains into tests. So
-Territory B's queue is ordered by what serves the pillars, and A adopts
-each support result (a facts table, an oracle, a ratchet) at its next work
-boundary rather than later.
+**Support lanes (maintainer, 2026-10-25).** Territory B's queue serves
+the multicore and memory-safety pillars through solver evidence (#954),
+compiler checks (#567), and Linux and libext2fs comparisons. Territory A
+adopts each support result at its next work boundary.
 
 **The split (maintainer, 2026-10-09).** Territory A holds only the trunk:
 memory safety and multicore -- the stored-authority rule and the kernel-core
@@ -96,283 +89,118 @@ lane (`kernelcheck-race-window-*-qemu`) before its issue closes.
 
 ### Evidence for the pillars (shared, scheduled by A)
 
-- **#742 stage 1 done** (2026-10-25): `make load-qemu` (four vCPUs) and
-  `make hwcheck-load-rpi5`, in no aggregate (#742's rules: a finder, never
-  the evidence a defect is fixed; time verdicts decided on the RPi5).
-  stress-ng 0.20.01 and hackbench 2.9 are built as musl static PIEs by
-  `scripts/build_load_programs.sh` into a cache outside the repository.
-  Today the BusyBox `xargs -P 4` and hackbench phases run; the load found #1039 (an
-  execve argv that fail-stops the kernel; done 2026-10-25), #1040 (an unmappable ELF ran
-  BusyBox; done 2026-10-25; #1065 then removed the argv[0] image choice), #1041 (images over
-  a 2 MiB span: stress-ng; done 2026-10-26, `stress-ng --version` runs) and #1042 (pipe2,
-  done 2026-10-25, unblocks hackbench and stress-ng `--pipe`). #1138 (sigaltstack, done
-  2026-10-26) took every stressor past its setup, and #1147 (shared anonymous mmap, statfs,
-  getrusage, umask; done 2026-10-26) past its shared region, and #1151 (a 16 MiB mmap region
-  apart from brk, madvise; done 2026-10-29) past its 2 MiB shared cache buffer, and #1166
-  (CLOCK_REALTIME advances; done 2026-10-29) past the startup sleep its stressors hung in;
-  and #1172 (setitimer's ITIMER_REAL; done 2026-10-29) let the fork and pipe stressors
-  stop at --timeout; #1176 (per-process uids and gids, setresuid; done 2026-10-29) runs
-  the stressors as a non-root `load` user through BusyBox su, so the exec stressor no longer
-  refuses root; it now skips because readlinkat (nr 78) of /proc/self/exe is unimplemented and
-  it cannot name its own executable (#1190). The fixture
-  rootfs grew from 2816 to 6144 blocks to hold both programs, so QEMU and
-  the board boot the same image (maintainer, option b: one board build,
-  sized from content; about 18 s more SWD per RPi5 lane run). Each program is recorded beside the same program under Linux
-  on the same machine (maintainer, 2026-10-25): a reference column, never
-  a verdict, appended to `docs/LOAD_SERIES.md` -- QEMU virt under mainline
-  v6.12 booting the same rootfs (#1158); the RPi5's column waits for a run under
-  Raspberry Pi OS. #1014 (run-lock contention, parked) is measured on this load
-  and nowhere else. Stages 2 and 3 (threads: CLONE_VM, futex, TLS, TLB
-  shootdown) wait for the #638 flip.
-- #584's soak at natural boundaries; #702 (dedicated soak hardware) is the
-  maintainer's decision. Every QEMU lane runs four vCPUs since 2026-10-11.
-- The parked triggers #680 and #812 are watched by the RPi5 lane
-  (`scripts/validate_parked_triggers.py`, #953).
+- #742 stages 2 and 3 (CLONE_VM, futex, TLS, TLB shootdown) wait for
+  the #638 flip. Use `make load-qemu` and `make hwcheck-load-rpi5` to
+  find defects. QEMU records timing; RPi5 decides timing verdicts.
+  The stress-ng exec stressor waits for `readlinkat` on
+  `/proc/self/exe` (#1190). Record matched Linux evidence in
+  `docs/LOAD_SERIES.md` under #1158. #1014 measures run-lock contention
+  on this workload and remains parked.
+- #584 is the load and soak workload. Dedicated soak hardware (#702)
+  is the maintainer's decision. Maintained QEMU lanes default to four vCPUs.
+- The RPi5 lane watches the parked triggers for #680 and #812.
 
 ### Territory A: the trunk, in this order
 
-**Highest priority, maintainer update 2026-11-19: kernel memory safety
-(#1513).** Fresh user payload page publication checks full initialization at
-the common mapping entry. Pipe handle publication checks initialized fields
-of the current slot, and lazy L3 table publication checks all bytes of
-the live table owner. Continue the remaining kernel coverage in #1513.
-The Pipe prototype checks copy-result handoff on the current owner.
-Review the remaining alias, mutation, and reset boundaries before adoption.
-This is a Milestone 1 gate and takes precedence over the
-remaining preemption review and flip. Territory A takes its dependency
-chain through #203, #637, #954, #986, #132 and #638, coordinating shared
-verification work with Territory B. A red allcheck takes precedence.
-Resume the trunk queue after this work or on maintainer direction.
+1. **Scoped memory safety (#1513).** Fresh user pages and newly published
+   L3 tables have initialization checks. Bounded L3 retirement orders
+   descriptor unlink, invalidation and reuse at runtime. The static
+   lifetime of resident tables remains open. The complete Pipe static
+   guarantee is deferred. TCP receive initialization across slot
+   reacquisition and the lifetime of the old COW source need design
+   decisions. Use #203, #637, #954, #986 and #132 for the supporting
+   evidence and contracts.
+2. **Global protection (#1159).** The boot handoff and FD probe migrations
+   are published. Eleven allowances remain at this snapshot. The child
+   EL0 frame keeps dedicated storage after the compile-only experiment
+   accepted overlaps and lifetime escape. Continue with the remaining
+   reviewed allowances when their design gates clear. The build reports
+   the current count; `docs/GLOBAL_PROTECTION.md` describes the ratchet.
+3. **Preemption (#638).** The raw CPU reader audit leaves three reads in
+   the stack-arrival and task-start paths. Decide how to cover both with
+   the existing CPU authority while preserving the unlocked negative
+   control. Measure the approved migration path at matched internal
+   boundaries and end to end before the flip. The flip requires #1159
+   and #1481 to meet their gates. Keep the existing #1323 lifecycle spans.
+4. **Stored authority (#637).** Continue the remaining L3 ownership and raw
+   exports. The clone saved-SP trial reached a decision on retaining
+   parent evidence across the run guard or copying inside that guard.
+   The DDB ring reads in `rp1_gem` and `virtio_net` wait on #1286.
+   Section regions (#777) need a decision for `stack_poison.tkb` and the
+   DTB. Use `make raw-site-counts` to select the next applicable site.
+   The frame and built-in consolidation work remains in #1017 and #750.
+5. **Hardware isolation (#1032).** The linked PAN, WXN and PXN checks and
+   QEMU permission controls are in use. The RPi5 RP1 inbound window
+   confines DMA to one arena. QEMU PCI virtio and SMMUv3 remain staged
+   block-first, with MMIO coverage retained. The compile-only capability
+   experiment checked access bounds. The transport still needs decisions
+   on capability selection and who assigns and validates BAR extents.
+   Process-stack guard arenas (#1226) need a capacity decision before
+   connecting the tested layout to the runtime.
 
-**Priority update, 2026-11-10.** ExecutionState uses existing per_cpu/CpuHere
-authority; its runtime and four-core RPi5 cost review are complete. RootHeld
-activation-entry protection now retains actual current or same-generation
-owner/Running authority through direct and prepared commit paths, with must-use
-outcomes and measured space/runtime review. It does not add page-table write
-authority. Continue the remaining #638 review before the flip; #638 remains
-open. Coordinate shared scheduler edits with the approved sleeping-Mutex
-lifetime/callback foundation (#1481); no extra bootstrap stack. The four
-retained exception diagnostic stores use typed per-CPU/complete-stop access
-and the narrowly admitted publication mirror; parent #1159 remains open for
-other globals. The exception/net boundaries and reverted-churn timing-policy
-correction are complete. Protect production-reachable boot/selftest state
-with typed guards, owners or phases, without a live-fixture exemption.
-Actual function-value effect checking is complete (#1493). UART input-flow
-requests use the existing TX IRQ, and complete debugger returns rearm
-retained TX work. Busy/Partial refusals serialize UART output or retain a
-diagnostic record (#1494). Typed UART callback registration under #1159
-now snapshots under its IRQ-safe guard and invokes after release.
-The wider DDB safety review (#1286) remains open.
-Exec allocations now debit the CPU that issued the borrowed reservation.
-Continue independent raw-CPU reader review while a concrete new decision
-is parked. Measure the approved #638 migration path both at matched
-internal boundaries and end to end before the flip.
-
-**Ownership review update, 2026-11-10.** The pending TCP chain probe owns
-its fully zeroed frame locally through the existing nonretaining copy API;
-all four measured frames fit the existing ceiling. Continue the remaining
-production-reachable global migrations without a fixture exemption.
-Scoped ASID initialization is published. The nested indexed ownership and
-held-span repair (#1500) is complete. Body-checked argument/result provenance
-now protects the real boot exec scratch API, direct references and reborrows;
-boot mapping uses the existing slot-owned windows (#1159). Ordinary direct
-reference/slice helpers now infer checked lifetime dependencies without new
-kernel annotations; continue the remaining export/alias consumers (#1513).
-The pin-sharing handle migration is published (#1159). Continue with the
-remaining global protection allowances.
-
-**Assigned queue (maintainer, 2026-10-23, pruned 2026-10-25).** Memory
-safety and multicore backbone only. Taken in order whenever the numbered
-trunk items below have no step ready; an item that reaches a decision is
-parked and the next one taken:
-#1096 (the locks #1071 left masked) is done (HISTORY.md: the generated DMA
-owners are TaskMutex, the spare stack stays masked). #980
-(reboot through the debug stop) is done (HISTORY.md). #799 waits under #954 until a site needs it.
-
-1. **Stored authority and the mint list (#637 stage 3).** Done since
-   2026-10-09 through 2026-10-25 (HISTORY.md): places, per-CPU storage,
-   RegionPool records, header overlays, the process-stack run owner, the
-   per-CPU scratch migration (#981, #982). What remains: the K category of
-   `kernel/RAW_MINT_FILES` -- `rp1_gem`, `virtio_net`
-   (`drivers/block/memory` left 2026-10-26: a checked slice, `virtio_blk`
-   2026-10-29 (#1161, #1162); `virtio_net` and `rp1_gem` are each down to
-   their DDB ring read, deferred (rp1_gem's RP1 clock and GPIO registers are
-   IoHandles since 2026-10-29, #1163); device-visible addresses have
-   one mint, `drivers/dma_address.tkb`, since 2026-10-29, #1162; next
-   #1032) -- leaves through device protocols and
-   `IoHandle` as `usb_xhci` did (#720), which is also "drivers out of the
-   frame" in #1017; then section regions (#777, awaiting its decision) take
-   `stack_poison.tkb`'s last integer ranges and the DTB blob. The frame API
-   rule is checked on both targets by `scripts/buildcheck_frame_api.py`
-   (#1018). Six reviewed raw exports remain after the FDT base helper
-   retirement. The `mmu_user_l3_physical` ownership work remains under
-   #637. `make raw-site-counts` picks the next file. #750 (consolidating the built-ins)
-   follows #732.
-2. **The process record.** Threads sharing an address space are #742
-   stages 2-3, after the preemption flip.
-3. **Preemption (#638), nine stages** (worker proposal 2026-10-24, with
-   #992 and #993 inserted; the route review is #638's comment of
-   2026-10-24): (1) the raw `cpu_id()` inventory check, done; (2)
-   `preempt_off` lowers to a per-CPU preempt count reached through
-   TPIDR_EL1, with a debug-build assert, constant still 0, measured on
-   RPi5 (decided 2026-10-25, DECISIONS.md; done 2026-10-25 except the RPi5
-   measurement: a .S helper reads TPIDR_EL1, the asserts run in every
-   image; the route review's other
-   recommendations are taken with it: an immediate switch at IRQ return
-   only, El0-only deliveries, bounded yield-and-retry slot pools,
-   `!{interrupt}` deriving `PreemptOff` with `nmi` and `debug_stopped`
-   apart); (3) an EL1
-   frame in `saved_sp` (#992: `FrameRef` carries its exception level,
-   deliveries take El0 only, `StackOwnership.tla` gains `PreemptEL1`;
-   done 2026-11-01, `FrameRef[process, ExceptionLevel]` provisional
-   until #1006; the boot probe erets into a hand-made El1 frame through the
-   successor path, on QEMU and RPi5, #1194); (4)
-   a non-stopping CPU-authority mint and the `!{interrupt}`-derives-
-   `PreemptOff` rule (#641 item 1; done 2026-10-29, 20e22f3c: D1 (a) an
-   `!{interrupt}` function is called only masked and mints CPU authority
-   there, D2 (i) a fallible `preempt_off (cpu) { } else { }`); (5) site migration (process_image's
-   target root is explicit and carried by ProcessImagePages, #981; the log's partial line with an owner word, done (#1159),
-   `syscall_ext2_reader`, done (#1323: a dispatch local), exception_evidence retained CPU rows, done (#1486: existing per_cpu/stopped_read plus scoped crash publication));
-   (6) the slot pools'
-   capacity premise (#993, done 2026-11-01: capacity unchanged, a full pool retries unmasked for the tick, the mutation lock before any slot, `SlotPool.tla`); (7) the lock-holder group with the `PreemptOff`
-   token (lifecycle spans done 2026-11-01, #1323; the span's may_block ban is a compile-time rule, #1350 done 2026-11-06; #789 is not needed for the flip: #638 comment); (8) the EL1 switch at IRQ return when the count is zero,
-   shown once in a deterministic lane (done 2026-11-06: slices 1-3 the per-stack count word, its leaves, the El1-resume zero check; slice 4 the /bin/protocol-trace window, whose IRQ-return consult reads the interrupted stack's count, on QEMU and RPi5, with the `638-no-consult` control; no El1 PMR reset, asserted at stage 9, typed under #850); (9) the flip (its per_cpu field list is done, #1331: `scripts/per_cpu_carried_fields.tsv`; slice 1 done 2026-11-07: every El1 resume stops on a masked priority-mask shadow, the #1194 probe takes no mask of its own (option F), the IRQ-return consult refuses a tick that interrupted a masked shadow; slice 2 2026-11-07: Wait4Block and ConsoleTx, the two models with a no-preemption guard, gain a `PREEMPTIBLE` variant that passes; (c) done 2026-11-08: a real window lets a tick switch /bin/protocol-trace inside its own ext2 read syscalls on one CPU, every answer checked, every boot; and across CPUs 0 and 1, a read preempted on one CPU resumed on the other, on QEMU and RPi5), models passing without
-   their no-preemption guards, the three boot-phase stand-ins rewritten (done 2026-11-08, #1462: the ext2 and gem_tx fixtures borrow a TestDriverPhase that the boot handoff consumes; debt (e) closed by evidence 2026-11-08: the scenario's contended-acquire rise was the held branch's 40000-byte pipe-probe era, and 19 lands before slice 4 against 78 after show no rise, #638 comment),
-   never while #584's soak runs. The flip's precondition is a number:
-   #1012's ratchet reports no production global outside the typed set.
-4. **Globals and hardware isolation (memory safety).** #1012: every
-   `let mut` global is `AtomicWord`, lock-protected, `per_cpu`, region
-   backing, `Place`, a `dma_fixed` or protocol owner, or boot-once (#1013),
-   or allow-listed with its reader named; the ratchet (slice 1, done
-   2026-10-29: `--emit-globals` and `buildcheck_global_protection.py` in
-   kernelbuild, docs/GLOBAL_PROTECTION.md) counted 475 of 712 production
-   globals outside that set (391 of 519 outside evidence/probe files), 428 since slices 3-4 (stall_probe, process.tkb counters and first-occurrence records, virtio_blk statistics and block counters to AtomicWord; the block fault scenario to a guarded Place), 418 since `BootOnce(T)` (#1013 done; the rpi5 and xHCI groups are #1246), 390 after them, 374 after the next diagnostic counters, 361 after the scheduler gates and report-once flags, 336 after the TCP fixture hooks and shell checkpoints, 318 after one-word kernel state (ext2 fence, terminal latch and foreground session, driver ready flags), 303 after the console transmit state moved behind the console guard, 277 after the tick-wake lists and spread-timer fixture moved behind the run lock and the trace switches to AtomicWord, 262 after the flip-breaking rows and the profile and irqsoff words, 245 after the peer fixtures' words moved behind the run guard, 242 after virtio_blk's state words moved behind the block device guard, 233 after the xHCI ring cursors and BOT tag (allowlist rows, as the trust ledger counts them; from 2026-11-07 the count is not written here: the `PASS global-protection` build line and the trust ledger's `unprotected_globals` report it, and docs/GLOBAL_PROTECTION.md lists what moved),
-   each listed; the migration follows the order the flip breaks things. #1032: WXN and PXN
-   first (configuration; a B-sized slice; done 2026-10-29: the identity
-   is split so only the text is executable, WXN is set, and two QEMU oops
-   modes are the negative controls), then PAN with a typed
-   `user_access` window (done 2026-10-30 on a branch: every QEMU lane
-   emulates cortex-a76, PAN is set per core and on every exception entry,
-   a linear `UserAccessWindow` wraps each user access, and a range's base
-   is refined to the user-window interval; `el1_read_user` is the
-   negative control), then DMA confinement (RPi5: RP1 confined to one
-   arena by the PCIe inbound window, since the DTB gives GEM and xHCI no
-   IOMMU; then staged QEMU PCI virtio and `smmuv3`, starting with block
-   and retaining MMIO coverage),
-   which narrows the device-semantics claims of
-   `kernel/DEVICE_SEMANTICS_FILES` from trusted toward enforced. Each step
-   has a negative control and an RPi5 measurement.
+A red allcheck takes precedence. Advance independent work when an item
+reaches a decision. #799 waits under #954 until a real site needs it.
 
 ### Territory B: supporting the pillars, by priority
 
-Board-free preparation for the approved Linux cold handoff and matched
-raw ext2 USB root comparison is complete (#1158). Run the comparison on
-the final Milestone 1 candidate on RPi5. The LLVM static frame
-gate now requires stack-size metadata for normal and debug kernel objects
-on both targets, with the 2048 B ordinary ceiling.
-The board-free RPi5 reset and loader controls now distinguish OpenOCD
-commands from checkout paths (#1503).
-**Waiting Mutex order, 2026-11-19.** Complete #1481 before the #638
-preemption flip. Within #1481, sequence EL1 continuation save and resume,
-ext2 reader-drain wait and wake, then sleeping ext2 readers. The direct
-ext2 mutation paths park while admitted readers drain, including openat
-with O_CREAT or O_TRUNC. Ext2 getdents64 parks at admission with SIGKILL
-cancellation. Complete the remaining eligible reader and writer paths,
-then measure uncontended and contended acquisition on RPi5 before closing
-#1481.
+**Milestone 1 first.** Finish the #1481 TaskMutex sequence before the
+#638 flip. The existing ext2 mutation and getdents64 admission paths can
+park. The retained-inode retirement prototype keeps the obligation in its
+guarded place and passes a generation-indexed I/O permit. Connecting it to
+the real FD teardown paths needs a decision on checked continuation
+admission before irreversible teardown. After the eligible reader and
+writer paths are connected, measure uncontended and contended acquisition
+on RPi5. #667 waits for a qualifying capture, and #1158 waits for the final
+Milestone 1 candidate.
 
-**Assigned queue (maintainer, 2026-10-23, re-cut 2026-10-25).**
-Low-dependency issues A does not hold, in this order; compiler work in
-this list is authorized; an item that reaches a decision is parked and the
-next one taken. The done record of the previous queue is in HISTORY.md
-(2026-10-25).
+**Standing queue (maintainer, 2026-10-23, re-cut 2026-10-25).**
+Low-dependency items in this order. Park each design decision and advance
+independent work.
 
-0. **Stop the silent growth (now).** The remaining `.tkb`-reading checks
-   move to #987's call-graph table one by one (#567; the table names
-   compiler builtins since #1261, and the DMA finish callers and the block
-   cache's slot-indexed callers moved with it, and the five ProcessCurrent
-   mint functions' callers on 2026-11-06); #850's stop-gap is
-   done (EFFECTS.md lists the checker-only effect words from the table
-   `dynamic_rule` reads; no new such word, DECISIONS.md; the migration
-   stays in band 2); #1003 (`WORDS.md`) and #1027 step 1 (`CLI.md`, the dead
-   flags out, the `--internal-*` namespace) and #1004 (dead builtins,
-   `stable_replace` to a removed-words table, the generated-only names
-   hidden) done 2026-10-25; #994 (address-taking DMA cache builtins counted as raw sites;
-   done 2026-10-25) and #1028 (other address-taking intrinsics: the one-argument translation intrinsics counted; done 2026-10-29); #1031 slice 1 (classify the 119
-   `kernel_invariant_stop` sites and ratchet them; done 2026-10-25,
-   `scripts/invariant_stop_sites.tsv`: 120 sites, frame 31, unmodelled 18,
-   ladder 71); #1018 (the frame API rule as a list-file check; done
-   2026-10-25, 8 ratchet entries); #986 slice 1 (the trust ledger as a dated
-   checkpoint series, each row attributed to the rule that retired it; done
-   2026-10-25, `docs/TRUST_LEDGER.json`; its remaining categories, #1157, done
-   2026-10-31; #986 stays open).
-1. **Verification (#954; B owns the refinement code).** #954 stage 2 done
-   2026-10-31 (#1160; docs/VERIFICATION_DESIGN.md, "Stage 2 scope" and "Stage
-   3 scope"); #955's evidence log continues from each audit; #986 slice 2 (region arithmetic and overlay length as
-   z3-checked obligations), #954 stage 3 (C), done 2026-10-30; its follow-up #1232 (global and enum atoms as z3 constants) done 2026-11-06.
-2. **Equivalence oracles.** ext2: tier B (#1034, landed 2026-10-25:
-   `kernel/tests/ext2_eq/ops.eq` replayed on host Linux and libext2fs,
-   compared logically in kernelcheck-qemu-main), #1033 (tier A, fsck after
-   every writing lane, counters against the kernel's own; done 2026-10-25,
-   `scripts/ext2_postcheck.py`), #1035 (tier C, done 2026-10-26: the ext2
-   driver as a host process over a RAM disk, `scripts/ext2_host.py` in
-   linuxcheck and `make ext2-host-long`; what it found: #1086, the whole-file
-   copy per write, and #1087, holes allocated, done 2026-10-29; #1089, torn
-   writes, outside the recovery model by decision, as on Linux ext2,
-   2026-10-30). The ext2
-   fixes #1019 and #968 flipped their ops.eq rows to `match` when they
-   landed (2026-10-25); #1021's doubly-indirect O_TRUNC row matches on a
-   sparse fixture the comparing runner plants (2026-10-25; #1022's truncate row and #1023's `peer` row, a held fd
-   across O_TRUNC, match since 2026-10-25). The cat copy row compares
-   ext2-to-ext2 bytes through BusyBox's fallback from sendfile (#1070).
-   The writer rows still avoid printf (#1067).
-   Signals: #999 (host-Linux conformance suite; done 2026-11-06, its #946 row runs on the kernel since #1373), #1000 (one delivery
-   chokepoint and `SignalDelivery.tla`, designed with #992; done 2026-11-06,
-   `signal_deliver`; #1379 won back 80 B and 64 B of its text, done 2026-11-06); #948 (the
-   terminal-read EINTR fixture) and #432 (timed blocking) done 2026-10-30;
-   #1373 (an unresolved EL0 fault ends the process with SIGSEGV, SIGBUS,
-   SIGTRAP or SIGILL instead of fail-stopping the kernel) done 2026-11-06,
-   which #946 (running the handler) builds on.
-3. **Compiler consolidation.** #750 after #732; #1027 step 2 (`--facts
-   DIR` for the `--emit-*` family) and step 3 (strict defaults with
-   opt-outs) done 2026-10-30, steps 4-5 wait on #1006 and #1009;
-   #1005 (one instruction table, `lib/instr_spec.ml`) done 2026-10-30.
-4. **Fixed DMA lifecycle, finishing the drivers.** Take the remaining xHCI
-   work in #720, then #740 step 3 when the profiler's copy-cost measurement
-   is available.
-5. **Independent pillar issues, moved from A (2026-10-16).** #789 (lock
-   order as ranked capability tokens, absorbing `acquires_lock_<rank>_<name>`,
-   after the syntax review); with it, #850's migration of the IRQ words to
-   an `IrqState` token in the `preempt_off` shape, which retires the #809
-   flow pass; the authority-boundary words follow.
-6. **Other compiler and language work, respecting design gates.** #709 (done
-   2026-10-30, a last-generation slot is retired) and #710 (generation exhaustion;
-   done 2026-10-30, a closed Exhausted outcome), #203 stage 3 (cross-call contracts,
-   byte ranges), #732's later slices, #793 (proofs on type variables; done 2026-11-06, retried after types resolve),
-   #762 (no vector stores in MMU-off code; done 2026-10-30), #774 (every IRQ dispatch arm
-   acknowledges its source; done 2026-10-30, per-source linear claims), #752 (typestate in more of the kernel), #755
-   (an immutable integer binding keeps one static; done 2026-10-30), #751 (per-element
-   witnesses, deferred until a consumer needs them),
-   #769 (every use of a global, done 2026-10-30 as --emit-globals' uses table).
-   The host GDB test (#747) remains deferred. The remaining audit follow-up from the October batch is #898.
-7. **Time measurement, then the optimizations waiting on it** (maintainer,
-   2026-10-08: space and time are both kept): #520 (TCP
-   throughput, with #972: submit-only NIC TX), #741 (RPi5 HTTP SYN
-   retransmission tails), then #680, #682 (region_pool lock-free
-   validation, false sharing, pinless single-user pools), #711, #718, #386.
-8. **Research applied to a real example, moved from A** (evaluated
-   2026-09-29; reasoning on #13): indexed views generated from a TLA+
-   model's actions (prototyped on #613; one `protocol` declaration
-   generates both TLA+ and permission types since 2026-10-11); Iris
-   vocabulary for lock and pool invariants (#132).
-9. **Evaluations awaiting a maintainer decision:** #687 (typed terminal
-   mode leases), #648.
-10. **Compiler and language research, independent of the ownership
-   checker:** #201, #282, #129, #417, #155, #28, #8, #200.
-11. **Toolchain and portability:** #123, #51, #50, #85. The #95 research
-   target is type-contract validation across separately compiled objects,
-   with implementation deferred until needed. #122 waits for #1009.
-   #124 is lowest priority, with DDB ahead of GDB.
+0. **Compiler checks and trust ratchets.** Move eligible source and
+   call-graph checks to the compiler one at a time (#567). The caller
+   policy, diagnostic event IDs and ext2 release-log checks now run in
+   OCaml. Preserve input coverage during migrations. Keep #850 in its
+   agreed checker band and continue #1031 and #986 where a concrete
+   change needs their ratchets.
+1. **Verification (#954; B owns refinement code).** Maintain #955
+   evidence and the #986 trust ledger. Use `docs/VERIFICATION_DESIGN.md`
+   for the existing proof boundaries.
+2. **Equivalence oracles.** Maintain the ext2 image, operation and
+   host-driver comparisons and the signal conformance suite. Keep
+   #1067's ext2 writer fixture constraint and the #946 signal-handler
+   contract visible at these boundaries.
+3. **Compiler consolidation.** #750 follows #732. The remaining #1027
+   CLI steps wait for #1006 and #1009.
+4. **Fixed DMA lifecycle.** #720 retains the remaining multi-command and
+   subregion-lifetime work after the checked DCBAA publication slice.
+   #740 has published the RX split. The queued socket integration needs
+   a decision on preserving the current direct TX copy and lock order.
+   Keep the matched direct HTTP comparison and RX cost attribution
+   distinct.
+5. **Independent pillar work.** Review ranked lock tokens (#789) after
+   syntax review, then carry IRQ state in a token (#850). Follow with
+   the authority-boundary words.
+6. **Other compiler and language work.** #203 stage 3 covers cross-call
+   contracts and byte ranges. #732 has later slices, #752 covers kernel
+   typestate, and #751 waits for a consumer. #747 remains deferred.
+   The switch and block DDB diagnostics (#898) are published. Follow-up
+   regressions are tracked for alternate-stack signal frame zeroing
+   (#1521) and exit-to-successor DDB visibility (#1522).
+7. **Measurement before optimization.** #520 (TCP throughput, with #972),
+   #741 (RPi5 HTTP SYN retransmission tails), then #680, #682, #711,
+   #718 and #386.
+8. **Research on real examples.** #613 covers model-derived indexed
+   views. #132 covers Iris vocabulary for lock and pool invariants.
+   See #13 for the research rationale.
+9. **Evaluations awaiting a maintainer decision.** #687 (typed terminal
+   mode leases) and #648.
+10. **Independent language research.** #201, #282, #129, #417, #155,
+    #28, #8 and #200.
+11. **Toolchain and portability.** #123, #51, #50 and #85. #95 remains
+    research until separately compiled type-contract validation is
+    needed. #122 waits for #1009. #124 is lowest priority, with DDB
+    ahead of GDB.
 
 Items are ordered within each band as well as between bands.
 
