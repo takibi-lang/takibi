@@ -2,7 +2,7 @@
 
 # Compiler command line
 
-`takibi <file.tkb>... [flags]`: 26 flags, from the table in `bin/main.ml`. GitHub issue #1027 plans their consolidation.
+`takibi <file.tkb>... [flags]`: 27 flags, from the table in `bin/main.ml`. GitHub issue #1027 plans their consolidation.
 
 ## Target and output (5)
 
@@ -21,7 +21,7 @@
 | `--no-frame-pointers` | - | drop the frame-pointer chains kept by default (the kernel debugger walks them) |
 | `--no-function-sections` | - | one text section instead of one per function and global (the default, for --gc-sections) |
 
-## Policy gates (11)
+## Policy gates (12)
 
 | Flag | Argument | Meaning |
 | --- | --- | --- |
@@ -31,6 +31,7 @@
 | `--raw-mint-file` | `<path>` | a file allowed to mint raw authority (repeatable) |
 | `--require-execution-model` | `<path>` | check the execution-model declarations in this file |
 | `--check-diagnostic-event-ids` | `<path>` | check resolved diagnostic event IDs declared in this file |
+| `--check-ext2-release-log` | - | check that ext2 release and create write through the undo log |
 | `--kernel-allowed-callers` | `<path>` | enforce the kernel caller policy compiled from this TSV in the repository root |
 | `--device-semantics-file` | `<path>` | a file allowed to declare device semantics (repeatable) |
 | `--regions` | - | enable the region built-ins |

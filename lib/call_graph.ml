@@ -306,6 +306,11 @@ let reference_name label =
   | Some at -> String.sub label 0 at
   | None -> label
 
+let reference_file label =
+  match String.index_opt label '@', String.rindex_opt label ':' with
+  | Some at, Some colon when at < colon -> String.sub label (at + 1) (colon - at - 1)
+  | _ -> "-"
+
 let write_table ?source_signatures (out : out_channel) graph (types : program_types) =
   let empty = StringSet.empty in
   let lexed = Hashtbl.create 64 in

@@ -2,11 +2,11 @@
   "date": "2026-11-26",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "6a7b937bda71e3abd5cf6dc5c969124266c51a797ef353629580d7d0e86c02c5",
-  "workload": "Existing process switch and block reservations, normal QEMU and RPi5 linked kernel images, and the QEMU DDB ASID-preparation observer.",
+  "source_sha256": "734d1525ff372b2134f92e8b44d9a0281758aaa7df0578a7b7d96cb9bfacff45",
+  "workload": "Normal QEMU and RPi5 kernel images linked with the existing ext2 release and create workload, with the equivalent compiler-time call graph check.",
   "evidence": [
     "HISTORY.md"
   ],
-  "assessment": "Text grows by 536 bytes on QEMU and 504 bytes on RPi5. Data, BSS, usable RAM starts and the existing 32-byte claim array are unchanged. The operation introduces no new reservation storage or allocation.",
-  "next_trigger": "Measure again when the stopped-root claim storage or scheduler reservation lifetime changes."
+  "assessment": "Both normal kernel ELFs are byte-identical to the published baseline. The build-only checker move changes no storage, reservation or allocation workload.",
+  "next_trigger": "Measure again when the ext2 write path, undo log storage or retained inode lifetime changes."
 }

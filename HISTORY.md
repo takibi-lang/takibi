@@ -1,5 +1,18 @@
 # takibi Engineering History
 
+## 2026-11-26: Check ext2 release logging on the resolved call graph (#567)
+
+The ordinary QEMU and RPi5 builds now check release and create calls
+before object emission. Both compiled graphs still reach 73 functions
+from eight roots and six reviewed writers, and reject both planted
+direct writes and nested undo logs.
+
+The ordinary linked ELFs are byte-identical to the production sources in
+60f444e06. QEMU text/data/BSS sizes are 850236/4616/1310720 bytes and the
+usable RAM start is 0x40218000. RPi5 sizes are 4244780/5592/1888256 bytes
+and the usable RAM start is 0x7e0000. This build-only change adds no
+runtime representation or allocation.
+
 ## 2026-11-26: DDB reports switch and block reservations (#898)
 
 Both scheduler paths hold a linear claim until the existing activation

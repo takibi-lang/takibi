@@ -50,6 +50,9 @@ share one collection of compiled function rows. The policy uses the same
 repository-relative `file:function` identity and target names as the table.
 Run it from the repository root. Global initializer references and
 uninstantiated definitions remain outside this policy.
+The same normal builds use `--check-ext2-release-log` to check the ext2
+undo-log rules against the in-memory rows before object emission. The
+ordinary and debug facts still carry the same call graph columns.
 
 What the table does not say: the targets of an indirect call (the effect
 contracts in `effect_rules.ml` constrain those), anything about `extern`
@@ -78,8 +81,6 @@ the table change in the same commit.
 - `scripts/buildcheck_ext2_mutation_guard.py`: `callees` and `params`.
 - `scripts/buildcheck_ext2_reader_self_wait.py`: `name`, `file`, `line`,
   `callees` and `callers`.
-- `scripts/buildcheck_ext2_release_log.py`: `name`, `file`, `line` and
-  `callees`.
 - `scripts/kernel_caller_facts.py`: `name`, `file`, `callees` and
   `values`.
 - `scripts/buildcheck_world_stop_rank.py`: `name`, `file`, `line`,
