@@ -379,6 +379,35 @@ ledger totals and the two sites in `user_entry_extern.tkb`. These are
 counts of compiler-reported sites. Assembly stores and pointer lifetime
 remain audited premises.
 
+### Inventory at the published 2026-11-26 revision
+
+The published revision 60f444e06 and archived build 0ea86103d have
+identical production inputs. Both normal kernel objects and linked ELFs,
+and the EL0 test payload object, had matching SHA-256 hashes when compared
+with the publication build. The inventory below reads the archived
+build's depfiles and compiler facts.
+
+| Depfile-derived source inventory | Count |
+| --- | ---: |
+| Checked source union | 182 files, 101,595 lines |
+| Normal QEMU kernel | 145 files |
+| Normal RPi5 kernel | 166 files |
+| EL0 test payload | 4 files |
+| Kernel Takibi files outside that union | 35 files |
+| Explicit unsafe blocks | 115 blocks, 139 enclosed lines |
+| Raw pointer casts | 460 |
+| Extern function or symbol declarations | 114 |
+| Production handwritten assembly | 34 files, 2,991 lines |
+| Generated assembly | 15 files, 1,125 lines |
+| Fixture assembly | 1 file, 27 lines |
+
+Normal compiler facts report 146 QEMU and 156 RPi5 raw sites. Excluding
+the named evidence files leaves 78 and 88 in those same facts tables.
+The filter describes source coverage within the normal builds; the
+linked images also contain fixtures. The separate raw-dereference
+budget check reports 2,400 plain and 3 I/O entries on QEMU, and 2,893
+plain and 0 I/O entries on RPi5. Each check has its own accounting scope.
+
 No trust premise is retired or added by this document. Before making the
 final scoped claim, complete each matrix row's source-backed controls,
 export inventory, compiler/external trust justification, measured migration
