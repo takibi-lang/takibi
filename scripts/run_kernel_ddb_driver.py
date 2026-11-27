@@ -528,6 +528,8 @@ def capture_loop(args, serial, deadline, ceiling, ready_file, release_file, netw
                     b"ddb: continuing\n" in received and
                     b"init: ash bootstrap\n" in received and
                     peer_delivery_ready and peer_tty_done):
+                if b"ddb> help\n" not in received:
+                    raise SystemExit("DDB did not echo the typed help command")
                 if args.break_source != "uart":
                     return 0
                 if hang_offset is None:

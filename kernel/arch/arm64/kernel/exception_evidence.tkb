@@ -2952,10 +2952,10 @@ private fn kernel_ddb_enter_stopped(
             if (byte == 0x0A || byte == 0x0D) {
                 ddb_puts("\n");
                 reading = false;
-            } else {
-                if (byte != 0x08 && byte != 0x7F) {
-                    length = ddb_append(line as []u8, length, byte);
-                }
+            } else if (byte >= 0x20 && byte < 0x7F) {
+                let appended: usize = ddb_append(line as []u8, length, byte);
+                if (appended > length) { uart_debug_putc(byte); }
+                length = appended;
             }
         }
         if (ddb_command_is(line as []u8, length, bs"continue")) {
