@@ -1217,6 +1217,7 @@ const SS_ONSTACK: usize = 1;
 const SS_DISABLE: usize = 2;
 const SS_AUTODISARM: usize = 0x80000000;
 const ALTSTACK_PROBE_SIZE: usize = 16384;
+const ALTSTACK_FRAME_SIZE: usize = 4688;
 const EPERM_RC: usize = 0xFFFFFFFFFFFFFFFF;
 const ENOMEM_RC: usize = 0xFFFFFFFFFFFFFFF4;
 
@@ -1266,8 +1267,11 @@ fn sigaltstack_probe(check_reserved: bool) !{unsafe} {
     fail_if(src_loc(), payload_read_u64(record_base, 40) != 0);
     fail_if(src_loc(), payload_read_u64(record_base, 48) != ALTSTACK_PROBE_SIZE);
     if (check_reserved) {
-        altstack_probe_expect_reserved_zero(alt as []u8, alt_base,
-                                            payload_read_u64(record_base, 8));
+        // The handler records SP before any stack writes. Both sizes are
+        // multiples of 16, so round down by the base's low bits.
+        let frame_offset: usize = ALTSTACK_PROBE_SIZE - ALTSTACK_FRAME_SIZE - (alt_base & 15);
+        fail_if(src_loc(), payload_read_u64(record_base, 8) != alt_base + frame_offset);
+        altstack_probe_expect_reserved_zero(alt as []u8, frame_offset);
     }
 
     // Without SA_ONSTACK the handler stays on the process stack.
@@ -1321,22 +1325,17 @@ fn sigaltstack_probe(check_reserved: bool) !{unsafe} {
                             message.len, 0, 0) != message.len);
 }
 
-// The assembly handler records SP before any stack writes. Check the
-// ucontext's uc_stack padding and the bytes after the FPSIMD terminator
+// Check uc_stack padding and the bytes after the FPSIMD terminator
 // against the user-owned, prefilled stack after rt_sigreturn.
 fn altstack_probe_expect_reserved_zero(alt: borrow [u8; ALTSTACK_PROBE_SIZE..],
-        alt_base: usize, frame_sp: usize) {
-    let frame_size: usize = 4688;
+        frame_offset: usize) {
     let uc_stack_padding: usize = 156;
     let fpsimd_reserved_tail: usize = 1128;
-    // Both sizes are multiples of 16, so round down by the base's low bits.
-    let frame_offset: usize = ALTSTACK_PROBE_SIZE - frame_size - (alt_base & 15);
-    fail_if(src_loc(), frame_sp != alt_base + frame_offset);
     for index: usize in 0..<ALTSTACK_PROBE_SIZE {
         if ((index >= frame_offset + uc_stack_padding &&
              index < frame_offset + uc_stack_padding + 4) ||
             (index >= frame_offset + fpsimd_reserved_tail &&
-             index < frame_offset + frame_size)) {
+             index < frame_offset + ALTSTACK_FRAME_SIZE)) {
             fail_if(src_loc(), alt[index] != 0);
         }
     }
