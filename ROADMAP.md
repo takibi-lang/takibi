@@ -30,6 +30,11 @@ work from the current milestone. Land finished branches one at a time.
 | 1: kernel landed | Complete the scoped memory-safety contract (#1513), then the remaining globals ratchet (#1159) and preemption integration (#638). | Complete the approved TaskMutex sequence (#1481). Triage #667 when a qualifying capture is available. Board-free preparation for the matched cold-boot comparison (#1158) is complete. Run the RPi5 benchmark on the final Milestone 1 candidate. | #638 flips after #1159 and #1481 meet their gates. Coordinate shared scheduler interfaces and four-core RPi5 regression evidence at these boundaries. |
 | 2: language settled | Implement the lossless printer and formatter entry point (#1010). | Develop round-trip and linked-kernel equivalence checks (#1010) against the agreed printer interface. Prepare source inventories and acceptance controls for #1009. | Integrate the printer and its checks before #1009. Use one branch for the syntax migration in the approved order, with the other territory reviewing round-trip and generated-code evidence. Review #1514 before finalizing the relevant syntax. |
 
+Lean work starts in Milestone 3, after the Milestone 2 syntax release.
+Schedule the rule-proof pilot (#1054) and the compiler correspondence
+review (#1515) there. During Milestones 1 and 2, ordinary defect reviews
+can still record evidence in #955.
+
 This allocation takes precedence over the standing queues. Publish shared
 interfaces before dependent work adopts them. The RPi5 lease serializes
 regression and benchmark runs. Required regression evidence stays with
