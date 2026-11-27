@@ -1,12 +1,12 @@
 {
-  "date": "2026-11-26",
+  "date": "2026-11-27",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "734d1525ff372b2134f92e8b44d9a0281758aaa7df0578a7b7d96cb9bfacff45",
-  "workload": "Normal QEMU and RPi5 kernel images linked with the existing ext2 release and create workload, with the equivalent compiler-time call graph check.",
+  "source_sha256": "cbf79260a9453a8ab815eb3966de0d5bb1965ea1ec88bb30de6bf52cf3c57c59",
+  "workload": "Normal QEMU and RPi5 kernels and the EL0 alternate signal stack fixture in the maintained ext2 image, relative to the linked allcheck baseline at d23834e64 with identical production sources at the current origin/main.",
   "evidence": [
-    "HISTORY.md"
+    "docs/MEMORY_SAFETY_CONTRACT.md"
   ],
-  "assessment": "Both normal kernel ELFs are byte-identical to the published baseline. The build-only checker move changes no storage, reservation or allocation workload.",
-  "next_trigger": "Measure again when the ext2 write path, undo log storage or retained inode lifetime changes."
+  "assessment": "The alternate-stack verifier adds 256 executable bytes and one mapped executable page to the fixture ELF and uses a 48-byte verifier frame. Normal QEMU kernel ELF is byte-identical. RPi5 linked .rodata grows 320 bytes from the packed fixture; kernel .text, .data, .bss and usable_ram_start agree with the baseline.",
+  "next_trigger": "Measure again if the EL0 fixture's image or stack boundary, the packed ext2 layout, or the signal-frame backing allocation changes."
 }
