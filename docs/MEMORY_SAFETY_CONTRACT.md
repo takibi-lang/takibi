@@ -190,11 +190,11 @@ same suffix and padding after successful `SA_ONSTACK` delivery. The
 Linux comparison checks defined ABI fields. Unsuccessful writes are
 outside both fixtures.
 The ordinary EL0 fixture adds 44 executable bytes and keeps its mapped
-extent and stack reservation. The alternate-stack check adds 256
+extent and stack reservation. The alternate-stack check adds 288
 executable bytes and one mapped executable page to the EL0 fixture. The
 existing 16 KiB alternate stack and its caller's frame are unchanged;
 the verifier has a 48-byte frame. In the normal links, QEMU's kernel
-ELF is byte-identical. The packed RPi5 ext2 image grows by 318 bytes
+ELF is byte-identical. The packed RPi5 ext2 image grows by 317 bytes
 and linked RPi5 read-only data grows by 320 bytes, with the kernel
 executable, data and BSS section sizes and usable RAM start unchanged.
 

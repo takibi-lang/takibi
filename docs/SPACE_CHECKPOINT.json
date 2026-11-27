@@ -2,11 +2,11 @@
   "date": "2026-11-27",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "cbf79260a9453a8ab815eb3966de0d5bb1965ea1ec88bb30de6bf52cf3c57c59",
+  "source_sha256": "2be86181c3727d6209c8a29b226daf1eb5c58f778fa6d3f297dc8298947e93a3",
   "workload": "Normal QEMU and RPi5 kernels and the EL0 alternate signal stack fixture in the maintained ext2 image, relative to the linked allcheck baseline at d23834e64 with identical production sources at the current origin/main.",
   "evidence": [
     "docs/MEMORY_SAFETY_CONTRACT.md"
   ],
-  "assessment": "The alternate-stack verifier adds 256 executable bytes and one mapped executable page to the fixture ELF and uses a 48-byte verifier frame. Normal QEMU kernel ELF is byte-identical. RPi5 linked .rodata grows 320 bytes from the packed fixture; kernel .text, .data, .bss and usable_ram_start agree with the baseline.",
+  "assessment": "The alternate-stack verifier adds 288 executable bytes and one mapped executable page to the fixture ELF and uses a 48-byte verifier frame. Normal QEMU kernel ELF is byte-identical. RPi5 linked .rodata grows 320 bytes from the packed fixture; kernel .text, .data, .bss and usable_ram_start agree with the baseline.",
   "next_trigger": "Measure again if the EL0 fixture's image or stack boundary, the packed ext2 layout, or the signal-frame backing allocation changes."
 }
