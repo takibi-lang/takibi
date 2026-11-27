@@ -103,10 +103,17 @@ class ProcessReservation(gdb.Breakpoint):
                          type=gdb.BP_HARDWARE_BREAKPOINT, temporary=True)
         self.path = path
         self.observed = None
+        self.reached = False
 
     def stop(self):
         caller = gdb.newest_frame().older()
-        if caller is None or caller.name() != f"kernel_process_{self.path}_reserved":
+        if caller is None:
+            return False
+        expected = f"kernel_process_{self.path}_reserved"
+        if self.path == "exit" and caller.name() == "kernel_process_exit_prepare_claimed":
+            if caller.older() is None or caller.older().name() != expected:
+                return False
+        elif caller.name() != expected:
             return False
         cpu = gdb.selected_thread().num - 1
         current = current_record(cpu)
@@ -121,6 +128,7 @@ class ProcessReservation(gdb.Breakpoint):
             return False
         claim = int(gdb.parse_and_eval("kernel_process_claim")[cpu]["pid"])
         self.observed = (cpu, outgoing, incoming, claim)
+        self.reached = True
         return True
 
     def verify(self):
@@ -158,3 +166,30 @@ if exit_call.cpu != reply.cpu:
     raise gdb.GdbError("armed peer exit migrated after its reply")
 exit_call.delete()
 print("PASS kernel/qemu peer-exit: a pending reschedule preserved peer placement from reply to exit syscall")
+
+# The named worker is now entering exit on its pinned CPU. Sample the
+# successor at the real activation-preparation boundary.
+exit_reservation = ProcessReservation("exit")
+reach(exit_reservation)
+exit_reservation.verify()
+
+
+class ExitClaimReturn(gdb.FinishBreakpoint):
+    def __init__(self, frame):
+        super().__init__(frame, internal=True)
+        self.reached = False
+
+    def stop(self):
+        self.reached = True
+        return True
+
+
+preparation = gdb.newest_frame().older()
+if preparation is None or preparation.name() != "kernel_process_exit_prepare_claimed":
+    raise gdb.GdbError("exit claim has no preparation boundary to check")
+exit_return = ExitClaimReturn(preparation)
+reach(exit_return)
+cpu = exit_reservation.observed[0]
+if int(gdb.parse_and_eval("kernel_process_claim")[cpu]["pid"]) != 0:
+    raise gdb.GdbError(f"cpu {cpu} retained its exit claim after ASID preparation")
+print(f"PASS kernel/qemu exit claim cleared: cpu={cpu}")

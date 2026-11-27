@@ -155,6 +155,8 @@ KERNEL_PEER_EXIT_TIMEOUT="$CEILING_SECS" \
 if [ "$BREAK_SOURCE" = uart ]; then
     grep '^PASS kernel/qemu schedule claim:' "$ARTIFACT_DIR/peer-exit-gdb.log"
     grep '^PASS kernel/qemu block claim:' "$ARTIFACT_DIR/peer-exit-gdb.log"
+    grep '^PASS kernel/qemu exit claim:' "$ARTIFACT_DIR/peer-exit-gdb.log"
+    grep '^PASS kernel/qemu exit claim cleared:' "$ARTIFACT_DIR/peer-exit-gdb.log"
     grep '^PASS kernel/qemu peer-exit:' "$ARTIFACT_DIR/peer-exit-gdb.log"
 fi
 

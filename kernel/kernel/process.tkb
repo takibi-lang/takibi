@@ -13745,13 +13745,27 @@ must_use variant ExitSwitch {
     Ordinary(exists process: usize. (ProcessOrdinaryTarget[process], PreemptOff[0]));
 }
 
+// Report the reserved successor while ASID preparation runs with the
+// outgoing task still current. Clear before commit, cancellation or retry.
+private fn kernel_process_exit_prepare_claimed(
+        owner: borrow ScheduledProcessOwner[process],
+        running: borrow ScheduledProcessState[process, ProcessState::Running])
+        -> AddressSpaceActivationPrepareResult[process] {
+    preempt_off (cpu) {
+        let claim = kernel_process_claim_begin(cpu, scheduled_process_record_owned(owner).pid);
+        let result = process_image_prepare_activation(owner, running);
+        kernel_process_claim_end(cpu, claim);
+        return result;
+    }
+}
+
 private fn kernel_process_exit_reserved(
         child: ProcessHandle,
         parent: ProcessHandle,
         owner: sink ScheduledProcessOwner[process],
         running: sink ScheduledProcessState[process, ProcessState::Running],
         deliver_wait4: bool, auto_reap: bool, span: sink PreemptOff[0]) -> ExitSwitch !{changes_witness_ProcessCurrent} {
-    match process_image_prepare_activation(owner, running) {
+    match kernel_process_exit_prepare_claimed(owner, running) {
         AddressSpaceActivationPrepareResult::Invalid => {
             kernel_process_schedule_cancel_reserved(owner, running);
             return ExitSwitch::Idle(span);
