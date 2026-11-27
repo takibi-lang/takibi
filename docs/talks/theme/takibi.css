@@ -139,6 +139,13 @@ pre .hljs-title.class_ {
   color: #9fe6c1;
 }
 
+/* Command substitution inside a string, e.g. "$(...)" in shell. The
+   imported default theme picks colours for a light background, which are
+   unreadable here, so keep it inside the takibi palette. */
+pre .hljs-subst {
+  color: #ffc16c;
+}
+
 pre .hljs-comment {
   color: #9ba5c8;
 }

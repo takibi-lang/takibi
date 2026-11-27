@@ -9,7 +9,7 @@ footer: "osdev-jp #54 / 2026-11-28"
 <!-- _paginate: false -->
 <!-- _footer: "" -->
 
-# A HTTP request on a hobby OS
+# An HTTP request on a hobby OS
 
 ## Running Alpine's BusyBox HTTPd on Takibi
 
@@ -165,8 +165,8 @@ HTTPd parent
   accept next connection
 ```
 
-The child must start with a private **view** of the parent's memory.
-Copy-on-Write lets Takibi defer physical page copies until a write.
+The child needs a **separate address space** that inherits the parent's
+memory contents. Copy-on-Write defers physical page copies until a write.
 
 <!-- 8:00-10:00 -->
 
@@ -222,23 +222,27 @@ once its last reference is gone. The parent's mapping of A remains valid.
 
 ---
 
-# Which process record can we update?
+# Can we mix up parent and child memory metadata?
 
-A setter for the child's process image record requires evidence for **its address-space root**.
+The parent and child each have their own memory management metadata
+(`ProcessImageRecord`): active page count, current stack lower end, heap size, and more.
+
+The setter requires **evidence that the target metadata exists**.
 
 ```text
-update child record + evidence for child root  -> accepted
-update child record + evidence for parent root -> type error
+child root + child evidence  -> accepted
+child root + parent evidence -> type error
 ```
 
-`ProcessImageRecordExists[root]` carries the root in its type.
-A successful record creation or lookup supplies the evidence.
+`root` is an internal key identifying an address space.
+Successfully creating or looking up the metadata yields evidence of type
+`ProcessImageRecordExists[root]`.
 
 <!-- 15:00-16:30 -->
 
 ---
 
-# The setter checks the identity at its boundary
+# The setter's type requires matching roots
 
 ```takibi
 fn process_image_set_active_page_count(
@@ -248,11 +252,14 @@ fn process_image_set_active_page_count(
 ) !{unsafe} { /* ... */ }
 ```
 
-Both arguments must agree on `identity` at compile time. The process
-owner keeps the record alive, and the setter takes a fresh pool pin for
-the actual write.
+The compiler checks that the update targets the same address space whose
+metadata was confirmed to exist. This prevents accidental writes to
+metadata whose existence has not been checked.
 
-COW source-page lifetime is a separate, open static-checking problem.
+The lifetime of the metadata is currently managed at runtime.
+
+Statically guaranteeing the lifetime of the physical page used as the
+COW copy source remains an open problem.
 
 <!-- 16:30-18:00 -->
 
@@ -264,7 +271,8 @@ COW source-page lifetime is a separate, open static-checking problem.
 ext2 file -- read --> HTTPd child -- write --> connected socket
 ```
 
-The child aliases the connected socket onto file descriptors 0 and 1.
+The child assigns the connected socket to file descriptors 0 and 1
+(standard input and output).
 
 From BusyBox's perspective, the file and the socket are both file
 descriptors. The kernel routes the read to ext2 and the write to TCP.
@@ -275,16 +283,15 @@ descriptors. The kernel routes the read to ext2 and the write to TCP.
 
 # What if the kernel ignores the send result?
 
-```text
-TCP send outcome        Syscall handling
-Sent                    Return the byte count if cleanup succeeds
-SourceFault             Return EFAULT
-Invalid                 Return EINVAL
-```
+| TCP send outcome | System call return value |
+| --- | --- |
+| `Sent` | Return the number of bytes sent if cleanup succeeds |
+| `SourceFault` | Return `EFAULT` |
+| `Invalid` | Return `EINVAL` |
 
-`KernelTcpSendResult` is a **must-use variant**.
+`KernelTcpSendResult` is a **`must_use variant`**.
 Each path must handle or pass on the result. Calling the send function
-and dropping the result is a compile error. The syscall's match decides
+and dropping the result is a compile error. The system call's `match` decides
 which Linux error to return.
 
 <!-- 20:00-23:00 -->
@@ -297,7 +304,7 @@ which Linux error to return.
 | --- | --- | --- |
 | Start HTTPd | ELF loading for Alpine BusyBox and musl | |
 | Receive and accept | IPv4/TCP parsing and a listening socket | Explicit byte-order conversion and slice bounds |
-| Fork the worker | `clone(SIGCHLD)`, separate address spaces, COW | Record evidence matches the target root |
+| Fork the worker | `clone(SIGCHLD)`, separate address spaces, COW | Existence check and update target match |
 | Read the file | File descriptor I/O and ext2 (USB on Pi 5) | |
 | Send the response | Socket file descriptors and TCP transmission | Handle or pass on the send result |
 | Reap the worker | Release its mappings after exit | |
