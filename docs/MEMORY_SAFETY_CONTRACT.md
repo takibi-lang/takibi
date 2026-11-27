@@ -162,7 +162,7 @@ This is a source-backed entry inventory, not complete export certification.
 | uname | The syscall clears its borrowed scratch buffer, writes six fixed-width fields and passes the first 390 bytes to `copy_to_user`. The successful peer TTY fixture checks all six field tails and adjacent sentinels | Physical slot exclusion, other field values and faulting destinations |
 | user_write_byte/u16/u32/u64 and user_zero_fill | Typed scalar inputs or constant zero; range/COW checks and access windows | All callers and all padding/holes of user ABI records; untouched user bytes are not kernel disclosure |
 | Fresh user pages, including exec/stack and COW copies | [User page publication](PAGE_PUBLICATION.md) checks full initialization of the incoming `PageOwner` at `address_space_map_page` | Allocator and frame identity, COW source lifetime, descriptor visibility and TLB ordering |
-| Signal frames on the ordinary or alternate user stack | `signal_handler_enter` uses the common `syscall_signal_frame_write` to clear the checked 4688-byte user span and store the ABI fields before installing the handler's SP and PC. The successful ordinary fixture checks the 3560-byte reserved suffix, the FPSIMD terminator and `uc_stack` padding | Alternate-stack padding and unsuccessful writes are outside that fixture; destination mapping, COW and the user access window remain premises |
+| Signal frames on the ordinary or alternate user stack | `signal_handler_enter` uses the common `syscall_signal_frame_write` to clear the checked 4688-byte user span and store the ABI fields before installing the handler's SP and PC. Successful ordinary and alternate-stack fixtures check the 3560-byte reserved suffix and `uc_stack` padding. The ordinary fixture also checks the FPSIMD terminator | Unsuccessful writes are outside these fixtures; destination mapping, COW and the user access window remain premises |
 | Retained fork/COW mappings and shared backing | Existing-page reference paths | Reference and teardown lifetimes |
 | Raw/assembly/device output paths | Named mint files and external contracts | Audit bypasses of the typed entry set; confinement is not initialization proof |
 
@@ -184,10 +184,12 @@ The signal-frame writer clears the checked 4688-byte destination before
 storing the populated fields. Ordinary and alternate-stack delivery use
 the same writer. In the ordinary signal-boundary fixture, the handler
 verifies that all 3560 prefilled bytes after the FPSIMD terminator are zero.
-The fixture also checks the terminator and `uc_stack` padding. This
-observes the successful ordinary frame; it leaves alternate-stack padding
-and unsuccessful writes outside the measured coverage.
-The EL0 fixture adds 44 executable bytes and keeps its mapped extent and
+The fixture also checks the terminator and `uc_stack` padding. The
+Takibi alternate-stack fixture prefills the destination and verifies the
+same suffix and padding after successful `SA_ONSTACK` delivery. The
+Linux comparison checks defined ABI fields. Unsuccessful writes are
+outside both fixtures.
+The ordinary EL0 fixture adds 44 executable bytes and keeps its mapped extent and
 stack reservation. The normal QEMU kernel ELF is byte-identical. RPi5
 executable section size and usable RAM start agree with the baseline;
 its packed ext2 image changes the linked read-only data size.

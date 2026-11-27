@@ -1055,7 +1055,7 @@ fn initial_user_payload() !{unsafe} {
                                 restore_content.len, 0, 0) != restore_content.len);
         fail_if(src_loc(), svc5(57, restore_fd, 0, 0, 0, 0) != 0);
         sigchld_siginfo_probe();
-        sigaltstack_probe();
+        sigaltstack_probe(true);
         sigaltstack_autodisarm_probe();
         shared_mapping_probe(true);
         sysinfo_kernel_probe();
@@ -1208,7 +1208,8 @@ fn sigchld_siginfo_probe() !{unsafe} {
  * answer is Linux's: `sigaltstack_probe_alone` is the same code as its own
  * static-PIE entry, which `make linuxcheck` runs under qemu-aarch64 and
  * compares with this line of the linux_file view. The alternate stack is
- * this function's own 16 KiB array, zeroed so every page is there. */
+ * this function's own 16 KiB array, prefilled so every page is there.
+ * The kernel payload additionally checks Takibi's reserved-byte contract. */
 const SIGALTSTACK_SYSCALL: usize = 132;
 const SIGUSR1: usize = 10;
 const SA_ONSTACK: usize = 0x08000000;
@@ -1220,13 +1221,15 @@ const EPERM_RC: usize = 0xFFFFFFFFFFFFFFFF;
 const ENOMEM_RC: usize = 0xFFFFFFFFFFFFFFF4;
 
 fn sigaltstack_probe_alone() !{unsafe} {
-    sigaltstack_probe();
+    sigaltstack_probe(false);
     svc5(93, 0, 0, 0, 0, 0);
 }
 
-fn sigaltstack_probe() !{unsafe} {
+fn sigaltstack_probe(check_reserved: bool) !{unsafe} {
     let mut alt: [u8; ALTSTACK_PROBE_SIZE];
-    for index: usize in 0..<ALTSTACK_PROBE_SIZE { alt[index] = 0; }
+    let mut fill: u8 = 0;
+    if (check_reserved) { fill = 0xA5; }
+    for index: usize in 0..<ALTSTACK_PROBE_SIZE { alt[index] = fill; }
     let alt_base: usize = alt as *u8 as usize;
     let mut record: [u8; 104];
     for index: usize in 0..<104 { record[index] = 0; }
@@ -1262,6 +1265,10 @@ fn sigaltstack_probe() !{unsafe} {
     fail_if(src_loc(), payload_read_u64(record_base, 32) != alt_base);
     fail_if(src_loc(), payload_read_u64(record_base, 40) != 0);
     fail_if(src_loc(), payload_read_u64(record_base, 48) != ALTSTACK_PROBE_SIZE);
+    if (check_reserved) {
+        altstack_probe_expect_reserved_zero(alt as []u8, alt_base,
+                                            payload_read_u64(record_base, 8));
+    }
 
     // Without SA_ONSTACK the handler stays on the process stack.
     altstack_probe_raise(0);
@@ -1312,6 +1319,27 @@ fn sigaltstack_probe() !{unsafe} {
         bs"userspace sigaltstack: EINVAL, ENOMEM, EFAULT, SA_ONSTACK runs on it with SS_ONSTACK and EPERM, fork keeps it, SS_DISABLE ok\n";
     fail_if(src_loc(), svc5(64, 1, (unsafe { message as *u8 }) as usize,
                             message.len, 0, 0) != message.len);
+}
+
+// The assembly handler records SP before any stack writes. Check the
+// ucontext's uc_stack padding and the bytes after the FPSIMD terminator
+// against the user-owned, prefilled stack after rt_sigreturn.
+fn altstack_probe_expect_reserved_zero(alt: borrow [u8; ALTSTACK_PROBE_SIZE..],
+        alt_base: usize, frame_sp: usize) {
+    let frame_size: usize = 4688;
+    let uc_stack_padding: usize = 156;
+    let fpsimd_reserved_tail: usize = 1128;
+    // Both sizes are multiples of 16, so round down by the base's low bits.
+    let frame_offset: usize = ALTSTACK_PROBE_SIZE - frame_size - (alt_base & 15);
+    fail_if(src_loc(), frame_sp != alt_base + frame_offset);
+    for index: usize in 0..<ALTSTACK_PROBE_SIZE {
+        if ((index >= frame_offset + uc_stack_padding &&
+             index < frame_offset + uc_stack_padding + 4) ||
+            (index >= frame_offset + fpsimd_reserved_tail &&
+             index < frame_offset + frame_size)) {
+            fail_if(src_loc(), alt[index] != 0);
+        }
+    }
 }
 
 // SS_AUTODISARM, which qemu-aarch64 8.2 refuses with EINVAL, so this half
