@@ -1361,7 +1361,8 @@ deliberately remains typed `!{interrupt, unsafe}`: it does not pretend that
 acknowledgement turns an interrupt frame into ordinary kernel context. Every
 reachable operation is fixed-size and polling-only, with no allocator, lock,
 scheduler, sleep, filesystem, network, or ordinary logging dependency. Its
-public command inventory follows.
+prompt echoes each printable byte that fits in its fixed command buffer.
+The public command inventory follows.
 <!-- DDB-COMMAND-INVENTORY-START -->
 `oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `stacks`; `wait`;
 `proc PID`; `bt [PID|cpu N]`; `trace [on|off|all|omit EVENT|pid PID|pid none]`; `events`; `unimpl`; `log`; `xk ADDRESS [COUNT]`;

@@ -1,12 +1,13 @@
 {
-  "date": "2026-11-27",
+  "date": "2026-11-28",
   "event": "incremental",
-  "decision": "measured",
-  "source_sha256": "2aa0851abffb78265df2d3b79a573d8fb5860f124c5a71c101b161d19722267a",
-  "workload": "Normal QEMU and RPi5 linked kernels relative to 0db9921db; the existing DDB UART workload observes the exit ASID preparation and claim clear.",
+  "decision": "reuse",
+  "source_sha256": "3a652ecc1abf5114d3de0986feeae112dd16f2c09c3748f7d894a9a73078300b",
+  "workload": "Existing DDB UART and software BREAK interactions using the fixed command buffer, with the established linked-image reservation and boot allocator workload.",
   "evidence": [
+    "kernel/README.md",
     "docs/SOAK_BACKLOG.md"
   ],
-  "assessment": "Executable text grows by 208 B on QEMU and 224 B on RPi5. The rodata, data and BSS sizes and usable RAM starts are unchanged. The exit path reuses the existing per-CPU claim and adds no allocation.",
-  "next_trigger": "Measure again if the scheduler claim representation, preparation path, or kernel image reservation changes."
+  "assessment": "The accepted-character echo adds polling UART output while the debugger is stopped. It does not change the command buffer size, add static storage, or change any allocation path. Reuse the preceding boot and allocation workload evidence for this incremental correction.",
+  "next_trigger": "Measure again if the command buffer, debugger storage, or fixed image reservation changes."
 }
