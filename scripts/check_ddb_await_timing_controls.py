@@ -24,7 +24,7 @@ class DdbSocket(Socket):
             return
         reply = ((b"ddb: continuing\r\n" + b"init: ash bootstrap\r\n") if command == b"continue\n"
                  else b"reply\nddb> ")
-        self.events.append((self.clock.now + self.reply_delay, reply))
+        self.events.append((self.clock.now + self.reply_delay, command + reply))
         self.events.sort()
 
 
